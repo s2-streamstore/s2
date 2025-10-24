@@ -1,0 +1,8 @@
+max_width = 100
+
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+imports_layout = "Mixed"
+
+comment_width = 100
+wrap_comments = true

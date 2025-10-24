@@ -1,0 +1,460 @@
+pub mod proto;
+pub mod sse;
+
+use std::time::Duration;
+
+use base64ct::{Base64, Encoding as _};
+use bytes::Bytes;
+use itertools::Itertools;
+use s2_common::{
+    record::{self, FencingToken},
+    types::{
+        self,
+        stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
+    },
+};
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
+
+use super::config::StreamConfig;
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StreamInfo {
+    /// Stream name.
+    #[schema(value_type = String)]
+    pub name: StreamName,
+    /// Creation time in ISO 8601 format.
+    #[schema(format = Time)]
+    pub created_at: String,
+    /// Deletion time in ISO 8601 format, if the stream is being deleted.
+    #[schema(format = Time)]
+    pub deleted_at: Option<String>,
+}
+
+impl From<types::stream::StreamInfo> for StreamInfo {
+    fn from(value: types::stream::StreamInfo) -> Self {
+        use time::format_description::well_known::Iso8601;
+
+        let types::stream::StreamInfo {
+            name,
+            created_at,
+            deleted_at,
+        } = value;
+
+        Self {
+            name,
+            created_at: created_at
+                .format(&Iso8601::DEFAULT)
+                .expect("valid iso8601 time"),
+            deleted_at: deleted_at
+                .map(|d| d.format(&Iso8601::DEFAULT).expect("valid iso8601 time")),
+        }
+    }
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListStreamsRequest {
+    /// Filter to streams whose name begins with this prefix.
+    #[param(value_type = String, default = "", required = false)]
+    pub prefix: Option<StreamNamePrefix>,
+    /// Filter to streams whose name begins with this prefix.
+    /// It must be greater than or equal to the `prefix` if specified.
+    #[param(value_type = String, default = "", required = false)]
+    pub start_after: Option<StreamNameStartAfter>,
+    /// Number of results, up to a maximum of 1000.
+    #[param(value_type = usize, maximum = 1000, default = 1000, required = false)]
+    pub limit: Option<usize>,
+}
+
+super::impl_list_request_try_from!(
+    ListStreamsRequest,
+    types::stream::StreamNamePrefix,
+    types::stream::StreamNameStartAfter
+);
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListStreamsResponse {
+    /// Matching streams.
+    #[schema(max_items = 1000)]
+    pub streams: Vec<StreamInfo>,
+    /// Indicates that there are more results that match the criteria.
+    pub has_more: bool,
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateStreamRequest {
+    /// Stream name that is unique to the basin.
+    /// It can be between 1 and 512 bytes in length.
+    pub stream: String,
+    /// Stream configuration.
+    pub config: Option<StreamConfig>,
+}
+
+impl TryFrom<CreateStreamRequest> for types::config::OptionalStreamConfig {
+    type Error = types::ValidationError;
+
+    fn try_from(value: CreateStreamRequest) -> Result<Self, Self::Error> {
+        let CreateStreamRequest { config, .. } = value;
+        config.unwrap_or_default().try_into()
+    }
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct StreamPosition {
+    /// Sequence number assigned by the service.
+    pub seq_num: u64,
+    /// Timestamp, which may be client-specified or assigned by the service.
+    /// If it is assigned by the service, it will represent milliseconds since Unix epoch.
+    pub timestamp: u64,
+}
+
+impl From<types::stream::StreamPosition> for StreamPosition {
+    fn from(pos: types::stream::StreamPosition) -> Self {
+        Self {
+            seq_num: pos.seq_num,
+            timestamp: pos.timestamp,
+        }
+    }
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TailResponse {
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
+    pub tail: StreamPosition,
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ReadStart {
+    /// Start from a sequence number.
+    #[param(value_type = u64, required = false)]
+    pub seq_num: Option<record::SeqNum>,
+    /// Start from a timestamp.
+    #[param(value_type = u64, required = false)]
+    pub timestamp: Option<record::Timestamp>,
+    /// Start from number of records before the next sequence number.
+    #[param(value_type = u64, required = false)]
+    pub tail_offset: Option<u64>,
+    /// Start reading from the tail if the requested position is beyond it.
+    /// Otherwise, a `416 Range Not Satisfiable` response is returned.
+    #[param(value_type = bool, required = false)]
+    pub clamp: Option<bool>,
+}
+
+impl TryFrom<ReadStart> for types::stream::ReadStart {
+    type Error = types::ValidationError;
+
+    fn try_from(value: ReadStart) -> Result<Self, Self::Error> {
+        let from = match (value.seq_num, value.timestamp, value.tail_offset) {
+            (Some(seq_num), None, None) => types::stream::ReadFrom::SeqNum(seq_num),
+            (None, Some(timestamp), None) => types::stream::ReadFrom::Timestamp(timestamp),
+            (None, None, Some(tail_offset)) => types::stream::ReadFrom::TailOffset(tail_offset),
+            (None, None, None) => types::stream::ReadFrom::TailOffset(0),
+            _ => {
+                return Err(types::ValidationError(
+                    "only one of seq_num, timestamp, or tail_offset can be provided".to_owned(),
+                ));
+            }
+        };
+        let clamp = value.clamp.unwrap_or(false);
+        Ok(Self { from, clamp })
+    }
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ReadEnd {
+    /// Record count limit.
+    /// Non-streaming reads are capped by the default limit of 1000 records.
+    #[param(value_type = u64, required = false)]
+    pub count: Option<usize>,
+    /// Metered bytes limit.
+    /// Non-streaming reads are capped by the default limit of 1 MiB.
+    #[param(value_type = usize, required = false)]
+    pub bytes: Option<usize>,
+    /// Exclusive timestamp to read until.
+    #[param(value_type = u64, required = false)]
+    pub until: Option<u64>,
+    /// Duration in seconds to wait for new records.
+    /// The default duration is 0 if there is a bound on `count`, `bytes`, or `until`, and otherwise infinite.
+    /// Non-streaming reads are always bounded on `count` and `bytes`, so you can achieve long poll semantics by specifying a non-zero duration up to 60 seconds.
+    /// In the context of an SSE or S2S streaming read, the duration will bound how much time can elapse between records throughout the lifetime of the session.
+    #[param(value_type = u32, required = false)]
+    pub wait: Option<u32>,
+}
+
+impl From<ReadEnd> for types::stream::ReadEnd {
+    fn from(value: ReadEnd) -> Self {
+        types::stream::ReadEnd {
+            limit: s2_common::read_extent::ReadLimit::from_count_and_bytes(
+                value.count,
+                value.bytes,
+            ),
+            until: value.until.into(),
+            wait: value.wait.map(|n| Duration::from_secs(n as u64)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReadResponseKind {
+    /// Server-sent events streaming response
+    EventStream,
+    /// Unary response
+    Unary,
+}
+
+impl ReadResponseKind {
+    pub fn from_accept_header(headers: &http::HeaderMap) -> Self {
+        headers
+            .get(http::header::ACCEPT)
+            .and_then(|accept| accept.to_str().ok())
+            .map_or(Self::Unary, |accept| {
+                if accept == "text/event-stream" {
+                    Self::EventStream
+                } else {
+                    Self::Unary
+                }
+            })
+    }
+}
+#[rustfmt::skip]
+#[derive(IntoParams)]
+#[into_params(parameter_in = Header)]
+pub struct FormatHeader {
+    /// Defines the interpretation of record data (header name, header value, and body) with the JSON content type.
+    /// Use `raw` (default) for efficient transmission and storage of Unicode data — storage will be in UTF-8.
+    /// Use `base64` for safe transmission with efficient storage of binary data.
+    #[param(required = false, rename = "s2-format")]
+    pub s2_format: S2Format,
+}
+
+#[rustfmt::skip]
+#[derive(ToSchema, Default, Clone, Copy)]
+pub enum S2Format {
+    #[default]
+    #[schema(rename = "raw")]
+    Raw,
+    #[schema(rename = "base64")]
+    Base64,
+}
+
+impl S2Format {
+    /// Returns `None` in case of more than 1 header or an invalid header value.
+    pub fn from_headers(headers: &http::HeaderMap) -> Option<Self> {
+        let mut formats = headers.get_all("s2-format").iter();
+        let Some(format) = formats.next() else {
+            return Some(S2Format::default());
+        };
+        if formats.next().is_some() {
+            return None;
+        }
+        format.to_str().ok().and_then(|fmt| match fmt.trim() {
+            "raw" | "json" => Some(Self::Raw),
+            "base64" | "json-binsafe" => Some(Self::Base64),
+            _ => None,
+        })
+    }
+
+    fn encode(self, bytes: &[u8]) -> String {
+        match self {
+            S2Format::Raw => String::from_utf8_lossy(bytes).into_owned(),
+            S2Format::Base64 => Base64::encode_string(bytes),
+        }
+    }
+
+    pub fn encode_read(self, record: record::SequencedRecord) -> SequencedRecord {
+        let (headers, body) = record.record.into_parts();
+        SequencedRecord {
+            seq_num: record.seq_num,
+            timestamp: record.timestamp,
+            headers: headers
+                .into_iter()
+                .map(|h| Header(self.encode(&h.name), self.encode(&h.value)))
+                .collect(),
+            body: self.encode(&body),
+        }
+    }
+
+    fn decode(self, s: String) -> Result<Bytes, types::ValidationError> {
+        Ok(match self {
+            S2Format::Raw => s.into_bytes().into(),
+            S2Format::Base64 => Base64::decode_vec(&s)
+                .map_err(|_| types::ValidationError("Invalid Base64 encoding".to_owned()))?
+                .into(),
+        })
+    }
+
+    pub fn decode_append(
+        self,
+        input: AppendInput,
+    ) -> Result<types::stream::AppendInput, types::ValidationError> {
+        let records: Vec<types::stream::AppendRecord> = input
+            .records
+            .into_iter()
+            .map(
+                |AppendRecord {
+                     timestamp,
+                     headers,
+                     body,
+                 }| {
+                    let headers = headers
+                        .into_iter()
+                        .map(|Header(name, value)| {
+                            Ok::<record::Header, types::ValidationError>(record::Header {
+                                name: self.decode(name)?,
+                                value: self.decode(value)?,
+                            })
+                        })
+                        .try_collect()?;
+
+                    let body = self.decode(body)?;
+
+                    let record = record::Record::try_from_parts(headers, body)
+                        .map_err(|e| e.to_string())?
+                        .into();
+
+                    let parts = types::stream::AppendRecordParts { timestamp, record };
+
+                    types::stream::AppendRecord::try_from(parts)
+                        .map_err(|e| types::ValidationError(e.to_string()))
+                },
+            )
+            .try_collect()?;
+
+        Ok(types::stream::AppendInput {
+            records: records.try_into()?,
+            match_seq_num: input.match_seq_num,
+            fencing_token: input.fencing_token,
+        })
+    }
+}
+
+/// Headers add structured information to a record as name-value pairs.
+///
+/// The name cannot be empty, with the exception of an S2 command record.
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+pub struct Header(pub String, pub String);
+
+#[rustfmt::skip]
+/// Record that is durably sequenced on a stream.
+#[derive(Debug, Clone, ToSchema, Serialize)]
+pub struct SequencedRecord {
+    /// Sequence number assigned by the service.
+    pub seq_num: record::SeqNum,
+    /// Timestamp for this record.
+    pub timestamp: record::Timestamp,
+    /// Series of name-value pairs for this record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(required = false)]
+    pub headers: Vec<Header>,
+    /// Body of the record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schema(required = false)]
+    pub body: String,
+}
+
+#[rustfmt::skip]
+/// Record to be appended to a stream.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AppendRecord {
+    /// Timestamp for this record.
+    /// The service will always ensure monotonicity by adjusting it up if necessary to the maximum observed timestamp.
+    /// Refer to stream timestamping configuration for the finer semantics around whether a client-specified timestamp is required, and whether it will be capped at the arrival time.
+    pub timestamp: Option<record::Timestamp>,
+    /// Series of name-value pairs for this record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(required = false)]
+    pub headers: Vec<Header>,
+    /// Body of the record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schema(required = false)]
+    pub body: String,
+}
+
+#[rustfmt::skip]
+/// Payload of an `append` request.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AppendInput {
+    /// Batch of records to append atomically, which must contain at least one record, and no more than 1000.
+    /// The total size of a batch of records may not exceed 1 MiB of metered bytes.
+    pub records: Vec<AppendRecord>,
+    /// Enforce that the sequence number assigned to the first record matches.
+    pub match_seq_num: Option<record::SeqNum>,
+    /// Enforce a fencing token, which starts out as an empty string that can be overridden by a `fence` command record.
+    #[schema(value_type = String, required = false)]
+    pub fencing_token: Option<FencingToken>,
+}
+
+#[rustfmt::skip]
+/// Success response to an `append` request.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AppendAck {
+    /// Sequence number and timestamp of the first record that was appended.
+    pub start: StreamPosition,
+    /// Sequence number of the last record that was appended `+ 1`, and timestamp of the last record that was appended.
+    /// The difference between `end.seq_num` and `start.seq_num` will be the number of records appended.
+    pub end: StreamPosition,
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record on the stream.
+    /// This can be greater than the `end` position in case of concurrent appends.
+    pub tail: StreamPosition,
+}
+
+impl From<types::stream::AppendAck> for AppendAck {
+    fn from(ack: types::stream::AppendAck) -> Self {
+        Self {
+            start: ack.start.into(),
+            end: ack.end.into(),
+            tail: ack.tail.into(),
+        }
+    }
+}
+
+#[rustfmt::skip]
+/// Aborted due to a failed condition.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AppendConditionFailed {
+    /// Fencing token did not match.
+    /// The expected fencing token is returned.
+    #[schema(title = "fencing token")]
+    FencingTokenMismatch(String),
+    /// Sequence number did not match the tail of the stream.
+    /// The expected next sequence number is returned.
+    #[schema(title = "seq num")]
+    SeqNumMismatch(u64),
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, ToSchema, Serialize)]
+pub struct ReadBatch {
+    /// Records that are durably sequenced on the stream, retrieved based on the requested criteria.
+    /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
+    pub records: Vec<SequencedRecord>,
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
+    /// This will only be present when reading recent records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<StreamPosition>,
+}
+
+impl From<(S2Format, types::stream::ReadBatch)> for ReadBatch {
+    fn from((s2_format, batch): (S2Format, types::stream::ReadBatch)) -> Self {
+        Self {
+            records: batch
+                .records
+                .into_iter()
+                .map(|record| s2_format.encode_read(record))
+                .collect(),
+            tail: batch.tail.map(Into::into),
+        }
+    }
+}

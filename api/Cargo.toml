@@ -1,0 +1,24 @@
+[package]
+name = "s2-api"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "openapi-gen"
+path = "src/bin/openapi-gen.rs"
+
+[dependencies]
+base64ct = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
+http = { workspace = true }
+itertools = { workspace = true }
+prost = { workspace = true }
+s2-common = { path = "../common" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+utoipa = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }

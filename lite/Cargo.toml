@@ -1,0 +1,15 @@
+[package]
+name = "s2-lite"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+compact_str = { workspace = true }
+eyre = { workspace = true }
+futures = { workspace = true }
+s2-common = { path = "../common" }
+thiserror = { workspace = true }
+utoipa = { workspace = true }

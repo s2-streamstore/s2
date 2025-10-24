@@ -1,0 +1,21 @@
+[package]
+name = "s2-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+compact_str = { workspace = true }
+const_format = { workspace = true }
+enum-ordinalize = { workspace = true }
+enumset = { workspace = true }
+futures = { workspace = true }
+rkyv = { workspace = true } # TODO optional
+serde = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rstest = { workspace = true }
