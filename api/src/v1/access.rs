@@ -1,11 +1,5 @@
 use compact_str::CompactString;
-use s2_common::types::{
-    self,
-    access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
-    access::{AccessTokenId, AccessTokenPrefix, AccessTokenStartAfter},
-    basin::BasinPrefix,
-    stream::StreamPrefix,
-};
+use s2_common::types;
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Iso8601};
 use utoipa::{IntoParams, ToSchema};
@@ -121,7 +115,7 @@ pub struct AccessTokenInfo {
     /// Access token ID.
     /// It must be unique to the account and between 1 and 96 bytes in length.
     #[schema(value_type = String)]
-    pub id: AccessTokenId,
+    pub id: types::access::AccessTokenId,
     /// Expiration time in ISO 8601 format.
     /// If not set, the expiration will be set to that of the requestor's token.
     #[schema(format = Time)]
@@ -183,12 +177,11 @@ impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AccessTokenScope {
     /// Basin names allowed.
-    pub basins: Option<ResourceSet<BasinName, BasinPrefix>>,
+    pub basins: Option<ResourceSet>,
     /// Stream names allowed.
-    pub streams: Option<ResourceSet<StreamName, StreamPrefix>>,
+    pub streams: Option<ResourceSet>,
     /// Token IDs allowed.
-
-    pub access_tokens: Option<ResourceSet<AccessTokenId, AccessTokenPrefix>>,
+    pub access_tokens:  Option<ResourceSet>,
     /// Access permissions at operation group level.
     pub op_groups: Option<PermittedOperationGroups>,
     /// Operations allowed for the token.
@@ -253,42 +246,43 @@ impl From<types::access::AccessTokenScope> for AccessTokenScope {
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "kebab-case")]
-pub enum ResourceSet<E, P> where E: ToSchema, P: ToSchema {
+pub enum ResourceSet {
     /// Match only the resource with this exact name.
     /// Use an empty string to match no resources.
     #[schema(title = "exact", value_type = String)]
-    Exact(E),
+    Exact(CompactString),
     /// Match all resources that start with this prefix.
     /// Use an empty string to match all resource.
     #[schema(title = "prefix", value_type = String)]
-    Prefix(P),
+    Prefix(CompactString),
 }
 
-impl<E, P> ResourceSet<E, P> {
-    pub fn to_opt(rs: types::access::ResourceSet<E, P>) -> Option<Self>
+impl ResourceSet {
+    pub fn to_opt<E, P>(rs: types::access::ResourceSet<E, P>) -> Option<Self>
     where
         E: Into<CompactString>,
         P: Into<CompactString>,
     {
         match rs {
             types::access::ResourceSet::None => None,
-            types::access::ResourceSet::Exact(e) => Some(ResourceSet::Exact(e)),
-            types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p)),
+            types::access::ResourceSet::Exact(e) => Some(ResourceSet::Exact(e.into())),
+            types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p.into())),
         }
     }
 }
 
-impl<E, P> TryFrom<ResourceSet<E, P>> for types::access::ResourceSet<E, P>
+impl<E, P> TryFrom<ResourceSet> for types::access::ResourceSet<E, P>
 where
-    E: AsRef<str>,
+    E: TryFrom<CompactString, Error = types::ValidationError>,
+    P: TryFrom<CompactString, Error = types::ValidationError>,
 {
     type Error = types::ValidationError;
 
-    fn try_from(value: ResourceSet<E, P>) -> Result<Self, Self::Error> {
+    fn try_from(value: ResourceSet) -> Result<Self, Self::Error> {
         Ok(match value {
-            ResourceSet::Exact(e) if e.as_ref().is_empty() => Self::None,
-            ResourceSet::Exact(e) => Self::Exact(e),
-            ResourceSet::Prefix(p) => Self::Prefix(p),
+            ResourceSet::Exact(e) if e.is_empty() => Self::None,
+            ResourceSet::Exact(e) => Self::Exact(e.try_into()?),
+            ResourceSet::Prefix(p) => Self::Prefix(p.try_into()?),
         })
     }
 }
@@ -375,10 +369,10 @@ impl From<types::access::ReadWritePermissions> for ReadWritePermissions {
 pub struct ListAccessTokensRequest {
     /// Filter to access tokens whose ID begins with this prefix.
     #[param(value_type = String, default = "", required = false)]
-    pub prefix: Option<AccessTokenIdPrefix>,
+    pub prefix: Option<types::access::AccessTokenIdPrefix>,
     /// Filter to access tokens whose ID lexicographically starts after this string.
     #[param(value_type = String, default = "", required = false)]
-    pub start_after: Option<AccessTokenIdStartAfter>,
+    pub start_after: Option<types::access::AccessTokenIdStartAfter>,
     /// Number of results, up to a maximum of 1000.
     #[param(value_type = usize, maximum = 1000, default = 1000, required = false)]
     pub limit: Option<usize>,

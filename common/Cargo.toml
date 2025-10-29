@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
-compact_str = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
 const_format = { workspace = true }
 enum-ordinalize = { workspace = true }
 enumset = { workspace = true }

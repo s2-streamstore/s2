@@ -3,10 +3,6 @@ name = "s2-api"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "openapi-gen"
-path = "src/bin/openapi-gen.rs"
-
 [dependencies]
 base64ct = { workspace = true }
 bytes = { workspace = true }
@@ -18,7 +14,10 @@ s2-common = { path = "../common" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+# TODO this should be optional
 utoipa = { workspace = true }
 
 [build-dependencies]
+# TODO this should be optional & check in the generated code, like Rust SDK
+# ... and Rust SDK should just depend on the proto from api!
 prost-build = { workspace = true }
