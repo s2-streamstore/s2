@@ -22,6 +22,10 @@ use crate::{
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct StreamStr<T: StrProps>(CompactString, PhantomData<T>);
 
 #[cfg(feature = "utoipa")]
