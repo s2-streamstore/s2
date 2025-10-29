@@ -3,6 +3,9 @@ name = "s2-api"
 version.workspace = true
 edition.workspace = true
 
+[features]
+utoipa = ["dep:utoipa"]
+
 [dependencies]
 base64ct = { workspace = true }
 bytes = { workspace = true }
@@ -14,8 +17,7 @@ s2-common = { path = "../common" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
-# TODO optional
-utoipa = { workspace = true }
+utoipa = { workspace = true, optional = true }
 
 [build-dependencies]
 # TODO this should be optional & check in the generated code, like Rust SDK

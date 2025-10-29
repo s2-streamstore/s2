@@ -1,10 +1,12 @@
 use compact_str::CompactString;
 use s2_common::types;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
 use utoipa::{IntoParams, ToSchema};
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum TimeseriesInterval {
     Minute,
@@ -33,8 +35,9 @@ impl From<types::metrics::TimeseriesInterval> for TimeseriesInterval {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct AccountMetricSetRequest {
     /// Metric set to return.
     pub set: AccountMetricSet,
@@ -61,7 +64,8 @@ impl From<AccountMetricSetRequest> for types::metrics::AccountMetricsRequest {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum AccountMetricSet {
     /// Set of all basins that had at least one stream during the specified period.
@@ -71,8 +75,9 @@ pub enum AccountMetricSet {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct BasinMetricSetRequest {
     /// Metric set to return.
     pub set: BasinMetricSet,
@@ -105,7 +110,8 @@ impl From<BasinMetricSetRequest> for types::metrics::BasinMetricsRequest {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum BasinMetricSet {
     /// Amount of stored data, per hour, aggregated over all streams in a basin.
@@ -123,8 +129,9 @@ pub enum BasinMetricSet {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct StreamMetricSetRequest {
     /// Metric set to return.
     pub set: StreamMetricSet,
@@ -150,7 +157,8 @@ impl From<StreamMetricSetRequest> for types::metrics::StreamMetricsRequest {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum StreamMetricSet {
     /// Amount of stored data, per minute, for a specific stream.
@@ -158,7 +166,8 @@ pub enum StreamMetricSet {
 }
 
 #[rustfmt::skip]
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum MetricUnit {
     Bytes,
@@ -175,10 +184,11 @@ impl From<types::metrics::MetricUnit> for MetricUnit {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ScalarMetric {
     /// Metric name.
-    #[schema(value_type = String)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Unit of the metric.
     pub unit: MetricUnit,
@@ -197,10 +207,11 @@ impl From<types::metrics::ScalarMetric> for ScalarMetric {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct AccumulationMetric {
     /// Timeseries name.
-    #[schema(value_type = String)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Unit of the metric.
     pub unit: MetricUnit,
@@ -224,10 +235,11 @@ impl From<types::metrics::AccumulationMetric> for AccumulationMetric {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct GaugeMetric {
     /// Timeseries name.
-    #[schema(value_type = String)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Unit of the metric.
     pub unit: MetricUnit,
@@ -248,13 +260,14 @@ impl From<types::metrics::GaugeMetric> for GaugeMetric {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct LabelMetric {
     /// Label name.
-    #[schema(value_type = String)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Label values.
-    #[schema(value_type = Vec<String>)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
     pub values: Vec<CompactString>,
 }
 
@@ -268,7 +281,8 @@ impl From<types::metrics::LabelMetric> for LabelMetric {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum Metric {
     /// Single named value.
@@ -296,7 +310,8 @@ impl From<types::metrics::Metric> for Metric {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct MetricSetResponse {
     /// Metrics comprising the set.
     pub values: Vec<Metric>,

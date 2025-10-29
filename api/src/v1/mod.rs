@@ -6,41 +6,46 @@ pub mod stream;
 
 use s2_common::types;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
 use utoipa::{IntoParams, ToSchema};
 
 #[rustfmt::skip]
-#[derive(Debug, IntoParams)]
-#[into_params(parameter_in = Header)]
+#[derive(Debug)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
 pub struct S2RequestTokenHeader {
     /// Client-specified request token for idempotent retries.
-    #[param(required = false, rename = "s2-request-token")]
+    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-request-token"))]
     pub s2_request_token: String,
 }
 
 #[rustfmt::skip]
-#[derive(Debug, IntoParams)]
-#[into_params(parameter_in = Path)]
+#[derive(Debug)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct AccessTokenIdPathSegment {
     /// Access token ID.
-    #[param(value_type = String, minimum = 1, maximum = 96)]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, minimum = 1, maximum = 96))]
     pub id: types::access::AccessTokenId,
 }
 
 #[rustfmt::skip]
-#[derive(Debug, IntoParams)]
-#[into_params(parameter_in = Path)]
+#[derive(Debug)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct BasinNamePathSegment {
     /// Basin name.
-    #[param(value_type = String, minimum = 8, maximum = 48, pattern = "^(?!-)[a-z0-9-]{8,48}(?<!-)$")]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, minimum = 8, maximum = 48, pattern = "^(?!-)[a-z0-9-]{8,48}(?<!-)$"))]
     pub basin: types::basin::BasinName,
 }
 
 #[rustfmt::skip]
-#[derive(Debug, IntoParams)]
-#[into_params(parameter_in = Path)]
+#[derive(Debug)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct StreamNamePathSegment {
     /// Stream name.
-    #[param(value_type = String, minimum = 1, maximum = 512)]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, minimum = 1, maximum = 512))]
     pub stream: types::stream::StreamName,
 }
 
@@ -72,7 +77,8 @@ macro_rules! impl_list_request_try_from {
 
 pub(crate) use impl_list_request_try_from;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ErrorResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<&'static str>,

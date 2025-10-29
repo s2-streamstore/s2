@@ -14,21 +14,23 @@ use s2_common::{
     },
 };
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
 use utoipa::{IntoParams, ToSchema};
 
 use super::config::StreamConfig;
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct StreamInfo {
     /// Stream name.
-    #[schema(value_type = String)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: StreamName,
     /// Creation time in ISO 8601 format.
-    #[schema(format = Time)]
+    #[cfg_attr(feature = "utoipa", schema(format = Time))]
     pub created_at: String,
     /// Deletion time in ISO 8601 format, if the stream is being deleted.
-    #[schema(format = Time)]
+    #[cfg_attr(feature = "utoipa", schema(format = Time))]
     pub deleted_at: Option<String>,
 }
 
@@ -54,18 +56,19 @@ impl From<types::stream::StreamInfo> for StreamInfo {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListStreamsRequest {
     /// Filter to streams whose name begins with this prefix.
-    #[param(value_type = String, default = "", required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub prefix: Option<StreamNamePrefix>,
     /// Filter to streams whose name begins with this prefix.
     /// It must be greater than or equal to the `prefix` if specified.
-    #[param(value_type = String, default = "", required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub start_after: Option<StreamNameStartAfter>,
     /// Number of results, up to a maximum of 1000.
-    #[param(value_type = usize, maximum = 1000, default = 1000, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = usize, maximum = 1000, default = 1000, required = false))]
     pub limit: Option<usize>,
 }
 
@@ -76,17 +79,19 @@ super::impl_list_request_try_from!(
 );
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ListStreamsResponse {
     /// Matching streams.
-    #[schema(max_items = 1000)]
+    #[cfg_attr(feature = "utoipa", schema(max_items = 1000))]
     pub streams: Vec<StreamInfo>,
     /// Indicates that there are more results that match the criteria.
     pub has_more: bool,
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct CreateStreamRequest {
     /// Stream name that is unique to the basin.
     /// It can be between 1 and 512 bytes in length.
@@ -105,7 +110,8 @@ impl TryFrom<CreateStreamRequest> for types::config::OptionalStreamConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct StreamPosition {
     /// Sequence number assigned by the service.
     pub seq_num: u64,
@@ -124,28 +130,30 @@ impl From<types::stream::StreamPosition> for StreamPosition {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct TailResponse {
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
     pub tail: StreamPosition,
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ReadStart {
     /// Start from a sequence number.
-    #[param(value_type = u64, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub seq_num: Option<record::SeqNum>,
     /// Start from a timestamp.
-    #[param(value_type = u64, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub timestamp: Option<record::Timestamp>,
     /// Start from number of records before the next sequence number.
-    #[param(value_type = u64, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub tail_offset: Option<u64>,
     /// Start reading from the tail if the requested position is beyond it.
     /// Otherwise, a `416 Range Not Satisfiable` response is returned.
-    #[param(value_type = bool, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = bool, required = false))]
     pub clamp: Option<bool>,
 }
 
@@ -170,25 +178,26 @@ impl TryFrom<ReadStart> for types::stream::ReadStart {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ReadEnd {
     /// Record count limit.
     /// Non-streaming reads are capped by the default limit of 1000 records.
-    #[param(value_type = u64, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub count: Option<usize>,
     /// Metered bytes limit.
     /// Non-streaming reads are capped by the default limit of 1 MiB.
-    #[param(value_type = usize, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = usize, required = false))]
     pub bytes: Option<usize>,
     /// Exclusive timestamp to read until.
-    #[param(value_type = u64, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub until: Option<u64>,
     /// Duration in seconds to wait for new records.
     /// The default duration is 0 if there is a bound on `count`, `bytes`, or `until`, and otherwise infinite.
     /// Non-streaming reads are always bounded on `count` and `bytes`, so you can achieve long poll semantics by specifying a non-zero duration up to 60 seconds.
     /// In the context of an SSE or S2S streaming read, the duration will bound how much time can elapse between records throughout the lifetime of the session.
-    #[param(value_type = u32, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = u32, required = false))]
     pub wait: Option<u32>,
 }
 
@@ -228,23 +237,24 @@ impl ReadResponseKind {
     }
 }
 #[rustfmt::skip]
-#[derive(IntoParams)]
-#[into_params(parameter_in = Header)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
 pub struct FormatHeader {
     /// Defines the interpretation of record data (header name, header value, and body) with the JSON content type.
     /// Use `raw` (default) for efficient transmission and storage of Unicode data — storage will be in UTF-8.
     /// Use `base64` for safe transmission with efficient storage of binary data.
-    #[param(required = false, rename = "s2-format")]
+    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-format"))]
     pub s2_format: S2Format,
 }
 
 #[rustfmt::skip]
-#[derive(ToSchema, Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub enum S2Format {
     #[default]
-    #[schema(rename = "raw")]
+    #[cfg_attr(feature = "utoipa", schema(rename = "raw"))]
     Raw,
-    #[schema(rename = "base64")]
+    #[cfg_attr(feature = "utoipa", schema(rename = "base64"))]
     Base64,
 }
 
@@ -342,12 +352,14 @@ impl S2Format {
 /// Headers add structured information to a record as name-value pairs.
 ///
 /// The name cannot be empty, with the exception of an S2 command record.
-#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct Header(pub String, pub String);
 
 #[rustfmt::skip]
 /// Record that is durably sequenced on a stream.
-#[derive(Debug, Clone, ToSchema, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct SequencedRecord {
     /// Sequence number assigned by the service.
     pub seq_num: record::SeqNum,
@@ -355,17 +367,18 @@ pub struct SequencedRecord {
     pub timestamp: record::Timestamp,
     /// Series of name-value pairs for this record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schema(required = false)]
+    #[cfg_attr(feature = "utoipa", schema(required = false))]
     pub headers: Vec<Header>,
     /// Body of the record.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    #[schema(required = false)]
+    #[cfg_attr(feature = "utoipa", schema(required = false))]
     pub body: String,
 }
 
 #[rustfmt::skip]
 /// Record to be appended to a stream.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct AppendRecord {
     /// Timestamp for this record.
     /// The service will always ensure monotonicity by adjusting it up if necessary to the maximum observed timestamp.
@@ -373,17 +386,18 @@ pub struct AppendRecord {
     pub timestamp: Option<record::Timestamp>,
     /// Series of name-value pairs for this record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schema(required = false)]
+    #[cfg_attr(feature = "utoipa", schema(required = false))]
     pub headers: Vec<Header>,
     /// Body of the record.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    #[schema(required = false)]
+    #[cfg_attr(feature = "utoipa", schema(required = false))]
     pub body: String,
 }
 
 #[rustfmt::skip]
 /// Payload of an `append` request.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct AppendInput {
     /// Batch of records to append atomically, which must contain at least one record, and no more than 1000.
     /// The total size of a batch of records may not exceed 1 MiB of metered bytes.
@@ -391,13 +405,14 @@ pub struct AppendInput {
     /// Enforce that the sequence number assigned to the first record matches.
     pub match_seq_num: Option<record::SeqNum>,
     /// Enforce a fencing token, which starts out as an empty string that can be overridden by a `fence` command record.
-    #[schema(value_type = String, required = false)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String, required = false))]
     pub fencing_token: Option<FencingToken>,
 }
 
 #[rustfmt::skip]
 /// Success response to an `append` request.
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct AppendAck {
     /// Sequence number and timestamp of the first record that was appended.
     pub start: StreamPosition,
@@ -421,21 +436,23 @@ impl From<types::stream::AppendAck> for AppendAck {
 
 #[rustfmt::skip]
 /// Aborted due to a failed condition.
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AppendConditionFailed {
     /// Fencing token did not match.
     /// The expected fencing token is returned.
-    #[schema(title = "fencing token")]
+    #[cfg_attr(feature = "utoipa", schema(title = "fencing token"))]
     FencingTokenMismatch(String),
     /// Sequence number did not match the tail of the stream.
     /// The expected next sequence number is returned.
-    #[schema(title = "seq num")]
+    #[cfg_attr(feature = "utoipa", schema(title = "seq num"))]
     SeqNumMismatch(u64),
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, ToSchema, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ReadBatch {
     /// Records that are durably sequenced on the stream, retrieved based on the requested criteria.
     /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, or `until`).

@@ -3,23 +3,25 @@ use s2_common::types::{
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
 };
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
 use utoipa::{IntoParams, ToSchema};
 
 use super::config::BasinConfig;
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListBasinsRequest {
     /// Filter to basins whose names begin with this prefix.
-    #[param(value_type = String, default = "", required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub prefix: Option<BasinNamePrefix>,
     /// Filter to basins whose names lexicographically start after this string.
     /// It must be greater than or equal to the `prefix` if specified.
-    #[param(value_type = String, default = "", required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub start_after: Option<BasinNameStartAfter>,
     /// Number of results, up to a maximum of 1000.
-    #[param(value_type = usize, maximum = 1000, default = 1000, required = false)]
+    #[cfg_attr(feature = "utoipa", param(value_type = usize, maximum = 1000, default = 1000, required = false))]
     pub limit: Option<usize>,
 }
 
@@ -30,20 +32,22 @@ super::impl_list_request_try_from!(
 );
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ListBasinsResponse {
     /// Matching basins.
-    #[schema(max_items = 1000)]
+    #[cfg_attr(feature = "utoipa", schema(max_items = 1000))]
     pub basins: Vec<BasinInfo>,
     /// Indicates that there are more basins that match the criteria.
     pub has_more: bool,
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct BasinInfo {
     /// Basin name.
-    #[schema(value_type = String)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: BasinName,
     /// Basin scope.
     pub scope: BasinScope,
@@ -64,7 +68,8 @@ impl From<types::basin::BasinInfo> for BasinInfo {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub enum BasinScope {
     /// AWS `us-east-1` region.
     #[serde(rename = "aws:us-east-1")]
@@ -88,7 +93,8 @@ impl From<types::basin::BasinScope> for BasinScope {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum BasinState {
     /// Basin is active.
@@ -110,18 +116,20 @@ impl From<types::basin::BasinState> for BasinState {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct CreateOrReconfigureBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin scope.
     /// This cannot be reconfigured.
-    #[schema(value_type = BasinScope, default = "aws:us-east-1", required = false)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = BasinScope, default = "aws:us-east-1", required = false))]
     pub scope: Option<BasinScope>,
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct CreateBasinRequest {
     /// Basin name which must be globally unique.
     /// It can be between 8 and 48 characters in length, and comprise lowercase letters, numbers and hyphens.
@@ -130,6 +138,6 @@ pub struct CreateBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin scope.
-    #[schema(value_type = BasinScope, default = "aws:us-east-1", required = false)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = BasinScope, default = "aws:us-east-1", required = false))]
     pub scope: Option<BasinScope>,
 }

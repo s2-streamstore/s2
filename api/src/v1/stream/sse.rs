@@ -2,6 +2,7 @@ use std::{str::FromStr, time::Duration};
 
 use s2_common::types;
 use serde::Serialize;
+#[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
 use super::ReadBatch;
@@ -68,7 +69,8 @@ impl FromStr for LastEventId {
 
 macro_rules! event {
     ($name:ident, $val:expr) => {
-        #[derive(Serialize, ToSchema)]
+        #[derive(Serialize)]
+        #[cfg_attr(feature = "utoipa", derive(ToSchema))]
         #[serde(rename_all = "snake_case")]
         pub enum $name {
             $name,
@@ -86,33 +88,34 @@ event!(Batch, "batch");
 event!(Error, "error");
 event!(Ping, "ping");
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(untagged)]
 pub enum ReadEvent {
-    #[schema(title = "batch")]
+    #[cfg_attr(feature = "utoipa", schema(title = "batch"))]
     Batch {
-        #[schema(inline)]
+        #[cfg_attr(feature = "utoipa", schema(inline))]
         event: Batch,
         data: ReadBatch,
-        #[schema(value_type = String, pattern = "^[0-9]+,[0-9]+,[0-9]+$")]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String, pattern = "^[0-9]+,[0-9]+,[0-9]+$"))]
         id: LastEventId,
     },
-    #[schema(title = "error")]
+    #[cfg_attr(feature = "utoipa", schema(title = "error"))]
     Error {
-        #[schema(inline)]
+        #[cfg_attr(feature = "utoipa", schema(inline))]
         event: Error,
         data: String,
     },
-    #[schema(title = "ping")]
+    #[cfg_attr(feature = "utoipa", schema(title = "ping"))]
     Ping {
-        #[schema(inline)]
+        #[cfg_attr(feature = "utoipa", schema(inline))]
         event: Ping,
         data: PingEventData,
     },
-    #[schema(title = "done")]
+    #[cfg_attr(feature = "utoipa", schema(title = "done"))]
     #[serde(skip)]
     Done {
-        #[schema(value_type = String, pattern = r"^\[DONE\]$")]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String, pattern = r"^\[DONE\]$"))]
         data: DoneEventData,
     },
 }
@@ -155,7 +158,8 @@ impl ReadEvent {
     }
 }
 
-#[derive(Debug, Clone, ToSchema, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename = "[DONE]")]
 pub struct DoneEventData;
 
@@ -166,7 +170,8 @@ impl AsRef<str> for DoneEventData {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, ToSchema, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct PingEventData {
     pub timestamp: u64,
 }
