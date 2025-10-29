@@ -1,5 +1,9 @@
-use compact_str::CompactString;
-use s2_common::types;
+use s2_common::types::{
+    self,
+    access::{AccessTokenId, AccessTokenIdPrefix},
+    basin::{BasinName, BasinNamePrefix},
+    stream::{StreamName, StreamNamePrefix},
+};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Iso8601};
 #[cfg(feature = "utoipa")]
@@ -181,11 +185,11 @@ impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct AccessTokenScope {
     /// Basin names allowed.
-    pub basins: Option<ResourceSet>,
+    pub basins: Option<ResourceSet<BasinName, BasinNamePrefix>>,
     /// Stream names allowed.
-    pub streams: Option<ResourceSet>,
+    pub streams: Option<ResourceSet<StreamName, StreamNamePrefix>>,
     /// Token IDs allowed.
-    pub access_tokens:  Option<ResourceSet>,
+    pub access_tokens:  Option<ResourceSet<AccessTokenId, AccessTokenIdPrefix>>,
     /// Access permissions at operation group level.
     pub op_groups: Option<PermittedOperationGroups>,
     /// Operations allowed for the token.
@@ -207,18 +211,9 @@ impl TryFrom<AccessTokenScope> for types::access::AccessTokenScope {
         } = value;
 
         Ok(Self {
-            basins: basins
-                .map(TryFrom::try_from)
-                .transpose()?
-                .unwrap_or_default(),
-            streams: streams
-                .map(TryFrom::try_from)
-                .transpose()?
-                .unwrap_or_default(),
-            access_tokens: access_tokens
-                .map(TryFrom::try_from)
-                .transpose()?
-                .unwrap_or_default(),
+            basins: basins.map(Into::into).unwrap_or_default(),
+            streams: streams.map(Into::into).unwrap_or_default(),
+            access_tokens: access_tokens.map(Into::into).unwrap_or_default(),
             op_groups: op_groups.map(Into::into).unwrap_or_default(),
             ops: ops
                 .map(|o| o.into_iter().map(types::access::Operation::from).collect())
@@ -251,44 +246,37 @@ impl From<types::access::AccessTokenScope> for AccessTokenScope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
-pub enum ResourceSet {
+pub enum ResourceSet<E, P> {
     /// Match only the resource with this exact name.
     /// Use an empty string to match no resources.
     #[cfg_attr(feature = "utoipa", schema(title = "exact", value_type = String))]
-    Exact(CompactString),
+    Exact(E),
     /// Match all resources that start with this prefix.
     /// Use an empty string to match all resource.
     #[cfg_attr(feature = "utoipa", schema(title = "prefix", value_type = String))]
-    Prefix(CompactString),
+    Prefix(P),
 }
 
-impl ResourceSet {
-    pub fn to_opt<E, P>(rs: types::access::ResourceSet<E, P>) -> Option<Self>
-    where
-        E: Into<CompactString>,
-        P: Into<CompactString>,
-    {
+impl<E, P> ResourceSet<E, P> {
+    pub fn to_opt(rs: types::access::ResourceSet<E, P>) -> Option<Self> {
         match rs {
             types::access::ResourceSet::None => None,
-            types::access::ResourceSet::Exact(e) => Some(ResourceSet::Exact(e.into())),
-            types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p.into())),
+            types::access::ResourceSet::Exact(e) => Some(ResourceSet::Exact(e)),
+            types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p)),
         }
     }
 }
 
-impl<E, P> TryFrom<ResourceSet> for types::access::ResourceSet<E, P>
+impl<E, P> From<ResourceSet<E, P>> for types::access::ResourceSet<E, P>
 where
-    E: TryFrom<CompactString, Error = types::ValidationError>,
-    P: TryFrom<CompactString, Error = types::ValidationError>,
+    E: AsRef<str>,
 {
-    type Error = types::ValidationError;
-
-    fn try_from(value: ResourceSet) -> Result<Self, Self::Error> {
-        Ok(match value {
-            ResourceSet::Exact(e) if e.is_empty() => Self::None,
-            ResourceSet::Exact(e) => Self::Exact(e.try_into()?),
-            ResourceSet::Prefix(p) => Self::Prefix(p.try_into()?),
-        })
+    fn from(value: ResourceSet<E, P>) -> Self {
+        match value {
+            ResourceSet::Exact(e) if e.as_ref().is_empty() => Self::None,
+            ResourceSet::Exact(e) => Self::Exact(e),
+            ResourceSet::Prefix(p) => Self::Prefix(p),
+        }
     }
 }
 

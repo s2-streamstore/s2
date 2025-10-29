@@ -2579,6 +2579,7 @@ dependencies = [
  "strum",
  "thiserror 2.0.17",
  "time",
+ "utoipa",
 ]
 
 [[package]]

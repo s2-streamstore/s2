@@ -16,6 +16,23 @@ use crate::{
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BasinStr<T: StrProps>(CompactString, PhantomData<T>);
 
+#[cfg(feature = "utoipa")]
+impl<T> utoipa::PartialSchema for BasinStr<T>
+where
+    T: StrProps,
+{
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::Object::builder()
+            .schema_type(utoipa::openapi::Type::String)
+            .min_length((!T::IS_PREFIX).then_some(1))
+            .max_length(Some(Self::MAX_LENGTH))
+            .into()
+    }
+}
+
+#[cfg(feature = "utoipa")]
+impl<T> utoipa::ToSchema for BasinStr<T> where T: StrProps {}
+
 impl<T: StrProps> serde::Serialize for BasinStr<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -30,10 +47,8 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for BasinStr<T> {
     where
         D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        CompactString::from(s)
-            .try_into()
-            .map_err(serde::de::Error::custom)
+        let s = CompactString::deserialize(deserializer)?;
+        s.try_into().map_err(serde::de::Error::custom)
     }
 }
 
