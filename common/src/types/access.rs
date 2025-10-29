@@ -12,6 +12,10 @@ use super::{
 use crate::{caps, types::resources::ListItemsRequest};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct AccessTokenStr<T: StrProps>(CompactString, PhantomData<T>);
 
 #[cfg(feature = "utoipa")]

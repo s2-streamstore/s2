@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-rkyv = ["dep:rkyv"]
+rkyv = ["dep:rkyv", "compact_str/rkyv"]
 utoipa = ["dep:utoipa"]
 
 [dependencies]

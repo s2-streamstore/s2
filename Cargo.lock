@@ -411,6 +411,7 @@ dependencies = [
  "castaway",
  "cfg-if",
  "itoa",
+ "rkyv",
  "rustversion",
  "ryu",
  "serde",
