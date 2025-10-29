@@ -5,6 +5,7 @@ edition.workspace = true
 
 [features]
 utoipa = ["dep:utoipa"]
+codegen = ["dep:prost-build"]
 
 [dependencies]
 base64ct = { workspace = true }
@@ -20,6 +21,4 @@ time = { workspace = true }
 utoipa = { workspace = true, optional = true }
 
 [build-dependencies]
-# TODO this should be optional & check in the generated code, like Rust SDK
-# ... and Rust SDK should just depend on the proto from api!
-prost-build = { workspace = true }
+prost-build = { workspace = true, optional = true }

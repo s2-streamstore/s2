@@ -1,7 +1,7 @@
 use compact_str::ToCompactString;
 use s2_common::{record, types};
 
-include!(concat!(env!("OUT_DIR"), "/s2.v1.rs"));
+include!("s2.v1.rs");
 
 impl From<StreamPosition> for types::stream::StreamPosition {
     fn from(StreamPosition { seq_num, timestamp }: StreamPosition) -> Self {
