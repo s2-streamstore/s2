@@ -29,6 +29,7 @@ prost-build = "0.14.1"
 rkyv = "0.8.12"
 rstest = "0.26.1"
 serde = { version = "1.0.228", features = ["derive"] }
+slatedb = "0.8.2"
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2.0.17"
 time = { version = "0.3.44", features = ["serde", "parsing", "formatting"] }

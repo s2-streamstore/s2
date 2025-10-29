@@ -10,6 +10,7 @@ clap = { workspace = true }
 compact_str = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
+s2-api = { path = "../api" }
 s2-common = { path = "../common" }
+slatedb = { workspace = true }
 thiserror = { workspace = true }
-utoipa = { workspace = true }

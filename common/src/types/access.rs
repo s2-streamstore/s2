@@ -143,18 +143,8 @@ pub enum Operation {
     StreamMetrics = 21,
 }
 
-#[derive(
-    rkyv::Archive,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
 pub enum ResourceSet<E, P> {
     #[default]
     None,

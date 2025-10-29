@@ -14,7 +14,7 @@ s2-common = { path = "../common" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
-# TODO this should be optional
+# TODO optional
 utoipa = { workspace = true }
 
 [build-dependencies]
