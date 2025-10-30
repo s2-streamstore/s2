@@ -1,6 +1,6 @@
-use std::ops::Deref;
+use std::{ops::Deref, str::FromStr};
 
-use compact_str::CompactString;
+use compact_str::{CompactString, ToCompactString};
 
 use crate::deep_size::DeepSize;
 
@@ -46,6 +46,14 @@ impl TryFrom<CompactString> for FencingToken {
             return Err(FencingTokenTooLongError(input.len()));
         }
         Ok(FencingToken(input))
+    }
+}
+
+impl FromStr for FencingToken {
+    type Err = FencingTokenTooLongError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.to_compact_string().try_into()
     }
 }
 

@@ -1,6 +1,6 @@
 use std::{num::NonZeroUsize, ops::Deref};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Page<T> {
     pub values: Vec<T>,
     pub has_more: bool,
