@@ -77,12 +77,53 @@ impl TryFrom<AppendInput> for types::stream::AppendInput {
     }
 }
 
+impl TryFrom<types::stream::AppendInput> for AppendInput {
+    type Error = types::ValidationError;
+
+    fn try_from(
+        types::stream::AppendInput {
+            records,
+            match_seq_num,
+            fencing_token,
+        }: types::stream::AppendInput,
+    ) -> Result<Self, Self::Error> {
+        let records = records
+            .into_iter()
+            .map(|record| {
+                let types::stream::AppendRecordParts { timestamp, record } = record.into();
+                let (headers, body) = record.into_inner().into_parts();
+                AppendRecord {
+                    timestamp,
+                    headers: headers.into_iter().map(Into::into).collect(),
+                    body,
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            records,
+            match_seq_num,
+            fencing_token: fencing_token.as_ref().map(|t| t.to_string()),
+        })
+    }
+}
+
 impl From<types::stream::AppendAck> for AppendAck {
     fn from(types::stream::AppendAck { start, end, tail }: types::stream::AppendAck) -> Self {
         Self {
             start: Some(start.into()),
             end: Some(end.into()),
             tail: Some(tail.into()),
+        }
+    }
+}
+
+impl From<AppendAck> for types::stream::AppendAck {
+    fn from(AppendAck { start, end, tail }: AppendAck) -> Self {
+        Self {
+            start: start.unwrap_or_default().into(),
+            end: end.unwrap_or_default().into(),
+            tail: tail.unwrap_or_default().into(),
         }
     }
 }

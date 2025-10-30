@@ -180,6 +180,48 @@ impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
     }
 }
 
+impl From<types::access::IssueAccessTokenRequest> for AccessTokenInfo {
+    fn from(value: types::access::IssueAccessTokenRequest) -> Self {
+        let types::access::IssueAccessTokenRequest {
+            id,
+            expires_at,
+            auto_prefix_streams,
+            scope,
+        } = value;
+
+        Self {
+            id,
+            expires_at: expires_at
+                .map(|e| e.format(&Iso8601::DEFAULT).expect("valid iso8601 time")),
+            auto_prefix_streams: Some(auto_prefix_streams),
+            scope: scope.into(),
+        }
+    }
+}
+
+impl TryFrom<AccessTokenInfo> for types::access::AccessTokenInfo {
+    type Error = types::ValidationError;
+
+    fn try_from(value: AccessTokenInfo) -> Result<Self, Self::Error> {
+        let AccessTokenInfo {
+            id,
+            expires_at,
+            auto_prefix_streams,
+            scope,
+        } = value;
+
+        Ok(Self {
+            id,
+            expires_at: expires_at.ok_or("Missing `expires_at`").and_then(|e| {
+                OffsetDateTime::parse(&e, &Iso8601::DEFAULT)
+                    .map_err(|_| "Invalid ISO-8601 formatted `expires_at` time")
+            })?,
+            auto_prefix_streams: auto_prefix_streams.unwrap_or_default(),
+            scope: scope.try_into()?,
+        })
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -374,7 +416,7 @@ pub struct ListAccessTokensRequest {
     pub limit: Option<usize>,
 }
 
-super::impl_list_request_try_from!(
+super::impl_list_request_conversions!(
     ListAccessTokensRequest,
     types::access::AccessTokenIdPrefix,
     types::access::AccessTokenIdStartAfter

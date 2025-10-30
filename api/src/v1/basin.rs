@@ -25,7 +25,7 @@ pub struct ListBasinsRequest {
     pub limit: Option<usize>,
 }
 
-super::impl_list_request_try_from!(
+super::impl_list_request_conversions!(
     ListBasinsRequest,
     types::basin::BasinNamePrefix,
     types::basin::BasinNameStartAfter
@@ -58,6 +58,18 @@ pub struct BasinInfo {
 impl From<types::basin::BasinInfo> for BasinInfo {
     fn from(value: types::basin::BasinInfo) -> Self {
         let types::basin::BasinInfo { name, scope, state } = value;
+
+        Self {
+            name,
+            scope: scope.into(),
+            state: state.into(),
+        }
+    }
+}
+
+impl From<BasinInfo> for types::basin::BasinInfo {
+    fn from(value: BasinInfo) -> Self {
+        let BasinInfo { name, scope, state } = value;
 
         Self {
             name,
@@ -111,6 +123,16 @@ impl From<types::basin::BasinState> for BasinState {
             types::basin::BasinState::Active => Self::Active,
             types::basin::BasinState::Creating => Self::Creating,
             types::basin::BasinState::Deleting => Self::Deleting,
+        }
+    }
+}
+
+impl From<BasinState> for types::basin::BasinState {
+    fn from(value: BasinState) -> Self {
+        match value {
+            BasinState::Active => Self::Active,
+            BasinState::Creating => Self::Creating,
+            BasinState::Deleting => Self::Deleting,
         }
     }
 }

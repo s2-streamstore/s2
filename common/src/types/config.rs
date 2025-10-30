@@ -78,6 +78,40 @@ pub struct StreamConfig {
     pub delete_on_empty: DeleteOnEmptyConfig,
 }
 
+impl StreamConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_storage_class(self, storage_class: StorageClass) -> Self {
+        Self {
+            storage_class,
+            ..self
+        }
+    }
+
+    pub fn with_retention_policy(self, retention_policy: RetentionPolicy) -> Self {
+        Self {
+            retention_policy,
+            ..self
+        }
+    }
+
+    pub fn with_timestamping(self, timestamping: TimestampingConfig) -> Self {
+        Self {
+            timestamping,
+            ..self
+        }
+    }
+
+    pub fn with_delete_on_empty(self, delete_on_empty: DeleteOnEmptyConfig) -> Self {
+        Self {
+            delete_on_empty,
+            ..self
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TimestampingReconfiguration {
     pub mode: Maybe<Option<TimestampingMode>>,
@@ -133,6 +167,15 @@ impl From<OptionalTimestampingConfig> for TimestampingConfig {
     }
 }
 
+impl From<TimestampingConfig> for OptionalTimestampingConfig {
+    fn from(value: TimestampingConfig) -> Self {
+        Self {
+            mode: Some(value.mode),
+            uncapped: Some(value.uncapped),
+        }
+    }
+}
+
 impl From<OptionalTimestampingConfig> for TimestampingReconfiguration {
     fn from(value: OptionalTimestampingConfig) -> Self {
         Self {
@@ -165,6 +208,14 @@ impl From<OptionalDeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     fn from(value: OptionalDeleteOnEmptyConfig) -> Self {
         Self {
             min_age: value.min_age.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
+    fn from(value: DeleteOnEmptyConfig) -> Self {
+        Self {
+            min_age: Some(value.min_age),
         }
     }
 }
@@ -272,6 +323,24 @@ impl From<OptionalStreamConfig> for StreamConfig {
     }
 }
 
+impl From<StreamConfig> for OptionalStreamConfig {
+    fn from(value: StreamConfig) -> Self {
+        let StreamConfig {
+            storage_class,
+            retention_policy,
+            timestamping,
+            delete_on_empty,
+        } = value;
+
+        Self {
+            storage_class: Some(storage_class),
+            retention_policy: Some(retention_policy),
+            timestamping: timestamping.into(),
+            delete_on_empty: delete_on_empty.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BasinConfig {
     pub default_stream_config: OptionalStreamConfig,
@@ -280,6 +349,31 @@ pub struct BasinConfig {
 }
 
 impl BasinConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_default_stream_config(self, default_stream_config: StreamConfig) -> Self {
+        Self {
+            default_stream_config: default_stream_config.into(),
+            ..self
+        }
+    }
+
+    pub fn with_create_stream_on_append(self, create_stream_on_append: bool) -> Self {
+        Self {
+            create_stream_on_append,
+            ..self
+        }
+    }
+
+    pub fn with_create_stream_on_read(self, create_stream_on_read: bool) -> Self {
+        Self {
+            create_stream_on_read,
+            ..self
+        }
+    }
+
     pub fn reconfigure(mut self, reconfiguration: BasinReconfiguration) -> Self {
         let BasinReconfiguration {
             default_stream_config,

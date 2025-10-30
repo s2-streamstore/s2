@@ -184,11 +184,43 @@ pub struct ReadWritePermissions {
     pub write: bool,
 }
 
+impl ReadWritePermissions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_read(self, read: bool) -> Self {
+        Self { read, ..self }
+    }
+
+    pub fn with_write(self, write: bool) -> Self {
+        Self { write, ..self }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PermittedOperationGroups {
     pub account: ReadWritePermissions,
     pub basin: ReadWritePermissions,
     pub stream: ReadWritePermissions,
+}
+
+impl PermittedOperationGroups {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_account(self, account: ReadWritePermissions) -> Self {
+        Self { account, ..self }
+    }
+
+    pub fn with_basin(self, basin: ReadWritePermissions) -> Self {
+        Self { basin, ..self }
+    }
+
+    pub fn with_stream(self, stream: ReadWritePermissions) -> Self {
+        Self { stream, ..self }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -198,6 +230,44 @@ pub struct AccessTokenScope {
     pub access_tokens: AccessTokenResourceSet,
     pub op_groups: PermittedOperationGroups,
     pub ops: EnumSet<Operation>,
+}
+
+impl AccessTokenScope {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_basins(self, basins: BasinResourceSet) -> Self {
+        Self { basins, ..self }
+    }
+
+    pub fn with_streams(self, streams: StreamResourceSet) -> Self {
+        Self { streams, ..self }
+    }
+
+    pub fn with_tokens(self, access_tokens: AccessTokenResourceSet) -> Self {
+        Self {
+            access_tokens,
+            ..self
+        }
+    }
+
+    pub fn with_op_groups(self, op_groups: PermittedOperationGroups) -> Self {
+        Self { op_groups, ..self }
+    }
+
+    pub fn with_ops(self, ops: impl IntoIterator<Item = Operation>) -> Self {
+        Self {
+            ops: ops.into_iter().collect(),
+            ..self
+        }
+    }
+
+    pub fn with_op(self, op: Operation) -> Self {
+        let mut ops = self.ops;
+        ops.insert(op);
+        Self { ops, ..self }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +284,35 @@ pub struct IssueAccessTokenRequest {
     pub expires_at: Option<time::OffsetDateTime>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
+}
+
+impl IssueAccessTokenRequest {
+    pub fn new(id: impl AsRef<str>) -> Result<Self, ValidationError> {
+        Ok(Self {
+            id: id.as_ref().parse()?,
+            expires_at: None,
+            auto_prefix_streams: false,
+            scope: AccessTokenScope::default(),
+        })
+    }
+
+    pub fn with_expires_at(self, expires_at: time::OffsetDateTime) -> Self {
+        Self {
+            expires_at: Some(expires_at),
+            ..self
+        }
+    }
+
+    pub fn with_auto_prefix_streams(self, auto_prefix_streams: bool) -> Self {
+        Self {
+            auto_prefix_streams,
+            ..self
+        }
+    }
+
+    pub fn with_scope(self, scope: AccessTokenScope) -> Self {
+        Self { scope, ..self }
+    }
 }
 
 pub type ListAccessTokensRequest = ListItemsRequest<AccessTokenIdPrefix, AccessTokenIdStartAfter>;

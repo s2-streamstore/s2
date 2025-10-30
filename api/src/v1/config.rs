@@ -175,6 +175,15 @@ impl From<TimestampingReconfiguration> for types::config::TimestampingReconfigur
     }
 }
 
+impl From<types::config::TimestampingReconfiguration> for TimestampingReconfiguration {
+    fn from(value: types::config::TimestampingReconfiguration) -> Self {
+        Self {
+            mode: value.mode.map_opt(Into::into),
+            uncapped: value.uncapped,
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -237,6 +246,14 @@ impl From<DeleteOnEmptyReconfiguration> for types::config::DeleteOnEmptyReconfig
     fn from(value: DeleteOnEmptyReconfiguration) -> Self {
         Self {
             min_age: value.min_age_secs.map_opt(Duration::from_secs),
+        }
+    }
+}
+
+impl From<types::config::DeleteOnEmptyReconfiguration> for DeleteOnEmptyReconfiguration {
+    fn from(value: types::config::DeleteOnEmptyReconfiguration) -> Self {
+        Self {
+            min_age_secs: value.min_age.map_opt(|d| d.as_secs()),
         }
     }
 }
@@ -366,6 +383,24 @@ impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
     }
 }
 
+impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
+    fn from(value: types::config::StreamReconfiguration) -> Self {
+        let types::config::StreamReconfiguration {
+            storage_class,
+            retention_policy,
+            timestamping,
+            delete_on_empty,
+        } = value;
+
+        Self {
+            storage_class: storage_class.map_opt(Into::into),
+            retention_policy: retention_policy.map_opt(Into::into),
+            timestamping: timestamping.map_opt(Into::into),
+            delete_on_empty: delete_on_empty.map_opt(Into::into),
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -450,5 +485,21 @@ impl TryFrom<BasinReconfiguration> for types::config::BasinReconfiguration {
             create_stream_on_append: create_stream_on_append.map(Into::into),
             create_stream_on_read: create_stream_on_read.map(Into::into),
         })
+    }
+}
+
+impl From<types::config::BasinReconfiguration> for BasinReconfiguration {
+    fn from(value: types::config::BasinReconfiguration) -> Self {
+        let types::config::BasinReconfiguration {
+            default_stream_config,
+            create_stream_on_append,
+            create_stream_on_read,
+        } = value;
+
+        Self {
+            default_stream_config: default_stream_config.map_opt(Into::into),
+            create_stream_on_append: create_stream_on_append.map(Into::into),
+            create_stream_on_read: create_stream_on_read.map(Into::into),
+        }
     }
 }

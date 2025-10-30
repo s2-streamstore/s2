@@ -63,6 +63,20 @@ impl From<AccountMetricSetRequest> for types::metrics::AccountMetricsRequest {
     }
 }
 
+impl From<types::metrics::AccountMetricsRequest> for AccountMetricSetRequest {
+    fn from(value: types::metrics::AccountMetricsRequest) -> Self {
+        Self {
+            set: match value.set {
+                types::metrics::AccountMetricSet::ActiveBasins => AccountMetricSet::ActiveBasins,
+                types::metrics::AccountMetricSet::AccountOps => AccountMetricSet::AccountOps,
+            },
+            start: value.start,
+            end: value.end,
+            interval: value.interval.map(Into::into),
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -101,6 +115,26 @@ impl From<BasinMetricSetRequest> for types::metrics::BasinMetricsRequest {
                 BasinMetricSet::ReadOps => types::metrics::BasinMetricSet::ReadOps,
                 BasinMetricSet::ReadThroughput => types::metrics::BasinMetricSet::ReadThroughput,
                 BasinMetricSet::Storage => types::metrics::BasinMetricSet::Storage,
+            },
+            start: value.start,
+            end: value.end,
+            interval: value.interval.map(Into::into),
+        }
+    }
+}
+
+impl From<types::metrics::BasinMetricsRequest> for BasinMetricSetRequest {
+    fn from(value: types::metrics::BasinMetricsRequest) -> Self {
+        Self {
+            set: match value.set {
+                types::metrics::BasinMetricSet::AppendOps => BasinMetricSet::AppendOps,
+                types::metrics::BasinMetricSet::AppendThroughput => {
+                    BasinMetricSet::AppendThroughput
+                }
+                types::metrics::BasinMetricSet::BasinOps => BasinMetricSet::BasinOps,
+                types::metrics::BasinMetricSet::ReadOps => BasinMetricSet::ReadOps,
+                types::metrics::BasinMetricSet::ReadThroughput => BasinMetricSet::ReadThroughput,
+                types::metrics::BasinMetricSet::Storage => BasinMetricSet::Storage,
             },
             start: value.start,
             end: value.end,
@@ -156,6 +190,19 @@ impl From<StreamMetricSetRequest> for types::metrics::StreamMetricsRequest {
     }
 }
 
+impl From<types::metrics::StreamMetricsRequest> for StreamMetricSetRequest {
+    fn from(value: types::metrics::StreamMetricsRequest) -> Self {
+        Self {
+            set: match value.set {
+                types::metrics::StreamMetricSet::Storage => StreamMetricSet::Storage,
+            },
+            start: value.start,
+            end: value.end,
+            interval: value.interval.map(Into::into),
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -183,6 +230,15 @@ impl From<types::metrics::MetricUnit> for MetricUnit {
     }
 }
 
+impl From<MetricUnit> for types::metrics::MetricUnit {
+    fn from(value: MetricUnit) -> Self {
+        match value {
+            MetricUnit::Bytes => types::metrics::MetricUnit::Bytes,
+            MetricUnit::Operations => types::metrics::MetricUnit::Operations,
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -198,6 +254,16 @@ pub struct ScalarMetric {
 
 impl From<types::metrics::ScalarMetric> for ScalarMetric {
     fn from(value: types::metrics::ScalarMetric) -> Self {
+        Self {
+            name: value.name,
+            unit: value.unit.into(),
+            value: value.value,
+        }
+    }
+}
+
+impl From<ScalarMetric> for types::metrics::ScalarMetric {
+    fn from(value: ScalarMetric) -> Self {
         Self {
             name: value.name,
             unit: value.unit.into(),
@@ -234,6 +300,17 @@ impl From<types::metrics::AccumulationMetric> for AccumulationMetric {
     }
 }
 
+impl From<AccumulationMetric> for types::metrics::AccumulationMetric {
+    fn from(value: AccumulationMetric) -> Self {
+        Self {
+            name: value.name,
+            unit: value.unit.into(),
+            bucket_length: value.bucket_length.into(),
+            values: value.values,
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -259,6 +336,16 @@ impl From<types::metrics::GaugeMetric> for GaugeMetric {
     }
 }
 
+impl From<GaugeMetric> for types::metrics::GaugeMetric {
+    fn from(value: GaugeMetric) -> Self {
+        Self {
+            name: value.name,
+            unit: value.unit.into(),
+            values: value.values,
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -273,6 +360,15 @@ pub struct LabelMetric {
 
 impl From<types::metrics::LabelMetric> for LabelMetric {
     fn from(value: types::metrics::LabelMetric) -> Self {
+        Self {
+            name: value.name,
+            values: value.values,
+        }
+    }
+}
+
+impl From<LabelMetric> for types::metrics::LabelMetric {
+    fn from(value: LabelMetric) -> Self {
         Self {
             name: value.name,
             values: value.values,
@@ -309,6 +405,19 @@ impl From<types::metrics::Metric> for Metric {
     }
 }
 
+impl From<Metric> for types::metrics::Metric {
+    fn from(value: Metric) -> Self {
+        match value {
+            Metric::Scalar(scalar) => types::metrics::Metric::Scalar(scalar.into()),
+            Metric::Accumulation(timeseries) => {
+                types::metrics::Metric::Accumulation(timeseries.into())
+            }
+            Metric::Gauge(timeseries) => types::metrics::Metric::Gauge(timeseries.into()),
+            Metric::Label(label) => types::metrics::Metric::Label(label.into()),
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -319,6 +428,14 @@ pub struct MetricSetResponse {
 
 impl From<types::metrics::MetricsResponse> for MetricSetResponse {
     fn from(value: types::metrics::MetricsResponse) -> Self {
+        Self {
+            values: value.values.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<MetricSetResponse> for types::metrics::MetricsResponse {
+    fn from(value: MetricSetResponse) -> Self {
         Self {
             values: value.values.into_iter().map(Into::into).collect(),
         }

@@ -49,12 +49,10 @@ pub struct StreamNamePathSegment {
     pub stream: types::stream::StreamName,
 }
 
-macro_rules! impl_list_request_try_from {
+macro_rules! impl_list_request_conversions {
     ($name:ident, $prefix:ty, $start_after:ty) => {
-        impl TryFrom<$name>
-            for s2_common::types::resources::ListItemsRequest<$prefix, $start_after>
-        {
-            type Error = s2_common::types::ValidationError;
+        impl TryFrom<$name> for types::resources::ListItemsRequest<$prefix, $start_after> {
+            type Error = types::ValidationError;
 
             fn try_from(value: $name) -> Result<Self, Self::Error> {
                 let $name {
@@ -63,19 +61,29 @@ macro_rules! impl_list_request_try_from {
                     limit,
                 } = value;
 
-                Ok(Self::try_from(
-                    s2_common::types::resources::ListItemsRequestParts {
-                        prefix: prefix.unwrap_or_default(),
-                        start_after: start_after.unwrap_or_default(),
-                        limit: limit.map(Into::into).unwrap_or_default(),
-                    },
-                )?)
+                Ok(Self::try_from(types::resources::ListItemsRequestParts {
+                    prefix: prefix.unwrap_or_default(),
+                    start_after: start_after.unwrap_or_default(),
+                    limit: limit.map(Into::into).unwrap_or_default(),
+                })?)
+            }
+        }
+
+        impl From<types::resources::ListItemsRequest<$prefix, $start_after>> for $name {
+            fn from(value: types::resources::ListItemsRequest<$prefix, $start_after>) -> Self {
+                let parts: types::resources::ListItemsRequestParts<$prefix, $start_after> =
+                    value.into();
+                Self {
+                    prefix: Some(parts.prefix),
+                    start_after: Some(parts.start_after),
+                    limit: Some(parts.limit.into()),
+                }
             }
         }
     };
 }
 
-pub(crate) use impl_list_request_try_from;
+pub(crate) use impl_list_request_conversions;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]

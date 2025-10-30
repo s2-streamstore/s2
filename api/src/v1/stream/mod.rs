@@ -14,6 +14,7 @@ use s2_common::{
     },
 };
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 #[cfg(feature = "utoipa")]
 use utoipa::{IntoParams, ToSchema};
 
@@ -55,6 +56,26 @@ impl From<types::stream::StreamInfo> for StreamInfo {
     }
 }
 
+impl From<StreamInfo> for types::stream::StreamInfo {
+    fn from(value: StreamInfo) -> Self {
+        use time::format_description::well_known::Iso8601;
+
+        let StreamInfo {
+            name,
+            created_at,
+            deleted_at,
+        } = value;
+
+        Self {
+            name,
+            created_at: OffsetDateTime::parse(&created_at, &Iso8601::DEFAULT)
+                .expect("valid iso8601 time"),
+            deleted_at: deleted_at
+                .map(|d| OffsetDateTime::parse(&d, &Iso8601::DEFAULT).expect("valid iso8601 time")),
+        }
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(IntoParams))]
@@ -72,7 +93,7 @@ pub struct ListStreamsRequest {
     pub limit: Option<usize>,
 }
 
-super::impl_list_request_try_from!(
+super::impl_list_request_conversions!(
     ListStreamsRequest,
     types::stream::StreamNamePrefix,
     types::stream::StreamNameStartAfter
@@ -110,7 +131,7 @@ impl TryFrom<CreateStreamRequest> for types::config::OptionalStreamConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct StreamPosition {
     /// Sequence number assigned by the service.
@@ -129,8 +150,17 @@ impl From<types::stream::StreamPosition> for StreamPosition {
     }
 }
 
+impl From<StreamPosition> for types::stream::StreamPosition {
+    fn from(pos: StreamPosition) -> Self {
+        Self {
+            seq_num: pos.seq_num,
+            timestamp: pos.timestamp,
+        }
+    }
+}
+
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct TailResponse {
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
