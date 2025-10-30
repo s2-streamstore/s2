@@ -168,7 +168,7 @@ pub struct TailResponse {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ReadStart {
@@ -207,8 +207,24 @@ impl TryFrom<ReadStart> for types::stream::ReadStart {
     }
 }
 
+impl From<types::stream::ReadStart> for ReadStart {
+    fn from(types::stream::ReadStart { from, clamp }: types::stream::ReadStart) -> Self {
+        let (seq_num, timestamp, tail_offset) = match from {
+            types::stream::ReadFrom::SeqNum(seq_num) => (Some(seq_num), None, None),
+            types::stream::ReadFrom::Timestamp(timestamp) => (None, Some(timestamp), None),
+            types::stream::ReadFrom::TailOffset(tail_offset) => (None, None, Some(tail_offset)),
+        };
+        Self {
+            seq_num,
+            timestamp,
+            tail_offset,
+            clamp: Some(clamp),
+        }
+    }
+}
+
 #[rustfmt::skip]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ReadEnd {
@@ -233,13 +249,24 @@ pub struct ReadEnd {
 
 impl From<ReadEnd> for types::stream::ReadEnd {
     fn from(value: ReadEnd) -> Self {
-        types::stream::ReadEnd {
+        Self {
             limit: s2_common::read_extent::ReadLimit::from_count_and_bytes(
                 value.count,
                 value.bytes,
             ),
             until: value.until.into(),
-            wait: value.wait.map(|n| Duration::from_secs(n as u64)),
+            wait: value.wait.map(|w| Duration::from_secs(w as u64)),
+        }
+    }
+}
+
+impl From<types::stream::ReadEnd> for ReadEnd {
+    fn from(value: types::stream::ReadEnd) -> Self {
+        Self {
+            count: value.limit.count(),
+            bytes: value.limit.bytes(),
+            until: value.until.into(),
+            wait: value.wait.map(|w| w.as_secs() as u32),
         }
     }
 }

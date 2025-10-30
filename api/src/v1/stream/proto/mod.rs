@@ -146,11 +146,51 @@ impl From<record::SequencedRecord> for SequencedRecord {
     }
 }
 
+impl TryFrom<SequencedRecord> for record::SequencedRecord {
+    type Error = types::ValidationError;
+
+    fn try_from(
+        SequencedRecord {
+            seq_num,
+            timestamp,
+            headers,
+            body,
+        }: SequencedRecord,
+    ) -> Result<Self, Self::Error> {
+        let record =
+            record::Record::try_from_parts(headers.into_iter().map(Into::into).collect(), body)
+                .map_err(|e| e.to_string())?;
+
+        Ok(Self {
+            seq_num,
+            timestamp,
+            record,
+        })
+    }
+}
+
 impl From<types::stream::ReadBatch> for ReadBatch {
     fn from(batch: types::stream::ReadBatch) -> Self {
         Self {
             records: batch.records.into_iter().map(Into::into).collect(),
             tail: batch.tail.map(Into::into),
         }
+    }
+}
+
+impl TryFrom<ReadBatch> for types::stream::ReadBatch {
+    type Error = types::ValidationError;
+
+    fn try_from(batch: ReadBatch) -> Result<Self, Self::Error> {
+        let records: Vec<_> = batch
+            .records
+            .into_iter()
+            .map(record::SequencedRecord::try_from)
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self {
+            records: records.into(),
+            tail: batch.tail.map(Into::into),
+        })
     }
 }
