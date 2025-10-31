@@ -1,17 +1,12 @@
 use std::{marker::PhantomData, ops::Deref, str::FromStr};
 
-use bytes::Bytes;
 use compact_str::{CompactString, ToCompactString};
 
 use super::{
     ValidationError,
-    config::BasinConfig,
     strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
 };
-use crate::{
-    caps,
-    types::resources::{CreateMode, ListItemsRequest},
-};
+use crate::{caps, types::resources::ListItemsRequest};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
@@ -177,14 +172,6 @@ impl Default for BasinNameStartAfter {
     fn default() -> Self {
         BasinStr(CompactString::default(), PhantomData)
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct CreateBasinRequest {
-    pub config: BasinConfig,
-    pub scope: BasinScope,
-    pub mode: CreateMode,
-    pub idempotence_key: Option<Bytes>,
 }
 
 pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAfter>;

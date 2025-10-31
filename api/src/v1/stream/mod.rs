@@ -7,7 +7,7 @@ use base64ct::{Base64, Encoding as _};
 use bytes::Bytes;
 use itertools::Itertools as _;
 use s2_common::{
-    record::{self, FencingToken},
+    record,
     types::{
         self,
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
@@ -116,18 +116,9 @@ pub struct ListStreamsResponse {
 pub struct CreateStreamRequest {
     /// Stream name that is unique to the basin.
     /// It can be between 1 and 512 bytes in length.
-    pub stream: String,
+    pub stream: StreamName,
     /// Stream configuration.
     pub config: Option<StreamConfig>,
-}
-
-impl TryFrom<CreateStreamRequest> for types::config::OptionalStreamConfig {
-    type Error = types::ValidationError;
-
-    fn try_from(value: CreateStreamRequest) -> Result<Self, Self::Error> {
-        let CreateStreamRequest { config, .. } = value;
-        config.unwrap_or_default().try_into()
-    }
 }
 
 #[rustfmt::skip]
@@ -135,10 +126,10 @@ impl TryFrom<CreateStreamRequest> for types::config::OptionalStreamConfig {
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct StreamPosition {
     /// Sequence number assigned by the service.
-    pub seq_num: u64,
+    pub seq_num: record::SeqNum,
     /// Timestamp, which may be client-specified or assigned by the service.
     /// If it is assigned by the service, it will represent milliseconds since Unix epoch.
-    pub timestamp: u64,
+    pub timestamp: record::Timestamp,
 }
 
 impl From<types::stream::StreamPosition> for StreamPosition {
@@ -488,8 +479,7 @@ pub struct AppendInput {
     /// Enforce that the sequence number assigned to the first record matches.
     pub match_seq_num: Option<record::SeqNum>,
     /// Enforce a fencing token, which starts out as an empty string that can be overridden by a `fence` command record.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String, required = false))]
-    pub fencing_token: Option<FencingToken>,
+    pub fencing_token: Option<record::FencingToken>,
 }
 
 #[rustfmt::skip]
@@ -526,11 +516,11 @@ pub enum AppendConditionFailed {
     /// Fencing token did not match.
     /// The expected fencing token is returned.
     #[cfg_attr(feature = "utoipa", schema(title = "fencing token"))]
-    FencingTokenMismatch(String),
+    FencingTokenMismatch(record::FencingToken),
     /// Sequence number did not match the tail of the stream.
     /// The expected next sequence number is returned.
     #[cfg_attr(feature = "utoipa", schema(title = "seq num"))]
-    SeqNumMismatch(u64),
+    SeqNumMismatch(record::SeqNum),
 }
 
 #[rustfmt::skip]

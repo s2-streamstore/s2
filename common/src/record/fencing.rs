@@ -10,8 +10,21 @@ pub const MAX_FENCING_TOKEN_LENGTH: usize = 36;
 #[error("Fencing token was longer than {MAX_FENCING_TOKEN_LENGTH} bytes in length: {0}")]
 pub struct FencingTokenTooLongError(pub usize);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct FencingToken(CompactString);
+
+#[cfg(feature = "utoipa")]
+impl utoipa::PartialSchema for FencingToken {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::Object::builder()
+            .schema_type(utoipa::openapi::Type::String)
+            .max_length(Some(MAX_FENCING_TOKEN_LENGTH))
+            .into()
+    }
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::ToSchema for FencingToken {}
 
 impl serde::Serialize for FencingToken {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
