@@ -13,10 +13,10 @@ use crate::{caps, types::resources::ListItemsRequest};
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct BasinStr<T: StrProps>(CompactString, PhantomData<T>);
+pub struct BasinNameStr<T: StrProps>(CompactString, PhantomData<T>);
 
 #[cfg(feature = "utoipa")]
-impl<T> utoipa::PartialSchema for BasinStr<T>
+impl<T> utoipa::PartialSchema for BasinNameStr<T>
 where
     T: StrProps,
 {
@@ -30,9 +30,9 @@ where
 }
 
 #[cfg(feature = "utoipa")]
-impl<T> utoipa::ToSchema for BasinStr<T> where T: StrProps {}
+impl<T> utoipa::ToSchema for BasinNameStr<T> where T: StrProps {}
 
-impl<T: StrProps> serde::Serialize for BasinStr<T> {
+impl<T: StrProps> serde::Serialize for BasinNameStr<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -41,7 +41,7 @@ impl<T: StrProps> serde::Serialize for BasinStr<T> {
     }
 }
 
-impl<'de, T: StrProps> serde::Deserialize<'de> for BasinStr<T> {
+impl<'de, T: StrProps> serde::Deserialize<'de> for BasinNameStr<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -51,18 +51,18 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for BasinStr<T> {
     }
 }
 
-impl<T: StrProps> BasinStr<T> {
+impl<T: StrProps> BasinNameStr<T> {
     const MIN_LENGTH: usize = 8;
     const MAX_LENGTH: usize = caps::MAX_BASIN_NAME_LEN;
 }
 
-impl<T: StrProps> AsRef<str> for BasinStr<T> {
+impl<T: StrProps> AsRef<str> for BasinNameStr<T> {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl<T: StrProps> Deref for BasinStr<T> {
+impl<T: StrProps> Deref for BasinNameStr<T> {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -70,7 +70,7 @@ impl<T: StrProps> Deref for BasinStr<T> {
     }
 }
 
-impl<T: StrProps> TryFrom<CompactString> for BasinStr<T> {
+impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
     type Error = ValidationError;
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
@@ -130,7 +130,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinStr<T> {
     }
 }
 
-impl<T: StrProps> FromStr for BasinStr<T> {
+impl<T: StrProps> FromStr for BasinNameStr<T> {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -138,39 +138,39 @@ impl<T: StrProps> FromStr for BasinStr<T> {
     }
 }
 
-impl<T: StrProps> std::fmt::Debug for BasinStr<T> {
+impl<T: StrProps> std::fmt::Debug for BasinNameStr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl<T: StrProps> std::fmt::Display for BasinStr<T> {
+impl<T: StrProps> std::fmt::Display for BasinNameStr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl<T: StrProps> From<BasinStr<T>> for CompactString {
-    fn from(value: BasinStr<T>) -> Self {
+impl<T: StrProps> From<BasinNameStr<T>> for CompactString {
+    fn from(value: BasinNameStr<T>) -> Self {
         value.0
     }
 }
 
-pub type BasinName = BasinStr<NameProps>;
+pub type BasinName = BasinNameStr<NameProps>;
 
-pub type BasinNamePrefix = BasinStr<PrefixProps>;
+pub type BasinNamePrefix = BasinNameStr<PrefixProps>;
 
 impl Default for BasinNamePrefix {
     fn default() -> Self {
-        BasinStr(CompactString::default(), PhantomData)
+        BasinNameStr(CompactString::default(), PhantomData)
     }
 }
 
-pub type BasinNameStartAfter = BasinStr<StartAfterProps>;
+pub type BasinNameStartAfter = BasinNameStr<StartAfterProps>;
 
 impl Default for BasinNameStartAfter {
     fn default() -> Self {
-        BasinStr(CompactString::default(), PhantomData)
+        BasinNameStr(CompactString::default(), PhantomData)
     }
 }
 

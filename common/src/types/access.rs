@@ -16,10 +16,10 @@ use crate::{caps, types::resources::ListItemsRequest};
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct AccessTokenStr<T: StrProps>(CompactString, PhantomData<T>);
+pub struct AccessTokenIdStr<T: StrProps>(CompactString, PhantomData<T>);
 
 #[cfg(feature = "utoipa")]
-impl<T> utoipa::PartialSchema for AccessTokenStr<T>
+impl<T> utoipa::PartialSchema for AccessTokenIdStr<T>
 where
     T: StrProps,
 {
@@ -33,9 +33,9 @@ where
 }
 
 #[cfg(feature = "utoipa")]
-impl<T> utoipa::ToSchema for AccessTokenStr<T> where T: StrProps {}
+impl<T> utoipa::ToSchema for AccessTokenIdStr<T> where T: StrProps {}
 
-impl<T: StrProps> serde::Serialize for AccessTokenStr<T> {
+impl<T: StrProps> serde::Serialize for AccessTokenIdStr<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -44,7 +44,7 @@ impl<T: StrProps> serde::Serialize for AccessTokenStr<T> {
     }
 }
 
-impl<'de, T: StrProps> serde::Deserialize<'de> for AccessTokenStr<T> {
+impl<'de, T: StrProps> serde::Deserialize<'de> for AccessTokenIdStr<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -54,17 +54,17 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for AccessTokenStr<T> {
     }
 }
 
-impl<T: StrProps> AccessTokenStr<T> {
+impl<T: StrProps> AccessTokenIdStr<T> {
     const MAX_LENGTH: usize = caps::MAX_TOKEN_ID_LEN;
 }
 
-impl<T: StrProps> AsRef<str> for AccessTokenStr<T> {
+impl<T: StrProps> AsRef<str> for AccessTokenIdStr<T> {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl<T: StrProps> Deref for AccessTokenStr<T> {
+impl<T: StrProps> Deref for AccessTokenIdStr<T> {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -72,7 +72,7 @@ impl<T: StrProps> Deref for AccessTokenStr<T> {
     }
 }
 
-impl<T: StrProps> TryFrom<CompactString> for AccessTokenStr<T> {
+impl<T: StrProps> TryFrom<CompactString> for AccessTokenIdStr<T> {
     type Error = ValidationError;
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
@@ -93,7 +93,7 @@ impl<T: StrProps> TryFrom<CompactString> for AccessTokenStr<T> {
     }
 }
 
-impl<T: StrProps> FromStr for AccessTokenStr<T> {
+impl<T: StrProps> FromStr for AccessTokenIdStr<T> {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -101,39 +101,39 @@ impl<T: StrProps> FromStr for AccessTokenStr<T> {
     }
 }
 
-impl<T: StrProps> std::fmt::Debug for AccessTokenStr<T> {
+impl<T: StrProps> std::fmt::Debug for AccessTokenIdStr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl<T: StrProps> std::fmt::Display for AccessTokenStr<T> {
+impl<T: StrProps> std::fmt::Display for AccessTokenIdStr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl<T: StrProps> From<AccessTokenStr<T>> for CompactString {
-    fn from(value: AccessTokenStr<T>) -> Self {
+impl<T: StrProps> From<AccessTokenIdStr<T>> for CompactString {
+    fn from(value: AccessTokenIdStr<T>) -> Self {
         value.0
     }
 }
 
-pub type AccessTokenId = AccessTokenStr<IdProps>;
+pub type AccessTokenId = AccessTokenIdStr<IdProps>;
 
-pub type AccessTokenIdPrefix = AccessTokenStr<PrefixProps>;
+pub type AccessTokenIdPrefix = AccessTokenIdStr<PrefixProps>;
 
 impl Default for AccessTokenIdPrefix {
     fn default() -> Self {
-        AccessTokenStr(CompactString::default(), PhantomData)
+        AccessTokenIdStr(CompactString::default(), PhantomData)
     }
 }
 
-pub type AccessTokenIdStartAfter = AccessTokenStr<StartAfterProps>;
+pub type AccessTokenIdStartAfter = AccessTokenIdStr<StartAfterProps>;
 
 impl Default for AccessTokenIdStartAfter {
     fn default() -> Self {
-        AccessTokenStr(CompactString::default(), PhantomData)
+        AccessTokenIdStr(CompactString::default(), PhantomData)
     }
 }
 

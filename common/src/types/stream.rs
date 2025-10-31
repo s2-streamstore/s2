@@ -1,6 +1,5 @@
 use std::{marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
 
-use bytes::Bytes;
 use compact_str::{CompactString, ToCompactString};
 use time::OffsetDateTime;
 
@@ -15,10 +14,7 @@ use crate::{
         FencingToken, Metered, MeteredRecord, MeteredSequencedRecords, MeteredSize, SeqNum,
         Timestamp,
     },
-    types::{
-        config::OptionalStreamConfig,
-        resources::{CreateMode, ListItemsRequest},
-    },
+    types::resources::ListItemsRequest,
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,10 +22,10 @@ use crate::{
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct StreamStr<T: StrProps>(CompactString, PhantomData<T>);
+pub struct StreamNameStr<T: StrProps>(CompactString, PhantomData<T>);
 
 #[cfg(feature = "utoipa")]
-impl<T> utoipa::PartialSchema for StreamStr<T>
+impl<T> utoipa::PartialSchema for StreamNameStr<T>
 where
     T: StrProps,
 {
@@ -43,9 +39,9 @@ where
 }
 
 #[cfg(feature = "utoipa")]
-impl<T> utoipa::ToSchema for StreamStr<T> where T: StrProps {}
+impl<T> utoipa::ToSchema for StreamNameStr<T> where T: StrProps {}
 
-impl<T: StrProps> serde::Serialize for StreamStr<T> {
+impl<T: StrProps> serde::Serialize for StreamNameStr<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -54,7 +50,7 @@ impl<T: StrProps> serde::Serialize for StreamStr<T> {
     }
 }
 
-impl<'de, T: StrProps> serde::Deserialize<'de> for StreamStr<T> {
+impl<'de, T: StrProps> serde::Deserialize<'de> for StreamNameStr<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -64,17 +60,17 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for StreamStr<T> {
     }
 }
 
-impl<T: StrProps> StreamStr<T> {
+impl<T: StrProps> StreamNameStr<T> {
     const MAX_LENGTH: usize = caps::MAX_STREAM_NAME_LEN;
 }
 
-impl<T: StrProps> AsRef<str> for StreamStr<T> {
+impl<T: StrProps> AsRef<str> for StreamNameStr<T> {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl<T: StrProps> Deref for StreamStr<T> {
+impl<T: StrProps> Deref for StreamNameStr<T> {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -82,7 +78,7 @@ impl<T: StrProps> Deref for StreamStr<T> {
     }
 }
 
-impl<T: StrProps> TryFrom<CompactString> for StreamStr<T> {
+impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
     type Error = ValidationError;
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
@@ -103,7 +99,7 @@ impl<T: StrProps> TryFrom<CompactString> for StreamStr<T> {
     }
 }
 
-impl<T: StrProps> FromStr for StreamStr<T> {
+impl<T: StrProps> FromStr for StreamNameStr<T> {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -111,39 +107,39 @@ impl<T: StrProps> FromStr for StreamStr<T> {
     }
 }
 
-impl<T: StrProps> std::fmt::Debug for StreamStr<T> {
+impl<T: StrProps> std::fmt::Debug for StreamNameStr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl<T: StrProps> std::fmt::Display for StreamStr<T> {
+impl<T: StrProps> std::fmt::Display for StreamNameStr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl<T: StrProps> From<StreamStr<T>> for CompactString {
-    fn from(value: StreamStr<T>) -> Self {
+impl<T: StrProps> From<StreamNameStr<T>> for CompactString {
+    fn from(value: StreamNameStr<T>) -> Self {
         value.0
     }
 }
 
-pub type StreamName = StreamStr<NameProps>;
+pub type StreamName = StreamNameStr<NameProps>;
 
-pub type StreamNamePrefix = StreamStr<PrefixProps>;
+pub type StreamNamePrefix = StreamNameStr<PrefixProps>;
 
 impl Default for StreamNamePrefix {
     fn default() -> Self {
-        StreamStr(CompactString::default(), PhantomData)
+        StreamNameStr(CompactString::default(), PhantomData)
     }
 }
 
-pub type StreamNameStartAfter = StreamStr<StartAfterProps>;
+pub type StreamNameStartAfter = StreamNameStr<StartAfterProps>;
 
 impl Default for StreamNameStartAfter {
     fn default() -> Self {
-        StreamStr(CompactString::default(), PhantomData)
+        StreamNameStr(CompactString::default(), PhantomData)
     }
 }
 
@@ -360,10 +356,3 @@ pub enum ReadSessionOutput {
 }
 
 pub type ListStreamsRequest = ListItemsRequest<StreamNamePrefix, StreamNameStartAfter>;
-
-#[derive(Debug, Clone)]
-pub struct CreateStreamRequest {
-    pub config: OptionalStreamConfig,
-    pub mode: CreateMode,
-    pub idempotence_key: Option<Bytes>,
-}

@@ -4,15 +4,16 @@ pub mod inmem;
 pub mod slatedb;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use compact_str::CompactString;
 use futures::stream::BoxStream;
 use s2_common::types::{
-    basin::{BasinInfo, BasinName, CreateBasinRequest, ListBasinsRequest},
-    config::{BasinReconfiguration, StreamReconfiguration},
-    resources::Page,
+    basin::{BasinInfo, BasinName, BasinScope, ListBasinsRequest},
+    config::{BasinConfig, BasinReconfiguration, OptionalStreamConfig, StreamReconfiguration},
+    resources::{CreateMode, Page},
     stream::{
-        AppendAck, AppendInput, CreateStreamRequest, ListStreamsRequest, ReadBatch, ReadRequest,
-        StreamInfo, StreamName, StreamPosition,
+        AppendAck, AppendInput, ListStreamsRequest, ReadBatch, ReadRequest, StreamInfo, StreamName,
+        StreamPosition,
     },
 };
 
@@ -66,7 +67,10 @@ pub trait Backend {
     async fn create_basin(
         &self,
         basin: BasinName,
-        request: CreateBasinRequest,
+        scope: BasinScope,
+        config: BasinConfig,
+        mode: CreateMode,
+        idempotence_key: Option<Bytes>,
     ) -> Result<(), CreateBasinError>;
 
     async fn reconfigure_basin(
@@ -86,7 +90,10 @@ pub trait Backend {
     async fn create_stream(
         &self,
         basin: BasinName,
-        request: CreateStreamRequest,
+        stream: StreamName,
+        config: OptionalStreamConfig,
+        mode: CreateMode,
+        idempotence_key: Option<Bytes>,
     ) -> Result<(), CreateStreamError>;
 
     async fn reconfigure_stream(
