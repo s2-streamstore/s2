@@ -123,6 +123,7 @@ pub struct CreateStreamRequest {
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
+/// Position of a record in a stream.
 pub struct StreamPosition {
     /// Sequence number assigned by the service.
     pub seq_num: record::SeqNum,
@@ -163,10 +164,10 @@ pub struct TailResponse {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ReadStart {
     /// Start from a sequence number.
-    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
+    #[cfg_attr(feature = "utoipa", param(value_type = record::SeqNum, required = false))]
     pub seq_num: Option<record::SeqNum>,
     /// Start from a timestamp.
-    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
+    #[cfg_attr(feature = "utoipa", param(value_type = record::Timestamp, required = false))]
     pub timestamp: Option<record::Timestamp>,
     /// Start from number of records before the next sequence number.
     #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
@@ -227,8 +228,8 @@ pub struct ReadEnd {
     #[cfg_attr(feature = "utoipa", param(value_type = usize, required = false))]
     pub bytes: Option<usize>,
     /// Exclusive timestamp to read until.
-    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
-    pub until: Option<u64>,
+    #[cfg_attr(feature = "utoipa", param(value_type = record::Timestamp, required = false))]
+    pub until: Option<record::Timestamp>,
     /// Duration in seconds to wait for new records.
     /// The default duration is 0 if there is a bound on `count`, `bytes`, or `until`, and otherwise infinite.
     /// Non-streaming reads are always bounded on `count` and `bytes`, so you can achieve long poll semantics by specifying a non-zero duration up to 60 seconds.
