@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+axum = ["dep:axum"]
 utoipa = ["dep:utoipa"]
 codegen = ["dep:prost-build"]
 
 [dependencies]
+axum = { workspace = true, optional = true }
 base64ct = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }

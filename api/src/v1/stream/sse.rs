@@ -158,6 +158,23 @@ impl ReadEvent {
     }
 }
 
+#[cfg(feature = "axum")]
+impl TryFrom<ReadEvent> for axum::response::sse::Event {
+    type Error = axum::Error;
+
+    fn try_from(event: ReadEvent) -> Result<Self, Self::Error> {
+        match event {
+            ReadEvent::Batch { event, data, id } => Self::default()
+                .event(event)
+                .id(id.to_string())
+                .json_data(data),
+            ReadEvent::Error { event, data } => Ok(Self::default().event(event).data(data)),
+            ReadEvent::Ping { event, data } => Self::default().event(event).json_data(data),
+            ReadEvent::Done { data } => Ok(Self::default().data(data)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename = "[DONE]")]

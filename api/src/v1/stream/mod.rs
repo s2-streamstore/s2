@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use base64ct::{Base64, Encoding as _};
 use bytes::Bytes;
-use itertools::Itertools;
+use itertools::Itertools as _;
 use s2_common::{
     record::{self, FencingToken},
     types::{
@@ -273,26 +273,66 @@ impl From<types::stream::ReadEnd> for ReadEnd {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ReadResponseKind {
-    /// Server-sent events streaming response
-    EventStream,
     /// Unary response
     Unary,
+    /// Server-sent events streaming response
+    EventStream,
+    /// S2S streaming response
+    S2sStream,
 }
 
 impl ReadResponseKind {
-    pub fn from_accept_header(headers: &http::HeaderMap) -> Self {
+    /// Determines the response kind based on the `Content-Type` or `Accept` headers.
+    pub fn from_headers(headers: &http::HeaderMap) -> Self {
         headers
-            .get(http::header::ACCEPT)
-            .and_then(|accept| accept.to_str().ok())
-            .map_or(Self::Unary, |accept| {
-                if accept == "text/event-stream" {
-                    Self::EventStream
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|ct| ct.to_str().ok())
+            .and_then(|ct| {
+                if ct == "s2s/proto" {
+                    return Some(Self::S2sStream);
+                }
+                None
+            })
+            .or_else(|| {
+                headers
+                    .get(http::header::ACCEPT)
+                    .and_then(|accept| accept.to_str().ok())
+                    .map(|accept| {
+                        if accept == "text/event-stream" {
+                            Self::EventStream
+                        } else {
+                            Self::Unary
+                        }
+                    })
+            })
+            .unwrap_or(Self::Unary)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AppendResponseKind {
+    /// Unary response
+    Unary,
+    /// S2S streaming response
+    S2sStream,
+}
+
+impl AppendResponseKind {
+    pub fn from_content_type(headers: &http::HeaderMap) -> Self {
+        headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|ct| ct.to_str().ok())
+            .map(|ct| {
+                if ct == "s2s/proto" {
+                    Self::S2sStream
                 } else {
                     Self::Unary
                 }
             })
+            .unwrap_or(Self::Unary)
     }
 }
+
 #[rustfmt::skip]
 #[cfg_attr(feature = "utoipa", derive(IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
@@ -363,46 +403,32 @@ impl S2Format {
 
     pub fn decode_append(
         self,
-        input: AppendInput,
-    ) -> Result<types::stream::AppendInput, types::ValidationError> {
-        let records: Vec<types::stream::AppendRecord> = input
-            .records
+        AppendRecord {
+            timestamp,
+            headers,
+            body,
+        }: AppendRecord,
+    ) -> Result<types::stream::AppendRecord, types::ValidationError> {
+        let headers = headers
             .into_iter()
-            .map(
-                |AppendRecord {
-                     timestamp,
-                     headers,
-                     body,
-                 }| {
-                    let headers = headers
-                        .into_iter()
-                        .map(|Header(name, value)| {
-                            Ok::<record::Header, types::ValidationError>(record::Header {
-                                name: self.decode(name)?,
-                                value: self.decode(value)?,
-                            })
-                        })
-                        .try_collect()?;
-
-                    let body = self.decode(body)?;
-
-                    let record = record::Record::try_from_parts(headers, body)
-                        .map_err(|e| e.to_string())?
-                        .into();
-
-                    let parts = types::stream::AppendRecordParts { timestamp, record };
-
-                    types::stream::AppendRecord::try_from(parts)
-                        .map_err(|e| types::ValidationError(e.to_string()))
-                },
-            )
+            .map(|Header(name, value)| {
+                Ok::<record::Header, types::ValidationError>(record::Header {
+                    name: self.decode(name)?,
+                    value: self.decode(value)?,
+                })
+            })
             .try_collect()?;
 
-        Ok(types::stream::AppendInput {
-            records: records.try_into()?,
-            match_seq_num: input.match_seq_num,
-            fencing_token: input.fencing_token,
-        })
+        let body = self.decode(body)?;
+
+        let record = record::Record::try_from_parts(headers, body)
+            .map_err(|e| e.to_string())?
+            .into();
+
+        let parts = types::stream::AppendRecordParts { timestamp, record };
+
+        types::stream::AppendRecord::try_from(parts)
+            .map_err(|e| types::ValidationError(e.to_string()))
     }
 }
 

@@ -87,8 +87,7 @@ pub(crate) use impl_list_request_conversions;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
-pub struct ErrorResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<&'static str>,
+pub struct ErrorInfo {
+    pub code: &'static str,
     pub message: String,
 }

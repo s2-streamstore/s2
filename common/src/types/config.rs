@@ -17,7 +17,7 @@ use crate::maybe::Maybe;
     PartialEq,
     Eq,
     Ordinalize,
-    // TODO: clap::ValueEnum
+    /* TODO: clap::ValueEnum */
 )]
 #[repr(u8)]
 pub enum StorageClass {
