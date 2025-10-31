@@ -41,7 +41,7 @@ pub struct GaugeMetric {
 #[derive(Debug, Clone)]
 pub struct LabelMetric {
     pub name: CompactString,
-    pub values: Vec<CompactString>,
+    pub values: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

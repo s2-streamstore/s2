@@ -63,6 +63,12 @@ impl From<FencingToken> for CompactString {
     }
 }
 
+impl AsRef<str> for FencingToken {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Deref for FencingToken {
     type Target = str;
 

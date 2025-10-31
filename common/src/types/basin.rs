@@ -167,7 +167,7 @@ pub type BasinNamePrefix = BasinStr<PrefixProps>;
 
 impl Default for BasinNamePrefix {
     fn default() -> Self {
-        "".parse().expect("empty prefix is valid")
+        BasinStr(CompactString::default(), PhantomData)
     }
 }
 
@@ -175,7 +175,7 @@ pub type BasinNameStartAfter = BasinStr<StartAfterProps>;
 
 impl Default for BasinNameStartAfter {
     fn default() -> Self {
-        "".parse().expect("empty start_after is valid")
+        BasinStr(CompactString::default(), PhantomData)
     }
 }
 

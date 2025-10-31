@@ -125,7 +125,7 @@ pub type AccessTokenIdPrefix = AccessTokenStr<PrefixProps>;
 
 impl Default for AccessTokenIdPrefix {
     fn default() -> Self {
-        "".parse().expect("empty prefix is valid")
+        AccessTokenStr(CompactString::default(), PhantomData)
     }
 }
 
@@ -133,7 +133,7 @@ pub type AccessTokenIdStartAfter = AccessTokenStr<StartAfterProps>;
 
 impl Default for AccessTokenIdStartAfter {
     fn default() -> Self {
-        "".parse().expect("empty start_after is valid")
+        AccessTokenStr(CompactString::default(), PhantomData)
     }
 }
 

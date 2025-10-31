@@ -146,7 +146,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CreateMode {
     CreateOnly,
     #[default]

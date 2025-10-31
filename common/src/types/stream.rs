@@ -135,7 +135,7 @@ pub type StreamNamePrefix = StreamStr<PrefixProps>;
 
 impl Default for StreamNamePrefix {
     fn default() -> Self {
-        "".parse().expect("empty prefix is valid")
+        StreamStr(CompactString::default(), PhantomData)
     }
 }
 
@@ -143,7 +143,7 @@ pub type StreamNameStartAfter = StreamStr<StartAfterProps>;
 
 impl Default for StreamNameStartAfter {
     fn default() -> Self {
-        "".parse().expect("empty start_after is valid")
+        StreamStr(CompactString::default(), PhantomData)
     }
 }
 

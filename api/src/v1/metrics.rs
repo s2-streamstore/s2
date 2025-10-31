@@ -354,8 +354,7 @@ pub struct LabelMetric {
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Label values.
-    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
-    pub values: Vec<CompactString>,
+    pub values: Vec<String>,
 }
 
 impl From<types::metrics::LabelMetric> for LabelMetric {
