@@ -2639,6 +2639,7 @@ name = "s2-common"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "clap",
  "compact_str",
  "const_format",
  "enum-ordinalize",

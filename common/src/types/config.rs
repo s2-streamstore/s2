@@ -17,8 +17,8 @@ use crate::maybe::Maybe;
     PartialEq,
     Eq,
     Ordinalize,
-    /* TODO: clap::ValueEnum */
 )]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[repr(u8)]
 pub enum StorageClass {
     #[strum(serialize = "standard")]

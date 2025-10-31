@@ -6,9 +6,11 @@ edition.workspace = true
 [features]
 rkyv = ["dep:rkyv", "compact_str/rkyv"]
 utoipa = ["dep:utoipa"]
+clap = ["dep:clap"]
 
 [dependencies]
 bytes = { workspace = true }
+clap = { workspace = true, optional = true }
 compact_str = { workspace = true, features = ["serde"] }
 const_format = { workspace = true }
 enum-ordinalize = { workspace = true }
