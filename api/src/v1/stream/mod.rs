@@ -25,7 +25,6 @@ use super::config::StreamConfig;
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct StreamInfo {
     /// Stream name.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: StreamName,
     /// Creation time in ISO 8601 format.
     #[cfg_attr(feature = "utoipa", schema(format = Time))]

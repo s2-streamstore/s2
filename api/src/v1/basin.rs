@@ -47,7 +47,6 @@ pub struct ListBasinsResponse {
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct BasinInfo {
     /// Basin name.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: BasinName,
     /// Basin scope.
     pub scope: BasinScope,

@@ -25,7 +25,6 @@ pub struct S2RequestTokenHeader {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct AccessTokenIdPathSegment {
     /// Access token ID.
-    #[cfg_attr(feature = "utoipa", param(value_type = String, minimum = 1, maximum = 96))]
     pub id: types::access::AccessTokenId,
 }
 
@@ -35,7 +34,6 @@ pub struct AccessTokenIdPathSegment {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct BasinNamePathSegment {
     /// Basin name.
-    #[cfg_attr(feature = "utoipa", param(value_type = String, minimum = 8, maximum = 48, pattern = "^(?!-)[a-z0-9-]{8,48}(?<!-)$"))]
     pub basin: types::basin::BasinName,
 }
 
@@ -45,7 +43,6 @@ pub struct BasinNamePathSegment {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct StreamNamePathSegment {
     /// Stream name.
-    #[cfg_attr(feature = "utoipa", param(value_type = String, minimum = 1, maximum = 512))]
     pub stream: types::stream::StreamName,
 }
 

@@ -121,7 +121,6 @@ impl From<types::access::Operation> for Operation {
 pub struct AccessTokenInfo {
     /// Access token ID.
     /// It must be unique to the account and between 1 and 96 bytes in length.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub id: types::access::AccessTokenId,
     /// Expiration time in ISO 8601 format.
     /// If not set, the expiration will be set to that of the requestor's token.
