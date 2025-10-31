@@ -129,6 +129,12 @@ impl Default for AccessTokenIdPrefix {
     }
 }
 
+impl From<AccessTokenId> for AccessTokenIdPrefix {
+    fn from(value: AccessTokenId) -> Self {
+        Self(value.0, PhantomData)
+    }
+}
+
 pub type AccessTokenIdStartAfter = AccessTokenIdStr<StartAfterProps>;
 
 impl Default for AccessTokenIdStartAfter {

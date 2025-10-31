@@ -166,6 +166,12 @@ impl Default for BasinNamePrefix {
     }
 }
 
+impl From<BasinName> for BasinNamePrefix {
+    fn from(value: BasinName) -> Self {
+        Self(value.0, PhantomData)
+    }
+}
+
 pub type BasinNameStartAfter = BasinNameStr<StartAfterProps>;
 
 impl Default for BasinNameStartAfter {
