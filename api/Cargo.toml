@@ -13,6 +13,8 @@ axum = { workspace = true, optional = true }
 base64ct = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }
+enum-ordinalize = "4.3.0"
+flate2 = "1.0"
 http = { workspace = true }
 itertools = { workspace = true }
 prost = { workspace = true }
@@ -20,7 +22,9 @@ s2-common = { path = "../common" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+tokio-util = { version = "0.7.16", features = ["rt", "codec"] }
 utoipa = { workspace = true, optional = true }
+zstd = "0.13"
 
 [build-dependencies]
 prost-build = { workspace = true, optional = true }

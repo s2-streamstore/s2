@@ -1,4 +1,5 @@
 pub mod proto;
+pub mod s2s;
 pub mod sse;
 
 use std::time::Duration;
