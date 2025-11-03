@@ -77,16 +77,14 @@ impl TryFrom<AppendInput> for types::stream::AppendInput {
     }
 }
 
-impl TryFrom<types::stream::AppendInput> for AppendInput {
-    type Error = types::ValidationError;
-
-    fn try_from(
+impl From<types::stream::AppendInput> for AppendInput {
+    fn from(
         types::stream::AppendInput {
             records,
             match_seq_num,
             fencing_token,
         }: types::stream::AppendInput,
-    ) -> Result<Self, Self::Error> {
+    ) -> Self {
         let records = records
             .into_iter()
             .map(|record| {
@@ -100,11 +98,11 @@ impl TryFrom<types::stream::AppendInput> for AppendInput {
             })
             .collect();
 
-        Ok(Self {
+        Self {
             records,
             match_seq_num,
             fencing_token: fencing_token.as_ref().map(|t| t.to_string()),
-        })
+        }
     }
 }
 
