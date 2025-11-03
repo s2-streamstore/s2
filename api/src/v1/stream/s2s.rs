@@ -8,6 +8,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures::Stream;
+use zstd::zstd_safe::WriteBuf;
 
 /*
   REGULAR MESSAGE:
@@ -76,49 +77,73 @@ impl CompressionAlgorithm {
         }
         if gzip { Self::Gzip } else { Self::None }
     }
-
-    pub fn compress(&self, data: &[u8]) -> std::io::Result<Bytes> {
-        match self {
-            CompressionAlgorithm::None => Ok(Bytes::copy_from_slice(data)),
-            CompressionAlgorithm::Gzip => {
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-                encoder.write_all(data)?;
-                let compressed = encoder.finish()?;
-                Ok(Bytes::from(compressed))
-            }
-            CompressionAlgorithm::Zstd => {
-                let compressed = zstd::encode_all(data, Default::default())?;
-                Ok(Bytes::from(compressed))
-            }
-        }
-    }
-
-    pub fn decompress(&self, data: &[u8]) -> std::io::Result<Bytes> {
-        match self {
-            CompressionAlgorithm::None => Ok(Bytes::copy_from_slice(data)),
-            CompressionAlgorithm::Gzip => {
-                let mut decoder = GzDecoder::new(data);
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
-                Ok(Bytes::from(decompressed))
-            }
-            CompressionAlgorithm::Zstd => {
-                let decompressed = zstd::decode_all(data)?;
-                Ok(Bytes::from(decompressed))
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegularMessage {
-    pub compression: CompressionAlgorithm,
-    pub payload: Bytes,
+pub struct CompressedData {
+    compression: CompressionAlgorithm,
+    payload: Bytes,
 }
 
-impl RegularMessage {
-    pub fn decompressed(&self) -> std::io::Result<Bytes> {
-        self.compression.decompress(&self.payload)
+impl CompressedData {
+    pub fn compressed_proto(
+        compression: CompressionAlgorithm,
+        proto: &impl prost::Message,
+    ) -> std::io::Result<Self> {
+        let mut proto_bytes = BytesMut::with_capacity(proto.encoded_len());
+        proto.encode(&mut proto_bytes)?;
+        CompressedData::compress(compression, proto_bytes.freeze())
+    }
+
+    pub fn compress(compression: CompressionAlgorithm, data: Bytes) -> std::io::Result<Self> {
+        if data.len() < 1024 * 1024 {
+            return Ok(Self {
+                compression,
+                payload: data,
+            });
+        }
+        let payload = match compression {
+            CompressionAlgorithm::None => data,
+            CompressionAlgorithm::Gzip => {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&data)?;
+                let compressed = encoder.finish()?;
+                Bytes::from(compressed)
+            }
+            CompressionAlgorithm::Zstd => {
+                let compressed = zstd::encode_all(data.as_slice(), 0)?;
+                Bytes::from(compressed)
+            }
+        };
+        Ok(Self {
+            compression,
+            payload,
+        })
+    }
+
+    pub fn decompress(self) -> std::io::Result<Bytes> {
+        match self.compression {
+            CompressionAlgorithm::None => Ok(self.payload),
+            CompressionAlgorithm::Gzip => {
+                let mut decoder = GzDecoder::new(self.payload.as_slice());
+                let mut buf = Vec::with_capacity(self.payload.len() * 2);
+                decoder.read_to_end(&mut buf)?;
+                buf.shrink_to_fit();
+                Ok(Bytes::from(buf.into_boxed_slice()))
+            }
+            CompressionAlgorithm::Zstd => {
+                let mut buf = Vec::with_capacity(self.payload.len() * 2);
+                zstd::stream::copy_decode(self.payload.as_slice(), &mut buf)?;
+                buf.shrink_to_fit();
+                Ok(Bytes::from(buf.into_boxed_slice()))
+            }
+        }
+    }
+
+    pub fn decompressed_proto<P: prost::Message + Default>(self) -> std::io::Result<P> {
+        let payload = self.decompress()?;
+        P::decode(payload.as_ref())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -130,20 +155,31 @@ pub struct TerminalMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionMessage {
-    Regular(RegularMessage),
+    Regular(CompressedData),
     Terminal(TerminalMessage),
 }
 
-impl SessionMessage {
-    pub fn regular(compression: CompressionAlgorithm, payload: Bytes) -> Self {
-        Self::Regular(RegularMessage {
-            compression,
-            payload,
-        })
+impl From<CompressedData> for SessionMessage {
+    fn from(data: CompressedData) -> Self {
+        Self::Regular(data)
     }
+}
 
-    pub fn terminal(status: u16, body: String) -> Self {
-        Self::Terminal(TerminalMessage { status, body })
+impl From<TerminalMessage> for SessionMessage {
+    fn from(msg: TerminalMessage) -> Self {
+        Self::Terminal(msg)
+    }
+}
+
+impl SessionMessage {
+    pub fn regular(
+        compression: CompressionAlgorithm,
+        proto: &impl prost::Message,
+    ) -> std::io::Result<Self> {
+        Ok(Self::Regular(CompressedData::compressed_proto(
+            compression,
+            proto,
+        )?))
     }
 
     pub fn encode(&self) -> Bytes {
@@ -185,7 +221,7 @@ impl SessionMessage {
             let body = String::from_utf8(buf.into()).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8")
             })?;
-            return Ok(Self::terminal(status, body));
+            return Ok(TerminalMessage { status, body }.into());
         }
 
         let compression_bits = (flag & FLAG_COMPRESSION_MASK) >> FLAG_COMPRESSION_SHIFT;
@@ -196,10 +232,11 @@ impl SessionMessage {
             ));
         };
 
-        Ok(Self::Regular(RegularMessage {
+        Ok(CompressedData {
             compression,
             payload: buf,
-        }))
+        }
+        .into())
     }
 
     fn payload_size(&self) -> usize {
@@ -241,7 +278,9 @@ where
 
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => {
-                Poll::Ready(Some(encode_proto_data(self.compression, item)))
+                let bytes =
+                    SessionMessage::regular(self.compression, &item).map(|msg| msg.encode());
+                Poll::Ready(Some(bytes))
             }
             Poll::Ready(Some(Err(e))) => {
                 self.terminated = true;
@@ -286,17 +325,6 @@ impl tokio_util::codec::Decoder for FrameDecoder {
         let frame_bytes = src.split_to(length).freeze();
         Ok(Some(SessionMessage::decode_message(frame_bytes)?))
     }
-}
-
-pub fn encode_proto_data(
-    compression: CompressionAlgorithm,
-    proto_msg: impl prost::Message,
-) -> std::io::Result<Bytes> {
-    let mut proto_bytes = BytesMut::with_capacity(proto_msg.encoded_len());
-    proto_msg.encode(&mut proto_bytes)?;
-    let compressed = compression.compress(&proto_bytes)?;
-    let message = SessionMessage::regular(compression, compressed);
-    Ok(message.encode())
 }
 
 #[cfg(test)]
