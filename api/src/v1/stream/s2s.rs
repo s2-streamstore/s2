@@ -1,9 +1,14 @@
+use std::{
+    io::{Read, Write},
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use futures::Stream;
 use prost::Message;
-use std::io::{Read, Write};
-use tokio_util::codec::Decoder as TokenDecoder;
 
 /*
   REGULAR MESSAGE:
@@ -70,7 +75,11 @@ impl CompressionAlgorithm {
                 }
             }
         }
-        if gzip { Self::Gzip } else { Self::None }
+        if gzip {
+            Self::Gzip
+        } else {
+            Self::None
+        }
     }
 
     pub fn compress(&self, data: &[u8]) -> std::io::Result<Bytes> {
@@ -206,21 +215,56 @@ impl SessionMessage {
     }
 }
 
-pub fn encode_proto_data<T, P>(compression: CompressionAlgorithm, data: T) -> std::io::Result<Bytes>
+pub struct FramedMessageStream<S> {
+    inner: S,
+    compression: CompressionAlgorithm,
+    terminated: bool,
+}
+
+impl<S> FramedMessageStream<S> {
+    pub fn new(compression: CompressionAlgorithm, inner: S) -> Self {
+        Self {
+            inner,
+            compression,
+            terminated: false,
+        }
+    }
+}
+
+impl<S, P, E> Stream for FramedMessageStream<S>
 where
-    P: Message + From<T>,
+    S: Stream<Item = Result<P, E>> + Unpin,
+    P: Message,
+    E: Into<TerminalMessage>,
 {
-    let proto_msg: P = data.into();
-    let mut proto_bytes = BytesMut::with_capacity(proto_msg.encoded_len());
-    proto_msg.encode(&mut proto_bytes)?;
-    let compressed = compression.compress(&proto_bytes)?;
-    let message = SessionMessage::regular(compression, compressed);
-    Ok(message.encode())
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.terminated {
+            return Poll::Ready(None);
+        }
+
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(proto))) => {
+                Poll::Ready(Some(encode_proto_data(self.compression, proto)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                self.terminated = true;
+                let bytes = SessionMessage::Terminal(e.into()).encode();
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(None) => {
+                self.terminated = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 pub struct FrameDecoder;
 
-impl TokenDecoder for FrameDecoder {
+impl tokio_util::codec::Decoder for FrameDecoder {
     type Item = SessionMessage;
     type Error = std::io::Error;
 
@@ -247,4 +291,20 @@ impl TokenDecoder for FrameDecoder {
         let frame_bytes = src.split_to(length).freeze();
         Ok(Some(SessionMessage::decode_message(frame_bytes)?))
     }
+}
+
+fn encode_proto_data(
+    compression: CompressionAlgorithm,
+    proto_msg: impl Message,
+) -> std::io::Result<Bytes> {
+    let mut proto_bytes = BytesMut::with_capacity(proto_msg.encoded_len());
+    proto_msg.encode(&mut proto_bytes)?;
+    let compressed = compression.compress(&proto_bytes)?;
+    let message = SessionMessage::regular(compression, compressed);
+    Ok(message.encode())
+}
+
+#[cfg(test)]
+mod test {
+    // TODO: port over tests without private deps
 }
