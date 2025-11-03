@@ -3,9 +3,9 @@ resolver = "2"
 members = ["common", "api", "lite"]
 
 [workspace.package]
-version = "0.1.0"
-license = "MIT"
 edition = "2024"
+license = "MIT"
+version = "0.1.0"
 
 [workspace.dependencies]
 async-trait = "0.1.89"
