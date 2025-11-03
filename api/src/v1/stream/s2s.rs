@@ -90,29 +90,31 @@ impl CompressedData {
         compression: CompressionAlgorithm,
         proto: &impl prost::Message,
     ) -> std::io::Result<Self> {
-        let mut proto_bytes = BytesMut::with_capacity(proto.encoded_len());
-        proto.encode(&mut proto_bytes)?;
-        Self::compress(compression, proto_bytes.freeze())
+        Self::compress(compression, proto.encode_to_vec())
     }
 
-    fn compress(compression: CompressionAlgorithm, data: Bytes) -> std::io::Result<Self> {
-        if data.len() < 1024 * 1024 {
+    fn compress(
+        compression: CompressionAlgorithm,
+        data: impl Into<Bytes>,
+    ) -> std::io::Result<Self> {
+        let payload = data.into();
+        if payload.len() < 1024 * 1024 {
             return Ok(Self {
                 compression,
-                payload: data,
+                payload,
             });
         }
         let payload = match compression {
-            CompressionAlgorithm::None => data,
+            CompressionAlgorithm::None => payload,
             CompressionAlgorithm::Gzip => {
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-                encoder.write_all(&data)?;
+                encoder.write_all(&payload)?;
                 let compressed = encoder.finish()?;
-                Bytes::from(compressed)
+                Bytes::from(compressed.into_boxed_slice())
             }
             CompressionAlgorithm::Zstd => {
-                let compressed = zstd::encode_all(data.as_slice(), 0)?;
-                Bytes::from(compressed)
+                let compressed = zstd::encode_all(payload.as_slice(), 0)?;
+                Bytes::from(compressed.into_boxed_slice())
             }
         };
         Ok(Self {
@@ -128,13 +130,11 @@ impl CompressedData {
                 let mut decoder = GzDecoder::new(self.payload.as_slice());
                 let mut buf = Vec::with_capacity(self.payload.len() * 2);
                 decoder.read_to_end(&mut buf)?;
-                buf.shrink_to_fit();
                 Ok(Bytes::from(buf.into_boxed_slice()))
             }
             CompressionAlgorithm::Zstd => {
                 let mut buf = Vec::with_capacity(self.payload.len() * 2);
                 zstd::stream::copy_decode(self.payload.as_slice(), &mut buf)?;
-                buf.shrink_to_fit();
                 Ok(Bytes::from(buf.into_boxed_slice()))
             }
         }
