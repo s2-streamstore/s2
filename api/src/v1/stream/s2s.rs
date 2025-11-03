@@ -92,7 +92,7 @@ impl CompressedData {
     ) -> std::io::Result<Self> {
         let mut proto_bytes = BytesMut::with_capacity(proto.encoded_len());
         proto.encode(&mut proto_bytes)?;
-        CompressedData::compress(compression, proto_bytes.freeze())
+        Self::compress(compression, proto_bytes.freeze())
     }
 
     fn compress(compression: CompressionAlgorithm, data: Bytes) -> std::io::Result<Self> {
