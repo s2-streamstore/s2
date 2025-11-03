@@ -288,7 +288,7 @@ impl tokio_util::codec::Decoder for FrameDecoder {
     }
 }
 
-fn encode_proto_data(
+pub fn encode_proto_data(
     compression: CompressionAlgorithm,
     proto_msg: impl prost::Message,
 ) -> std::io::Result<Bytes> {
