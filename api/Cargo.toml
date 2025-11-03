@@ -30,3 +30,6 @@ zstd = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

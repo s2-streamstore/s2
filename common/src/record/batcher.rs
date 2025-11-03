@@ -160,264 +160,188 @@ where
 }
 
 #[cfg(test)]
-mod test {
-    use bytes::Bytes;
-    use rstest::rstest;
-
+mod tests {
     use super::*;
     use crate::{
         caps,
-        read_extent::{CountOrBytes, ReadLimit, ReadUntil},
-        record::{Encodable, EnvelopeRecord, Header, InternalRecordError, MeteredSize, Record},
+        read_extent::{ReadLimit, ReadUntil},
+        record::{CommandRecord, Encodable, MeteredRecord, MeteredSize, Record},
     };
+    use bytes::Bytes;
 
-    fn create_test_record(size: usize) -> Bytes {
-        let body = Bytes::from(vec![b'x'; size]);
-        let record = Record::Envelope(
-            EnvelopeRecord::try_from_parts(
-                vec![Header {
-                    name: Bytes::from("test"),
-                    value: Bytes::from("value"),
-                }],
-                body,
-            )
-            .unwrap(),
-        );
-        MeteredRecord::from(record).to_bytes()
+    type BatchItem = (SeqNum, Timestamp, Bytes);
+
+    #[derive(Clone)]
+    struct TestRecord {
+        seq_num: SeqNum,
+        timestamp: Timestamp,
+        record: Record,
+        bytes: Bytes,
+        metered_size: usize,
     }
 
-    fn uniform_records(
-        count: usize,
-        record_body_size: usize,
-        starting_seq_num: SeqNum,
-        timestamp_step: u64,
-    ) -> impl Iterator<Item = Result<(SeqNum, Timestamp, Bytes), InternalRecordError>> {
-        (0..count).map(move |i| {
-            let seq_num = starting_seq_num + i as u64;
-            let timestamp = seq_num * timestamp_step;
-            let data = create_test_record(record_body_size);
-            Ok((seq_num, timestamp, data))
-        })
+    impl TestRecord {
+        fn trim(seq_num: SeqNum, timestamp: Timestamp) -> Self {
+            let record = Record::Command(CommandRecord::Trim(seq_num));
+            let metered: MeteredRecord = record.clone().into();
+            Self {
+                seq_num,
+                timestamp,
+                record,
+                bytes: metered.to_bytes(),
+                metered_size: metered.metered_size(),
+            }
+        }
+
+        fn into_item(self) -> (SeqNum, Timestamp, Bytes) {
+            (self.seq_num, self.timestamp, self.bytes)
+        }
     }
 
-    #[rstest]
-    #[case(ReadLimit::Bytes(300_000), ReadUntil::Unbounded, 29, 290551, true)]
-    #[case(ReadLimit::Count(50), ReadUntil::Unbounded, 50, 500950, true)]
-    #[case(ReadLimit::CountOrBytes(CountOrBytes{ count: 50, bytes: 300_000}), ReadUntil::Unbounded, 29, 290551, true)]
-    #[case(ReadLimit::Unbounded, ReadUntil::Unbounded, 1000, 10019000, false)]
-    #[case(ReadLimit::Unbounded, ReadUntil::Timestamp(Timestamp::MAX), 1000, 10019000, false)]
-    #[case(ReadLimit::Unbounded, ReadUntil::Timestamp(200000), 100, 1001900, true)]
-    #[case(ReadLimit::Bytes(10019), ReadUntil::Unbounded, 1, 10019, true)]
-    #[case(ReadLimit::Bytes(10019), ReadUntil::Timestamp(10000), 0, 0, false)]
-    #[case(ReadLimit::Bytes(9999), ReadUntil::Unbounded, 0, 0, false)]
-    #[case(ReadLimit::Bytes(0), ReadUntil::Unbounded, 0, 0, false)]
-    #[case(ReadLimit::Bytes(10000), ReadUntil::Unbounded, 0, 0, false)]
-    fn record_batcher(
-        #[case] read_limit: ReadLimit,
-        #[case] until: ReadUntil,
-        #[case] expected_records: usize,
-        #[case] expected_metered_bytes: usize,
-        #[case] expected_is_terminal: bool,
-    ) {
-        let (acc_bytes, acc_count, is_terminal) =
-            RecordBatcher::new(uniform_records(1000, 10_000, 100, 1000), read_limit, until).fold(
-                (0usize, 0usize, false),
-                |(acc_bytes, acc_count, is_terminal), batch| {
-                    let batch = batch.expect("batch");
-                    assert!(batch.records.len() <= caps::RECORD_BATCH_MAX.count);
-                    assert!(batch.records.metered_size() <= caps::RECORD_BATCH_MAX.bytes);
-                    (
-                        acc_bytes + batch.records.metered_size(),
-                        acc_count + batch.records.len(),
-                        is_terminal || batch.is_terminal,
-                    )
-                },
-            );
+    fn to_ok(record: TestRecord) -> Result<BatchItem, InternalRecordError> {
+        Ok(record.into_item())
+    }
 
-        assert_eq!(acc_bytes, expected_metered_bytes);
-        assert_eq!(acc_count, expected_records);
-        assert_eq!(is_terminal, expected_is_terminal);
+    fn assert_batch(batch: &RecordBatch, expected: &[TestRecord], is_terminal: bool) {
+        assert_eq!(batch.is_terminal, is_terminal);
+        assert_eq!(batch.records.len(), expected.len());
+        let expected_size: usize = expected.iter().map(|r| r.metered_size).sum();
+        assert_eq!(batch.records.metered_size(), expected_size);
+        for (actual, expected) in batch.records.iter().zip(expected.iter()) {
+            assert_eq!(actual.seq_num, expected.seq_num);
+            assert_eq!(actual.timestamp, expected.timestamp);
+            assert_eq!(actual.record, expected.record);
+        }
     }
 
     #[test]
-    fn record_batcher_single_batch() {
-        let mut batcher = RecordBatcher::new(
-            uniform_records(100, 10, 100, 1000),
-            ReadLimit::CountOrBytes(CountOrBytes {
-                count: 100,
-                bytes: 1024 * 1024,
-            }),
-            ReadUntil::Unbounded,
-        );
-
-        let batch_1 = batcher.next().unwrap().unwrap();
-        assert!(batch_1.is_terminal);
-        assert!(batch_1.records.metered_size() <= 1024 * 1024);
-        assert!(batch_1.records.len() <= 1000);
-
-        let batch_2 = batcher.next();
-        assert!(batch_2.is_none());
-    }
-
-    #[test]
-    fn record_batcher_until_max_vs_none() {
-        let create_records = || {
-            uniform_records(100, 10, 100, 1000).map(|result| {
-                result.map(|(seq_num, _timestamp, data)| {
-                    let timestamp = if seq_num < 150 {
-                        seq_num * 1000
-                    } else {
-                        Timestamp::MAX
-                    };
-                    (seq_num, timestamp, data)
-                })
-            })
-        };
-
-        let read_limit = ReadLimit::CountOrBytes(CountOrBytes {
-            count: 100,
-            bytes: 1024 * 1024,
-        });
-
-        let (count_none, last_seq_none, terminal_none) =
-            RecordBatcher::new(create_records(), read_limit, ReadUntil::Unbounded).fold(
-                (0usize, None, false),
-                |(acc_count, _last_seq, is_terminal), batch| {
-                    let batch = batch.expect("batch");
-                    let last_seq = batch.records.last().map(|r| r.seq_num);
-                    (
-                        acc_count + batch.records.len(),
-                        last_seq.or(_last_seq),
-                        is_terminal || batch.is_terminal,
-                    )
-                },
-            );
-
-        let (count_max, last_seq_max, terminal_max) = RecordBatcher::new(
-            create_records(),
-            read_limit,
-            ReadUntil::Timestamp(Timestamp::MAX),
-        )
-        .fold(
-            (0usize, None, false),
-            |(acc_count, _last_seq, is_terminal), batch| {
-                let batch = batch.expect("batch");
-                let last_seq = batch.records.last().map(|r| r.seq_num);
-                (
-                    acc_count + batch.records.len(),
-                    last_seq.or(_last_seq),
-                    is_terminal || batch.is_terminal,
-                )
-            },
-        );
-
-        assert_eq!(count_none, 100);
-        assert_eq!(last_seq_none, Some(199));
-        assert!(terminal_none);
-
-        assert_eq!(count_max, 50);
-        assert_eq!(last_seq_max, Some(149));
-        assert!(terminal_max);
-    }
-
-    #[test]
-    fn record_batcher_error_handling() {
-        let records = vec![
-            Ok((100, 100000, create_test_record(100))),
-            Ok((101, 101000, create_test_record(100))),
-            Err(InternalRecordError::Truncated("test error")),
+    fn collects_records_until_iterator_ends() {
+        let expected = vec![
+            TestRecord::trim(1, 10),
+            TestRecord::trim(2, 11),
+            TestRecord::trim(3, 12),
         ];
+        let iterator = expected.clone().into_iter().map(to_ok);
+        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
-        let mut batcher = RecordBatcher::new(
-            records.into_iter(),
-            ReadLimit::Unbounded,
-            ReadUntil::Unbounded,
-        );
-
-        let batch_1 = batcher.next().unwrap().unwrap();
-        assert_eq!(batch_1.records.len(), 2);
-
-        let batch_2 = batcher.next();
-        assert!(batch_2.is_some());
-        assert!(batch_2.unwrap().is_err());
-
-        let batch_3 = batcher.next();
-        assert!(batch_3.is_none());
+        let batch = batcher.next().expect("batch expected").expect("ok batch");
+        assert_batch(&batch, &expected, false);
+        assert!(batcher.next().is_none());
     }
 
     #[test]
-    fn record_batcher_respects_batch_limits() {
-        let mut batcher = RecordBatcher::new(
-            uniform_records(2000, 10_000, 100, 1000),
-            ReadLimit::Unbounded,
-            ReadUntil::Unbounded,
-        );
+    fn stops_at_count_read_limit() {
+        let expected = vec![
+            TestRecord::trim(1, 10),
+            TestRecord::trim(2, 11),
+            TestRecord::trim(3, 12),
+        ];
+        let iterator = expected.clone().into_iter().map(to_ok);
+        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Count(2), ReadUntil::Unbounded);
 
-        let batch = batcher.next().unwrap().unwrap();
-        assert!(batch.records.len() <= caps::RECORD_BATCH_MAX.count);
-        assert!(batch.records.metered_size() <= caps::RECORD_BATCH_MAX.bytes);
+        let batch = batcher.next().expect("batch expected").expect("ok batch");
+        assert_batch(&batch, &expected[..2], true);
+        assert!(batcher.next().is_none());
     }
 
     #[test]
-    fn record_batcher_empty_iterator() {
-        let empty: Vec<Result<(SeqNum, Timestamp, Bytes), InternalRecordError>> = vec![];
+    fn stops_at_byte_read_limit() {
+        let expected = vec![TestRecord::trim(1, 10), TestRecord::trim(2, 11)];
+        let first_size = expected[0].metered_size;
+        let iterator = expected.clone().into_iter().map(to_ok);
         let mut batcher =
-            RecordBatcher::new(empty.into_iter(), ReadLimit::Unbounded, ReadUntil::Unbounded);
+            RecordBatcher::new(iterator, ReadLimit::Bytes(first_size), ReadUntil::Unbounded);
 
-        let batch = batcher.next();
-        assert!(batch.is_none());
+        let batch = batcher.next().expect("batch expected").expect("ok batch");
+        assert_batch(&batch, &expected[..1], true);
+        assert!(batcher.next().is_none());
     }
 
     #[test]
-    fn record_batcher_fused_iterator() {
-        let records: Vec<Result<(SeqNum, Timestamp, Bytes), InternalRecordError>> =
-            vec![Ok((100, 100000, create_test_record(100)))];
+    fn stops_at_timestamp_limit() {
+        let expected = vec![
+            TestRecord::trim(1, 10),
+            TestRecord::trim(2, 19),
+            TestRecord::trim(3, 20),
+        ];
+        let iterator = expected.clone().into_iter().map(to_ok);
+        let mut batcher =
+            RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Timestamp(20));
 
-        let mut batcher = RecordBatcher::new(
-            records.into_iter(),
-            ReadLimit::Count(1),
-            ReadUntil::Unbounded,
-        );
-
-        let _batch_1 = batcher.next().unwrap();
-        let batch_2 = batcher.next();
-        assert!(batch_2.is_none());
-
-        let batch_3 = batcher.next();
-        assert!(batch_3.is_none());
+        let batch = batcher.next().expect("batch expected").expect("ok batch");
+        assert_batch(&batch, &expected[..2], true);
+        assert!(batcher.next().is_none());
     }
 
     #[test]
-    fn record_batcher_count_limit() {
-        let mut batcher = RecordBatcher::new(
-            uniform_records(100, 10, 100, 1000),
-            ReadLimit::Count(5),
-            ReadUntil::Unbounded,
-        );
-
-        let mut total_count = 0;
-        while let Some(Ok(batch)) = batcher.next() {
-            total_count += batch.records.len();
+    fn splits_batches_when_caps_are_hit() {
+        let mut records = Vec::with_capacity(caps::RECORD_BATCH_MAX.count + 1);
+        for index in 0..=(caps::RECORD_BATCH_MAX.count as SeqNum) {
+            records.push(TestRecord::trim(index, index + 10));
         }
+        let iterator = records.clone().into_iter().map(to_ok);
+        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
-        assert_eq!(total_count, 5);
+        let first_batch = batcher
+            .next()
+            .expect("first batch expected")
+            .expect("first batch ok");
+        assert_batch(
+            &first_batch,
+            &records[..caps::RECORD_BATCH_MAX.count],
+            false,
+        );
+
+        let second_batch = batcher
+            .next()
+            .expect("second batch expected")
+            .expect("second batch ok");
+        assert_batch(
+            &second_batch,
+            &records[caps::RECORD_BATCH_MAX.count..],
+            false,
+        );
+        assert!(batcher.next().is_none());
     }
 
     #[test]
-    fn record_batcher_bytes_limit() {
-        let record_size = 10_019;
-        let byte_limit = record_size * 2;
-        let mut batcher = RecordBatcher::new(
-            uniform_records(100, 10_000, 100, 1000),
-            ReadLimit::Bytes(byte_limit),
-            ReadUntil::Unbounded,
+    fn surfaces_decode_errors_after_draining_buffer() {
+        let records = vec![TestRecord::trim(1, 10), TestRecord::trim(2, 11)];
+        let invalid_data = (3, 12, Bytes::new());
+
+        let iterator = records
+            .clone()
+            .into_iter()
+            .map(to_ok)
+            .chain(std::iter::once(Ok(invalid_data)));
+        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
+
+        let batch = batcher.next().expect("batch expected").expect("ok batch");
+        assert_batch(&batch, &records, false);
+
+        let error = batcher
+            .next()
+            .expect("error expected")
+            .expect_err("expected decode error");
+        assert!(matches!(error, InternalRecordError::Truncated("MagicByte")));
+        assert!(batcher.next().is_none());
+    }
+
+    #[test]
+    fn surfaces_iterator_errors_immediately() {
+        let iterator = std::iter::once::<Result<(SeqNum, Timestamp, Bytes), InternalRecordError>>(
+            Err(InternalRecordError::InvalidValue("test", "boom")),
         );
+        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
-        let mut total_bytes = 0;
-        while let Some(Ok(batch)) = batcher.next() {
-            total_bytes += batch.records.metered_size();
-        }
-
-        assert_eq!(total_bytes, byte_limit);
+        let error = batcher
+            .next()
+            .expect("error expected")
+            .expect_err("expected iterator error");
+        assert!(matches!(
+            error,
+            InternalRecordError::InvalidValue("test", "boom")
+        ));
+        assert!(batcher.next().is_none());
     }
 }

@@ -28,12 +28,13 @@ use zstd::zstd_safe::WriteBuf;
   └─────────────┴────────────┴─────────────┴───────────────┘
 
   LENGTH = size of (FLAGS + PAYLOAD), does NOT include length header itself
-  Maximum message size: 2^24 - 1 = 16,777,215 bytes
+  Implemented limit: 2 MiB (smaller than 24-bit protocol maximum)
 */
 
 const LENGTH_PREFIX_SIZE: usize = 3;
 const STATUS_CODE_SIZE: usize = 2;
-const MAX_MESSAGE_SIZE: usize = (1 << 24) - 1; // 16MB - 1
+const COMPRESSION_THRESHOLD_BYTES: usize = 1024; // 1 KiB
+const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
 /*
 Flag byte layout:
@@ -93,30 +94,26 @@ impl CompressedData {
         Self::compress(compression, proto.encode_to_vec())
     }
 
-    fn compress(
-        compression: CompressionAlgorithm,
-        data: impl Into<Bytes>,
-    ) -> std::io::Result<Self> {
-        let payload = data.into();
-        if payload.len() < 1024 * 1024 {
+    fn compress(compression: CompressionAlgorithm, data: Vec<u8>) -> std::io::Result<Self> {
+        if compression == CompressionAlgorithm::None || data.len() < COMPRESSION_THRESHOLD_BYTES {
             return Ok(Self {
-                compression,
-                payload,
+                compression: CompressionAlgorithm::None,
+                payload: data.into(),
             });
         }
-        let payload = match compression {
-            CompressionAlgorithm::None => payload,
+        let mut buf = Vec::with_capacity(data.len());
+        match compression {
             CompressionAlgorithm::Gzip => {
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-                encoder.write_all(&payload)?;
-                let compressed = encoder.finish()?;
-                Bytes::from(compressed.into_boxed_slice())
+                let mut encoder = GzEncoder::new(buf, Compression::default());
+                encoder.write_all(data.as_slice())?;
+                buf = encoder.finish()?;
             }
             CompressionAlgorithm::Zstd => {
-                let compressed = zstd::encode_all(payload.as_slice(), 0)?;
-                Bytes::from(compressed.into_boxed_slice())
+                zstd::stream::copy_encode(data.as_slice(), &mut buf, 0)?;
             }
+            CompressionAlgorithm::None => unreachable!("handled above"),
         };
+        let payload = Bytes::from(buf.into_boxed_slice());
         Ok(Self {
             compression,
             payload,
@@ -185,8 +182,8 @@ impl SessionMessage {
     pub fn encode(&self) -> Bytes {
         let encoded_size = FLAG_TOTAL_SIZE + self.payload_size();
         assert!(
-            encoded_size <= MAX_MESSAGE_SIZE,
-            "payload exceeds maximum message size"
+            encoded_size <= MAX_FRAME_BYTES,
+            "payload exceeds encoder limit"
         );
         let mut buf = BytesMut::with_capacity(LENGTH_PREFIX_SIZE + encoded_size);
         buf.put_uint(encoded_size as u64, 3);
@@ -309,10 +306,10 @@ impl tokio_util::codec::Decoder for FrameDecoder {
 
         let length = ((src[0] as usize) << 16) | ((src[1] as usize) << 8) | (src[2] as usize);
 
-        if length > MAX_MESSAGE_SIZE {
+        if length > MAX_FRAME_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "message size exceeds maximum",
+                "frame exceeds decode limit",
             ));
         }
 
@@ -331,11 +328,16 @@ impl tokio_util::codec::Decoder for FrameDecoder {
 mod test {
     use super::*;
     use bytes::BytesMut;
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
     use http::HeaderValue;
+    use proptest::{collection::vec, prelude::*};
     use prost::Message;
+    use std::{
+        io,
+        pin::Pin,
+        task::{Context, Poll},
+    };
     use tokio_util::codec::Decoder;
-    use std::{pin::Pin, task::{Context, Poll}};
 
     #[derive(Clone, PartialEq, prost::Message)]
     struct TestProto {
@@ -364,10 +366,102 @@ mod test {
         }
     }
 
-    fn decode_once(bytes: &Bytes) -> SessionMessage {
+    fn decode_once(bytes: &Bytes) -> io::Result<SessionMessage> {
         let mut decoder = FrameDecoder;
         let mut buf = BytesMut::from(bytes.as_ref());
-        decoder.decode(&mut buf).unwrap().unwrap()
+        decoder
+            .decode(&mut buf)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "frame incomplete"))
+    }
+
+    fn compression_strategy() -> impl proptest::strategy::Strategy<Value = CompressionAlgorithm> {
+        prop_oneof![
+            Just(CompressionAlgorithm::None),
+            Just(CompressionAlgorithm::Gzip),
+            Just(CompressionAlgorithm::Zstd),
+        ]
+    }
+
+    fn chunk_bytes(data: &Bytes, pattern: &[usize]) -> Vec<Bytes> {
+        let mut chunks = Vec::new();
+        let mut offset = 0;
+        for &hint in pattern {
+            if offset >= data.len() {
+                break;
+            }
+            let remaining = data.len() - offset;
+            let take = (hint % remaining).saturating_add(1).min(remaining);
+            chunks.push(data.slice(offset..offset + take));
+            offset += take;
+        }
+        if offset < data.len() {
+            chunks.push(data.slice(offset..));
+        }
+        if chunks.is_empty() {
+            chunks.push(data.clone());
+        }
+        chunks
+    }
+
+    proptest! {
+        #[test]
+        fn regular_session_message_round_trips_proptest(
+            algo in compression_strategy(),
+            payload in vec(any::<u8>(), 0..=COMPRESSION_THRESHOLD_BYTES * 4)
+        ) {
+            let proto = TestProto::new(payload.clone());
+            let msg = SessionMessage::regular(algo, &proto).unwrap();
+            let encoded = msg.encode();
+            let decoded = decode_once(&encoded).unwrap();
+
+            prop_assert!(matches!(decoded, SessionMessage::Regular(_)));
+            let SessionMessage::Regular(data) = decoded else { unreachable!() };
+
+            let expected_compression = if algo == CompressionAlgorithm::None || payload.len() < COMPRESSION_THRESHOLD_BYTES {
+                CompressionAlgorithm::None
+            } else {
+                algo
+            };
+            let actual_compression = data.compression;
+
+            let restored = data.try_into_proto::<TestProto>().unwrap();
+            prop_assert_eq!(restored.payload, payload);
+            prop_assert_eq!(actual_compression, expected_compression);
+        }
+
+        #[test]
+        fn frame_decoder_handles_chunked_frames(
+            algo in compression_strategy(),
+            payload in vec(any::<u8>(), 0..=COMPRESSION_THRESHOLD_BYTES * 4),
+            chunk_pattern in vec(0usize..=16, 0..=16)
+        ) {
+            let proto = TestProto::new(payload);
+            let msg = SessionMessage::regular(algo, &proto).unwrap();
+            let encoded = msg.encode();
+            let expected = decode_once(&encoded).unwrap();
+
+            let chunks = chunk_bytes(&encoded, &chunk_pattern);
+            prop_assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), encoded.len());
+
+            let mut decoder = FrameDecoder;
+            let mut buf = BytesMut::new();
+            let mut decoded = None;
+
+            for (idx, chunk) in chunks.iter().enumerate() {
+                buf.extend_from_slice(chunk.as_ref());
+                let result = decoder.decode(&mut buf).expect("decode invocation failed");
+                if idx < chunks.len() - 1 {
+                    prop_assert!(result.is_none());
+                } else {
+                    let message = result.expect("final chunk should produce frame");
+                    prop_assert!(buf.is_empty());
+                    decoded = Some(message);
+                }
+            }
+
+            let decoded = decoded.expect("decoder never emitted frame");
+            prop_assert_eq!(decoded, expected);
+        }
     }
 
     #[test]
@@ -406,7 +500,7 @@ mod test {
         let proto = TestProto::new(vec![1, 2, 3, 4]);
         let msg = SessionMessage::regular(CompressionAlgorithm::None, &proto).unwrap();
         let encoded = msg.encode();
-        let decoded = decode_once(&encoded);
+        let decoded = decode_once(&encoded).unwrap();
 
         match decoded {
             SessionMessage::Regular(data) => {
@@ -426,7 +520,7 @@ mod test {
         };
         let msg = SessionMessage::from(terminal.clone());
         let encoded = msg.encode();
-        let decoded = decode_once(&encoded);
+        let decoded = decode_once(&encoded).unwrap();
 
         match decoded {
             SessionMessage::Regular(_) => panic!("expected terminal message"),
@@ -460,6 +554,31 @@ mod test {
     }
 
     #[test]
+    fn frame_decoder_rejects_frames_exceeding_decode_limit() {
+        let length = MAX_FRAME_BYTES + 1;
+        let prefix = [
+            ((length >> 16) & 0xFF) as u8,
+            ((length >> 8) & 0xFF) as u8,
+            (length & 0xFF) as u8,
+        ];
+        let mut buf = BytesMut::from(prefix.as_slice());
+        let mut decoder = FrameDecoder;
+        let err = decoder.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    #[should_panic(expected = "encoder limit")]
+    fn session_message_encode_rejects_frames_over_limit() {
+        let data = CompressedData {
+            compression: CompressionAlgorithm::None,
+            payload: Bytes::from(vec![0u8; MAX_FRAME_BYTES]),
+        };
+        let msg = SessionMessage::from(data);
+        let _ = msg.encode();
+    }
+
+    #[test]
     fn frame_decoder_rejects_unknown_compression() {
         let mut raw = vec![0, 0, 1];
         raw.push(0x60);
@@ -485,7 +604,7 @@ mod test {
         let proto = TestProto::new(payload.clone());
         let msg = SessionMessage::regular(CompressionAlgorithm::Gzip, &proto).unwrap();
         let encoded = msg.encode();
-        let decoded = decode_once(&encoded);
+        let decoded = decode_once(&encoded).unwrap();
 
         match decoded {
             SessionMessage::Regular(data) => {
@@ -504,7 +623,7 @@ mod test {
         let proto = TestProto::new(payload.clone());
         let msg = SessionMessage::regular(CompressionAlgorithm::Zstd, &proto).unwrap();
         let encoded = msg.encode();
-        let decoded = decode_once(&encoded);
+        let decoded = decode_once(&encoded).unwrap();
 
         match decoded {
             SessionMessage::Regular(data) => {
@@ -531,13 +650,14 @@ mod test {
 
         let stream = stream::iter(items.into_iter());
         let framed = FramedMessageStream::new(CompressionAlgorithm::None, stream);
-        let outputs =
-            futures::executor::block_on(async { framed.collect::<Vec<std::io::Result<Bytes>>>().await });
+        let outputs = futures::executor::block_on(async {
+            framed.collect::<Vec<std::io::Result<Bytes>>>().await
+        });
 
         assert_eq!(outputs.len(), 2);
 
         let first = outputs[0].as_ref().expect("first frame ok");
-        match decode_once(first) {
+        match decode_once(first).unwrap() {
             SessionMessage::Regular(data) => {
                 let restored = data.try_into_proto::<TestProto>().unwrap();
                 assert_eq!(restored, proto);
@@ -546,7 +666,7 @@ mod test {
         }
 
         let second = outputs[1].as_ref().expect("second frame ok");
-        match decode_once(second) {
+        match decode_once(second).unwrap() {
             SessionMessage::Regular(_) => panic!("expected terminal message"),
             SessionMessage::Terminal(term) => {
                 assert_eq!(term.status, 500);
@@ -571,7 +691,7 @@ mod test {
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
 
         match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(Ok(bytes))) => match decode_once(&bytes) {
+            Poll::Ready(Some(Ok(bytes))) => match decode_once(&bytes).unwrap() {
                 SessionMessage::Regular(_) => {}
                 SessionMessage::Terminal(_) => panic!("expected regular message"),
             },
@@ -579,7 +699,7 @@ mod test {
         }
 
         match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(Ok(bytes))) => match decode_once(&bytes) {
+            Poll::Ready(Some(Ok(bytes))) => match decode_once(&bytes).unwrap() {
                 SessionMessage::Terminal(term) => {
                     assert_eq!(term.status, 400);
                     assert_eq!(term.body, "bad");

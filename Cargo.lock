@@ -2654,6 +2654,7 @@ dependencies = [
  "futures",
  "http",
  "itertools",
+ "proptest",
  "prost",
  "prost-build",
  "s2-common",
