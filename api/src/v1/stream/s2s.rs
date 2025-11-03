@@ -6,9 +6,8 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures::Stream;
-use prost::Message;
 
 /*
   REGULAR MESSAGE:
@@ -75,11 +74,7 @@ impl CompressionAlgorithm {
                 }
             }
         }
-        if gzip {
-            Self::Gzip
-        } else {
-            Self::None
-        }
+        if gzip { Self::Gzip } else { Self::None }
     }
 
     pub fn compress(&self, data: &[u8]) -> std::io::Result<Bytes> {
@@ -234,7 +229,7 @@ impl<S> FramedMessageStream<S> {
 impl<S, P, E> Stream for FramedMessageStream<S>
 where
     S: Stream<Item = Result<P, E>> + Unpin,
-    P: Message,
+    P: prost::Message,
     E: Into<TerminalMessage>,
 {
     type Item = std::io::Result<Bytes>;
@@ -245,8 +240,8 @@ where
         }
 
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(proto))) => {
-                Poll::Ready(Some(encode_proto_data(self.compression, proto)))
+            Poll::Ready(Some(Ok(item))) => {
+                Poll::Ready(Some(encode_proto_data(self.compression, item)))
             }
             Poll::Ready(Some(Err(e))) => {
                 self.terminated = true;
@@ -295,7 +290,7 @@ impl tokio_util::codec::Decoder for FrameDecoder {
 
 fn encode_proto_data(
     compression: CompressionAlgorithm,
-    proto_msg: impl Message,
+    proto_msg: impl prost::Message,
 ) -> std::io::Result<Bytes> {
     let mut proto_bytes = BytesMut::with_capacity(proto_msg.encoded_len());
     proto_msg.encode(&mut proto_bytes)?;
