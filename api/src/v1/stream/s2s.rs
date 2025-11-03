@@ -329,5 +329,269 @@ impl tokio_util::codec::Decoder for FrameDecoder {
 
 #[cfg(test)]
 mod test {
-    // TODO: port over tests without private deps
+    use super::*;
+    use bytes::BytesMut;
+    use futures::{stream, StreamExt};
+    use http::HeaderValue;
+    use prost::Message;
+    use tokio_util::codec::Decoder;
+    use std::{pin::Pin, task::{Context, Poll}};
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct TestProto {
+        #[prost(bytes, tag = "1")]
+        payload: Vec<u8>,
+    }
+
+    impl TestProto {
+        fn new(payload: Vec<u8>) -> Self {
+            Self { payload }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestError {
+        status: u16,
+        body: &'static str,
+    }
+
+    impl Into<TerminalMessage> for TestError {
+        fn into(self) -> TerminalMessage {
+            TerminalMessage {
+                status: self.status,
+                body: self.body.to_string(),
+            }
+        }
+    }
+
+    fn decode_once(bytes: &Bytes) -> SessionMessage {
+        let mut decoder = FrameDecoder;
+        let mut buf = BytesMut::from(bytes.as_ref());
+        decoder.decode(&mut buf).unwrap().unwrap()
+    }
+
+    #[test]
+    fn from_accept_encoding_prefers_zstd() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip, zstd, br"),
+        );
+
+        let algo = CompressionAlgorithm::from_accept_encoding(&headers);
+        assert_eq!(algo, CompressionAlgorithm::Zstd);
+    }
+
+    #[test]
+    fn from_accept_encoding_falls_back_to_gzip() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip;q=0.8, deflate"),
+        );
+
+        let algo = CompressionAlgorithm::from_accept_encoding(&headers);
+        assert_eq!(algo, CompressionAlgorithm::Gzip);
+    }
+
+    #[test]
+    fn from_accept_encoding_defaults_to_none() {
+        let headers = http::HeaderMap::new();
+        let algo = CompressionAlgorithm::from_accept_encoding(&headers);
+        assert_eq!(algo, CompressionAlgorithm::None);
+    }
+
+    #[test]
+    fn regular_session_message_round_trips() {
+        let proto = TestProto::new(vec![1, 2, 3, 4]);
+        let msg = SessionMessage::regular(CompressionAlgorithm::None, &proto).unwrap();
+        let encoded = msg.encode();
+        let decoded = decode_once(&encoded);
+
+        match decoded {
+            SessionMessage::Regular(data) => {
+                assert_eq!(data.compression, CompressionAlgorithm::None);
+                let restored = data.try_into_proto::<TestProto>().unwrap();
+                assert_eq!(restored, proto);
+            }
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+    }
+
+    #[test]
+    fn terminal_session_message_round_trips() {
+        let terminal = TerminalMessage {
+            status: 418,
+            body: "short-circuit".to_string(),
+        };
+        let msg = SessionMessage::from(terminal.clone());
+        let encoded = msg.encode();
+        let decoded = decode_once(&encoded);
+
+        match decoded {
+            SessionMessage::Regular(_) => panic!("expected terminal message"),
+            SessionMessage::Terminal(decoded_terminal) => {
+                assert_eq!(decoded_terminal, terminal);
+            }
+        }
+    }
+
+    #[test]
+    fn frame_decoder_waits_for_complete_frame() {
+        let proto = TestProto::new(vec![9, 9, 9]);
+        let msg = SessionMessage::regular(CompressionAlgorithm::None, &proto).unwrap();
+        let encoded = msg.encode();
+        let mut decoder = FrameDecoder;
+
+        let split_idx = encoded.len() - 1;
+        let mut buf = BytesMut::from(&encoded[..split_idx]);
+        assert!(decoder.decode(&mut buf).unwrap().is_none());
+        buf.extend_from_slice(&encoded[split_idx..]);
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
+
+        match decoded {
+            SessionMessage::Regular(data) => {
+                let restored = data.try_into_proto::<TestProto>().unwrap();
+                assert_eq!(restored, proto);
+            }
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn frame_decoder_rejects_unknown_compression() {
+        let mut raw = vec![0, 0, 1];
+        raw.push(0x60);
+        let mut decoder = FrameDecoder;
+        let mut buf = BytesMut::from(raw.as_slice());
+        let err = decoder.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn frame_decoder_rejects_terminal_without_status() {
+        let mut raw = vec![0, 0, 1];
+        raw.push(FLAG_TERMINAL);
+        let mut decoder = FrameDecoder;
+        let mut buf = BytesMut::from(raw.as_slice());
+        let err = decoder.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn compressed_data_round_trip_gzip() {
+        let payload = vec![42; 1_200_000];
+        let proto = TestProto::new(payload.clone());
+        let msg = SessionMessage::regular(CompressionAlgorithm::Gzip, &proto).unwrap();
+        let encoded = msg.encode();
+        let decoded = decode_once(&encoded);
+
+        match decoded {
+            SessionMessage::Regular(data) => {
+                assert_eq!(data.compression, CompressionAlgorithm::Gzip);
+                assert!(data.payload.len() < proto.encode_to_vec().len());
+                let restored = data.try_into_proto::<TestProto>().unwrap();
+                assert_eq!(restored.payload, payload);
+            }
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+    }
+
+    #[test]
+    fn compressed_data_round_trip_zstd() {
+        let payload = vec![7; 1_100_000];
+        let proto = TestProto::new(payload.clone());
+        let msg = SessionMessage::regular(CompressionAlgorithm::Zstd, &proto).unwrap();
+        let encoded = msg.encode();
+        let decoded = decode_once(&encoded);
+
+        match decoded {
+            SessionMessage::Regular(data) => {
+                assert_eq!(data.compression, CompressionAlgorithm::Zstd);
+                assert!(data.payload.len() < proto.encode_to_vec().len());
+                let restored = data.try_into_proto::<TestProto>().unwrap();
+                assert_eq!(restored.payload, payload);
+            }
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+    }
+
+    #[test]
+    fn framed_message_stream_yields_terminal_on_error() {
+        let proto = TestProto::new(vec![1, 2, 3]);
+        let items = vec![
+            Ok(proto.clone()),
+            Err(TestError {
+                status: 500,
+                body: "boom",
+            }),
+            Ok(proto.clone()),
+        ];
+
+        let stream = stream::iter(items.into_iter());
+        let framed = FramedMessageStream::new(CompressionAlgorithm::None, stream);
+        let outputs =
+            futures::executor::block_on(async { framed.collect::<Vec<std::io::Result<Bytes>>>().await });
+
+        assert_eq!(outputs.len(), 2);
+
+        let first = outputs[0].as_ref().expect("first frame ok");
+        match decode_once(first) {
+            SessionMessage::Regular(data) => {
+                let restored = data.try_into_proto::<TestProto>().unwrap();
+                assert_eq!(restored, proto);
+            }
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+
+        let second = outputs[1].as_ref().expect("second frame ok");
+        match decode_once(second) {
+            SessionMessage::Regular(_) => panic!("expected terminal message"),
+            SessionMessage::Terminal(term) => {
+                assert_eq!(term.status, 500);
+                assert_eq!(term.body, "boom");
+            }
+        }
+    }
+
+    #[test]
+    fn framed_message_stream_stops_after_termination() {
+        let mut stream = FramedMessageStream::new(
+            CompressionAlgorithm::None,
+            stream::iter(vec![
+                Ok(TestProto::new(vec![0])),
+                Err(TestError {
+                    status: 400,
+                    body: "bad",
+                }),
+            ]),
+        );
+
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(bytes))) => match decode_once(&bytes) {
+                SessionMessage::Regular(_) => {}
+                SessionMessage::Terminal(_) => panic!("expected regular message"),
+            },
+            other => panic!("unexpected poll result: {other:?}"),
+        }
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(bytes))) => match decode_once(&bytes) {
+                SessionMessage::Terminal(term) => {
+                    assert_eq!(term.status, 400);
+                    assert_eq!(term.body, "bad");
+                }
+                SessionMessage::Regular(_) => panic!("expected terminal message"),
+            },
+            other => panic!("unexpected poll result: {other:?}"),
+        }
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(None) => {}
+            other => panic!("expected stream to terminate, got {other:?}"),
+        }
+    }
 }
