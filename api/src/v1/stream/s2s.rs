@@ -86,7 +86,7 @@ pub struct CompressedData {
 }
 
 impl CompressedData {
-    pub fn compressed_proto(
+    pub fn for_proto(
         compression: CompressionAlgorithm,
         proto: &impl prost::Message,
     ) -> std::io::Result<Self> {
@@ -95,7 +95,7 @@ impl CompressedData {
         CompressedData::compress(compression, proto_bytes.freeze())
     }
 
-    pub fn compress(compression: CompressionAlgorithm, data: Bytes) -> std::io::Result<Self> {
+    fn compress(compression: CompressionAlgorithm, data: Bytes) -> std::io::Result<Self> {
         if data.len() < 1024 * 1024 {
             return Ok(Self {
                 compression,
@@ -121,7 +121,7 @@ impl CompressedData {
         })
     }
 
-    pub fn decompress(self) -> std::io::Result<Bytes> {
+    fn decompressed(self) -> std::io::Result<Bytes> {
         match self.compression {
             CompressionAlgorithm::None => Ok(self.payload),
             CompressionAlgorithm::Gzip => {
@@ -140,8 +140,8 @@ impl CompressedData {
         }
     }
 
-    pub fn decompressed_proto<P: prost::Message + Default>(self) -> std::io::Result<P> {
-        let payload = self.decompress()?;
+    pub fn try_into_proto<P: prost::Message + Default>(self) -> std::io::Result<P> {
+        let payload = self.decompressed()?;
         P::decode(payload.as_ref())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
@@ -176,7 +176,7 @@ impl SessionMessage {
         compression: CompressionAlgorithm,
         proto: &impl prost::Message,
     ) -> std::io::Result<Self> {
-        Ok(Self::Regular(CompressedData::compressed_proto(
+        Ok(Self::Regular(CompressedData::for_proto(
             compression,
             proto,
         )?))
