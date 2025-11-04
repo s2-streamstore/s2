@@ -11,6 +11,7 @@ version = "0.1.0"
 async-trait = "0.1.89"
 axum = "0.8.6"
 base64ct = { version = "1.8.0", features = ["alloc"] }
+blake3 = "1.8.2"
 bytes = "1.10.1"
 compact_str = "0.9.0"
 clap = { version = "4.5.51", features = ["derive"] }

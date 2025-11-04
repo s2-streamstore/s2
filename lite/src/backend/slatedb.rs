@@ -8,29 +8,12 @@ use s2_common::types::{
 };
 use tokio::sync::{broadcast, mpsc};
 
-use crate::backend::ops::{AppendError, ReadError};
+use crate::backend::{
+    ops::{AppendError, ReadError},
+    stream_id::StreamId,
+};
 
 use super::ops::{CheckTailError, DataOps};
-
-#[derive(Debug, Clone)]
-enum StreamCommand {
-    CheckTail {
-        reply_tx: mpsc::Sender<Result<StreamPosition, CheckTailError>>,
-    },
-    Read {
-        reply_tx: mpsc::Sender<Result<ReadBatch, ReadError>>,
-    },
-    Append {
-        input: AppendInput,
-        reply_tx: mpsc::Sender<Result<AppendAck, AppendError>>,
-    },
-}
-
-pub struct ActiveStreams {
-    tx: mpsc::Sender<StreamCommand>,
-    // TODO: AbortOnDrop wrapper
-    _handle: tokio::task::JoinHandle<()>,
-}
 
 struct StreamTailState {
     tail: StreamPosition,
@@ -38,19 +21,18 @@ struct StreamTailState {
 }
 
 struct StreamState {
-    db: Arc<slatedb::Db>,
     tail_state: Option<StreamTailState>,
 }
 
 impl StreamState {}
 
 pub struct SlateDbBackend {
-    db: Arc<slatedb::Db>,
-    streams: DashMap<(BasinName, StreamName), ActiveStreams>,
+    db: slatedb::Db,
+    streams: DashMap<StreamId, StreamState>,
 }
 
 impl SlateDbBackend {
-    pub fn new(db: Arc<slatedb::Db>) -> Self {
+    pub fn new(db: slatedb::Db) -> Self {
         Self {
             db,
             streams: DashMap::default(),
