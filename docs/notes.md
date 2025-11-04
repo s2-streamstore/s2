@@ -40,3 +40,38 @@ Granular access tokens supported by storing them in the same DB.
   get_account_metrics
   get_basin_metrics
   get_stream_metrics
+
+## data format
+
+StreamID = Blake3(BasinName, StreamName)
+  32 byte hash
+
+1 byte prefix for each key identifying the type of data:
+BC  Basin config
+SC  Stream config
+SD  Stream data
+ST  Stream timestamp
+SP  Stream tail position
+
+```
+BC  "{BasinName}"                 ->    BasinConfig
+SC  "{BasinName}#{StreamName}"    ->    StreamConfig
+SD  StreamID.SeqNum               ->    Record
+ST  StreamID.Timestamp            ->    SeqNum
+SP  StreamId                      ->    SeqNum.Timestamp
+```
+
+Appends:
+  Every AppendInput maps to a WriteBatch,
+  with per-record SR and ST key-value pairs, and an SP update
+
+Reads:
+  By seq num – straightforward, scan >= SD key
+  By timestamp – find first record >= ST key, and then look by seq num
+  If no record found, figure out the tail if possible to follow
+
+Figuring out the tail:
+  Init SP if it isn't already
+
+Retention:
+  TTL set on each SD & ST row if configured

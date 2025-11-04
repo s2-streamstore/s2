@@ -6,14 +6,20 @@ use s2_common::types::{
     basin::BasinName,
     stream::{AppendAck, AppendInput, ReadBatch, ReadEnd, ReadStart, StreamName, StreamPosition},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::backend::ops::{AppendError, ReadError};
 
 use super::ops::{CheckTailError, DataOps};
 
-pub enum StreamCommand {
-    Read {},
+#[derive(Debug, Clone)]
+enum StreamCommand {
+    CheckTail {
+        reply_tx: mpsc::Sender<Result<StreamPosition, CheckTailError>>,
+    },
+    Read {
+        reply_tx: mpsc::Sender<Result<ReadBatch, ReadError>>,
+    },
     Append {
         input: AppendInput,
         reply_tx: mpsc::Sender<Result<AppendAck, AppendError>>,
@@ -22,7 +28,21 @@ pub enum StreamCommand {
 
 pub struct ActiveStreams {
     tx: mpsc::Sender<StreamCommand>,
+    // TODO: AbortOnDrop wrapper
+    _handle: tokio::task::JoinHandle<()>,
 }
+
+struct StreamTailState {
+    tail: StreamPosition,
+    follower_tx: broadcast::Sender<ReadBatch>,
+}
+
+struct StreamState {
+    db: Arc<slatedb::Db>,
+    tail_state: Option<StreamTailState>,
+}
+
+impl StreamState {}
 
 pub struct SlateDbBackend {
     db: Arc<slatedb::Db>,

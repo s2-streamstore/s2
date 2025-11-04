@@ -1,12 +1,15 @@
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use s2_common::types::{
-    basin::{BasinInfo, BasinName, BasinScope, ListBasinsRequest},
-    config::{BasinConfig, BasinReconfiguration, OptionalStreamConfig, StreamReconfiguration},
-    resources::{CreateMode, Page},
-    stream::{
-        AppendAck, AppendInput, ListStreamsRequest, ReadBatch, ReadEnd, ReadStart, StreamInfo,
-        StreamName, StreamPosition,
+use s2_common::{
+    record::{FencingToken, SeqNum},
+    types::{
+        basin::{BasinInfo, BasinName, BasinScope, ListBasinsRequest},
+        config::{BasinConfig, BasinReconfiguration, OptionalStreamConfig, StreamReconfiguration},
+        resources::{CreateMode, Page},
+        stream::{
+            AppendAck, AppendInput, ListStreamsRequest, ReadBatch, ReadEnd, ReadStart, StreamInfo,
+            StreamName, StreamPosition,
+        },
     },
 };
 
@@ -14,13 +17,29 @@ use s2_common::types::{
 // TODO spec out all the errors properly
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum CheckTailError {}
+pub enum CheckTailError {
+    #[error("Stream not found")]
+    StreamNotFound,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum AppendError {}
+pub enum AppendError {
+    #[error("Stream not found")]
+    StreamNotFound,
+    #[error("Sequence number mismatch: expected {expected}, actual {actual}")]
+    SeqNumMismatch { expected: SeqNum, actual: SeqNum },
+    #[error("Fencing token mismatch: expected {expected}, actual {actual}")]
+    FencingTokenMismatch {
+        expected: FencingToken,
+        actual: FencingToken,
+    },
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum ReadError {}
+pub enum ReadError {
+    #[error("Stream not found")]
+    StreamNotFound,
+}
 
 pub trait DataOps {
     async fn check_tail(
