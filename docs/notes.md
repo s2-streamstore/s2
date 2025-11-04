@@ -1,22 +1,14 @@
 s2-cloud: scale horizontally
-s2-lite: scale vertically
-
-Pluggable backends, to start:
-- InMemory { embedded }
-    Data tied to process lifetime
-- SlateDB  { embedded, diskless, durable, bottomless }
-    Configured with:
-      an object storage URI
+s2-lite: scale vertically, slatedb
 
 Backend responsibilities:
 - fencing zombies
 
 Following live updates is easy because it'd be a single node that is aware of what's being written on a stream, so always just publish to a tailer broadcast channel.
 
-Basins supported via `S2-Basin` header.
+Task per stream and communicate over a channel... or do shared state..?
 
-Q: what do we do if a basin is lost
-  Streams, well, it's the nature of the beast
+Basins supported via `S2-Basin` header. If missing, `default` basin used.
 
 Granular access tokens supported by storing them in the same DB.
   Background tasks may be required by certain backends, while others have built-in TTL support.

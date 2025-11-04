@@ -333,12 +333,6 @@ impl ReadEnd {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ReadRequest {
-    pub start: ReadStart,
-    pub end: ReadEnd,
-}
-
 #[derive(Default, Clone)]
 pub struct ReadBatch {
     pub records: MeteredSequencedRecords,

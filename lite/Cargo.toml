@@ -9,9 +9,11 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 compact_str = { workspace = true }
+dashmap = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 s2-api = { path = "../api" }
 s2-common = { path = "../common", features = ["clap"] }
 slatedb = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
