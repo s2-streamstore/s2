@@ -13,30 +13,31 @@ Basins supported via `S2-Basin` header. If missing, `default` basin used.
 Granular access tokens supported by storing them in the same DB.
   Background tasks may be required by certain backends, while others have built-in TTL support.
 
-/records
+DataOps /records
   append # (basin, stream)
   read # (basin, stream)
   check_tail # (basin, stream)
-/streams
+
+StreamOps /streams
   list_streams  # (basin)
   create_stream  # (basin, stream)
   get_stream_config # (basin, stream)
   reconfigure_stream # (basin, stream)
   delete_stream # (basin, stream)
 
-/basins
+BasinOps /basins
   list_basins # ()
   create_basin # (basin)
   get_basin_config # (basin)
   reconfigure_basin # (basin)
   delete_basin # (basin)
 
-/access-tokens # not initially supported
+AccessTokenOps /access-tokens # not initially supported
   list_access_tokens
   issue_access_token
   revoke_access_token
 
-/metrics # not initially supported
+MetricOps /metrics # not initially supported
   get_account_metrics
   get_basin_metrics
   get_stream_metrics
@@ -44,7 +45,6 @@ Granular access tokens supported by storing them in the same DB.
 ## data format
 
 StreamID = Blake3(BasinName, StreamName)
-  32 byte hash
 
 1 byte prefix for each key identifying the type of data:
 BC  Basin config
