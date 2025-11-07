@@ -21,6 +21,8 @@ use utoipa::{IntoParams, ToSchema};
 
 use super::config::StreamConfig;
 
+pub const S2_FORMAT_HEADER: http::HeaderName = http::HeaderName::from_static("s2-format");
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -350,7 +352,7 @@ pub enum S2Format {
 impl S2Format {
     /// Returns `None` in case of more than 1 header or an invalid header value.
     pub fn from_headers(headers: &http::HeaderMap) -> Option<Self> {
-        let mut formats = headers.get_all("s2-format").iter();
+        let mut formats = headers.get_all(S2_FORMAT_HEADER).iter();
         let Some(format) = formats.next() else {
             return Some(S2Format::default());
         };
