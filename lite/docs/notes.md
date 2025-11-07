@@ -4,7 +4,7 @@ TBD: Task per stream and communicate over a channel, or shared state?
 
 Basins supported via `S2-Basin` header. If missing, `default` basin used.
 
-Granular access tokens supported by storing them in the same DB.
+Granular access tokens can be supported by storing them in the same DB.
 
 ## Data model
 
@@ -43,6 +43,7 @@ Retention:
 
 ## API surface
 
+```
 DataOps /records
   append # (basin, stream)
   read # (basin, stream)
@@ -71,3 +72,4 @@ MetricOps /metrics # not initially supported
   get_account_metrics
   get_basin_metrics
   get_stream_metrics
+```
