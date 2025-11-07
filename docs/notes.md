@@ -47,18 +47,18 @@ MetricOps /metrics # not initially supported
 StreamID = Blake3(BasinName, StreamName)
 
 1 byte prefix for each key identifying the type of data:
-BC  Basin config
-SC  Stream config
-SD  Stream data
-ST  Stream timestamp
-SP  Stream tail position
+BC  Basin config              upd   per-basin
+SC  Stream config             upd   per-stream
+SD  Stream data               imm   per-record
+ST  Stream timestamp          imm   per-record
+SP  Stream tail position      upd   per-stream
 
 ```
 BC  "{BasinName}"                 ->    BasinConfig
 SC  "{BasinName}#{StreamName}"    ->    StreamConfig
 SD  StreamID.SeqNum               ->    Record
 ST  StreamID.Timestamp            ->    SeqNum
-SP  StreamId                      ->    SeqNum.Timestamp
+SP  StreamID                      ->    SeqNum.Timestamp
 ```
 
 Appends:
