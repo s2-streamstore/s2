@@ -1,6 +1,3 @@
 [submodule "protos"]
 	path = api/protos
 	url = https://github.com/s2-streamstore/s2-protos
-[submodule "api/protos"]
-	path = api/protos
-	url = git@github.com:s2-streamstore/s2-protos.git
