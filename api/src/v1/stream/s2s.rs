@@ -204,6 +204,12 @@ impl SessionMessage {
     }
 
     fn decode_message(mut buf: Bytes) -> std::io::Result<Self> {
+        if buf.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "empty frame payload",
+            ));
+        }
         let flag = buf.get_u8();
 
         let is_terminal = (flag & FLAG_TERMINAL) != 0;
@@ -596,6 +602,15 @@ mod test {
         let mut buf = BytesMut::from(raw.as_slice());
         let err = decoder.decode(&mut buf).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn frame_decoder_handles_empty_payload() {        
+        let raw = vec![0, 0, 0];
+        let mut decoder = FrameDecoder;
+        let mut buf = BytesMut::from(raw.as_slice());
+        let err = decoder.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
