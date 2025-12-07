@@ -5,6 +5,45 @@ use s2_common::types::{
     stream::{StreamName, StreamNamePrefix},
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone)]
+pub struct MaybeEmpty<T>(pub Option<T>);
+
+impl<T> MaybeEmpty<T> {
+    pub fn new(value: Option<T>) -> Self {
+        Self(value)
+    }
+}
+
+impl<T: Serialize + AsRef<str>> Serialize for MaybeEmpty<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match &self.0 {
+            Some(v) => v.serialize(serializer),
+            None => serializer.serialize_str(""),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for MaybeEmpty<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if s.is_empty() {
+            Ok(MaybeEmpty(None))
+        } else {
+            T::deserialize(serde::de::value::StringDeserializer::new(s)).map(|v| MaybeEmpty(Some(v)))
+        }
+    }
+}
+
 use time::{OffsetDateTime, format_description::well_known::Iso8601};
 #[cfg(feature = "utoipa")]
 use utoipa::{IntoParams, ToSchema};
@@ -226,11 +265,11 @@ impl TryFrom<AccessTokenInfo> for types::access::AccessTokenInfo {
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct AccessTokenScope {
     /// Basin names allowed.
-    pub basins: Option<ResourceSet<BasinName, BasinNamePrefix>>,
+    pub basins: Option<ResourceSet<MaybeEmpty<BasinName>, BasinNamePrefix>>,
     /// Stream names allowed.
-    pub streams: Option<ResourceSet<StreamName, StreamNamePrefix>>,
+    pub streams: Option<ResourceSet<MaybeEmpty<StreamName>, StreamNamePrefix>>,
     /// Token IDs allowed.
-    pub access_tokens:  Option<ResourceSet<AccessTokenId, AccessTokenIdPrefix>>,
+    pub access_tokens:  Option<ResourceSet<MaybeEmpty<AccessTokenId>, AccessTokenIdPrefix>>,
     /// Access permissions at operation group level.
     pub op_groups: Option<PermittedOperationGroups>,
     /// Operations allowed for the token.
@@ -298,24 +337,21 @@ pub enum ResourceSet<E, P> {
     Prefix(P),
 }
 
-impl<E, P> ResourceSet<E, P> {
+impl<E, P> ResourceSet<MaybeEmpty<E>, P> {
     pub fn to_opt(rs: types::access::ResourceSet<E, P>) -> Option<Self> {
         match rs {
             types::access::ResourceSet::None => None,
-            types::access::ResourceSet::Exact(e) => Some(ResourceSet::Exact(e)),
+            types::access::ResourceSet::Exact(e) => Some(ResourceSet::Exact(MaybeEmpty::new(Some(e)))),
             types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p)),
         }
     }
 }
 
-impl<E, P> From<ResourceSet<E, P>> for types::access::ResourceSet<E, P>
-where
-    E: AsRef<str>,
-{
-    fn from(value: ResourceSet<E, P>) -> Self {
+impl<E, P> From<ResourceSet<MaybeEmpty<E>, P>> for types::access::ResourceSet<E, P> {
+    fn from(value: ResourceSet<MaybeEmpty<E>, P>) -> Self {
         match value {
-            ResourceSet::Exact(e) if e.as_ref().is_empty() => Self::None,
-            ResourceSet::Exact(e) => Self::Exact(e),
+            ResourceSet::Exact(MaybeEmpty(None)) => Self::None,
+            ResourceSet::Exact(MaybeEmpty(Some(e))) => Self::Exact(e),
             ResourceSet::Prefix(p) => Self::Prefix(p),
         }
     }
