@@ -7,22 +7,29 @@ use s2_common::types::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
-pub struct MaybeEmpty<T>(pub Option<T>);
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum MaybeEmpty<T> {
+    Empty,
+    NonEmpty(T),
+}
 
 impl<T> MaybeEmpty<T> {
     pub fn new(value: Option<T>) -> Self {
-        Self(value)
+        match value {
+            Some(v) => Self::NonEmpty(v),
+            None => Self::Empty,
+        }
     }
 }
 
-impl<T: Serialize + AsRef<str>> Serialize for MaybeEmpty<T> {
+impl<T: Serialize> Serialize for MaybeEmpty<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        match &self.0 {
-            Some(v) => v.serialize(serializer),
-            None => serializer.serialize_str(""),
+        match self {
+            Self::NonEmpty(v) => v.serialize(serializer),
+            Self::Empty => serializer.serialize_str(""),
         }
     }
 }
@@ -37,9 +44,9 @@ where
     {
         let s = String::deserialize(deserializer)?;
         if s.is_empty() {
-            Ok(MaybeEmpty(None))
+            Ok(MaybeEmpty::Empty)
         } else {
-            T::deserialize(serde::de::value::StringDeserializer::new(s)).map(|v| MaybeEmpty(Some(v)))
+            T::deserialize(serde::de::value::StringDeserializer::new(s)).map(MaybeEmpty::NonEmpty)
         }
     }
 }
@@ -341,7 +348,9 @@ impl<E, P> ResourceSet<MaybeEmpty<E>, P> {
     pub fn to_opt(rs: types::access::ResourceSet<E, P>) -> Option<Self> {
         match rs {
             types::access::ResourceSet::None => None,
-            types::access::ResourceSet::Exact(e) => Some(ResourceSet::Exact(MaybeEmpty::new(Some(e)))),
+            types::access::ResourceSet::Exact(e) => {
+                Some(ResourceSet::Exact(MaybeEmpty::NonEmpty(e)))
+            }
             types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p)),
         }
     }
@@ -350,8 +359,8 @@ impl<E, P> ResourceSet<MaybeEmpty<E>, P> {
 impl<E, P> From<ResourceSet<MaybeEmpty<E>, P>> for types::access::ResourceSet<E, P> {
     fn from(value: ResourceSet<MaybeEmpty<E>, P>) -> Self {
         match value {
-            ResourceSet::Exact(MaybeEmpty(None)) => Self::None,
-            ResourceSet::Exact(MaybeEmpty(Some(e))) => Self::Exact(e),
+            ResourceSet::Exact(MaybeEmpty::Empty) => Self::None,
+            ResourceSet::Exact(MaybeEmpty::NonEmpty(e)) => Self::Exact(e),
             ResourceSet::Prefix(p) => Self::Prefix(p),
         }
     }
@@ -474,4 +483,110 @@ pub struct ListAccessTokensResponse {
 pub struct IssueAccessTokenResponse {
     /// Created access token.
     pub access_token: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn random_basin_resource_set() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            Just(serde_json::json!({"exact": ""})),
+            "[a-z][a-z0-9]{7,20}".prop_map(|s| serde_json::json!({"exact": s})),
+            Just(serde_json::json!({"prefix": ""})),
+            "[a-z][a-z0-9]{0,10}".prop_map(|s| serde_json::json!({"prefix": s})),
+        ]
+    }
+
+    fn random_resource_set() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            Just(serde_json::json!({"exact": ""})),
+            "[a-z][a-z0-9]{0,20}".prop_map(|s| serde_json::json!({"exact": s})),
+            Just(serde_json::json!({"prefix": ""})),
+            "[a-z][a-z0-9]{0,10}".prop_map(|s| serde_json::json!({"prefix": s})),
+        ]
+    }
+
+    fn random_access_token_info() -> impl Strategy<Value = serde_json::Value> {
+        (
+            "[a-z][a-z0-9]{0,20}",
+            proptest::option::of(random_basin_resource_set()),
+            proptest::option::of(random_resource_set()),
+            proptest::option::of(random_resource_set()),
+        )
+            .prop_map(|(id, basins, streams, access_tokens)| {
+                serde_json::json!({
+                    "id": id,
+                    "scope": {
+                        "basins": basins,
+                        "streams": streams,
+                        "access_tokens": access_tokens
+                    }
+                })
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn access_token_info_roundtrip(json in random_access_token_info()) {
+            let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
+            let internal: types::access::IssueAccessTokenRequest = parsed.clone().try_into().unwrap();
+            let back: AccessTokenInfo = internal.into();
+            prop_assert_eq!(parsed.id, back.id);
+        }
+    }
+
+    #[test]
+    fn empty_exact_converts_to_resource_set_none() {
+        let json = serde_json::json!({
+            "id": "test-token",
+            "scope": {
+                "streams": {"exact": ""},
+                "basins": {"exact": ""},
+                "access_tokens": {"exact": ""}
+            }
+        });
+
+        let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
+        let internal: types::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
+
+        assert!(matches!(
+            internal.scope.streams,
+            types::access::ResourceSet::None
+        ));
+        assert!(matches!(
+            internal.scope.basins,
+            types::access::ResourceSet::None
+        ));
+        assert!(matches!(
+            internal.scope.access_tokens,
+            types::access::ResourceSet::None
+        ));
+    }
+
+    #[test]
+    fn missing_scope_fields_default_to_resource_set_none() {
+        let json = serde_json::json!({
+            "id": "test-token",
+            "scope": {}
+        });
+
+        let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
+        let internal: types::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
+
+        assert!(matches!(
+            internal.scope.streams,
+            types::access::ResourceSet::None
+        ));
+        assert!(matches!(
+            internal.scope.basins,
+            types::access::ResourceSet::None
+        ));
+        assert!(matches!(
+            internal.scope.access_tokens,
+            types::access::ResourceSet::None
+        ));
+    }
 }

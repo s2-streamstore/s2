@@ -161,13 +161,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
     use crate::{
         caps,
         read_extent::{ReadLimit, ReadUntil},
         record::{CommandRecord, Encodable, MeteredRecord, MeteredSize, Record},
     };
-    use bytes::Bytes;
 
     type BatchItem = (SeqNum, Timestamp, Bytes);
 

@@ -332,18 +332,20 @@ impl tokio_util::codec::Decoder for FrameDecoder {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use bytes::BytesMut;
-    use futures::{StreamExt, stream};
-    use http::HeaderValue;
-    use proptest::{collection::vec, prelude::*};
-    use prost::Message;
     use std::{
         io,
         pin::Pin,
         task::{Context, Poll},
     };
+
+    use bytes::BytesMut;
+    use futures::{StreamExt, stream};
+    use http::HeaderValue;
+    use proptest::{collection::vec, prelude::*};
+    use prost::Message;
     use tokio_util::codec::Decoder;
+
+    use super::*;
 
     #[derive(Clone, PartialEq, prost::Message)]
     struct TestProto {
@@ -605,7 +607,7 @@ mod test {
     }
 
     #[test]
-    fn frame_decoder_handles_empty_payload() {        
+    fn frame_decoder_handles_empty_payload() {
         let raw = vec![0, 0, 0];
         let mut decoder = FrameDecoder;
         let mut buf = BytesMut::from(raw.as_slice());

@@ -8,12 +8,11 @@ use s2_common::types::{
 };
 use tokio::sync::{broadcast, mpsc};
 
+use super::ops::{CheckTailError, DataOps};
 use crate::backend::{
     ops::{AppendError, ReadError},
     stream_id::StreamId,
 };
-
-use super::ops::{CheckTailError, DataOps};
 
 struct StreamTailState {
     tail: StreamPosition,

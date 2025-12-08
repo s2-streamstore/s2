@@ -38,9 +38,11 @@ impl StreamId {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamId;
-    use s2_common::types::{basin::BasinName, stream::StreamName};
     use std::str::FromStr;
+
+    use s2_common::types::{basin::BasinName, stream::StreamName};
+
+    use super::StreamId;
 
     #[test]
     fn deterministic_for_same_inputs() {
