@@ -13,15 +13,6 @@ pub enum MaybeEmpty<T> {
     NonEmpty(T),
 }
 
-impl<T> MaybeEmpty<T> {
-    pub fn new(value: Option<T>) -> Self {
-        match value {
-            Some(v) => Self::NonEmpty(v),
-            None => Self::Empty,
-        }
-    }
-}
-
 impl<T: Serialize> Serialize for MaybeEmpty<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
