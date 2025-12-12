@@ -339,7 +339,7 @@ mod test {
     };
 
     use bytes::BytesMut;
-    use futures::{StreamExt, stream};
+    use futures::StreamExt;
     use http::HeaderValue;
     use proptest::{collection::vec, prelude::*};
     use prost::Message;
@@ -365,11 +365,11 @@ mod test {
         body: &'static str,
     }
 
-    impl Into<TerminalMessage> for TestError {
-        fn into(self) -> TerminalMessage {
+    impl From<TestError> for TerminalMessage {
+        fn from(val: TestError) -> Self {
             TerminalMessage {
-                status: self.status,
-                body: self.body.to_string(),
+                status: val.status,
+                body: val.body.to_string(),
             }
         }
     }
@@ -665,7 +665,7 @@ mod test {
             Ok(proto.clone()),
         ];
 
-        let stream = stream::iter(items.into_iter());
+        let stream = futures::stream::iter(items);
         let framed = FramedMessageStream::new(CompressionAlgorithm::None, stream);
         let outputs = futures::executor::block_on(async {
             framed.collect::<Vec<std::io::Result<Bytes>>>().await
@@ -696,7 +696,7 @@ mod test {
     fn framed_message_stream_stops_after_termination() {
         let mut stream = FramedMessageStream::new(
             CompressionAlgorithm::None,
-            stream::iter(vec![
+            futures::stream::iter(vec![
                 Ok(TestProto::new(vec![0])),
                 Err(TestError {
                     status: 400,
