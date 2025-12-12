@@ -425,7 +425,7 @@ mod test {
             prop_assert!(matches!(decoded, SessionMessage::Regular(_)));
             let SessionMessage::Regular(data) = decoded else { unreachable!() };
 
-            let expected_compression = if algo == CompressionAlgorithm::None || payload.len() < COMPRESSION_THRESHOLD_BYTES {
+            let expected_compression = if algo == CompressionAlgorithm::None || proto.encoded_len() < COMPRESSION_THRESHOLD_BYTES {
                 CompressionAlgorithm::None
             } else {
                 algo
