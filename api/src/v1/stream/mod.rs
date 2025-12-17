@@ -47,16 +47,6 @@ impl From<types::stream::StreamInfo> for StreamInfo {
     }
 }
 
-impl From<StreamInfo> for types::stream::StreamInfo {
-    fn from(value: StreamInfo) -> Self {
-        Self {
-            name: value.name,
-            created_at: value.created_at,
-            deleted_at: value.deleted_at,
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(IntoParams))]
@@ -180,22 +170,6 @@ impl TryFrom<ReadStart> for types::stream::ReadStart {
     }
 }
 
-impl From<types::stream::ReadStart> for ReadStart {
-    fn from(types::stream::ReadStart { from, clamp }: types::stream::ReadStart) -> Self {
-        let (seq_num, timestamp, tail_offset) = match from {
-            types::stream::ReadFrom::SeqNum(seq_num) => (Some(seq_num), None, None),
-            types::stream::ReadFrom::Timestamp(timestamp) => (None, Some(timestamp), None),
-            types::stream::ReadFrom::TailOffset(tail_offset) => (None, None, Some(tail_offset)),
-        };
-        Self {
-            seq_num,
-            timestamp,
-            tail_offset,
-            clamp: Some(clamp),
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(IntoParams))]
@@ -229,17 +203,6 @@ impl From<ReadEnd> for types::stream::ReadEnd {
             ),
             until: value.until.into(),
             wait: value.wait.map(|w| Duration::from_secs(w as u64)),
-        }
-    }
-}
-
-impl From<types::stream::ReadEnd> for ReadEnd {
-    fn from(value: types::stream::ReadEnd) -> Self {
-        Self {
-            count: value.limit.count(),
-            bytes: value.limit.bytes(),
-            until: value.until.into(),
-            wait: value.wait.map(|w| w.as_secs() as u32),
         }
     }
 }

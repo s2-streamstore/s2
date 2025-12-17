@@ -206,21 +206,6 @@ impl From<types::access::IssueAccessTokenRequest> for AccessTokenInfo {
     }
 }
 
-impl TryFrom<AccessTokenInfo> for types::access::AccessTokenInfo {
-    type Error = types::ValidationError;
-
-    fn try_from(value: AccessTokenInfo) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: value.id,
-            expires_at: value
-                .expires_at
-                .ok_or_else(|| types::ValidationError("Missing `expires_at`".to_owned()))?,
-            auto_prefix_streams: value.auto_prefix_streams.unwrap_or_default(),
-            scope: value.scope.try_into()?,
-        })
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]

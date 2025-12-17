@@ -1,6 +1,4 @@
-use std::{fmt::Debug, num::NonZeroUsize, ops::Deref, str::FromStr};
-
-use crate::types::ValidationError;
+use std::{fmt::Debug, num::NonZeroUsize, ops::Deref};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Page<T> {
@@ -69,39 +67,6 @@ pub struct ListItemsRequest<P, S>(ListItemsRequestParts<P, S>)
 where
     P: Default,
     S: Default;
-
-impl<P, S> ListItemsRequest<P, S>
-where
-    P: Default + FromStr,
-    S: Default + FromStr,
-    <P as FromStr>::Err: Debug,
-    <S as FromStr>::Err: Debug,
-{
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_prefix(mut self, prefix: impl AsRef<str>) -> Result<Self, ValidationError> {
-        self.0.prefix = prefix.as_ref().parse().map_err(|e| format!("{:?}", e))?;
-        Ok(self)
-    }
-
-    pub fn with_start_after(
-        mut self,
-        start_after: impl AsRef<str>,
-    ) -> Result<Self, ValidationError> {
-        self.0.start_after = start_after
-            .as_ref()
-            .parse()
-            .map_err(|e| format!("{:?}", e))?;
-        Ok(self)
-    }
-
-    pub fn with_limit(mut self, limit: impl Into<ListLimit>) -> Self {
-        self.0.limit = limit.into();
-        self
-    }
-}
 
 impl<P, S> ListItemsRequest<P, S>
 where
