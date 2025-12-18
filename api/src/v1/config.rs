@@ -724,6 +724,18 @@ mod tests {
                 merged.retention_policy,
                 stream.retention_policy.or(basin.retention_policy).unwrap_or_default()
             );
+            prop_assert_eq!(
+                merged.timestamping.mode,
+                stream.timestamping.mode.or(basin.timestamping.mode).unwrap_or_default()
+            );
+            prop_assert_eq!(
+                merged.timestamping.uncapped,
+                stream.timestamping.uncapped.or(basin.timestamping.uncapped).unwrap_or_default()
+            );
+            prop_assert_eq!(
+                merged.delete_on_empty.min_age,
+                stream.delete_on_empty.min_age.or(basin.delete_on_empty.min_age).unwrap_or_default()
+            );
         }
 
         #[test]
@@ -914,6 +926,19 @@ mod tests {
 
             prop_assert_eq!(result.timestamping.mode, Some(expected_mode));
             prop_assert_eq!(result.timestamping.uncapped, Some(base_uncapped));
+        }
+
+        #[test]
+        fn empty_json_converts_to_all_none(_unused in Just(())) {
+            let json = serde_json::json!({});
+            let parsed: StreamConfig = serde_json::from_value(json).unwrap();
+            let internal: types::config::OptionalStreamConfig = parsed.try_into().unwrap();
+
+            prop_assert!(internal.storage_class.is_none(), "storage_class should be None");
+            prop_assert!(internal.retention_policy.is_none(), "retention_policy should be None");
+            prop_assert!(internal.timestamping.mode.is_none(), "timestamping.mode should be None");
+            prop_assert!(internal.timestamping.uncapped.is_none(), "timestamping.uncapped should be None");
+            prop_assert!(internal.delete_on_empty.min_age.is_none(), "delete_on_empty.min_age should be None");
         }
     }
 }
