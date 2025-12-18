@@ -790,21 +790,6 @@ mod tests {
         }
 
         #[test]
-        fn to_opt_returns_none_for_defaults(_unused in Just(())) {
-            // default stream config -> None
-            prop_assert!(StreamConfig::to_opt(types::config::OptionalStreamConfig::default()).is_none());
-
-            // delete_on_empty: None or Some(ZERO) -> None
-            let doe_none = types::config::OptionalDeleteOnEmptyConfig { min_age: None };
-            let doe_zero = types::config::OptionalDeleteOnEmptyConfig { min_age: Some(Duration::ZERO) };
-            prop_assert!(DeleteOnEmptyConfig::to_opt(doe_none).is_none());
-            prop_assert!(DeleteOnEmptyConfig::to_opt(doe_zero).is_none());
-
-            // default timestamping -> None
-            prop_assert!(TimestampingConfig::to_opt(types::config::OptionalTimestampingConfig::default()).is_none());
-        }
-
-        #[test]
         fn to_opt_returns_some_for_non_defaults(
             sc in gen_storage_class(),
             doe_secs in 1u64..u64::MAX,
@@ -927,18 +912,53 @@ mod tests {
             prop_assert_eq!(result.timestamping.mode, Some(expected_mode));
             prop_assert_eq!(result.timestamping.uncapped, Some(base_uncapped));
         }
+    }
 
-        #[test]
-        fn empty_json_converts_to_all_none(_unused in Just(())) {
-            let json = serde_json::json!({});
-            let parsed: StreamConfig = serde_json::from_value(json).unwrap();
-            let internal: types::config::OptionalStreamConfig = parsed.try_into().unwrap();
+    #[test]
+    fn to_opt_returns_none_for_defaults() {
+        // default stream config -> None
+        assert!(StreamConfig::to_opt(types::config::OptionalStreamConfig::default()).is_none());
 
-            prop_assert!(internal.storage_class.is_none(), "storage_class should be None");
-            prop_assert!(internal.retention_policy.is_none(), "retention_policy should be None");
-            prop_assert!(internal.timestamping.mode.is_none(), "timestamping.mode should be None");
-            prop_assert!(internal.timestamping.uncapped.is_none(), "timestamping.uncapped should be None");
-            prop_assert!(internal.delete_on_empty.min_age.is_none(), "delete_on_empty.min_age should be None");
-        }
+        // delete_on_empty: None or Some(ZERO) -> None
+        let doe_none = types::config::OptionalDeleteOnEmptyConfig { min_age: None };
+        let doe_zero = types::config::OptionalDeleteOnEmptyConfig {
+            min_age: Some(Duration::ZERO),
+        };
+        assert!(DeleteOnEmptyConfig::to_opt(doe_none).is_none());
+        assert!(DeleteOnEmptyConfig::to_opt(doe_zero).is_none());
+
+        // default timestamping -> None
+        assert!(
+            TimestampingConfig::to_opt(types::config::OptionalTimestampingConfig::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_json_converts_to_all_none() {
+        let json = serde_json::json!({});
+        let parsed: StreamConfig = serde_json::from_value(json).unwrap();
+        let internal: types::config::OptionalStreamConfig = parsed.try_into().unwrap();
+
+        assert!(
+            internal.storage_class.is_none(),
+            "storage_class should be None"
+        );
+        assert!(
+            internal.retention_policy.is_none(),
+            "retention_policy should be None"
+        );
+        assert!(
+            internal.timestamping.mode.is_none(),
+            "timestamping.mode should be None"
+        );
+        assert!(
+            internal.timestamping.uncapped.is_none(),
+            "timestamping.uncapped should be None"
+        );
+        assert!(
+            internal.delete_on_empty.min_age.is_none(),
+            "delete_on_empty.min_age should be None"
+        );
     }
 }
