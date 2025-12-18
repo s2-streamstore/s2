@@ -152,7 +152,7 @@ impl From<TimestampingConfig> for types::config::OptionalTimestampingConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct TimestampingReconfiguration {
     /// Timestamping mode for appends that influences how timestamps are handled.
@@ -231,7 +231,7 @@ impl From<DeleteOnEmptyConfig> for types::config::OptionalDeleteOnEmptyConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct DeleteOnEmptyReconfiguration {
     /// Minimum age in seconds before an empty stream can be deleted.
@@ -340,7 +340,7 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct StreamReconfiguration {
     /// Storage class for recent writes.
@@ -401,7 +401,7 @@ impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct BasinConfig {
     /// Default stream configuration.
@@ -452,7 +452,7 @@ impl From<types::config::BasinConfig> for BasinConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct BasinReconfiguration {
     /// Basin configuration.
@@ -500,5 +500,465 @@ impl From<types::config::BasinReconfiguration> for BasinReconfiguration {
             create_stream_on_append: create_stream_on_append.map(Into::into),
             create_stream_on_read: create_stream_on_read.map(Into::into),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn gen_storage_class() -> impl Strategy<Value = StorageClass> {
+        prop_oneof![Just(StorageClass::Standard), Just(StorageClass::Express)]
+    }
+
+    fn gen_timestamping_mode() -> impl Strategy<Value = TimestampingMode> {
+        prop_oneof![
+            Just(TimestampingMode::ClientPrefer),
+            Just(TimestampingMode::ClientRequire),
+            Just(TimestampingMode::Arrival),
+        ]
+    }
+
+    fn gen_retention_policy() -> impl Strategy<Value = RetentionPolicy> {
+        prop_oneof![
+            any::<u64>().prop_map(RetentionPolicy::Age),
+            Just(RetentionPolicy::Infinite(InfiniteRetention {})),
+        ]
+    }
+
+    fn gen_timestamping_config() -> impl Strategy<Value = TimestampingConfig> {
+        (
+            proptest::option::of(gen_timestamping_mode()),
+            proptest::option::of(any::<bool>()),
+        )
+            .prop_map(|(mode, uncapped)| TimestampingConfig { mode, uncapped })
+    }
+
+    fn gen_delete_on_empty_config() -> impl Strategy<Value = DeleteOnEmptyConfig> {
+        any::<u64>().prop_map(|min_age_secs| DeleteOnEmptyConfig { min_age_secs })
+    }
+
+    fn gen_stream_config() -> impl Strategy<Value = StreamConfig> {
+        (
+            proptest::option::of(gen_storage_class()),
+            proptest::option::of(gen_retention_policy()),
+            proptest::option::of(gen_timestamping_config()),
+            proptest::option::of(gen_delete_on_empty_config()),
+        )
+            .prop_map(
+                |(storage_class, retention_policy, timestamping, delete_on_empty)| StreamConfig {
+                    storage_class,
+                    retention_policy,
+                    timestamping,
+                    delete_on_empty,
+                },
+            )
+    }
+
+    fn gen_basin_config() -> impl Strategy<Value = BasinConfig> {
+        (
+            proptest::option::of(gen_stream_config()),
+            any::<bool>(),
+            any::<bool>(),
+        )
+            .prop_map(
+                |(default_stream_config, create_stream_on_append, create_stream_on_read)| {
+                    BasinConfig {
+                        default_stream_config,
+                        create_stream_on_append,
+                        create_stream_on_read,
+                    }
+                },
+            )
+    }
+
+    fn gen_maybe<T: std::fmt::Debug + Clone + 'static>(
+        inner: impl Strategy<Value = T>,
+    ) -> impl Strategy<Value = Maybe<Option<T>>> {
+        prop_oneof![
+            Just(Maybe::Unspecified),
+            Just(Maybe::Specified(None)),
+            inner.prop_map(|v| Maybe::Specified(Some(v))),
+        ]
+    }
+
+    fn gen_stream_reconfiguration() -> impl Strategy<Value = StreamReconfiguration> {
+        (
+            gen_maybe(gen_storage_class()),
+            gen_maybe(gen_retention_policy()),
+            gen_maybe(gen_timestamping_reconfiguration()),
+            gen_maybe(gen_delete_on_empty_reconfiguration()),
+        )
+            .prop_map(
+                |(storage_class, retention_policy, timestamping, delete_on_empty)| {
+                    StreamReconfiguration {
+                        storage_class,
+                        retention_policy,
+                        timestamping,
+                        delete_on_empty,
+                    }
+                },
+            )
+    }
+
+    fn gen_timestamping_reconfiguration() -> impl Strategy<Value = TimestampingReconfiguration> {
+        (gen_maybe(gen_timestamping_mode()), gen_maybe(any::<bool>()))
+            .prop_map(|(mode, uncapped)| TimestampingReconfiguration { mode, uncapped })
+    }
+
+    fn gen_delete_on_empty_reconfiguration() -> impl Strategy<Value = DeleteOnEmptyReconfiguration>
+    {
+        gen_maybe(any::<u64>())
+            .prop_map(|min_age_secs| DeleteOnEmptyReconfiguration { min_age_secs })
+    }
+
+    fn gen_basin_reconfiguration() -> impl Strategy<Value = BasinReconfiguration> {
+        (
+            gen_maybe(gen_stream_reconfiguration()),
+            prop_oneof![
+                Just(Maybe::Unspecified),
+                any::<bool>().prop_map(Maybe::Specified),
+            ],
+            prop_oneof![
+                Just(Maybe::Unspecified),
+                any::<bool>().prop_map(Maybe::Specified),
+            ],
+        )
+            .prop_map(
+                |(default_stream_config, create_stream_on_append, create_stream_on_read)| {
+                    BasinReconfiguration {
+                        default_stream_config,
+                        create_stream_on_append,
+                        create_stream_on_read,
+                    }
+                },
+            )
+    }
+
+    fn gen_internal_optional_stream_config()
+    -> impl Strategy<Value = types::config::OptionalStreamConfig> {
+        (
+            proptest::option::of(gen_storage_class()),
+            proptest::option::of(gen_retention_policy()),
+            proptest::option::of(gen_timestamping_mode()),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<u64>()),
+        )
+            .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe)| {
+                types::config::OptionalStreamConfig {
+                    storage_class: sc.map(Into::into),
+                    retention_policy: rp.map(|rp| match rp {
+                        RetentionPolicy::Age(secs) => {
+                            types::config::RetentionPolicy::Age(Duration::from_secs(secs))
+                        }
+                        RetentionPolicy::Infinite(_) => types::config::RetentionPolicy::Infinite(),
+                    }),
+                    timestamping: types::config::OptionalTimestampingConfig {
+                        mode: ts_mode.map(Into::into),
+                        uncapped: ts_uncapped,
+                    },
+                    delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+                        min_age: doe.map(Duration::from_secs),
+                    },
+                }
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn stream_config_conversion_validates(config in gen_stream_config()) {
+            let has_zero_age = matches!(config.retention_policy, Some(RetentionPolicy::Age(0)));
+            let result: Result<types::config::OptionalStreamConfig, _> = config.try_into();
+
+            if has_zero_age {
+                prop_assert!(result.is_err());
+            } else {
+                prop_assert!(result.is_ok());
+            }
+        }
+
+        #[test]
+        fn basin_config_conversion_validates(config in gen_basin_config()) {
+            let has_invalid_config = config.default_stream_config.as_ref().is_some_and(|sc| {
+                matches!(sc.retention_policy, Some(RetentionPolicy::Age(0)))
+            });
+
+            let result: Result<types::config::BasinConfig, _> = config.try_into();
+
+            if has_invalid_config {
+                prop_assert!(result.is_err());
+            } else {
+                prop_assert!(result.is_ok());
+            }
+        }
+
+        #[test]
+        fn stream_reconfiguration_conversion_validates(reconfig in gen_stream_reconfiguration()) {
+            let has_zero_age = matches!(
+                reconfig.retention_policy,
+                Maybe::Specified(Some(RetentionPolicy::Age(0)))
+            );
+            let result: Result<types::config::StreamReconfiguration, _> = reconfig.try_into();
+
+            if has_zero_age {
+                prop_assert!(result.is_err());
+            } else {
+                prop_assert!(result.is_ok());
+            }
+        }
+
+        #[test]
+        fn merge_stream_or_basin_or_default(
+            stream in gen_internal_optional_stream_config(),
+            basin in gen_internal_optional_stream_config(),
+        ) {
+            let merged = stream.clone().merge(basin.clone());
+
+            prop_assert_eq!(
+                merged.storage_class,
+                stream.storage_class.or(basin.storage_class).unwrap_or_default()
+            );
+            prop_assert_eq!(
+                merged.retention_policy,
+                stream.retention_policy.or(basin.retention_policy).unwrap_or_default()
+            );
+            prop_assert_eq!(
+                merged.timestamping.mode,
+                stream.timestamping.mode.or(basin.timestamping.mode).unwrap_or_default()
+            );
+            prop_assert_eq!(
+                merged.timestamping.uncapped,
+                stream.timestamping.uncapped.or(basin.timestamping.uncapped).unwrap_or_default()
+            );
+            prop_assert_eq!(
+                merged.delete_on_empty.min_age,
+                stream.delete_on_empty.min_age.or(basin.delete_on_empty.min_age).unwrap_or_default()
+            );
+        }
+
+        #[test]
+        fn reconfigure_unspecified_preserves_base(base in gen_internal_optional_stream_config()) {
+            let reconfig = types::config::StreamReconfiguration::default();
+            let result = base.clone().reconfigure(reconfig);
+
+            prop_assert_eq!(result.storage_class, base.storage_class);
+            prop_assert_eq!(result.retention_policy, base.retention_policy);
+            prop_assert_eq!(result.timestamping.mode, base.timestamping.mode);
+            prop_assert_eq!(result.timestamping.uncapped, base.timestamping.uncapped);
+            prop_assert_eq!(result.delete_on_empty.min_age, base.delete_on_empty.min_age);
+        }
+
+        #[test]
+        fn reconfigure_specified_none_clears(base in gen_internal_optional_stream_config()) {
+            let reconfig = types::config::StreamReconfiguration {
+                storage_class: Maybe::Specified(None),
+                retention_policy: Maybe::Specified(None),
+                timestamping: Maybe::Specified(None),
+                delete_on_empty: Maybe::Specified(None),
+            };
+            let result = base.reconfigure(reconfig);
+
+            prop_assert!(result.storage_class.is_none());
+            prop_assert!(result.retention_policy.is_none());
+            prop_assert!(result.timestamping.mode.is_none());
+            prop_assert!(result.timestamping.uncapped.is_none());
+            prop_assert!(result.delete_on_empty.min_age.is_none());
+        }
+
+        #[test]
+        fn reconfigure_specified_some_sets_value(
+            base in gen_internal_optional_stream_config(),
+            new_sc in gen_storage_class(),
+            new_rp_secs in 1u64..u64::MAX,
+        ) {
+            let reconfig = types::config::StreamReconfiguration {
+                storage_class: Maybe::Specified(Some(new_sc.into())),
+                retention_policy: Maybe::Specified(Some(
+                    types::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs))
+                )),
+                ..Default::default()
+            };
+            let result = base.reconfigure(reconfig);
+
+            prop_assert_eq!(result.storage_class, Some(new_sc.into()));
+            prop_assert_eq!(
+                result.retention_policy,
+                Some(types::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs)))
+            );
+        }
+
+        #[test]
+        fn to_opt_returns_some_for_non_defaults(
+            sc in gen_storage_class(),
+            doe_secs in 1u64..u64::MAX,
+            ts_mode in gen_timestamping_mode(),
+        ) {
+            // non-default storage class -> Some
+            let internal = types::config::OptionalStreamConfig {
+                storage_class: Some(sc.into()),
+                ..Default::default()
+            };
+            prop_assert!(StreamConfig::to_opt(internal).is_some());
+
+            // non-zero delete_on_empty -> Some
+            let internal = types::config::OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::from_secs(doe_secs)),
+            };
+            let api = DeleteOnEmptyConfig::to_opt(internal);
+            prop_assert!(api.is_some());
+            prop_assert_eq!(api.unwrap().min_age_secs, doe_secs);
+
+            // non-default timestamping -> Some
+            let internal = types::config::OptionalTimestampingConfig {
+                mode: Some(ts_mode.into()),
+                uncapped: None,
+            };
+            prop_assert!(TimestampingConfig::to_opt(internal).is_some());
+        }
+
+        #[test]
+        fn basin_reconfiguration_conversion_validates(reconfig in gen_basin_reconfiguration()) {
+            let has_zero_age = matches!(
+                &reconfig.default_stream_config,
+                Maybe::Specified(Some(sr)) if matches!(
+                    sr.retention_policy,
+                    Maybe::Specified(Some(RetentionPolicy::Age(0)))
+                )
+            );
+            let result: Result<types::config::BasinReconfiguration, _> = reconfig.try_into();
+
+            if has_zero_age {
+                prop_assert!(result.is_err());
+            } else {
+                prop_assert!(result.is_ok());
+            }
+        }
+
+        #[test]
+        fn reconfigure_basin_unspecified_preserves(
+            base_sc in proptest::option::of(gen_storage_class()),
+            base_on_append in any::<bool>(),
+            base_on_read in any::<bool>(),
+        ) {
+            let base = types::config::BasinConfig {
+                default_stream_config: types::config::OptionalStreamConfig {
+                    storage_class: base_sc.map(Into::into),
+                    ..Default::default()
+                },
+                create_stream_on_append: base_on_append,
+                create_stream_on_read: base_on_read,
+            };
+
+            let reconfig = types::config::BasinReconfiguration::default();
+            let result = base.clone().reconfigure(reconfig);
+
+            prop_assert_eq!(result.default_stream_config.storage_class, base.default_stream_config.storage_class);
+            prop_assert_eq!(result.create_stream_on_append, base.create_stream_on_append);
+            prop_assert_eq!(result.create_stream_on_read, base.create_stream_on_read);
+        }
+
+        #[test]
+        fn reconfigure_basin_specified_updates(
+            base_on_append in any::<bool>(),
+            new_on_append in any::<bool>(),
+            new_sc in gen_storage_class(),
+        ) {
+            let base = types::config::BasinConfig {
+                create_stream_on_append: base_on_append,
+                ..Default::default()
+            };
+
+            let reconfig = types::config::BasinReconfiguration {
+                default_stream_config: Maybe::Specified(Some(types::config::StreamReconfiguration {
+                    storage_class: Maybe::Specified(Some(new_sc.into())),
+                    ..Default::default()
+                })),
+                create_stream_on_append: Maybe::Specified(new_on_append),
+                ..Default::default()
+            };
+            let result = base.reconfigure(reconfig);
+
+            prop_assert_eq!(result.default_stream_config.storage_class, Some(new_sc.into()));
+            prop_assert_eq!(result.create_stream_on_append, new_on_append);
+        }
+
+        #[test]
+        fn reconfigure_nested_partial_update(
+            base_mode in gen_timestamping_mode(),
+            base_uncapped in any::<bool>(),
+            new_mode in gen_timestamping_mode(),
+        ) {
+            let base = types::config::OptionalStreamConfig {
+                timestamping: types::config::OptionalTimestampingConfig {
+                    mode: Some(base_mode.into()),
+                    uncapped: Some(base_uncapped),
+                },
+                ..Default::default()
+            };
+
+            let expected_mode: types::config::TimestampingMode = new_mode.into();
+
+            let reconfig = types::config::StreamReconfiguration {
+                timestamping: Maybe::Specified(Some(types::config::TimestampingReconfiguration {
+                    mode: Maybe::Specified(Some(expected_mode)),
+                    uncapped: Maybe::Unspecified,
+                })),
+                ..Default::default()
+            };
+            let result = base.reconfigure(reconfig);
+
+            prop_assert_eq!(result.timestamping.mode, Some(expected_mode));
+            prop_assert_eq!(result.timestamping.uncapped, Some(base_uncapped));
+        }
+    }
+
+    #[test]
+    fn to_opt_returns_none_for_defaults() {
+        // default stream config -> None
+        assert!(StreamConfig::to_opt(types::config::OptionalStreamConfig::default()).is_none());
+
+        // delete_on_empty: None or Some(ZERO) -> None
+        let doe_none = types::config::OptionalDeleteOnEmptyConfig { min_age: None };
+        let doe_zero = types::config::OptionalDeleteOnEmptyConfig {
+            min_age: Some(Duration::ZERO),
+        };
+        assert!(DeleteOnEmptyConfig::to_opt(doe_none).is_none());
+        assert!(DeleteOnEmptyConfig::to_opt(doe_zero).is_none());
+
+        // default timestamping -> None
+        assert!(
+            TimestampingConfig::to_opt(types::config::OptionalTimestampingConfig::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_json_converts_to_all_none() {
+        let json = serde_json::json!({});
+        let parsed: StreamConfig = serde_json::from_value(json).unwrap();
+        let internal: types::config::OptionalStreamConfig = parsed.try_into().unwrap();
+
+        assert!(
+            internal.storage_class.is_none(),
+            "storage_class should be None"
+        );
+        assert!(
+            internal.retention_policy.is_none(),
+            "retention_policy should be None"
+        );
+        assert!(
+            internal.timestamping.mode.is_none(),
+            "timestamping.mode should be None"
+        );
+        assert!(
+            internal.timestamping.uncapped.is_none(),
+            "timestamping.uncapped should be None"
+        );
+        assert!(
+            internal.delete_on_empty.min_age.is_none(),
+            "delete_on_empty.min_age should be None"
+        );
     }
 }
