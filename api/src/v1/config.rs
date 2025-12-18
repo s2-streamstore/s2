@@ -848,7 +848,7 @@ mod tests {
             };
             prop_assert!(TimestampingConfig::to_opt(internal).is_some());
         }
-        
+
         #[test]
         fn basin_reconfiguration_conversion_validates(reconfig in gen_basin_reconfiguration()) {
             let has_zero_age = matches!(
@@ -930,7 +930,7 @@ mod tests {
             };
 
             let expected_mode: types::config::TimestampingMode = new_mode.into();
-            
+
             let reconfig = types::config::StreamReconfiguration {
                 timestamping: Maybe::Specified(Some(types::config::TimestampingReconfiguration {
                     mode: Maybe::Specified(Some(expected_mode)),
