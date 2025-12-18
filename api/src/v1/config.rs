@@ -333,8 +333,8 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
         Ok(Self {
             storage_class: storage_class.map(Into::into),
             retention_policy,
-            timestamping: timestamping.unwrap_or_default().into(),
-            delete_on_empty: delete_on_empty.unwrap_or_default().into(),
+            timestamping: timestamping.map(Into::into).unwrap_or_default(),
+            delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
         })
     }
 }
