@@ -31,7 +31,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: arduino/setup-protoc@v3
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: cargo clippy --workspace --all-features --all-targets -- -D warnings --allow deprecated
 
   test:
