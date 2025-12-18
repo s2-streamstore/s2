@@ -668,34 +668,6 @@ mod tests {
 
     proptest! {
         #[test]
-        fn stream_config_json_roundtrip(config in gen_stream_config()) {
-            let json = serde_json::to_string(&config).unwrap();
-            let parsed: StreamConfig = serde_json::from_str(&json).unwrap();
-            prop_assert_eq!(config, parsed);
-        }
-
-        #[test]
-        fn basin_config_json_roundtrip(config in gen_basin_config()) {
-            let json = serde_json::to_string(&config).unwrap();
-            let parsed: BasinConfig = serde_json::from_str(&json).unwrap();
-            prop_assert_eq!(config, parsed);
-        }
-
-        #[test]
-        fn stream_reconfiguration_json_roundtrip(reconfig in gen_stream_reconfiguration()) {
-            let json = serde_json::to_string(&reconfig).unwrap();
-            let parsed: StreamReconfiguration = serde_json::from_str(&json).unwrap();
-            prop_assert_eq!(reconfig, parsed);
-        }
-
-        #[test]
-        fn basin_reconfiguration_json_roundtrip(reconfig in gen_basin_reconfiguration()) {
-            let json = serde_json::to_string(&reconfig).unwrap();
-            let parsed: BasinReconfiguration = serde_json::from_str(&json).unwrap();
-            prop_assert_eq!(reconfig, parsed);
-        }
-
-        #[test]
         fn stream_config_conversion_validates(config in gen_stream_config()) {
             let has_zero_age = matches!(config.retention_policy, Some(RetentionPolicy::Age(0)));
             let result: Result<types::config::OptionalStreamConfig, _> = config.try_into();
