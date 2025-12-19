@@ -271,7 +271,7 @@ mod test {
 
     use bytes::Bytes;
 
-    use super::{Encodable as _, EnvelopeRecord, Header, HeaderFlag};
+    use super::{Encodable as _, EnvelopeRecord, Header, HeaderFlag, InternalRecordError};
 
     fn roundtrip_parts(headers: Vec<Header>, body: Bytes) {
         let encoded: Bytes = EnvelopeRecord::try_from_parts(headers.clone(), body.clone())
@@ -402,8 +402,11 @@ mod test {
         for len in 1..encoded.len() {
             let truncated = encoded.slice(..len);
             assert!(
-                EnvelopeRecord::try_from(truncated).is_err(),
-                "expected error for truncated input at len {len}"
+                matches!(
+                    EnvelopeRecord::try_from(truncated),
+                    Err(InternalRecordError::Truncated(_))
+                ),
+                "expected Truncated error for len {len}"
             );
         }
     }
