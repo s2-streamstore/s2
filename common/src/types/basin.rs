@@ -23,7 +23,7 @@ where
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         utoipa::openapi::Object::builder()
             .schema_type(utoipa::openapi::Type::String)
-            .min_length((!T::IS_PREFIX).then_some(1))
+            .min_length((!T::IS_PREFIX).then_some(Self::MIN_LENGTH))
             .max_length(Some(Self::MAX_LENGTH))
             .into()
     }
