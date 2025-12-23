@@ -29,13 +29,11 @@ pub const S2_FORMAT_HEADER: http::HeaderName = http::HeaderName::from_static("s2
 pub struct StreamInfo {
     /// Stream name.
     pub name: StreamName,
-    /// Creation time in ISO 8601 format.
-    #[serde(with = "time::serde::iso8601")]
-    #[cfg_attr(feature = "utoipa", schema(format = Time))]
+    /// Creation time in RFC 3339 format.
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
-    /// Deletion time in ISO 8601 format, if the stream is being deleted.
-    #[serde(with = "time::serde::iso8601::option")]
-    #[cfg_attr(feature = "utoipa", schema(format = Time))]
+    /// Deletion time in RFC 3339 format, if the stream is being deleted.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
 }
 

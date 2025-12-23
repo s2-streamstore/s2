@@ -159,10 +159,9 @@ pub struct AccessTokenInfo {
     /// Access token ID.
     /// It must be unique to the account and between 1 and 96 bytes in length.
     pub id: types::access::AccessTokenId,
-    /// Expiration time in ISO 8601 format.
+    /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
-    #[serde(default, with = "time::serde::iso8601::option")]
-    #[cfg_attr(feature = "utoipa", schema(format = Time))]
+    #[serde(default, with = "time::serde::rfc3339::option")]
     pub expires_at: Option<OffsetDateTime>,
     /// Namespace streams based on the configured stream-level scope, which must be a prefix.
     /// Stream name arguments will be automatically prefixed, and the prefix will be stripped when listing streams.
