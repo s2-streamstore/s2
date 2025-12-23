@@ -36,5 +36,5 @@ thiserror = "2.0.17"
 time = { version = "0.3.44", features = ["serde", "parsing", "formatting"] }
 tokio = "1.48.0"
 tokio-util = "0.7.17"
-utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
+utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6", features = ["time"] }
 zstd = "0.13.3"
