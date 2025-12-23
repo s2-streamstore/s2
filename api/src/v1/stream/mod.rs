@@ -30,50 +30,31 @@ pub struct StreamInfo {
     /// Stream name.
     pub name: StreamName,
     /// Creation time in ISO 8601 format.
+    #[serde(with = "time::serde::iso8601")]
     #[cfg_attr(feature = "utoipa", schema(format = Time))]
-    pub created_at: String,
+    pub created_at: OffsetDateTime,
     /// Deletion time in ISO 8601 format, if the stream is being deleted.
+    #[serde(with = "time::serde::iso8601::option")]
     #[cfg_attr(feature = "utoipa", schema(format = Time))]
-    pub deleted_at: Option<String>,
+    pub deleted_at: Option<OffsetDateTime>,
 }
 
 impl From<types::stream::StreamInfo> for StreamInfo {
     fn from(value: types::stream::StreamInfo) -> Self {
-        use time::format_description::well_known::Iso8601;
-
-        let types::stream::StreamInfo {
-            name,
-            created_at,
-            deleted_at,
-        } = value;
-
         Self {
-            name,
-            created_at: created_at
-                .format(&Iso8601::DEFAULT)
-                .expect("valid iso8601 time"),
-            deleted_at: deleted_at
-                .map(|d| d.format(&Iso8601::DEFAULT).expect("valid iso8601 time")),
+            name: value.name,
+            created_at: value.created_at,
+            deleted_at: value.deleted_at,
         }
     }
 }
 
 impl From<StreamInfo> for types::stream::StreamInfo {
     fn from(value: StreamInfo) -> Self {
-        use time::format_description::well_known::Iso8601;
-
-        let StreamInfo {
-            name,
-            created_at,
-            deleted_at,
-        } = value;
-
         Self {
-            name,
-            created_at: OffsetDateTime::parse(&created_at, &Iso8601::DEFAULT)
-                .expect("valid iso8601 time"),
-            deleted_at: deleted_at
-                .map(|d| OffsetDateTime::parse(&d, &Iso8601::DEFAULT).expect("valid iso8601 time")),
+            name: value.name,
+            created_at: value.created_at,
+            deleted_at: value.deleted_at,
         }
     }
 }

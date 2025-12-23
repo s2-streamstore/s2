@@ -42,7 +42,7 @@ where
     }
 }
 
-use time::{OffsetDateTime, format_description::well_known::Iso8601};
+use time::OffsetDateTime;
 #[cfg(feature = "utoipa")]
 use utoipa::{IntoParams, ToSchema};
 
@@ -161,8 +161,9 @@ pub struct AccessTokenInfo {
     pub id: types::access::AccessTokenId,
     /// Expiration time in ISO 8601 format.
     /// If not set, the expiration will be set to that of the requestor's token.
+    #[serde(default, with = "time::serde::iso8601::option")]
     #[cfg_attr(feature = "utoipa", schema(format = Time))]
-    pub expires_at: Option<String>,
+    pub expires_at: Option<OffsetDateTime>,
     /// Namespace streams based on the configured stream-level scope, which must be a prefix.
     /// Stream name arguments will be automatically prefixed, and the prefix will be stripped when listing streams.
     #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]
@@ -175,62 +176,33 @@ impl TryFrom<AccessTokenInfo> for types::access::IssueAccessTokenRequest {
     type Error = types::ValidationError;
 
     fn try_from(value: AccessTokenInfo) -> Result<Self, Self::Error> {
-        let AccessTokenInfo {
-            id,
-            expires_at,
-            auto_prefix_streams,
-            scope,
-        } = value;
-
         Ok(Self {
-            id,
-            expires_at: expires_at
-                .map(|e| OffsetDateTime::parse(&e, &Iso8601::DEFAULT))
-                .transpose()
-                .map_err(|_| "Invalid ISO-8601 formatted `expires_at` time")?,
-            auto_prefix_streams: auto_prefix_streams.unwrap_or_default(),
-            scope: scope.try_into()?,
+            id: value.id,
+            expires_at: value.expires_at,
+            auto_prefix_streams: value.auto_prefix_streams.unwrap_or_default(),
+            scope: value.scope.try_into()?,
         })
     }
 }
 
 impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
     fn from(value: types::access::AccessTokenInfo) -> Self {
-        let types::access::AccessTokenInfo {
-            id,
-            expires_at,
-            auto_prefix_streams,
-            scope,
-        } = value;
-
         Self {
-            id,
-            expires_at: Some(
-                expires_at
-                    .format(&Iso8601::DEFAULT)
-                    .expect("valid iso8601 time"),
-            ),
-            auto_prefix_streams: Some(auto_prefix_streams),
-            scope: scope.into(),
+            id: value.id,
+            expires_at: Some(value.expires_at),
+            auto_prefix_streams: Some(value.auto_prefix_streams),
+            scope: value.scope.into(),
         }
     }
 }
 
 impl From<types::access::IssueAccessTokenRequest> for AccessTokenInfo {
     fn from(value: types::access::IssueAccessTokenRequest) -> Self {
-        let types::access::IssueAccessTokenRequest {
-            id,
-            expires_at,
-            auto_prefix_streams,
-            scope,
-        } = value;
-
         Self {
-            id,
-            expires_at: expires_at
-                .map(|e| e.format(&Iso8601::DEFAULT).expect("valid iso8601 time")),
-            auto_prefix_streams: Some(auto_prefix_streams),
-            scope: scope.into(),
+            id: value.id,
+            expires_at: value.expires_at,
+            auto_prefix_streams: Some(value.auto_prefix_streams),
+            scope: value.scope.into(),
         }
     }
 }
@@ -239,21 +211,13 @@ impl TryFrom<AccessTokenInfo> for types::access::AccessTokenInfo {
     type Error = types::ValidationError;
 
     fn try_from(value: AccessTokenInfo) -> Result<Self, Self::Error> {
-        let AccessTokenInfo {
-            id,
-            expires_at,
-            auto_prefix_streams,
-            scope,
-        } = value;
-
         Ok(Self {
-            id,
-            expires_at: expires_at.ok_or("Missing `expires_at`").and_then(|e| {
-                OffsetDateTime::parse(&e, &Iso8601::DEFAULT)
-                    .map_err(|_| "Invalid ISO-8601 formatted `expires_at` time")
-            })?,
-            auto_prefix_streams: auto_prefix_streams.unwrap_or_default(),
-            scope: scope.try_into()?,
+            id: value.id,
+            expires_at: value
+                .expires_at
+                .ok_or_else(|| types::ValidationError("Missing `expires_at`".to_owned()))?,
+            auto_prefix_streams: value.auto_prefix_streams.unwrap_or_default(),
+            scope: value.scope.try_into()?,
         })
     }
 }
