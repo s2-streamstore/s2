@@ -78,40 +78,6 @@ pub struct StreamConfig {
     pub delete_on_empty: DeleteOnEmptyConfig,
 }
 
-impl StreamConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_storage_class(self, storage_class: StorageClass) -> Self {
-        Self {
-            storage_class,
-            ..self
-        }
-    }
-
-    pub fn with_retention_policy(self, retention_policy: RetentionPolicy) -> Self {
-        Self {
-            retention_policy,
-            ..self
-        }
-    }
-
-    pub fn with_timestamping(self, timestamping: TimestampingConfig) -> Self {
-        Self {
-            timestamping,
-            ..self
-        }
-    }
-
-    pub fn with_delete_on_empty(self, delete_on_empty: DeleteOnEmptyConfig) -> Self {
-        Self {
-            delete_on_empty,
-            ..self
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct TimestampingReconfiguration {
     pub mode: Maybe<Option<TimestampingMode>>,
@@ -349,31 +315,6 @@ pub struct BasinConfig {
 }
 
 impl BasinConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_default_stream_config(self, default_stream_config: StreamConfig) -> Self {
-        Self {
-            default_stream_config: default_stream_config.into(),
-            ..self
-        }
-    }
-
-    pub fn with_create_stream_on_append(self, create_stream_on_append: bool) -> Self {
-        Self {
-            create_stream_on_append,
-            ..self
-        }
-    }
-
-    pub fn with_create_stream_on_read(self, create_stream_on_read: bool) -> Self {
-        Self {
-            create_stream_on_read,
-            ..self
-        }
-    }
-
     pub fn reconfigure(mut self, reconfiguration: BasinReconfiguration) -> Self {
         let BasinReconfiguration {
             default_stream_config,

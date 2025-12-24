@@ -66,18 +66,6 @@ impl From<types::basin::BasinInfo> for BasinInfo {
     }
 }
 
-impl From<BasinInfo> for types::basin::BasinInfo {
-    fn from(value: BasinInfo) -> Self {
-        let BasinInfo { name, scope, state } = value;
-
-        Self {
-            name,
-            scope: scope.into(),
-            state: state.into(),
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -122,16 +110,6 @@ impl From<types::basin::BasinState> for BasinState {
             types::basin::BasinState::Active => Self::Active,
             types::basin::BasinState::Creating => Self::Creating,
             types::basin::BasinState::Deleting => Self::Deleting,
-        }
-    }
-}
-
-impl From<BasinState> for types::basin::BasinState {
-    fn from(value: BasinState) -> Self {
-        match value {
-            BasinState::Active => Self::Active,
-            BasinState::Creating => Self::Creating,
-            BasinState::Deleting => Self::Deleting,
         }
     }
 }

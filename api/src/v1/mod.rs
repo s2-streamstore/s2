@@ -65,18 +65,6 @@ macro_rules! impl_list_request_conversions {
                 })?)
             }
         }
-
-        impl From<types::resources::ListItemsRequest<$prefix, $start_after>> for $name {
-            fn from(value: types::resources::ListItemsRequest<$prefix, $start_after>) -> Self {
-                let parts: types::resources::ListItemsRequestParts<$prefix, $start_after> =
-                    value.into();
-                Self {
-                    prefix: Some(parts.prefix),
-                    start_after: Some(parts.start_after),
-                    limit: Some(parts.limit.into()),
-                }
-            }
-        }
     };
 }
 
