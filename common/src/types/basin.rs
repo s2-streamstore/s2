@@ -180,6 +180,12 @@ impl Default for BasinNameStartAfter {
     }
 }
 
+impl From<BasinName> for BasinNameStartAfter {
+    fn from(value: BasinName) -> Self {
+        Self(value.0, PhantomData)
+    }
+}
+
 pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAfter>;
 
 #[derive(Debug, Clone, Copy)]
