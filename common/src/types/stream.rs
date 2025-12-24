@@ -129,15 +129,15 @@ pub type StreamName = StreamNameStr<NameProps>;
 
 pub type StreamNamePrefix = StreamNameStr<PrefixProps>;
 
-impl From<StreamName> for StreamNamePrefix {
-    fn from(value: StreamName) -> Self {
-        Self(value.0, PhantomData)
-    }
-}
-
 impl Default for StreamNamePrefix {
     fn default() -> Self {
         StreamNameStr(CompactString::default(), PhantomData)
+    }
+}
+
+impl From<StreamName> for StreamNamePrefix {
+    fn from(value: StreamName) -> Self {
+        Self(value.0, PhantomData)
     }
 }
 
@@ -146,6 +146,12 @@ pub type StreamNameStartAfter = StreamNameStr<StartAfterProps>;
 impl Default for StreamNameStartAfter {
     fn default() -> Self {
         StreamNameStr(CompactString::default(), PhantomData)
+    }
+}
+
+impl From<StreamName> for StreamNameStartAfter {
+    fn from(value: StreamName) -> Self {
+        Self(value.0, PhantomData)
     }
 }
 
