@@ -454,7 +454,7 @@ impl From<types::stream::AppendAck> for AppendAck {
 
 #[rustfmt::skip]
 /// Aborted due to a failed condition.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AppendConditionFailed {
