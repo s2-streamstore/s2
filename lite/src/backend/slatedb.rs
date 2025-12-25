@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use futures::stream::BoxStream;
-use s2_common::types::{
-    basin::BasinName,
-    stream::{AppendAck, AppendInput, ReadBatch, ReadEnd, ReadStart, StreamName, StreamPosition},
+use s2_common::{
+    record::StreamPosition,
+    types::{
+        basin::BasinName,
+        stream::{AppendAck, AppendInput, ReadBatch, ReadEnd, ReadStart, StreamName},
+    },
 };
 use tokio::sync::{broadcast, mpsc};
 

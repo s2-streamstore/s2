@@ -20,6 +20,31 @@ pub type SeqNum = u64;
 pub type NonZeroSeqNum = std::num::NonZeroU64;
 pub type Timestamp = u64;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct StreamPosition {
+    pub seq_num: SeqNum,
+    pub timestamp: Timestamp,
+}
+
+impl StreamPosition {
+    pub const MIN: StreamPosition = StreamPosition {
+        seq_num: SeqNum::MIN,
+        timestamp: Timestamp::MIN,
+    };
+}
+
+impl std::fmt::Display for StreamPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} @ {}", self.seq_num, self.timestamp)
+    }
+}
+
+impl DeepSize for StreamPosition {
+    fn deep_size(&self) -> usize {
+        self.seq_num.deep_size() + self.timestamp.deep_size()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum InternalRecordError {
     #[error("Truncated: {0}")]
@@ -123,7 +148,7 @@ impl From<MagicByte> for u8 {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Record {
     Command(CommandRecord),
     Envelope(EnvelopeRecord),
@@ -154,10 +179,9 @@ impl Record {
         Ok(Self::Envelope(envelope))
     }
 
-    pub fn sequenced(self, seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
+    pub fn sequenced(self, position: StreamPosition) -> SequencedRecord {
         SequencedRecord {
-            seq_num,
-            timestamp,
+            position,
             record: self,
         }
     }
@@ -234,10 +258,9 @@ impl Encodable for MeteredRecord {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequencedRecord {
-    pub seq_num: SeqNum,
-    pub timestamp: Timestamp,
+    pub position: StreamPosition,
     pub record: Record,
 }
 
@@ -249,17 +272,17 @@ impl MeteredSize for SequencedRecord {
 
 impl DeepSize for SequencedRecord {
     fn deep_size(&self) -> usize {
-        self.seq_num.deep_size() + self.timestamp.deep_size() + self.record.deep_size()
+        self.position.deep_size() + self.record.deep_size()
     }
 }
 
 pub type MeteredRecord = Metered<Record>;
 
 impl MeteredRecord {
-    pub fn sequenced(self, seq_num: SeqNum, timestamp: Timestamp) -> MeteredSequencedRecord {
+    pub fn sequenced(self, position: StreamPosition) -> MeteredSequencedRecord {
         MeteredSequencedRecord {
             size: self.metered_size(),
-            inner: self.inner.sequenced(seq_num, timestamp),
+            inner: self.inner.sequenced(position),
         }
     }
 
@@ -347,9 +370,8 @@ mod test {
             let as_bytes = metered_record.clone().to_bytes();
             let decoded_record = MeteredRecord::try_from(as_bytes).unwrap();
             prop_assert_eq!(&decoded_record, &metered_record);
-            let sequenced = decoded_record.sequenced(seq_num, timestamp);
-            assert_eq!(sequenced.seq_num, seq_num);
-            assert_eq!(sequenced.timestamp, timestamp);
+            let sequenced = decoded_record.sequenced(StreamPosition { seq_num, timestamp });
+            assert_eq!(sequenced.position, StreamPosition {seq_num, timestamp});
             assert_eq!(sequenced.record, record);
         }
     );
@@ -424,11 +446,19 @@ mod test {
             }
             Record::Envelope(e) => panic!("Command expected, got Envelope: {e:?}"),
         }
-        let sequenced_record = record.sequenced(42, 100_000);
+        let sequenced_record = record.sequenced(StreamPosition {
+            seq_num: 42,
+            timestamp: 100_000,
+        });
         let sequenced_metered = sequenced_record.metered_size();
         assert_eq!(record_metered, sequenced_metered);
-        assert_eq!(sequenced_record.seq_num, 42);
-        assert_eq!(sequenced_record.timestamp, 100_000);
+        assert_eq!(
+            sequenced_record.position,
+            StreamPosition {
+                seq_num: 42,
+                timestamp: 100_000,
+            }
+        );
         assert_eq!(
             sequenced_record.record,
             Record::try_from_parts(headers, body).unwrap()

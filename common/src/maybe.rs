@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```
+/// use s2_common::maybe::Maybe;
+///
 /// #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
 /// pub struct MyStruct {
 ///     #[serde(default)]

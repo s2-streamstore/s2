@@ -27,3 +27,4 @@ utoipa = { workspace = true, optional = true }
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }
+serde_json = { workspace = true }

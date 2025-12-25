@@ -6,7 +6,7 @@ use super::InternalRecordError;
 use crate::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{MeteredRecord, MeteredSequencedRecords, MeteredSize, SeqNum, Timestamp},
+    record::{MeteredRecord, MeteredSequencedRecords, MeteredSize, StreamPosition},
 };
 
 #[derive(Debug)]
@@ -17,7 +17,7 @@ pub struct RecordBatch {
 
 pub struct RecordBatcher<I, E>
 where
-    I: Iterator<Item = Result<(SeqNum, Timestamp, Bytes), E>>,
+    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
     E: Into<InternalRecordError>,
 {
     record_iterator: I,
@@ -41,7 +41,7 @@ fn make_records(read_limit: &EvaluatedReadLimit) -> MeteredSequencedRecords {
 
 impl<I, E> RecordBatcher<I, E>
 where
-    I: Iterator<Item = Result<(SeqNum, Timestamp, Bytes), E>>,
+    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
     E: std::fmt::Debug + Into<InternalRecordError>,
 {
     pub fn new(record_iterator: I, read_limit: ReadLimit, until: ReadUntil) -> Self {
@@ -64,9 +64,9 @@ where
         let mut stashed_record = None;
         while self.buffered_error.is_none() {
             match self.record_iterator.next() {
-                Some(Ok((seq_num, timestamp, data))) => {
+                Some(Ok((position, data))) => {
                     let record = match MeteredRecord::try_from(data) {
-                        Ok(record) => record.sequenced(seq_num, timestamp),
+                        Ok(record) => record.sequenced(position),
                         Err(err) => {
                             self.buffered_error = Some(err);
                             break;
@@ -76,7 +76,7 @@ where
                     if remaining_limit.deny(
                         self.buffered_records.len() + 1,
                         self.buffered_records.metered_size() + record.metered_size(),
-                    ) || self.until.deny(timestamp)
+                    ) || self.until.deny(position.timestamp)
                     {
                         self.read_limit = EvaluatedReadLimit::Exhausted;
                         break;
@@ -137,7 +137,7 @@ where
 
 impl<I, E> Iterator for RecordBatcher<I, E>
 where
-    I: Iterator<Item = Result<(SeqNum, Timestamp, Bytes), E>>,
+    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
     E: std::fmt::Debug + Into<InternalRecordError>,
 {
     type Item = Result<RecordBatch, InternalRecordError>;
@@ -154,7 +154,7 @@ where
 
 impl<I, E> FusedIterator for RecordBatcher<I, E>
 where
-    I: Iterator<Item = Result<(SeqNum, Timestamp, Bytes), E>>,
+    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
     E: std::fmt::Debug + Into<InternalRecordError>,
 {
 }
@@ -167,64 +167,45 @@ mod tests {
     use crate::{
         caps,
         read_extent::{ReadLimit, ReadUntil},
-        record::{CommandRecord, Encodable, MeteredRecord, MeteredSize, Record},
+        record::{
+            CommandRecord, Encodable, MeteredSize, Record, SeqNum, SequencedRecord, Timestamp,
+        },
     };
 
-    type BatchItem = (SeqNum, Timestamp, Bytes);
-
-    #[derive(Clone)]
-    struct TestRecord {
-        seq_num: SeqNum,
-        timestamp: Timestamp,
-        record: Record,
-        bytes: Bytes,
-        metered_size: usize,
+    fn test_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
+        Record::Command(CommandRecord::Trim(seq_num))
+            .sequenced(StreamPosition { seq_num, timestamp })
     }
 
-    impl TestRecord {
-        fn trim(seq_num: SeqNum, timestamp: Timestamp) -> Self {
-            let record = Record::Command(CommandRecord::Trim(seq_num));
-            let metered: MeteredRecord = record.clone().into();
-            Self {
-                seq_num,
-                timestamp,
-                record,
-                bytes: metered.to_bytes(),
-                metered_size: metered.metered_size(),
-            }
-        }
-
-        fn into_item(self) -> (SeqNum, Timestamp, Bytes) {
-            (self.seq_num, self.timestamp, self.bytes)
-        }
+    fn to_iter(
+        records: Vec<SequencedRecord>,
+    ) -> impl Iterator<Item = Result<(StreamPosition, Bytes), InternalRecordError>> {
+        records
+            .into_iter()
+            .map(|SequencedRecord { position, record }| {
+                (position, MeteredRecord::from(record).to_bytes())
+            })
+            .map(Ok)
     }
 
-    fn to_ok(record: TestRecord) -> Result<BatchItem, InternalRecordError> {
-        Ok(record.into_item())
-    }
-
-    fn assert_batch(batch: &RecordBatch, expected: &[TestRecord], is_terminal: bool) {
+    fn assert_batch(batch: &RecordBatch, expected: &[SequencedRecord], is_terminal: bool) {
         assert_eq!(batch.is_terminal, is_terminal);
         assert_eq!(batch.records.len(), expected.len());
-        let expected_size: usize = expected.iter().map(|r| r.metered_size).sum();
+        let expected_size: usize = expected.iter().map(|r| r.metered_size()).sum();
         assert_eq!(batch.records.metered_size(), expected_size);
         for (actual, expected) in batch.records.iter().zip(expected.iter()) {
-            assert_eq!(actual.seq_num, expected.seq_num);
-            assert_eq!(actual.timestamp, expected.timestamp);
-            assert_eq!(actual.record, expected.record);
+            assert_eq!(actual, expected);
         }
     }
 
     #[test]
     fn collects_records_until_iterator_ends() {
-        let expected = vec![
-            TestRecord::trim(1, 10),
-            TestRecord::trim(2, 11),
-            TestRecord::trim(3, 12),
-        ];
-        let iterator = expected.clone().into_iter().map(to_ok);
-        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
-
+        let expected = vec![test_record(1, 10), test_record(2, 11), test_record(3, 12)];
+        let mut batcher = RecordBatcher::new(
+            to_iter(expected.clone()),
+            ReadLimit::Unbounded,
+            ReadUntil::Unbounded,
+        );
         let batch = batcher.next().expect("batch expected").expect("ok batch");
         assert_batch(&batch, &expected, false);
         assert!(batcher.next().is_none());
@@ -232,13 +213,12 @@ mod tests {
 
     #[test]
     fn stops_at_count_read_limit() {
-        let expected = vec![
-            TestRecord::trim(1, 10),
-            TestRecord::trim(2, 11),
-            TestRecord::trim(3, 12),
-        ];
-        let iterator = expected.clone().into_iter().map(to_ok);
-        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Count(2), ReadUntil::Unbounded);
+        let expected = vec![test_record(1, 10), test_record(2, 11), test_record(3, 12)];
+        let mut batcher = RecordBatcher::new(
+            to_iter(expected.clone()),
+            ReadLimit::Count(2),
+            ReadUntil::Unbounded,
+        );
 
         let batch = batcher.next().expect("batch expected").expect("ok batch");
         assert_batch(&batch, &expected[..2], true);
@@ -247,11 +227,13 @@ mod tests {
 
     #[test]
     fn stops_at_byte_read_limit() {
-        let expected = vec![TestRecord::trim(1, 10), TestRecord::trim(2, 11)];
-        let first_size = expected[0].metered_size;
-        let iterator = expected.clone().into_iter().map(to_ok);
-        let mut batcher =
-            RecordBatcher::new(iterator, ReadLimit::Bytes(first_size), ReadUntil::Unbounded);
+        let expected = vec![test_record(1, 10), test_record(2, 11)];
+        let first_size = expected[0].metered_size();
+        let mut batcher = RecordBatcher::new(
+            to_iter(expected.clone()),
+            ReadLimit::Bytes(first_size),
+            ReadUntil::Unbounded,
+        );
 
         let batch = batcher.next().expect("batch expected").expect("ok batch");
         assert_batch(&batch, &expected[..1], true);
@@ -260,14 +242,12 @@ mod tests {
 
     #[test]
     fn stops_at_timestamp_limit() {
-        let expected = vec![
-            TestRecord::trim(1, 10),
-            TestRecord::trim(2, 19),
-            TestRecord::trim(3, 20),
-        ];
-        let iterator = expected.clone().into_iter().map(to_ok);
-        let mut batcher =
-            RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Timestamp(20));
+        let expected = vec![test_record(1, 10), test_record(2, 19), test_record(3, 20)];
+        let mut batcher = RecordBatcher::new(
+            to_iter(expected.clone()),
+            ReadLimit::Unbounded,
+            ReadUntil::Timestamp(20),
+        );
 
         let batch = batcher.next().expect("batch expected").expect("ok batch");
         assert_batch(&batch, &expected[..2], true);
@@ -278,10 +258,13 @@ mod tests {
     fn splits_batches_when_caps_are_hit() {
         let mut records = Vec::with_capacity(caps::RECORD_BATCH_MAX.count + 1);
         for index in 0..=(caps::RECORD_BATCH_MAX.count as SeqNum) {
-            records.push(TestRecord::trim(index, index + 10));
+            records.push(test_record(index, index + 10));
         }
-        let iterator = records.clone().into_iter().map(to_ok);
-        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
+        let mut batcher = RecordBatcher::new(
+            to_iter(records.clone()),
+            ReadLimit::Unbounded,
+            ReadUntil::Unbounded,
+        );
 
         let first_batch = batcher
             .next()
@@ -307,15 +290,20 @@ mod tests {
 
     #[test]
     fn surfaces_decode_errors_after_draining_buffer() {
-        let records = vec![TestRecord::trim(1, 10), TestRecord::trim(2, 11)];
-        let invalid_data = (3, 12, Bytes::new());
+        let records = vec![test_record(1, 10), test_record(2, 11)];
+        let invalid_data = (
+            StreamPosition {
+                seq_num: 3,
+                timestamp: 12,
+            },
+            Bytes::new(),
+        );
 
-        let iterator = records
-            .clone()
-            .into_iter()
-            .map(to_ok)
-            .chain(std::iter::once(Ok(invalid_data)));
-        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
+        let mut batcher = RecordBatcher::new(
+            to_iter(records.clone()).chain(std::iter::once(Ok(invalid_data))),
+            ReadLimit::Unbounded,
+            ReadUntil::Unbounded,
+        );
 
         let batch = batcher.next().expect("batch expected").expect("ok batch");
         assert_batch(&batch, &records, false);
@@ -330,7 +318,7 @@ mod tests {
 
     #[test]
     fn surfaces_iterator_errors_immediately() {
-        let iterator = std::iter::once::<Result<(SeqNum, Timestamp, Bytes), InternalRecordError>>(
+        let iterator = std::iter::once::<Result<(StreamPosition, Bytes), InternalRecordError>>(
             Err(InternalRecordError::InvalidValue("test", "boom")),
         );
         let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);

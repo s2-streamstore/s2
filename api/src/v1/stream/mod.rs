@@ -104,8 +104,8 @@ pub struct StreamPosition {
     pub timestamp: record::Timestamp,
 }
 
-impl From<types::stream::StreamPosition> for StreamPosition {
-    fn from(pos: types::stream::StreamPosition) -> Self {
+impl From<record::StreamPosition> for StreamPosition {
+    fn from(pos: record::StreamPosition) -> Self {
         Self {
             seq_num: pos.seq_num,
             timestamp: pos.timestamp,
@@ -113,7 +113,7 @@ impl From<types::stream::StreamPosition> for StreamPosition {
     }
 }
 
-impl From<StreamPosition> for types::stream::StreamPosition {
+impl From<StreamPosition> for record::StreamPosition {
     fn from(pos: StreamPosition) -> Self {
         Self {
             seq_num: pos.seq_num,
@@ -315,11 +315,17 @@ impl S2Format {
         }
     }
 
-    pub fn encode_read(self, record: record::SequencedRecord) -> SequencedRecord {
-        let (headers, body) = record.record.into_parts();
+    pub fn encode_read(
+        self,
+        record::SequencedRecord {
+            position: record::StreamPosition { seq_num, timestamp },
+            record,
+        }: record::SequencedRecord,
+    ) -> SequencedRecord {
+        let (headers, body) = record.into_parts();
         SequencedRecord {
-            seq_num: record.seq_num,
-            timestamp: record.timestamp,
+            seq_num,
+            timestamp,
             headers: headers
                 .into_iter()
                 .map(|h| Header(self.encode(&h.name), self.encode(&h.value)))

@@ -3,10 +3,8 @@ use s2_common::{record, types};
 
 include!("s2.v1.rs");
 
-impl From<types::stream::StreamPosition> for StreamPosition {
-    fn from(
-        types::stream::StreamPosition { seq_num, timestamp }: types::stream::StreamPosition,
-    ) -> Self {
+impl From<record::StreamPosition> for StreamPosition {
+    fn from(record::StreamPosition { seq_num, timestamp }: record::StreamPosition) -> Self {
         Self { seq_num, timestamp }
     }
 }
@@ -84,8 +82,7 @@ impl From<types::stream::AppendAck> for AppendAck {
 impl From<record::SequencedRecord> for SequencedRecord {
     fn from(
         record::SequencedRecord {
-            seq_num,
-            timestamp,
+            position: record::StreamPosition { seq_num, timestamp },
             record,
         }: record::SequencedRecord,
     ) -> Self {

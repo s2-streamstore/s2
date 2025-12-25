@@ -15,7 +15,7 @@ pub enum HeaderValidationError {
     NameEmpty,
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct EnvelopeRecord {
     headers: Vec<Header>,
     body: Bytes,

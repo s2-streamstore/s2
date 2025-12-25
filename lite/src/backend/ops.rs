@@ -1,14 +1,14 @@
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use s2_common::{
-    record::{FencingToken, SeqNum},
+    record::{FencingToken, SeqNum, StreamPosition},
     types::{
         basin::{BasinInfo, BasinName, BasinScope, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration, OptionalStreamConfig, StreamReconfiguration},
         resources::{CreateMode, Page},
         stream::{
             AppendAck, AppendInput, ListStreamsRequest, ReadBatch, ReadEnd, ReadStart, StreamInfo,
-            StreamName, StreamPosition,
+            StreamName,
         },
     },
 };

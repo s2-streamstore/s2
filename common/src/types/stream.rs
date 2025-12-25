@@ -12,7 +12,7 @@ use crate::{
     read_extent::{ReadLimit, ReadUntil},
     record::{
         FencingToken, Metered, MeteredRecord, MeteredSequencedRecords, MeteredSize, SeqNum,
-        Timestamp,
+        StreamPosition, Timestamp,
     },
     types::resources::ListItemsRequest,
 };
@@ -160,18 +160,6 @@ pub struct StreamInfo {
     pub name: StreamName,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct StreamPosition {
-    pub seq_num: SeqNum,
-    pub timestamp: Timestamp,
-}
-
-impl std::fmt::Display for StreamPosition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} @ {}", self.seq_num, self.timestamp)
-    }
 }
 
 #[derive(Debug, Clone)]
