@@ -19,20 +19,35 @@ impl StreamId {
 
         Self(hasher.finalize())
     }
+}
 
-    /// Access the raw 32-byte hash.
-    pub fn as_hash(&self) -> blake3::Hash {
-        self.0
-    }
-
-    /// Borrow the identifier as raw bytes.
-    pub fn as_bytes(&self) -> &[u8; 32] {
+impl AsRef<[u8]> for StreamId {
+    fn as_ref(&self) -> &[u8] {
         self.0.as_bytes()
     }
+}
 
-    /// Consume the identifier and return the raw bytes.
-    pub fn into_bytes(self) -> [u8; 32] {
-        *self.0.as_bytes()
+impl From<[u8; 32]> for StreamId {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(blake3::Hash::from_bytes(bytes))
+    }
+}
+
+impl From<StreamId> for [u8; 32] {
+    fn from(id: StreamId) -> Self {
+        *id.0.as_bytes()
+    }
+}
+
+impl From<blake3::Hash> for StreamId {
+    fn from(hash: blake3::Hash) -> Self {
+        Self(hash)
+    }
+}
+
+impl From<StreamId> for blake3::Hash {
+    fn from(id: StreamId) -> Self {
+        id.0
     }
 }
 

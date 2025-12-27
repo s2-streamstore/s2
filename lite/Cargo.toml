@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+async-stream = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
@@ -13,8 +14,15 @@ compact_str = { workspace = true }
 dashmap = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
+rand = { workspace = true }
 s2-api = { path = "../api" }
 s2-common = { path = "../common", features = ["clap"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 slatedb = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -2743,6 +2743,7 @@ dependencies = [
 name = "s2-lite"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
  "blake3",
  "bytes",
@@ -2751,10 +2752,15 @@ dependencies = [
  "dashmap",
  "eyre",
  "futures",
+ "proptest",
+ "rand 0.9.2",
  "s2-api",
  "s2-common",
+ "serde",
+ "serde_json",
  "slatedb",
  "thiserror 2.0.17",
+ "time",
  "tokio",
 ]
 
