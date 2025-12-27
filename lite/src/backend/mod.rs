@@ -1,4 +1,5 @@
-pub(crate) mod ops;
-pub mod slatedb;
+pub mod db;
+pub mod error;
 
+mod kv;
 mod stream_id;
