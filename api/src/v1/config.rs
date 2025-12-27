@@ -10,9 +10,9 @@ use utoipa::ToSchema;
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {
-    /// Append tail latency under 500 ms.
+    /// Append tail latency under 400 milliseconds with s2.dev.
     Standard,
-    /// Append tail latency under 50 ms.
+    /// Append tail latency under 40 milliseconds with s2.dev.
     Express,
 }
 
