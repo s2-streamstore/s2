@@ -32,8 +32,8 @@ where
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         utoipa::openapi::Object::builder()
             .schema_type(utoipa::openapi::Type::String)
-            .min_length((!T::IS_PREFIX).then_some(1))
-            .max_length(Some(Self::MAX_LENGTH))
+            .min_length((!T::IS_PREFIX).then_some(caps::MIN_STREAM_NAME_LEN))
+            .max_length(Some(caps::MAX_STREAM_NAME_LEN))
             .into()
     }
 }
@@ -60,10 +60,6 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for StreamNameStr<T> {
     }
 }
 
-impl<T: StrProps> StreamNameStr<T> {
-    const MAX_LENGTH: usize = caps::MAX_STREAM_NAME_LEN;
-}
-
 impl<T: StrProps> AsRef<str> for StreamNameStr<T> {
     fn as_ref(&self) -> &str {
         &self.0
@@ -86,11 +82,11 @@ impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
             return Err(format!("Stream {} must not be empty", T::FIELD_NAME).into());
         }
 
-        if name.len() > Self::MAX_LENGTH {
+        if name.len() > caps::MAX_STREAM_NAME_LEN {
             return Err(format!(
                 "Stream {} must not exceed {} characters in length",
                 T::FIELD_NAME,
-                Self::MAX_LENGTH
+                caps::MAX_STREAM_NAME_LEN
             )
             .into());
         }
