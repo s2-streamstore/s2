@@ -5,7 +5,7 @@ use s2_common::{
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
     record::{Encodable, FencingToken, MeteredRecord, SeqNum, StreamPosition, Timestamp},
     types::{
-        basin::{BasinName, BasinNamePrefix, BasinNameStartAfter, BasinScope},
+        basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
         config::{BasinConfig, OptionalStreamConfig},
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     },
@@ -578,88 +578,32 @@ impl From<DbKey> for Bytes {
 impl TryFrom<Bytes> for DbKey {
     type Error = DeserializationError;
 
-    fn try_from(mut bytes: Bytes) -> Result<Self, Self::Error> {
-        use ordinals::*;
-
+    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
         check_min_size(&bytes, 1)?;
-        let ordinal = bytes.get_u8();
-
-        match ordinal {
-            BASIN_META => {
-                check_min_size(&bytes, 8)?;
-                let basin_str =
-                    std::str::from_utf8(&bytes).map_err(|e| invalid_value_err("basin", e))?;
-                let basin =
-                    BasinName::from_str(basin_str).map_err(|e| invalid_value_err("basin", e))?;
-                Ok(DbKey::BasinMeta(basin))
+        match bytes[0] {
+            ordinals::BASIN_META => basin_meta::deser_key(bytes).map(DbKey::BasinMeta),
+            ordinals::STREAM_META => stream_meta::deser_key(bytes)
+                .map(|(basin, stream)| DbKey::StreamMeta(basin, stream)),
+            ordinals::STREAM_TAIL_POSITION => {
+                stream_tail_position::deser_key(bytes).map(DbKey::StreamTailPosition)
             }
-            STREAM_META => {
-                check_min_size(&bytes, 10)?;
-                let sep_pos = bytes
-                    .iter()
-                    .position(|&b| b == 0x00)
-                    .ok_or(DeserializationError::MissingFieldSeparator)?;
-
-                let basin_str = std::str::from_utf8(&bytes[..sep_pos])
-                    .map_err(|e| invalid_value_err("basin", e))?;
-                let stream_str = std::str::from_utf8(&bytes[sep_pos + 1..])
-                    .map_err(|e| invalid_value_err("stream", e))?;
-
-                let basin =
-                    BasinName::from_str(basin_str).map_err(|e| invalid_value_err("basin", e))?;
-                let stream =
-                    StreamName::from_str(stream_str).map_err(|e| invalid_value_err("stream", e))?;
-
-                Ok(DbKey::StreamMeta(basin, stream))
+            ordinals::STREAM_FENCING_TOKEN => {
+                stream_fencing_token::deser_key(bytes).map(DbKey::StreamFencingToken)
             }
-            STREAM_TAIL_POSITION => {
-                check_exact_size(&bytes, 32)?;
-                let mut stream_id_bytes = [0u8; 32];
-                bytes.copy_to_slice(&mut stream_id_bytes);
-                Ok(DbKey::StreamTailPosition(StreamId::from(stream_id_bytes)))
+            ordinals::STREAM_TRIM_POINT => {
+                stream_trim_point::deser_key(bytes).map(DbKey::StreamTrimPoint)
             }
-            STREAM_FENCING_TOKEN => {
-                check_exact_size(&bytes, 32)?;
-                let mut stream_id_bytes = [0u8; 32];
-                bytes.copy_to_slice(&mut stream_id_bytes);
-                Ok(DbKey::StreamFencingToken(StreamId::from(stream_id_bytes)))
-            }
-            STREAM_TRIM_POINT => {
-                check_exact_size(&bytes, 32)?;
-                let mut stream_id_bytes = [0u8; 32];
-                bytes.copy_to_slice(&mut stream_id_bytes);
-                Ok(DbKey::StreamTrimPoint(StreamId::from(stream_id_bytes)))
-            }
-            STREAM_RECORD_DATA => {
-                check_exact_size(&bytes, 48)?;
-                let mut stream_id_bytes = [0u8; 32];
-                bytes.copy_to_slice(&mut stream_id_bytes);
-                let seq_num = bytes.get_u64();
-                let timestamp = bytes.get_u64();
-                Ok(DbKey::StreamRecordData(
-                    stream_id_bytes.into(),
-                    StreamPosition { seq_num, timestamp },
-                ))
-            }
-            STREAM_RECORD_TIMESTAMP => {
-                check_exact_size(&bytes, 40)?;
-                let mut stream_id_bytes = [0u8; 32];
-                bytes.copy_to_slice(&mut stream_id_bytes);
-                let timestamp = bytes.get_u64();
-                Ok(DbKey::StreamRecordTimestamp(
-                    stream_id_bytes.into(),
-                    timestamp,
-                ))
-            }
-            _ => Err(DeserializationError::InvalidOrdinal(ordinal)),
+            ordinals::STREAM_RECORD_DATA => stream_record_data::deser_key(bytes)
+                .map(|(stream_id, pos)| DbKey::StreamRecordData(stream_id, pos)),
+            ordinals::STREAM_RECORD_TIMESTAMP => stream_record_timestamp::deser_key(bytes)
+                .map(|(stream_id, timestamp)| DbKey::StreamRecordTimestamp(stream_id, timestamp)),
+            ordinal => Err(DeserializationError::InvalidOrdinal(ordinal)),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use time::OffsetDateTime;
-
     use super::*;
 
     #[test]
@@ -873,8 +817,6 @@ mod tests {
 
     #[test]
     fn basin_meta_ser_key_start_after_pagination() {
-        use s2_common::types::basin::{BasinNamePrefix, BasinNameStartAfter};
-
         let basin1 = BasinName::from_str("test-aaa").unwrap();
         let basin2 = BasinName::from_str("test-bbb").unwrap();
         let basin3 = BasinName::from_str("test-ccc").unwrap();

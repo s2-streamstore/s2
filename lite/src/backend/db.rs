@@ -1,7 +1,5 @@
 use std::{
     collections::VecDeque,
-    ops::Range,
-    str::FromStr,
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
@@ -9,27 +7,24 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{FutureExt as _, Stream, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
-use rand::seq;
-use s2_api::v1::config::BasinReconfiguration;
 use s2_common::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{
-        CommandRecord, FencingToken, Metered, MeteredRecord, MeteredSequencedRecord,
-        MeteredSequencedRecords, MeteredSize, Record, SeqNum, SequencedRecord, StreamPosition,
-        Timestamp,
+        CommandRecord, FencingToken, MeteredSequencedRecord, MeteredSequencedRecords, MeteredSize,
+        Record, SeqNum, StreamPosition, Timestamp,
     },
     types::{
-        basin::{BasinInfo, BasinName, BasinScope, BasinState, ListBasinsRequest},
+        basin::{BasinInfo, BasinName, BasinState, ListBasinsRequest},
         config::{
             BasinConfig, OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy,
-            StreamReconfiguration, TimestampingMode,
+            TimestampingMode,
         },
         resources::{CreateMode, ListItemsRequestParts, Page},
         stream::{
-            AppendAck, AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
-            ListStreamsRequest, ReadBatch, ReadEnd, ReadFrom, ReadPosition, ReadSessionOutput,
-            ReadStart, StreamInfo, StreamName,
+            AppendAck, AppendInput, AppendRecordBatch, AppendRecordParts, ListStreamsRequest,
+            ReadBatch, ReadEnd, ReadFrom, ReadPosition, ReadSessionOutput, ReadStart, StreamInfo,
+            StreamName,
         },
     },
 };
@@ -48,9 +43,9 @@ use crate::backend::{
     error::{
         AppendConditionFailed, AppendError, CreateBasinError, CreateStreamError, DeleteBasinError,
         DeleteStreamError, GetBasinConfigError, GetStreamConfigError, ListBasinsError,
-        ListStreamsError, ReadError, ReconfigureBasinError, StreamerError,
+        ListStreamsError, ReadError, StreamerError,
     },
-    kv::{self, BasinMeta},
+    kv,
     stream_id::StreamId,
 };
 
@@ -77,7 +72,7 @@ pub struct SlateDbBackend {
 }
 
 impl SlateDbBackend {
-    pub fn new(db: slatedb::Db, default_basin_config: BasinConfig) -> Self {
+    pub fn new(db: slatedb::Db) -> Self {
         Self {
             db,
             client_states: Arc::new(DashMap::new()),
@@ -382,11 +377,8 @@ impl SlateDbBackend {
                             .map_err(StreamerError::Deserialization)?;
                         assert_eq!(deser_stream_id, stream_id);
 
-                        let record = MeteredRecord::try_from(kv.value)
-                            .map_err(|e| StreamerError::Deserialization(kv::DeserializationError::InvalidValue {
-                                name: "record",
-                                error: e.to_string(),
-                            }))?
+                        let record = kv::stream_record_data::deser_value(kv.value)
+                            .map_err(StreamerError::Deserialization)?
                             .sequenced(pos);
 
                         if end.until.deny(pos.timestamp)
@@ -538,6 +530,7 @@ impl SlateDbBackend {
         mode: CreateMode,
         idempotence_key: Option<Bytes>,
     ) -> Result<(), CreateStreamError> {
+        // TODO: idempotence
         if let Some(existing_meta) = self
             .db_get(
                 kv::stream_meta::ser_key(&basin, &stream),
@@ -670,6 +663,7 @@ impl SlateDbBackend {
         mode: CreateMode,
         idempotence_key: Option<Bytes>,
     ) -> Result<BasinInfo, CreateBasinError> {
+        // TODO: idempotence
         if let Some(existing_meta) = self
             .db_get(kv::basin_meta::ser_key(&basin), kv::basin_meta::deser_value)
             .await??
@@ -743,12 +737,6 @@ const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 struct AppendAckRange {
     start: StreamPosition,
     end: StreamPosition,
-}
-
-impl AppendAckRange {
-    fn seq_nums(&self) -> Range<SeqNum> {
-        self.start.seq_num..self.end.seq_num
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1199,10 +1187,6 @@ impl PendingAppends {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
     pub fn next_ack_pos(&self) -> Option<StreamPosition> {
         self.next_ack_pos
     }
@@ -1270,21 +1254,20 @@ impl PendingAppendReply {
     }
 
     fn unblock(self, stable_pos: Result<StreamPosition, StreamerError>) {
-        match stable_pos {
+        let reply = match stable_pos {
             Ok(stable_pos) => {
                 assert!(self.durability_dependency() <= stable_pos.seq_num);
-                self.reply_tx.send(match self.reply {
+                match self.reply {
                     Ok(ack) => Ok(AppendAck {
                         start: ack.start,
                         end: ack.end,
                         tail: stable_pos,
                     }),
                     Err(cond_fail) => Err(cond_fail.into()),
-                });
+                }
             }
-            Err(e) => {
-                self.reply_tx.send(Err(e.into()));
-            }
-        }
+            Err(e) => Err(e.into()),
+        };
+        let _ = self.reply_tx.send(reply);
     }
 }
