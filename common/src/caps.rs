@@ -1,6 +1,7 @@
 pub const MIN_BASIN_NAME_LEN: usize = 8;
 pub const MAX_BASIN_NAME_LEN: usize = 48;
 
+pub const MIN_STREAM_NAME_LEN: usize = 1;
 pub const MAX_STREAM_NAME_LEN: usize = 512;
 
 pub const MAX_TOKEN_ID_LEN: usize = 96;

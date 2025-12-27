@@ -49,7 +49,7 @@ pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
     /// Basin scope.
-    pub scope: BasinScope,
+    pub scope: Option<BasinScope>,
     /// Basin state.
     pub state: BasinState,
 }
@@ -60,7 +60,7 @@ impl From<types::basin::BasinInfo> for BasinInfo {
 
         Self {
             name,
-            scope: scope.into(),
+            scope: scope.map(Into::into),
             state: state.into(),
         }
     }

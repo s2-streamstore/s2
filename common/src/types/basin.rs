@@ -52,7 +52,7 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for BasinNameStr<T> {
 }
 
 impl<T: StrProps> BasinNameStr<T> {
-    const MIN_LENGTH: usize = 8;
+    const MIN_LENGTH: usize = caps::MIN_BASIN_NAME_LEN;
     const MAX_LENGTH: usize = caps::MAX_BASIN_NAME_LEN;
 }
 
@@ -195,16 +195,15 @@ pub enum BasinState {
     Deleting,
 }
 
-#[derive(Debug, strum::Display, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, strum::Display, Clone, Copy, PartialEq, Eq)]
 pub enum BasinScope {
     #[strum(serialize = "aws:us-east-1")]
-    #[default]
     AwsUsEast1,
 }
 
 #[derive(Debug, Clone)]
 pub struct BasinInfo {
     pub name: BasinName,
-    pub scope: BasinScope,
+    pub scope: Option<BasinScope>,
     pub state: BasinState,
 }

@@ -329,6 +329,18 @@ pub type MeteredSequencedRecord = Metered<SequencedRecord>;
 
 pub type MeteredSequencedRecords = Metered<Vec<SequencedRecord>>;
 
+impl MeteredSequencedRecord {
+    pub fn into_parts(self) -> (StreamPosition, MeteredRecord) {
+        (
+            self.position,
+            MeteredRecord {
+                size: self.size,
+                inner: self.inner.record,
+            },
+        )
+    }
+}
+
 #[cfg(test)]
 mod test {
     use proptest::prelude::*;
