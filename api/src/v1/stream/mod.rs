@@ -338,7 +338,7 @@ impl S2Format {
         Ok(match self {
             S2Format::Raw => s.into_bytes().into(),
             S2Format::Base64 => Base64::decode_vec(&s)
-                .map_err(|_| types::ValidationError("Invalid Base64 encoding".to_owned()))?
+                .map_err(|_| types::ValidationError("invalid Base64 encoding".to_owned()))?
                 .into(),
         })
     }

@@ -7,11 +7,11 @@ use crate::deep_size::DeepSize;
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum HeaderValidationError {
-    #[error("Too many")]
+    #[error("too many")]
     TooMany,
-    #[error("Too long")]
+    #[error("too long")]
     TooLong,
-    #[error("Empty name")]
+    #[error("empty name")]
     NameEmpty,
 }
 

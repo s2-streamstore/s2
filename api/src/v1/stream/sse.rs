@@ -50,9 +50,9 @@ impl FromStr for LastEventId {
         {
             let item = iter
                 .next()
-                .ok_or_else(|| format!("Missing {field} in Last-Event-Id"))?;
+                .ok_or_else(|| format!("missing {field} in Last-Event-Id"))?;
             item.parse()
-                .map_err(|e| format!("Invalid {field} in Last-Event-ID: {e}").into())
+                .map_err(|e| format!("invalid {field} in Last-Event-ID: {e}").into())
         }
 
         let seq_num = get_next(&mut iter, "seq_num")?;
