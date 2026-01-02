@@ -288,7 +288,7 @@ pub enum Metric {
     /// Single named value.
     Scalar(ScalarMetric),
     /// Named series of `(timestamp, value)` points representing an accumulation over a specified
-    /// bucket.
+    /// interval.
     Accumulation(AccumulationMetric),
     /// Named series of `(timestamp, value)` points each representing an instantaneous value.
     Gauge(GaugeMetric),
