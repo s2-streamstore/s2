@@ -215,11 +215,12 @@ pub struct AccumulationMetric {
     pub name: CompactString,
     /// Unit of the metric.
     pub unit: MetricUnit,
-    /// The duration of bucket for the accumulation.
-    pub bucket_length: TimeseriesInterval,
+    /// The interval at which data points are accumulated.
+    pub interval: TimeseriesInterval,
     /// Timeseries values.
     /// Each element is a tuple of a timestamp in Unix epoch seconds and a data point.
-    /// The data point represents the accumulated value for a bucket of time starting at the provided timestamp, lasting for the duration of the `bucket_length` parameter.
+    /// The data point represents the accumulated value for the time period starting at the timestamp,
+    /// spanning one `interval`.
     pub values: Vec<(u32, f64)>,
 }
 
@@ -228,7 +229,7 @@ impl From<types::metrics::AccumulationMetric> for AccumulationMetric {
         Self {
             name: value.name,
             unit: value.unit.into(),
-            bucket_length: value.bucket_length.into(),
+            interval: value.interval.into(),
             values: value.values,
         }
     }

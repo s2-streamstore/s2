@@ -27,7 +27,7 @@ pub struct ScalarMetric {
 pub struct AccumulationMetric {
     pub name: CompactString,
     pub unit: MetricUnit,
-    pub bucket_length: TimeseriesInterval,
+    pub interval: TimeseriesInterval,
     pub values: Vec<(u32, f64)>,
 }
 
