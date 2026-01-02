@@ -129,11 +129,11 @@ impl Encodable for CommandRecord {
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum CommandPayloadError {
-    #[error("Invalid UTF-8")]
+    #[error("invalid UTF-8")]
     InvalidUtf8(Utf8Error),
     #[error(transparent)]
     FencingTokenTooLong(#[from] FencingTokenTooLongError),
-    #[error("Earliest sequence number to trim to was {0} bytes, must be 8")]
+    #[error("earliest sequence number to trim to was {0} bytes, must be 8")]
     TrimPointSize(usize),
 }
 

@@ -57,7 +57,7 @@ impl TryFrom<RetentionPolicy> for types::config::RetentionPolicy {
     fn try_from(value: RetentionPolicy) -> Result<Self, Self::Error> {
         match value {
             RetentionPolicy::Age(0) => Err(types::ValidationError(
-                "Age must be greater than 0 seconds".to_string(),
+                "age must be greater than 0 seconds".to_string(),
             )),
             RetentionPolicy::Age(age) => Ok(Self::Age(Duration::from_secs(age))),
             RetentionPolicy::Infinite(_) => Ok(Self::Infinite()),

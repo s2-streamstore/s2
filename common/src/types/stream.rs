@@ -79,12 +79,12 @@ impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
         if !T::IS_PREFIX && name.is_empty() {
-            return Err(format!("Stream {} must not be empty", T::FIELD_NAME).into());
+            return Err(format!("stream {} must not be empty", T::FIELD_NAME).into());
         }
 
         if name.len() > caps::MAX_STREAM_NAME_LEN {
             return Err(format!(
-                "Stream {} must not exceed {} characters in length",
+                "stream {} must not exceed {} characters in length",
                 T::FIELD_NAME,
                 caps::MAX_STREAM_NAME_LEN
             )
@@ -199,7 +199,7 @@ impl TryFrom<AppendRecordParts> for AppendRecord {
 
     fn try_from(parts: AppendRecordParts) -> Result<Self, Self::Error> {
         if parts.metered_size() > caps::RECORD_BATCH_MAX.bytes {
-            Err("Record must have metered size less than 1 MiB")
+            Err("record must have metered size less than 1 MiB")
         } else {
             Ok(Self(parts))
         }
@@ -237,15 +237,15 @@ impl TryFrom<Metered<Vec<AppendRecord>>> for AppendRecordBatch {
 
     fn try_from(records: Metered<Vec<AppendRecord>>) -> Result<Self, Self::Error> {
         if records.is_empty() {
-            return Err("Record batch must not be empty");
+            return Err("record batch must not be empty");
         }
 
         if records.len() > caps::RECORD_BATCH_MAX.count {
-            return Err("Record batch must not exceed 1000 records");
+            return Err("record batch must not exceed 1000 records");
         }
 
         if records.metered_size() > caps::RECORD_BATCH_MAX.bytes {
-            return Err("Record batch must not exceed a metered size of 1 MiB");
+            return Err("record batch must not exceed a metered size of 1 MiB");
         }
 
         Ok(Self(records))

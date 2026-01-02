@@ -77,12 +77,12 @@ impl<T: StrProps> TryFrom<CompactString> for AccessTokenIdStr<T> {
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
         if !T::IS_PREFIX && name.is_empty() {
-            return Err(format!("Access token {} must not be empty", T::FIELD_NAME).into());
+            return Err(format!("access token {} must not be empty", T::FIELD_NAME).into());
         }
 
         if name.len() > Self::MAX_LENGTH {
             return Err(format!(
-                "Access token {} must not exceed {} characters in length",
+                "access token {} must not exceed {} characters in length",
                 T::FIELD_NAME,
                 Self::MAX_LENGTH
             )

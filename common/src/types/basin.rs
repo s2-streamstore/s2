@@ -71,7 +71,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
         if name.len() > caps::MAX_BASIN_NAME_LEN {
             return Err(format!(
-                "Basin {} must not exceed {} characters in length",
+                "basin {} must not exceed {} characters in length",
                 T::FIELD_NAME,
                 caps::MAX_BASIN_NAME_LEN
             )
@@ -80,7 +80,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
 
         if !T::IS_PREFIX && name.len() < caps::MIN_BASIN_NAME_LEN {
             return Err(format!(
-                "Basin {} should be at least {} characters in length",
+                "basin {} should be at least {} characters in length",
                 T::FIELD_NAME,
                 caps::MIN_BASIN_NAME_LEN
             )
@@ -95,7 +95,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
 
         if !first_char.is_ascii_lowercase() && !first_char.is_ascii_digit() {
             return Err(format!(
-                "Basin {} must begin with a lowercase letter or number",
+                "basin {} must begin with a lowercase letter or number",
                 T::FIELD_NAME
             )
             .into());
@@ -107,7 +107,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
             && !last_char.is_ascii_digit()
         {
             return Err(format!(
-                "Basin {} must end with a lowercase letter or number",
+                "basin {} must end with a lowercase letter or number",
                 T::FIELD_NAME
             )
             .into());
@@ -115,7 +115,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
 
         if chars.any(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-') {
             return Err(format!(
-                "Basin {} must comprise lowercase letters, numbers, and hyphens",
+                "basin {} must comprise lowercase letters, numbers, and hyphens",
                 T::FIELD_NAME
             )
             .into());

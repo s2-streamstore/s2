@@ -47,20 +47,20 @@ impl DeepSize for StreamPosition {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum InternalRecordError {
-    #[error("Truncated: {0}")]
+    #[error("truncated: {0}")]
     Truncated(&'static str),
-    #[error("Invalid value [{0}]: {1}")]
+    #[error("invalid value [{0}]: {1}")]
     InvalidValue(&'static str, &'static str),
 }
 
 /// `impl Display` can be safely returned to the client without leaking internal details.
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum PublicRecordError {
-    #[error("Unknown command")]
+    #[error("unknown command")]
     UnknownCommand,
-    #[error("Invalid `{0}` command: {1}")]
+    #[error("invalid `{0}` command: {1}")]
     CommandPayload(CommandOp, CommandPayloadError),
-    #[error("Invalid header: {0}")]
+    #[error("invalid header: {0}")]
     Header(#[from] HeaderValidationError),
 }
 
