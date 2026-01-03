@@ -84,7 +84,7 @@ impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
 
         if name.len() > caps::MAX_STREAM_NAME_LEN {
             return Err(format!(
-                "stream {} must not exceed {} characters in length",
+                "stream {} must not exceed {} bytes in length",
                 T::FIELD_NAME,
                 caps::MAX_STREAM_NAME_LEN
             )

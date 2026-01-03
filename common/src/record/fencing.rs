@@ -7,7 +7,7 @@ use crate::deep_size::DeepSize;
 pub const MAX_FENCING_TOKEN_LENGTH: usize = 36;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-#[error("fencing token must not exceed {MAX_FENCING_TOKEN_LENGTH} characters in length")]
+#[error("fencing token must not exceed {MAX_FENCING_TOKEN_LENGTH} bytes in length")]
 pub struct FencingTokenTooLongError(pub usize);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
