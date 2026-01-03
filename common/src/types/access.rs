@@ -82,7 +82,7 @@ impl<T: StrProps> TryFrom<CompactString> for AccessTokenIdStr<T> {
 
         if name.len() > Self::MAX_LENGTH {
             return Err(format!(
-                "access token {} must not exceed {} characters in length",
+                "access token {} must not exceed {} bytes in length",
                 T::FIELD_NAME,
                 Self::MAX_LENGTH
             )

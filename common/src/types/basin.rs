@@ -71,7 +71,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
         if name.len() > caps::MAX_BASIN_NAME_LEN {
             return Err(format!(
-                "basin {} must not exceed {} characters in length",
+                "basin {} must not exceed {} bytes in length",
                 T::FIELD_NAME,
                 caps::MAX_BASIN_NAME_LEN
             )
@@ -80,7 +80,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
 
         if !T::IS_PREFIX && name.len() < caps::MIN_BASIN_NAME_LEN {
             return Err(format!(
-                "basin {} should be at least {} characters in length",
+                "basin {} should be at least {} bytes in length",
                 T::FIELD_NAME,
                 caps::MIN_BASIN_NAME_LEN
             )
