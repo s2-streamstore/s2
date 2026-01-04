@@ -219,8 +219,7 @@ pub struct AccumulationMetric {
     pub interval: TimeseriesInterval,
     /// Timeseries values.
     /// Each element is a tuple of a timestamp in Unix epoch seconds and a data point.
-    /// The data point represents the accumulated value for the time period starting at the timestamp,
-    /// spanning one `interval`.
+    /// The data point represents the accumulated value for the time period starting at the timestamp, spanning one `interval`.
     pub values: Vec<(u32, f64)>,
 }
 
@@ -287,8 +286,7 @@ impl From<types::metrics::LabelMetric> for LabelMetric {
 pub enum Metric {
     /// Single named value.
     Scalar(ScalarMetric),
-    /// Named series of `(timestamp, value)` points representing an accumulation over a specified
-    /// interval.
+    /// Named series of `(timestamp, value)` points representing an accumulation over a specified interval.
     Accumulation(AccumulationMetric),
     /// Named series of `(timestamp, value)` points each representing an instantaneous value.
     Gauge(GaugeMetric),
