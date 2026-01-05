@@ -21,15 +21,15 @@ impl IntoResponse for HeaderExtractionError {
     fn into_response(self) -> Response {
         let (code, message) = match self {
             HeaderExtractionError::MissingHeader(header) => (
-                "missing_header",
+                "header_missing",
                 format!("Missing required header: {}", header),
             ),
             HeaderExtractionError::InvalidUtf8(header) => (
-                "invalid_header_utf8",
+                "header_invalid",
                 format!("Header {} contains invalid UTF-8", header),
             ),
             HeaderExtractionError::InvalidHeaderValue(header, error) => (
-                "invalid_header_value",
+                "header_invalid",
                 format!("Invalid header value for {}: {}", header, error),
             ),
         };
