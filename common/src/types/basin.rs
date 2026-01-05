@@ -17,6 +17,64 @@ pub static BASIN_HEADER: http::HeaderName = http::HeaderName::from_static("s2-ba
 )]
 pub struct BasinNameStr<T: StrProps>(CompactString, PhantomData<T>);
 
+impl<T: StrProps> BasinNameStr<T> {
+    fn validate_str(name: &str) -> Result<(), ValidationError> {
+        if name.len() > caps::MAX_BASIN_NAME_LEN {
+            return Err(format!(
+                "basin {} must not exceed {} bytes in length",
+                T::FIELD_NAME,
+                caps::MAX_BASIN_NAME_LEN
+            )
+            .into());
+        }
+
+        if !T::IS_PREFIX && name.len() < caps::MIN_BASIN_NAME_LEN {
+            return Err(format!(
+                "basin {} should be at least {} bytes in length",
+                T::FIELD_NAME,
+                caps::MIN_BASIN_NAME_LEN
+            )
+            .into());
+        }
+
+        let mut chars = name.chars();
+
+        let Some(first_char) = chars.next() else {
+            return Ok(());
+        };
+
+        if !first_char.is_ascii_lowercase() && !first_char.is_ascii_digit() {
+            return Err(format!(
+                "basin {} must begin with a lowercase letter or number",
+                T::FIELD_NAME
+            )
+            .into());
+        }
+
+        if !T::IS_PREFIX
+            && let Some(last_char) = chars.next_back()
+            && !last_char.is_ascii_lowercase()
+            && !last_char.is_ascii_digit()
+        {
+            return Err(format!(
+                "basin {} must end with a lowercase letter or number",
+                T::FIELD_NAME
+            )
+            .into());
+        }
+
+        if chars.any(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-') {
+            return Err(format!(
+                "basin {} must comprise lowercase letters, numbers, and hyphens",
+                T::FIELD_NAME
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::PartialSchema for BasinNameStr<T>
 where
@@ -71,58 +129,7 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
     type Error = ValidationError;
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        if name.len() > caps::MAX_BASIN_NAME_LEN {
-            return Err(format!(
-                "basin {} must not exceed {} bytes in length",
-                T::FIELD_NAME,
-                caps::MAX_BASIN_NAME_LEN
-            )
-            .into());
-        }
-
-        if !T::IS_PREFIX && name.len() < caps::MIN_BASIN_NAME_LEN {
-            return Err(format!(
-                "basin {} should be at least {} bytes in length",
-                T::FIELD_NAME,
-                caps::MIN_BASIN_NAME_LEN
-            )
-            .into());
-        }
-
-        let mut chars = name.chars();
-
-        let Some(first_char) = chars.next() else {
-            return Ok(Self(name, PhantomData));
-        };
-
-        if !first_char.is_ascii_lowercase() && !first_char.is_ascii_digit() {
-            return Err(format!(
-                "basin {} must begin with a lowercase letter or number",
-                T::FIELD_NAME
-            )
-            .into());
-        }
-
-        if !T::IS_PREFIX
-            && let Some(last_char) = chars.next_back()
-            && !last_char.is_ascii_lowercase()
-            && !last_char.is_ascii_digit()
-        {
-            return Err(format!(
-                "basin {} must end with a lowercase letter or number",
-                T::FIELD_NAME
-            )
-            .into());
-        }
-
-        if chars.any(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-') {
-            return Err(format!(
-                "basin {} must comprise lowercase letters, numbers, and hyphens",
-                T::FIELD_NAME
-            )
-            .into());
-        }
-
+        Self::validate_str(&name)?;
         Ok(Self(name, PhantomData))
     }
 }
@@ -131,7 +138,8 @@ impl<T: StrProps> FromStr for BasinNameStr<T> {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.to_compact_string().try_into()
+        Self::validate_str(s)?;
+        Ok(Self(s.to_compact_string(), PhantomData))
     }
 }
 

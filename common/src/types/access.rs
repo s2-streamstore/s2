@@ -18,6 +18,25 @@ use crate::{caps, types::resources::ListItemsRequest};
 )]
 pub struct AccessTokenIdStr<T: StrProps>(CompactString, PhantomData<T>);
 
+impl<T: StrProps> AccessTokenIdStr<T> {
+    fn validate_str(id: &str) -> Result<(), ValidationError> {
+        if !T::IS_PREFIX && id.is_empty() {
+            return Err(format!("access token {} must not be empty", T::FIELD_NAME).into());
+        }
+
+        if id.len() > caps::MAX_ACCESS_TOKEN_ID_LEN {
+            return Err(format!(
+                "access token {} must not exceed {} bytes in length",
+                T::FIELD_NAME,
+                caps::MAX_ACCESS_TOKEN_ID_LEN
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::PartialSchema for AccessTokenIdStr<T>
 where
@@ -72,19 +91,7 @@ impl<T: StrProps> TryFrom<CompactString> for AccessTokenIdStr<T> {
     type Error = ValidationError;
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        if !T::IS_PREFIX && name.is_empty() {
-            return Err(format!("access token {} must not be empty", T::FIELD_NAME).into());
-        }
-
-        if name.len() > caps::MAX_ACCESS_TOKEN_ID_LEN {
-            return Err(format!(
-                "access token {} must not exceed {} bytes in length",
-                T::FIELD_NAME,
-                caps::MAX_ACCESS_TOKEN_ID_LEN
-            )
-            .into());
-        }
-
+        Self::validate_str(&name)?;
         Ok(Self(name, PhantomData))
     }
 }
@@ -93,7 +100,8 @@ impl<T: StrProps> FromStr for AccessTokenIdStr<T> {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.to_compact_string().try_into()
+        Self::validate_str(s)?;
+        Ok(Self(s.to_compact_string(), PhantomData))
     }
 }
 
