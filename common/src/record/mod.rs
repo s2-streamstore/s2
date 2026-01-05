@@ -235,7 +235,7 @@ pub trait Encodable {
     fn encode_into(&self, buf: &mut impl BufMut);
 }
 
-impl Encodable for MeteredRecord {
+impl Encodable for Metered<&Record> {
     fn encoded_size(&self) -> usize {
         1 + self.magic_byte().metered_size_varlen as usize
             + match &**self {
@@ -276,16 +276,16 @@ impl DeepSize for SequencedRecord {
     }
 }
 
-pub type MeteredRecord = Metered<Record>;
-
-impl MeteredRecord {
-    pub fn sequenced(self, position: StreamPosition) -> MeteredSequencedRecord {
-        MeteredSequencedRecord {
+impl Metered<Record> {
+    pub fn sequenced(self, position: StreamPosition) -> Metered<SequencedRecord> {
+        Metered {
             size: self.metered_size(),
             inner: self.inner.sequenced(position),
         }
     }
+}
 
+impl Metered<&Record> {
     fn magic_byte(&self) -> MagicByte {
         let metered_size = self.metered_size();
         let metered_size_varlen = 8 - (metered_size.leading_zeros() / 8) as u8;
@@ -303,7 +303,7 @@ impl MeteredRecord {
     }
 }
 
-impl TryFrom<Bytes> for MeteredRecord {
+impl TryFrom<Bytes> for Metered<Record> {
     type Error = InternalRecordError;
 
     fn try_from(mut buf: Bytes) -> Result<Self, Self::Error> {
@@ -325,15 +325,21 @@ impl TryFrom<Bytes> for MeteredRecord {
     }
 }
 
-pub type MeteredSequencedRecord = Metered<SequencedRecord>;
-
-pub type MeteredSequencedRecords = Metered<Vec<SequencedRecord>>;
-
-impl MeteredSequencedRecord {
-    pub fn into_parts(self) -> (StreamPosition, MeteredRecord) {
+impl Metered<SequencedRecord> {
+    pub fn parts(&self) -> (StreamPosition, Metered<&Record>) {
         (
             self.position,
-            MeteredRecord {
+            Metered {
+                size: self.size,
+                inner: &self.inner.record,
+            },
+        )
+    }
+
+    pub fn into_parts(self) -> (StreamPosition, Metered<Record>) {
+        (
+            self.position,
+            Metered {
                 size: self.size,
                 inner: self.inner.record,
             },
@@ -378,9 +384,9 @@ mod test {
             body in bytes_strategy(true),
         ) {
             let record = Record::try_from_parts(headers, body).unwrap();
-            let metered_record: MeteredRecord = record.clone().into();
-            let as_bytes = metered_record.clone().to_bytes();
-            let decoded_record = MeteredRecord::try_from(as_bytes).unwrap();
+            let metered_record: Metered<Record> = record.clone().into();
+            let encoded_record = metered_record.as_ref().to_bytes();
+            let decoded_record = Metered::try_from(encoded_record).unwrap();
             prop_assert_eq!(&decoded_record, &metered_record);
             let sequenced = decoded_record.sequenced(StreamPosition { seq_num, timestamp });
             assert_eq!(sequenced.position, StreamPosition {seq_num, timestamp});
@@ -396,8 +402,8 @@ mod test {
             body in bytes_strategy(true),
         ) {
             let record = Record::try_from_parts(headers.clone(), body.clone()).unwrap();
-            let data_as_bytes = MeteredRecord::from(record.clone()).to_bytes();
-            assert_eq!(record.metered_size(), try_metered_size(data_as_bytes.as_ref()).unwrap() as usize);
+            let encoded_record = Metered::from(&record).to_bytes();
+            assert_eq!(record.metered_size(), try_metered_size(encoded_record.as_ref()).unwrap() as usize);
         }
     );
 

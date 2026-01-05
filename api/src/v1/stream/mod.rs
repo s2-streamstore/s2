@@ -2,7 +2,7 @@ pub mod proto;
 pub mod s2s;
 pub mod sse;
 
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use base64ct::{Base64, Encoding as _};
 use bytes::Bytes;
@@ -10,22 +10,31 @@ use itertools::Itertools as _;
 use s2_common::{
     record,
     types::{
-        self,
+        self, ValidationError,
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     },
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-#[cfg(feature = "utoipa")]
-use utoipa::{IntoParams, ToSchema};
 
 use super::config::StreamConfig;
 
-pub const S2_FORMAT_HEADER: http::HeaderName = http::HeaderName::from_static("s2-format");
+pub static FORMAT_HEADER: http::HeaderName = http::HeaderName::from_static("s2-format");
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
+pub struct S2FormatHeader {
+    /// Defines the interpretation of record data (header name, header value, and body) with the JSON content type.
+    /// Use `raw` (default) for efficient transmission and storage of Unicode data — storage will be in UTF-8.
+    /// Use `base64` for safe transmission with efficient storage of binary data.
+    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-format"))]
+    pub s2_format: Format,
+}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamInfo {
     /// Stream name.
     pub name: StreamName,
@@ -49,7 +58,7 @@ impl From<types::stream::StreamInfo> for StreamInfo {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListStreamsRequest {
     /// Filter to streams whose name begins with this prefix.
@@ -72,7 +81,7 @@ super::impl_list_request_conversions!(
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ListStreamsResponse {
     /// Matching streams.
     #[cfg_attr(feature = "utoipa", schema(max_items = 1000))]
@@ -83,7 +92,7 @@ pub struct ListStreamsResponse {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateStreamRequest {
     /// Stream name that is unique to the basin.
     /// It can be between 1 and 512 bytes in length.
@@ -94,7 +103,7 @@ pub struct CreateStreamRequest {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Position of a record in a stream.
 pub struct StreamPosition {
     /// Sequence number assigned by the service.
@@ -124,7 +133,7 @@ impl From<StreamPosition> for record::StreamPosition {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct TailResponse {
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
     pub tail: StreamPosition,
@@ -132,7 +141,7 @@ pub struct TailResponse {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ReadStart {
     /// Start from a sequence number.
@@ -172,7 +181,7 @@ impl TryFrom<ReadStart> for types::stream::ReadStart {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ReadEnd {
     /// Record count limit.
@@ -270,20 +279,9 @@ impl AppendResponseKind {
 }
 
 #[rustfmt::skip]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
-#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
-pub struct FormatHeader {
-    /// Defines the interpretation of record data (header name, header value, and body) with the JSON content type.
-    /// Use `raw` (default) for efficient transmission and storage of Unicode data — storage will be in UTF-8.
-    /// Use `base64` for safe transmission with efficient storage of binary data.
-    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-format"))]
-    pub s2_format: S2Format,
-}
-
-#[rustfmt::skip]
 #[derive(Default, Clone, Copy)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
-pub enum S2Format {
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum Format {
     #[default]
     #[cfg_attr(feature = "utoipa", schema(rename = "raw"))]
     Raw,
@@ -291,27 +289,17 @@ pub enum S2Format {
     Base64,
 }
 
-impl S2Format {
-    /// Returns `None` in case of more than 1 header or an invalid header value.
-    pub fn from_headers(headers: &http::HeaderMap) -> Option<Self> {
-        let mut formats = headers.get_all(S2_FORMAT_HEADER).iter();
-        let Some(format) = formats.next() else {
-            return Some(S2Format::default());
-        };
-        if formats.next().is_some() {
-            return None;
-        }
-        format.to_str().ok().and_then(|fmt| match fmt.trim() {
-            "raw" | "json" => Some(Self::Raw),
-            "base64" | "json-binsafe" => Some(Self::Base64),
-            _ => None,
-        })
+impl s2_common::header::ExtractableHeader for Format {
+    fn name() -> &'static http::HeaderName {
+        &FORMAT_HEADER
     }
+}
 
+impl Format {
     fn encode(self, bytes: &[u8]) -> String {
         match self {
-            S2Format::Raw => String::from_utf8_lossy(bytes).into_owned(),
-            S2Format::Base64 => Base64::encode_string(bytes),
+            Format::Raw => String::from_utf8_lossy(bytes).into_owned(),
+            Format::Base64 => Base64::encode_string(bytes),
         }
     }
 
@@ -336,8 +324,8 @@ impl S2Format {
 
     fn decode(self, s: String) -> Result<Bytes, types::ValidationError> {
         Ok(match self {
-            S2Format::Raw => s.into_bytes().into(),
-            S2Format::Base64 => Base64::decode_vec(&s)
+            Format::Raw => s.into_bytes().into(),
+            Format::Base64 => Base64::decode_vec(&s)
                 .map_err(|_| types::ValidationError("invalid Base64 encoding".to_owned()))?
                 .into(),
         })
@@ -374,17 +362,29 @@ impl S2Format {
     }
 }
 
+impl FromStr for Format {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "raw" | "json" => Ok(Self::Raw),
+            "base64" | "json-binsafe" => Ok(Self::Base64),
+            _ => Err(ValidationError(s.to_string())),
+        }
+    }
+}
+
 /// Headers add structured information to a record as name-value pairs.
 ///
 /// The name cannot be empty, with the exception of an S2 command record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Header(pub String, pub String);
 
 #[rustfmt::skip]
 /// Record that is durably sequenced on a stream.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SequencedRecord {
     /// Sequence number assigned by the service.
     pub seq_num: record::SeqNum,
@@ -403,7 +403,7 @@ pub struct SequencedRecord {
 #[rustfmt::skip]
 /// Record to be appended to a stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AppendRecord {
     /// Timestamp for this record.
     /// The service will always ensure monotonicity by adjusting it up if necessary to the maximum observed timestamp.
@@ -422,7 +422,7 @@ pub struct AppendRecord {
 #[rustfmt::skip]
 /// Payload of an `append` request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AppendInput {
     /// Batch of records to append atomically, which must contain at least one record, and no more than 1000.
     /// The total size of a batch of records may not exceed 1 MiB of metered bytes.
@@ -436,7 +436,7 @@ pub struct AppendInput {
 #[rustfmt::skip]
 /// Success response to an `append` request.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AppendAck {
     /// Sequence number and timestamp of the first record that was appended.
     pub start: StreamPosition,
@@ -461,7 +461,7 @@ impl From<types::stream::AppendAck> for AppendAck {
 #[rustfmt::skip]
 /// Aborted due to a failed condition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AppendConditionFailed {
     /// Fencing token did not match.
@@ -476,7 +476,7 @@ pub enum AppendConditionFailed {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ReadBatch {
     /// Records that are durably sequenced on the stream, retrieved based on the requested criteria.
     /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
@@ -487,8 +487,8 @@ pub struct ReadBatch {
     pub tail: Option<StreamPosition>,
 }
 
-impl From<(S2Format, types::stream::ReadBatch)> for ReadBatch {
-    fn from((s2_format, batch): (S2Format, types::stream::ReadBatch)) -> Self {
+impl From<(Format, types::stream::ReadBatch)> for ReadBatch {
+    fn from((s2_format, batch): (Format, types::stream::ReadBatch)) -> Self {
         Self {
             records: batch
                 .records

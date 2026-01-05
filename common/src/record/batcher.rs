@@ -6,12 +6,12 @@ use super::InternalRecordError;
 use crate::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{MeteredRecord, MeteredSequencedRecords, MeteredSize, StreamPosition},
+    record::{Metered, MeteredSize, SequencedRecord, StreamPosition},
 };
 
 #[derive(Debug)]
 pub struct RecordBatch {
-    pub records: MeteredSequencedRecords,
+    pub records: Metered<Vec<SequencedRecord>>,
     pub is_terminal: bool,
 }
 
@@ -21,21 +21,21 @@ where
     E: Into<InternalRecordError>,
 {
     record_iterator: I,
-    buffered_records: MeteredSequencedRecords,
+    buffered_records: Metered<Vec<SequencedRecord>>,
     buffered_error: Option<InternalRecordError>,
     read_limit: EvaluatedReadLimit,
     until: ReadUntil,
     is_terminated: bool,
 }
 
-fn make_records(read_limit: &EvaluatedReadLimit) -> MeteredSequencedRecords {
+fn make_records(read_limit: &EvaluatedReadLimit) -> Metered<Vec<SequencedRecord>> {
     match read_limit {
-        EvaluatedReadLimit::Remaining(limit) => MeteredSequencedRecords::with_capacity(
-            limit.count().map_or(caps::RECORD_BATCH_MAX.count, |n| {
+        EvaluatedReadLimit::Remaining(limit) => {
+            Metered::with_capacity(limit.count().map_or(caps::RECORD_BATCH_MAX.count, |n| {
                 n.min(caps::RECORD_BATCH_MAX.count)
-            }),
-        ),
-        EvaluatedReadLimit::Exhausted => MeteredSequencedRecords::default(),
+            }))
+        }
+        EvaluatedReadLimit::Exhausted => Metered::default(),
     }
 }
 
@@ -65,7 +65,7 @@ where
         while self.buffered_error.is_none() {
             match self.record_iterator.next() {
                 Some(Ok((position, data))) => {
-                    let record = match MeteredRecord::try_from(data) {
+                    let record = match Metered::try_from(data) {
                         Ok(record) => record.sequenced(position),
                         Err(err) => {
                             self.buffered_error = Some(err);
@@ -114,7 +114,7 @@ where
             let records = std::mem::replace(
                 &mut self.buffered_records,
                 if is_terminal || self.buffered_error.is_some() {
-                    MeteredSequencedRecords::default()
+                    Metered::default()
                 } else {
                     let mut buf = make_records(&self.read_limit);
                     if let Some(record) = stashed_record.take() {
@@ -183,7 +183,7 @@ mod tests {
         records
             .into_iter()
             .map(|SequencedRecord { position, record }| {
-                (position, MeteredRecord::from(record).to_bytes())
+                (position, Metered::from(record).as_ref().to_bytes())
             })
             .map(Ok)
     }

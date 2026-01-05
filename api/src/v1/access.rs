@@ -43,12 +43,10 @@ where
 }
 
 use time::OffsetDateTime;
-#[cfg(feature = "utoipa")]
-use utoipa::{IntoParams, ToSchema};
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum Operation {
     /// List basins.
@@ -154,7 +152,7 @@ impl From<types::access::Operation> for Operation {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AccessTokenInfo {
     /// Access token ID.
     /// It must be unique to the account and between 1 and 96 bytes in length.
@@ -208,7 +206,7 @@ impl From<types::access::IssueAccessTokenRequest> for AccessTokenInfo {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AccessTokenScope {
     /// Basin names allowed.
     pub basins: Option<ResourceSet<MaybeEmpty<BasinName>, BasinNamePrefix>>,
@@ -270,7 +268,7 @@ impl From<types::access::AccessTokenScope> for AccessTokenScope {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceSet<E, P> {
     /// Match only the resource with this exact name.
@@ -307,7 +305,7 @@ impl<E, P> From<ResourceSet<MaybeEmpty<E>, P>> for types::access::ResourceSet<E,
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PermittedOperationGroups {
     /// Account-level access permissions.
     pub account: Option<ReadWritePermissions>,
@@ -351,7 +349,7 @@ impl From<types::access::PermittedOperationGroups> for PermittedOperationGroups 
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ReadWritePermissions {
     /// Read permission.
     #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]
@@ -385,7 +383,7 @@ impl From<types::access::ReadWritePermissions> for ReadWritePermissions {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListAccessTokensRequest {
     /// Filter to access tokens whose ID begins with this prefix.
@@ -407,7 +405,7 @@ super::impl_list_request_conversions!(
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ListAccessTokensResponse {
     /// Matching access tokens.
     #[cfg_attr(feature = "utoipa", schema(max_items = 1000))]
@@ -418,7 +416,7 @@ pub struct ListAccessTokensResponse {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct IssueAccessTokenResponse {
     /// Created access token.
     pub access_token: String,

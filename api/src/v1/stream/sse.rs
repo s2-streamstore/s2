@@ -2,8 +2,6 @@ use std::{str::FromStr, time::Duration};
 
 use s2_common::types;
 use serde::Serialize;
-#[cfg(feature = "utoipa")]
-use utoipa::ToSchema;
 
 use super::ReadBatch;
 
@@ -70,7 +68,7 @@ impl FromStr for LastEventId {
 macro_rules! event {
     ($name:ident, $val:expr) => {
         #[derive(Serialize)]
-        #[cfg_attr(feature = "utoipa", derive(ToSchema))]
+        #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
         #[serde(rename_all = "snake_case")]
         pub enum $name {
             $name,
@@ -89,7 +87,7 @@ event!(Error, "error");
 event!(Ping, "ping");
 
 #[derive(Serialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum ReadEvent {
     #[cfg_attr(feature = "utoipa", schema(title = "batch"))]
@@ -176,7 +174,7 @@ impl TryFrom<ReadEvent> for axum::response::sse::Event {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename = "[DONE]")]
 pub struct DoneEventData;
 
@@ -188,7 +186,7 @@ impl AsRef<str> for DoneEventData {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PingEventData {
     pub timestamp: u64,
 }

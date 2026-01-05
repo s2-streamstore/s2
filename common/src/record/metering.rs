@@ -3,6 +3,15 @@ pub trait MeteredSize {
     fn metered_size(&self) -> usize;
 }
 
+impl<T> MeteredSize for &T
+where
+    T: MeteredSize,
+{
+    fn metered_size(&self) -> usize {
+        (**self).metered_size()
+    }
+}
+
 impl<T: MeteredSize> MeteredSize for &[T] {
     fn metered_size(&self) -> usize {
         self.iter().fold(0, |acc, item| acc + item.metered_size())
@@ -23,6 +32,13 @@ pub struct Metered<T> {
 impl<T> Metered<T> {
     pub fn into_inner(self) -> T {
         self.inner
+    }
+
+    pub const fn as_ref(&self) -> Metered<&T> {
+        Metered {
+            size: self.size,
+            inner: &self.inner,
+        }
     }
 }
 
@@ -119,6 +135,21 @@ where
     pub fn append(&mut self, other: Self) {
         self.inner.extend(other.inner);
         self.size += other.size;
+    }
+}
+
+impl<T> FromIterator<Metered<T>> for Metered<Vec<T>>
+where
+    T: MeteredSize,
+{
+    fn from_iter<I: IntoIterator<Item = Metered<T>>>(iterable: I) -> Self {
+        let it = iterable.into_iter();
+        let (cap_lower, cap_upper) = it.size_hint();
+        let mut buf = Self::with_capacity(cap_upper.unwrap_or(cap_lower));
+        for item in it {
+            buf.push(item);
+        }
+        buf
     }
 }
 
