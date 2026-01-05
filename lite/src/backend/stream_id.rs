@@ -1,69 +1,38 @@
-use s2_common::types::{basin::BasinName, stream::StreamName};
-
-const FIELD_SEPARATOR: u8 = 0x00;
+use s2_common::{
+    bash::Bash,
+    types::{basin::BasinName, stream::StreamName},
+};
 
 /// Unique identifier for a stream scoped by its basin.
-///
-/// The identifier is the Blake3 hash of the string representations of the
-/// basin and stream names with a separator byte to avoid collisions when
-/// concatenating variable length fields.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct StreamId(blake3::Hash);
+pub struct StreamId(Bash);
 
-impl StreamId {
-    pub fn new(basin: &BasinName, stream: &StreamName) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(basin.as_ref().as_bytes());
-        hasher.update(&[FIELD_SEPARATOR]);
-        hasher.update(stream.as_ref().as_bytes());
-
-        Self(hasher.finalize())
-    }
-
-    /// Access the raw 32-byte hash.
-    pub fn as_hash(&self) -> blake3::Hash {
-        self.0
-    }
-
-    /// Borrow the identifier as raw bytes.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        self.0.as_bytes()
-    }
-
-    /// Consume the identifier and return the raw bytes.
-    pub fn into_bytes(self) -> [u8; 32] {
-        *self.0.as_bytes()
+impl std::fmt::Display for StreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
+impl StreamId {
+    pub const LEN: usize = 32;
 
-    use s2_common::types::{basin::BasinName, stream::StreamName};
-
-    use super::StreamId;
-
-    #[test]
-    fn deterministic_for_same_inputs() {
-        let basin = BasinName::from_str("basin-alpha").unwrap();
-        let stream = StreamName::from_str("stream-main").unwrap();
-
-        let first = StreamId::new(&basin, &stream);
-        let second = StreamId::new(&basin, &stream);
-
-        assert_eq!(first, second);
+    pub fn new(basin: &BasinName, stream: &StreamName) -> Self {
+        Self(Bash::new(&[basin.as_bytes(), stream.as_bytes()]))
     }
 
-    #[test]
-    fn distinct_for_different_inputs() {
-        let basin = BasinName::from_str("basin-alpha").unwrap();
-        let stream_a = StreamName::from_str("stream-main").unwrap();
-        let stream_b = StreamName::from_str("stream-aux").unwrap();
+    pub fn as_bytes(&self) -> &[u8; Self::LEN] {
+        self.0.as_bytes()
+    }
+}
 
-        let id_a = StreamId::new(&basin, &stream_a);
-        let id_b = StreamId::new(&basin, &stream_b);
+impl From<[u8; StreamId::LEN]> for StreamId {
+    fn from(bytes: [u8; StreamId::LEN]) -> Self {
+        Self(bytes.into())
+    }
+}
 
-        assert_ne!(id_a, id_b);
+impl From<StreamId> for [u8; StreamId::LEN] {
+    fn from(id: StreamId) -> Self {
+        id.0.into()
     }
 }

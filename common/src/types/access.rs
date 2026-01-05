@@ -27,7 +27,7 @@ where
         utoipa::openapi::Object::builder()
             .schema_type(utoipa::openapi::Type::String)
             .min_length((!T::IS_PREFIX).then_some(1))
-            .max_length(Some(Self::MAX_LENGTH))
+            .max_length(Some(caps::MAX_ACCESS_TOKEN_ID_LEN))
             .into()
     }
 }
@@ -54,10 +54,6 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for AccessTokenIdStr<T> {
     }
 }
 
-impl<T: StrProps> AccessTokenIdStr<T> {
-    const MAX_LENGTH: usize = caps::MAX_TOKEN_ID_LEN;
-}
-
 impl<T: StrProps> AsRef<str> for AccessTokenIdStr<T> {
     fn as_ref(&self) -> &str {
         &self.0
@@ -80,11 +76,11 @@ impl<T: StrProps> TryFrom<CompactString> for AccessTokenIdStr<T> {
             return Err(format!("access token {} must not be empty", T::FIELD_NAME).into());
         }
 
-        if name.len() > Self::MAX_LENGTH {
+        if name.len() > caps::MAX_ACCESS_TOKEN_ID_LEN {
             return Err(format!(
                 "access token {} must not exceed {} bytes in length",
                 T::FIELD_NAME,
-                Self::MAX_LENGTH
+                caps::MAX_ACCESS_TOKEN_ID_LEN
             )
             .into());
         }

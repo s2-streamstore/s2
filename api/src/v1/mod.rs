@@ -1,17 +1,17 @@
 pub mod access;
 pub mod basin;
 pub mod config;
+#[cfg(feature = "axum")]
+pub mod extractors;
 pub mod metrics;
 pub mod stream;
 
 use s2_common::types;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "utoipa")]
-use utoipa::{IntoParams, ToSchema};
 
 #[rustfmt::skip]
 #[derive(Debug)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
 pub struct S2RequestTokenHeader {
     /// Client-specified request token for idempotent retries.
@@ -21,7 +21,7 @@ pub struct S2RequestTokenHeader {
 
 #[rustfmt::skip]
 #[derive(Debug)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct AccessTokenIdPathSegment {
     /// Access token ID.
@@ -30,7 +30,7 @@ pub struct AccessTokenIdPathSegment {
 
 #[rustfmt::skip]
 #[derive(Debug)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct BasinNamePathSegment {
     /// Basin name.
@@ -39,7 +39,7 @@ pub struct BasinNamePathSegment {
 
 #[rustfmt::skip]
 #[derive(Debug)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct StreamNamePathSegment {
     /// Stream name.
@@ -71,7 +71,7 @@ macro_rules! impl_list_request_conversions {
 pub(crate) use impl_list_request_conversions;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ErrorInfo {
     pub code: &'static str,
     pub message: String,

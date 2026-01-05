@@ -5,16 +5,34 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+async-stream = { workspace = true }
 async-trait = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
+axum-extra = { workspace = true }
+axum-server = { workspace = true, features = ["tls-rustls"] }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 compact_str = { workspace = true }
 dashmap = { workspace = true }
+enum-ordinalize = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
-s2-api = { path = "../api" }
+http = { workspace = true }
+parking_lot = { workspace = true, features = ["arc_lock"] }
+rand = { workspace = true }
+rcgen = { workspace = true }
+s2-api = { path = "../api", features = ["axum"] }
 s2-common = { path = "../common", features = ["clap"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 slatedb = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+uuid = { workspace = true }

@@ -3,14 +3,12 @@ use s2_common::types::{
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
 };
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "utoipa")]
-use utoipa::{IntoParams, ToSchema};
 
 use super::config::BasinConfig;
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(IntoParams))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListBasinsRequest {
     /// Filter to basins whose names begin with this prefix.
@@ -33,7 +31,7 @@ super::impl_list_request_conversions!(
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ListBasinsResponse {
     /// Matching basins.
     #[cfg_attr(feature = "utoipa", schema(max_items = 1000))]
@@ -44,7 +42,7 @@ pub struct ListBasinsResponse {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
@@ -68,7 +66,7 @@ impl From<types::basin::BasinInfo> for BasinInfo {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum BasinScope {
     /// AWS `us-east-1` region.
     #[serde(rename = "aws:us-east-1")]
@@ -93,7 +91,7 @@ impl From<types::basin::BasinScope> for BasinScope {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum BasinState {
     /// Basin is active.
@@ -116,7 +114,7 @@ impl From<types::basin::BasinState> for BasinState {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateOrReconfigureBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
@@ -127,7 +125,7 @@ pub struct CreateOrReconfigureBasinRequest {
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateBasinRequest {
     /// Basin name which must be globally unique.
     /// It can be between 8 and 48 bytes in length, and comprise lowercase letters, numbers and hyphens.
