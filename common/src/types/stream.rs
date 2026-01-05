@@ -24,6 +24,25 @@ use crate::{
 )]
 pub struct StreamNameStr<T: StrProps>(CompactString, PhantomData<T>);
 
+impl<T: StrProps> StreamNameStr<T> {
+    fn validate_str(name: &str) -> Result<(), ValidationError> {
+        if !T::IS_PREFIX && name.is_empty() {
+            return Err(format!("stream {} must not be empty", T::FIELD_NAME).into());
+        }
+
+        if name.len() > caps::MAX_STREAM_NAME_LEN {
+            return Err(format!(
+                "stream {} must not exceed {} bytes in length",
+                T::FIELD_NAME,
+                caps::MAX_STREAM_NAME_LEN
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::PartialSchema for StreamNameStr<T>
 where
@@ -78,19 +97,7 @@ impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
     type Error = ValidationError;
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        if !T::IS_PREFIX && name.is_empty() {
-            return Err(format!("stream {} must not be empty", T::FIELD_NAME).into());
-        }
-
-        if name.len() > caps::MAX_STREAM_NAME_LEN {
-            return Err(format!(
-                "stream {} must not exceed {} bytes in length",
-                T::FIELD_NAME,
-                caps::MAX_STREAM_NAME_LEN
-            )
-            .into());
-        }
-
+        Self::validate_str(&name)?;
         Ok(Self(name, PhantomData))
     }
 }
@@ -99,7 +106,8 @@ impl<T: StrProps> FromStr for StreamNameStr<T> {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.to_compact_string().try_into()
+        Self::validate_str(s)?;
+        Ok(Self(s.to_compact_string(), PhantomData))
     }
 }
 
