@@ -218,3 +218,67 @@ pub struct BasinInfo {
     pub scope: Option<BasinScope>,
     pub state: BasinState,
 }
+
+#[cfg(test)]
+mod test {
+    use rstest::rstest;
+
+    use super::{BasinNameStr, NameProps, PrefixProps, StartAfterProps};
+
+    #[rstest]
+    #[case::min_len("abcdefgh".to_owned())]
+    #[case::starts_with_digit("1abcdefg".to_owned())]
+    #[case::contains_hyphen("abcd-efg".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_BASIN_NAME_LEN))]
+    fn validate_name_ok(#[case] name: String) {
+        assert_eq!(BasinNameStr::<NameProps>::validate_str(&name), Ok(()));
+    }
+
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_BASIN_NAME_LEN + 1))]
+    #[case::too_short("abcdefg".to_owned())]
+    #[case::empty("".to_owned())]
+    #[case::invalid_first_char("Abcdefgh".to_owned())]
+    #[case::invalid_last_char("abcdefg-".to_owned())]
+    #[case::invalid_characters("abcd_efg".to_owned())]
+    fn validate_name_err(#[case] name: String) {
+        BasinNameStr::<NameProps>::validate_str(&name).expect_err("expected validation error");
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::single_char("a".to_owned())]
+    #[case::trailing_hyphen("abcdefg-".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_BASIN_NAME_LEN))]
+    fn validate_prefix_ok(#[case] prefix: String) {
+        assert_eq!(BasinNameStr::<PrefixProps>::validate_str(&prefix), Ok(()));
+    }
+
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_BASIN_NAME_LEN + 1))]
+    #[case::invalid_first_char("-abc".to_owned())]
+    #[case::invalid_characters("ab_cd".to_owned())]
+    fn validate_prefix_err(#[case] prefix: String) {
+        BasinNameStr::<PrefixProps>::validate_str(&prefix).expect_err("expected validation error");
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::single_char("a".to_owned())]
+    #[case::trailing_hyphen("abcdefg-".to_owned())]
+    fn validate_start_after_ok(#[case] start_after: String) {
+        assert_eq!(
+            BasinNameStr::<StartAfterProps>::validate_str(&start_after),
+            Ok(())
+        );
+    }
+
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_BASIN_NAME_LEN + 1))]
+    #[case::invalid_first_char("-abc".to_owned())]
+    #[case::invalid_characters("ab_cd".to_owned())]
+    fn validate_start_after_err(#[case] start_after: String) {
+        BasinNameStr::<StartAfterProps>::validate_str(&start_after)
+            .expect_err("expected validation error");
+    }
+}
