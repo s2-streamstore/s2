@@ -32,7 +32,7 @@ serde_json = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
-tokio-util = { workspace = true, features = ["rt", "codec", "io"] }
+tokio-util = { workspace = true, features = ["codec", "io"] }
 utoipa = { workspace = true, optional = true, features = ["time"] }
 zstd = { workspace = true }
 
