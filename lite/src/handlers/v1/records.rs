@@ -15,7 +15,7 @@ use s2_api::{
 use s2_common::{
     caps::RECORD_BATCH_MAX,
     http::extract::Header,
-    read_extent::CountOrBytes,
+    read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
     types::{
         basin::BasinName,
@@ -75,10 +75,11 @@ pub async fn read(
             response_mime,
         } => {
             let start: ReadStart = start.try_into()?;
-            let end: ReadEnd = end.into();
-            let wait = end.wait.map(|dur| dur.min(super::MAX_UNARY_READ_WAIT));
-            let session = backend.read(basin, stream, start, end).await?;
-            let batch = merge_read_session(session, wait).await?;
+            let mut end: ReadEnd = end.into();
+            end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
+            end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
+            let session = backend.read(basin, stream, start, end.clone()).await?;
+            let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
                 JsonOrProto::Json => {
                     let batch = v1t::stream::ReadBatch::encode(format, batch);
@@ -196,10 +197,10 @@ async fn merge_read_session(
                     break;
                 }
             }
-            ReadSessionOutput::Heartbeat(_) => {
+            ReadSessionOutput::Heartbeat(pos) => {
                 assert!(
                     wait.is_some_and(|d| d > Duration::ZERO),
-                    "heartbeat only if non-zero wait"
+                    "heartbeat {pos} only if non-zero wait"
                 );
                 if !acc.records.is_empty() {
                     break;
