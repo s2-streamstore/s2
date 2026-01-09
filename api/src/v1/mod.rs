@@ -1,13 +1,11 @@
 pub mod access;
 pub mod basin;
 pub mod config;
-#[cfg(feature = "axum")]
-pub mod extractors;
+pub mod error;
 pub mod metrics;
 pub mod stream;
 
-use s2_common::types;
-use serde::{Deserialize, Serialize};
+use s2_common::types::{self, resources::RequestToken};
 
 #[rustfmt::skip]
 #[derive(Debug)]
@@ -16,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub struct S2RequestTokenHeader {
     /// Client-specified request token for idempotent retries.
     #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-request-token"))]
-    pub s2_request_token: String,
+    pub s2_request_token: RequestToken,
 }
 
 #[rustfmt::skip]
@@ -69,10 +67,3 @@ macro_rules! impl_list_request_conversions {
 }
 
 pub(crate) use impl_list_request_conversions;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct ErrorInfo {
-    pub code: &'static str,
-    pub message: String,
-}

@@ -1,15 +1,23 @@
 use std::{str::FromStr, time::Duration};
 
-use s2_common::types;
+use s2_common::{http::ParseableHeader, types};
 use serde::Serialize;
 
 use super::ReadBatch;
+
+static LAST_EVENT_ID_HEADER: http::HeaderName = http::HeaderName::from_static("last-event-id");
 
 #[derive(Debug, Clone, Copy)]
 pub struct LastEventId {
     pub seq_num: u64,
     pub count: usize,
     pub bytes: usize,
+}
+
+impl ParseableHeader for LastEventId {
+    fn name() -> &'static http::HeaderName {
+        &LAST_EVENT_ID_HEADER
+    }
 }
 
 impl Serialize for LastEventId {
@@ -121,7 +129,7 @@ pub enum ReadEvent {
 fn elapsed_since_epoch() -> Duration {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .expect("healthy clock")
 }
 
 impl ReadEvent {

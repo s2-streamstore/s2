@@ -234,7 +234,7 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
         .await;
     assert!(matches!(
         reconfigure_result,
-        Err(ReconfigureBasinError::BasinDeletionInProgress(_))
+        Err(ReconfigureBasinError::BasinDeletionPending(_))
     ));
 
     let recreate_result = backend
@@ -246,7 +246,7 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
         .await;
     assert!(matches!(
         recreate_result,
-        Err(CreateBasinError::BasinDeletionInProgress(_))
+        Err(CreateBasinError::BasinDeletionPending(_))
     ));
 
     backend

@@ -215,7 +215,7 @@ impl Deref for RequestToken {
     }
 }
 
-impl crate::header::ExtractableHeader for RequestToken {
+impl crate::http::ParseableHeader for RequestToken {
     fn name() -> &'static http::HeaderName {
         &REQUEST_TOKEN_HEADER
     }

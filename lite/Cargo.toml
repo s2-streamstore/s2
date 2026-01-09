@@ -19,7 +19,9 @@ enum-ordinalize = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+itertools = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }
+prost = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
 s2-api = { path = "../api", features = ["axum"] }
@@ -30,6 +32,8 @@ slatedb = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

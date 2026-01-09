@@ -37,7 +37,7 @@ use crate::backend::{
     stream_id::StreamId,
 };
 
-// TODO: https://github.com/slatedb/slatedb/issues/1138
+// TODO: bump once sl8 supports pipelining (https://github.com/slatedb/slatedb/issues/1138)
 const MAX_INFLIGHT_APPENDS: usize = 1;
 
 const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -528,10 +528,10 @@ async fn db_write_records(
         kv::stream_tail_position::ser_key(stream_id),
         kv::stream_tail_position::ser_value(next_pos(&records)),
     );
-    static WRITE_OPTIONS: WriteOptions = WriteOptions {
+    static WRITE_OPTS: WriteOptions = WriteOptions {
         await_durable: true,
     };
-    db.write_with_options(wb, &WRITE_OPTIONS).await?;
+    db.write_with_options(wb, &WRITE_OPTS).await?;
     Ok(records)
 }
 

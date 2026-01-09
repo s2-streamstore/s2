@@ -191,7 +191,7 @@ impl From<BasinName> for BasinNameStartAfter {
     }
 }
 
-impl crate::header::ExtractableHeader for BasinName {
+impl crate::http::ParseableHeader for BasinName {
     fn name() -> &'static http::HeaderName {
         &BASIN_HEADER
     }

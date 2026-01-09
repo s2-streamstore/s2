@@ -38,7 +38,7 @@ impl Backend {
     }
 
     pub async fn append_session(
-        &self,
+        self,
         basin: BasinName,
         stream: StreamName,
         inputs: impl Stream<Item = AppendInput>,
@@ -57,7 +57,9 @@ impl Backend {
                     ) => {
                         let metered_size = input.records.metered_size();
                         inflight_bytes += metered_size;
-                        let fut = client.append(input, Some(session.clone())).map(move |res| (metered_size, res));
+                        let fut = client
+                            .append(input, Some(session.clone()))
+                            .map(move |res| (metered_size, res));
                         futs.push_back(fut);
                     }
                     Some((metered_size, res)) = futs.next() => {

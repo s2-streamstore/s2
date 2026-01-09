@@ -16,9 +16,8 @@ use time::OffsetDateTime;
 use super::{Backend, store::db_txn_get};
 use crate::backend::{
     error::{
-        BasinAlreadyExistsError, BasinDeletionInProgressError, BasinNotFoundError,
-        CreateBasinError, DeleteBasinError, GetBasinConfigError, ListBasinsError,
-        ReconfigureBasinError,
+        BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, CreateBasinError,
+        DeleteBasinError, GetBasinConfigError, ListBasinsError, ReconfigureBasinError,
     },
     kv,
 };
@@ -95,7 +94,7 @@ impl Backend {
             db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?
         {
             if existing_meta.deleted_at.is_some() {
-                return Err(BasinDeletionInProgressError { basin }.into());
+                return Err(BasinDeletionPendingError { basin }.into());
             }
             match mode {
                 CreateMode::CreateOnly(_) => {
@@ -119,7 +118,7 @@ impl Backend {
 
         let created_at = existing_created_at.unwrap_or_else(OffsetDateTime::now_utc);
 
-        let meta = kv::BasinMeta {
+        let meta = kv::basin_meta::BasinMeta {
             config,
             created_at,
             deleted_at: None,
@@ -167,7 +166,7 @@ impl Backend {
         };
 
         if meta.deleted_at.is_some() {
-            return Err(BasinDeletionInProgressError { basin }.into());
+            return Err(BasinDeletionPendingError { basin }.into());
         }
 
         meta.config = meta.config.reconfigure(reconfig);

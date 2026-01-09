@@ -7,14 +7,12 @@ pub mod stream_record_timestamp;
 pub mod stream_tail_position;
 pub mod stream_trim_point;
 
-pub use basin_meta::BasinMeta;
 use bytes::{Buf, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
 use s2_common::{
     record::{SeqNum, StreamPosition, Timestamp},
     types::{basin::BasinName, stream::StreamName},
 };
-pub use stream_meta::StreamMeta;
 use thiserror::Error;
 
 use crate::backend::stream_id::StreamId;
@@ -61,7 +59,7 @@ pub enum Key {
     /// (SP) per-stream, updatable
     /// Key: StreamID
     /// Value: SeqNum Timestamp
-    /// TODO: unnecessary once sl8 supports reverse scans
+    // TODO: unnecessary once sl8 supports reverse order scan (https://github.com/slatedb/slatedb/issues/438)
     StreamTailPosition(StreamId),
     /// (SFT) per-stream, updatable, optional, default empty
     /// Key: StreamID

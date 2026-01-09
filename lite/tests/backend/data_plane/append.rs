@@ -266,6 +266,7 @@ async fn test_append_session_basic() {
     ]);
 
     let session = backend
+        .clone()
         .append_session(basin_name.clone(), stream_name.clone(), inputs)
         .await
         .expect("Failed to create append session");
@@ -304,6 +305,7 @@ async fn test_append_session_empty() {
     let inputs = futures::stream::iter(vec![]);
 
     let session = backend
+        .clone()
         .append_session(basin_name.clone(), stream_name.clone(), inputs)
         .await
         .expect("Failed to create append session");
@@ -349,6 +351,7 @@ async fn test_append_session_multiple_records_per_batch() {
     ]);
 
     let session = backend
+        .clone()
         .append_session(basin_name.clone(), stream_name.clone(), inputs)
         .await
         .expect("Failed to create append session");
@@ -530,6 +533,7 @@ async fn test_append_session_large_batches() {
     }));
 
     let session = backend
+        .clone()
         .append_session(basin_name.clone(), stream_name.clone(), inputs)
         .await
         .expect("Failed to create append session");

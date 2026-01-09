@@ -1,16 +1,18 @@
+#[cfg(feature = "axum")]
+pub mod extract;
+
 pub mod proto;
 pub mod s2s;
 pub mod sse;
 
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 
-use base64ct::{Base64, Encoding as _};
-use bytes::Bytes;
+use futures::stream::BoxStream;
 use itertools::Itertools as _;
 use s2_common::{
     record,
     types::{
-        self, ValidationError,
+        self,
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     },
 };
@@ -18,19 +20,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::config::StreamConfig;
-
-pub static FORMAT_HEADER: http::HeaderName = http::HeaderName::from_static("s2-format");
-
-#[rustfmt::skip]
-#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
-#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
-pub struct S2FormatHeader {
-    /// Defines the interpretation of record data (header name, header value, and body) with the JSON content type.
-    /// Use `raw` (default) for efficient transmission and storage of Unicode data — storage will be in UTF-8.
-    /// Use `base64` for safe transmission with efficient storage of binary data.
-    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-format"))]
-    pub s2_format: Format,
-}
+use crate::{data::Format, mime::JsonOrProto};
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,161 +207,58 @@ impl From<ReadEnd> for types::stream::ReadEnd {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum ReadResponseKind {
-    /// Unary response
-    Unary,
-    /// Server-sent events streaming response
-    EventStream,
+pub enum ReadRequest {
+    /// Unary
+    Unary {
+        format: Format,
+        response_mime: JsonOrProto,
+    },
+    /// Server-Sent Events streaming response
+    EventStream {
+        format: Format,
+        last_event_id: Option<sse::LastEventId>,
+    },
     /// S2S streaming response
-    S2sStream,
+    S2s {
+        response_compression: s2s::CompressionAlgorithm,
+    },
 }
 
-impl ReadResponseKind {
-    /// Determines the response kind based on the `Content-Type` or `Accept` headers.
-    pub fn from_headers(headers: &http::HeaderMap) -> Self {
-        headers
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|ct| ct.to_str().ok())
-            .and_then(|ct| {
-                if ct == "s2s/proto" {
-                    return Some(Self::S2sStream);
-                }
-                None
-            })
-            .or_else(|| {
-                headers
-                    .get(http::header::ACCEPT)
-                    .and_then(|accept| accept.to_str().ok())
-                    .map(|accept| {
-                        if accept == "text/event-stream" {
-                            Self::EventStream
-                        } else {
-                            Self::Unary
-                        }
-                    })
-            })
-            .unwrap_or(Self::Unary)
-    }
+pub enum AppendRequest {
+    /// Unary
+    Unary {
+        input: types::stream::AppendInput,
+        response_mime: JsonOrProto,
+    },
+    /// S2S bi-directional streaming
+    S2s {
+        inputs: BoxStream<'static, Result<types::stream::AppendInput, AppendInputStreamError>>,
+        response_compression: s2s::CompressionAlgorithm,
+    },
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum AppendResponseKind {
-    /// Unary response
-    Unary,
-    /// S2S streaming response
-    S2sStream,
-}
-
-impl AppendResponseKind {
-    pub fn from_content_type(headers: &http::HeaderMap) -> Self {
-        headers
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|ct| ct.to_str().ok())
-            .map(|ct| {
-                if ct == "s2s/proto" {
-                    Self::S2sStream
-                } else {
-                    Self::Unary
-                }
-            })
-            .unwrap_or(Self::Unary)
-    }
-}
-
-#[rustfmt::skip]
-#[derive(Default, Clone, Copy)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub enum Format {
-    #[default]
-    #[cfg_attr(feature = "utoipa", schema(rename = "raw"))]
-    Raw,
-    #[cfg_attr(feature = "utoipa", schema(rename = "base64"))]
-    Base64,
-}
-
-impl s2_common::header::ExtractableHeader for Format {
-    fn name() -> &'static http::HeaderName {
-        &FORMAT_HEADER
-    }
-}
-
-impl Format {
-    fn encode(self, bytes: &[u8]) -> String {
+impl std::fmt::Debug for AppendRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Format::Raw => String::from_utf8_lossy(bytes).into_owned(),
-            Format::Base64 => Base64::encode_string(bytes),
+            AppendRequest::Unary {
+                input,
+                response_mime: response,
+            } => f
+                .debug_struct("AppendRequest::Unary")
+                .field("input", input)
+                .field("response", response)
+                .finish(),
+            AppendRequest::S2s { .. } => f.debug_struct("AppendRequest::S2s").finish(),
         }
-    }
-
-    pub fn encode_read(
-        self,
-        record::SequencedRecord {
-            position: record::StreamPosition { seq_num, timestamp },
-            record,
-        }: record::SequencedRecord,
-    ) -> SequencedRecord {
-        let (headers, body) = record.into_parts();
-        SequencedRecord {
-            seq_num,
-            timestamp,
-            headers: headers
-                .into_iter()
-                .map(|h| Header(self.encode(&h.name), self.encode(&h.value)))
-                .collect(),
-            body: self.encode(&body),
-        }
-    }
-
-    fn decode(self, s: String) -> Result<Bytes, types::ValidationError> {
-        Ok(match self {
-            Format::Raw => s.into_bytes().into(),
-            Format::Base64 => Base64::decode_vec(&s)
-                .map_err(|_| types::ValidationError("invalid Base64 encoding".to_owned()))?
-                .into(),
-        })
-    }
-
-    pub fn decode_append(
-        self,
-        AppendRecord {
-            timestamp,
-            headers,
-            body,
-        }: AppendRecord,
-    ) -> Result<types::stream::AppendRecord, types::ValidationError> {
-        let headers = headers
-            .into_iter()
-            .map(|Header(name, value)| {
-                Ok::<record::Header, types::ValidationError>(record::Header {
-                    name: self.decode(name)?,
-                    value: self.decode(value)?,
-                })
-            })
-            .try_collect()?;
-
-        let body = self.decode(body)?;
-
-        let record = record::Record::try_from_parts(headers, body)
-            .map_err(|e| e.to_string())?
-            .into();
-
-        let parts = types::stream::AppendRecordParts { timestamp, record };
-
-        types::stream::AppendRecord::try_from(parts)
-            .map_err(|e| types::ValidationError(e.to_string()))
     }
 }
 
-impl FromStr for Format {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "raw" | "json" => Ok(Self::Raw),
-            "base64" | "json-binsafe" => Ok(Self::Base64),
-            _ => Err(ValidationError(s.to_string())),
-        }
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum AppendInputStreamError {
+    #[error("Failed to decode S2S frame: {0}")]
+    FrameDecode(#[from] std::io::Error),
+    #[error(transparent)]
+    Validation(#[from] types::ValidationError),
 }
 
 /// Headers add structured information to a record as name-value pairs.
@@ -400,6 +287,27 @@ pub struct SequencedRecord {
     pub body: String,
 }
 
+impl SequencedRecord {
+    pub fn encode(
+        format: Format,
+        record::SequencedRecord {
+            position: record::StreamPosition { seq_num, timestamp },
+            record,
+        }: record::SequencedRecord,
+    ) -> Self {
+        let (headers, body) = record.into_parts();
+        Self {
+            seq_num,
+            timestamp,
+            headers: headers
+                .into_iter()
+                .map(|h| Header(format.encode(&h.name), format.encode(&h.value)))
+                .collect(),
+            body: format.encode(&body),
+        }
+    }
+}
+
 #[rustfmt::skip]
 /// Record to be appended to a stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +327,38 @@ pub struct AppendRecord {
     pub body: String,
 }
 
+impl AppendRecord {
+    pub fn decode(
+        self,
+        format: Format,
+    ) -> Result<types::stream::AppendRecord, types::ValidationError> {
+        let headers = self
+            .headers
+            .into_iter()
+            .map(|Header(name, value)| {
+                Ok::<record::Header, types::ValidationError>(record::Header {
+                    name: format.decode(name)?,
+                    value: format.decode(value)?,
+                })
+            })
+            .try_collect()?;
+
+        let body = format.decode(self.body)?;
+
+        let record = record::Record::try_from_parts(headers, body)
+            .map_err(|e| e.to_string())?
+            .into();
+
+        let parts = types::stream::AppendRecordParts {
+            timestamp: self.timestamp,
+            record,
+        };
+
+        types::stream::AppendRecord::try_from(parts)
+            .map_err(|e| types::ValidationError(e.to_string()))
+    }
+}
+
 #[rustfmt::skip]
 /// Payload of an `append` request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,6 +371,25 @@ pub struct AppendInput {
     pub match_seq_num: Option<record::SeqNum>,
     /// Enforce a fencing token, which starts out as an empty string that can be overridden by a `fence` command record.
     pub fencing_token: Option<record::FencingToken>,
+}
+
+impl AppendInput {
+    pub fn decode(
+        self,
+        format: Format,
+    ) -> Result<types::stream::AppendInput, types::ValidationError> {
+        let records: Vec<types::stream::AppendRecord> = self
+            .records
+            .into_iter()
+            .map(|record| record.decode(format))
+            .try_collect()?;
+
+        Ok(types::stream::AppendInput {
+            records: types::stream::AppendRecordBatch::try_from(records)?,
+            match_seq_num: self.match_seq_num,
+            fencing_token: self.fencing_token,
+        })
+    }
 }
 
 #[rustfmt::skip]
@@ -487,13 +446,13 @@ pub struct ReadBatch {
     pub tail: Option<StreamPosition>,
 }
 
-impl From<(Format, types::stream::ReadBatch)> for ReadBatch {
-    fn from((s2_format, batch): (Format, types::stream::ReadBatch)) -> Self {
+impl ReadBatch {
+    pub fn encode(format: Format, batch: types::stream::ReadBatch) -> Self {
         Self {
             records: batch
                 .records
                 .into_iter()
-                .map(|record| s2_format.encode_read(record))
+                .map(|record| SequencedRecord::encode(format, record))
                 .collect(),
             tail: batch.tail.map(Into::into),
         }

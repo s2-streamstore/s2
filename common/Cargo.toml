@@ -5,11 +5,13 @@ license.workspace = true
 version.workspace = true
 
 [features]
+axum = ["dep:axum"]
 clap = ["dep:clap"]
 rkyv = ["dep:rkyv", "compact_str/rkyv"]
 utoipa = ["dep:utoipa"]
 
 [dependencies]
+axum = { workspace = true, optional = true  }
 bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, optional = true }

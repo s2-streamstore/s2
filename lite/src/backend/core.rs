@@ -16,8 +16,8 @@ use tokio::time::Instant;
 
 use super::{
     error::{
-        BasinDeletionInProgressError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
-        StorageError, StreamDeletionInProgressError, StreamNotFoundError, StreamerError,
+        BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
+        StorageError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
         TransactionConflictError, UnavailableError,
     },
     kv,
@@ -81,7 +81,7 @@ impl Backend {
         let trim_point = trim_point.unwrap_or(..SeqNum::MIN);
 
         if trim_point.end == SeqNum::MAX {
-            return Err(StreamDeletionInProgressError { basin, stream }.into());
+            return Err(StreamDeletionPendingError { basin, stream }.into());
         }
 
         let client_states = self.client_states.clone();
@@ -220,8 +220,8 @@ impl Backend {
             + From<BasinNotFoundError>
             + From<TransactionConflictError>
             + From<UnavailableError>
-            + From<BasinDeletionInProgressError>
-            + From<StreamDeletionInProgressError>
+            + From<BasinDeletionPendingError>
+            + From<StreamDeletionPendingError>
             + From<StreamNotFoundError>,
     {
         match self.streamer_client(basin, stream).await {
@@ -246,8 +246,8 @@ impl Backend {
                             CreateStreamError::Storage(e) => Err(e)?,
                             CreateStreamError::TransactionConflict(e) => Err(e)?,
                             CreateStreamError::Unavailable(e) => Err(e)?,
-                            CreateStreamError::BasinDeletionInProgress(e) => Err(e)?,
-                            CreateStreamError::StreamDeletionInProgress(e) => Err(e)?,
+                            CreateStreamError::BasinDeletionPending(e) => Err(e)?,
+                            CreateStreamError::StreamDeletionPending(e) => Err(e)?,
                             CreateStreamError::BasinNotFound(e) => Err(e)?,
                             CreateStreamError::StreamAlreadyExists(_) => {}
                         }
@@ -289,7 +289,7 @@ mod tests {
         let stream = StreamName::from_str("stream1").unwrap();
         let stream_id = StreamId::new(&basin, &stream);
 
-        let meta = kv::StreamMeta {
+        let meta = kv::stream_meta::StreamMeta {
             config: OptionalStreamConfig::default(),
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,

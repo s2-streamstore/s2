@@ -4,7 +4,9 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser as _;
 use s2_lite::{backend::Backend, handlers};
 use slatedb::object_store;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::info;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(clap::Args, Debug, Clone)]
 struct TlsConfig {
@@ -46,7 +48,13 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "server=info,s2_lite=info,tower_http=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
     let args = Args::parse();
 
@@ -87,7 +95,12 @@ async fn main() -> eyre::Result<()> {
         .build()
         .await?;
 
-    let app = handlers::router(Backend::new(db));
+    let app = handlers::router(Backend::new(db)).layer(
+        TraceLayer::new_for_http()
+            .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+            .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
+            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+    );
 
     match (
         args.tls.tls_self,

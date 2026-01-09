@@ -49,13 +49,13 @@ pub struct StreamAlreadyExistsError {
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("basin `{basin}` is being deleted")]
-pub struct BasinDeletionInProgressError {
+pub struct BasinDeletionPendingError {
     pub basin: BasinName,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("stream `{stream}` in basin `{basin}` is being deleted")]
-pub struct StreamDeletionInProgressError {
+pub struct StreamDeletionPendingError {
     pub basin: BasinName,
     pub stream: StreamName,
 }
@@ -87,7 +87,7 @@ pub(super) enum StreamerError {
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
-    StreamDeletionInProgress(#[from] StreamDeletionInProgressError),
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -115,9 +115,9 @@ pub enum CheckTailError {
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
-    BasinDeletionInProgress(#[from] BasinDeletionInProgressError),
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
-    StreamDeletionInProgress(#[from] StreamDeletionInProgressError),
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
 }
 
 impl From<StreamerError> for CheckTailError {
@@ -125,7 +125,7 @@ impl From<StreamerError> for CheckTailError {
         match e {
             StreamerError::StreamNotFound(e) => Self::StreamNotFound(e),
             StreamerError::Storage(e) => Self::Storage(e),
-            StreamerError::StreamDeletionInProgress(e) => Self::StreamDeletionInProgress(e),
+            StreamerError::StreamDeletionPending(e) => Self::StreamDeletionPending(e),
         }
     }
 }
@@ -143,9 +143,9 @@ pub enum AppendError {
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
-    BasinDeletionInProgress(#[from] BasinDeletionInProgressError),
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
-    StreamDeletionInProgress(#[from] StreamDeletionInProgressError),
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -195,7 +195,7 @@ impl From<StreamerError> for AppendError {
         match e {
             StreamerError::StreamNotFound(e) => Self::StreamNotFound(e),
             StreamerError::Storage(e) => Self::Storage(e),
-            StreamerError::StreamDeletionInProgress(e) => Self::StreamDeletionInProgress(e),
+            StreamerError::StreamDeletionPending(e) => Self::StreamDeletionPending(e),
         }
     }
 }
@@ -213,9 +213,9 @@ pub enum ReadError {
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
-    BasinDeletionInProgress(#[from] BasinDeletionInProgressError),
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
-    StreamDeletionInProgress(#[from] StreamDeletionInProgressError),
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
     TailExceeded(#[from] TailExceededError),
 }
@@ -225,7 +225,7 @@ impl From<StreamerError> for ReadError {
         match e {
             StreamerError::StreamNotFound(e) => Self::StreamNotFound(e),
             StreamerError::Storage(e) => Self::Storage(e),
-            StreamerError::StreamDeletionInProgress(e) => Self::StreamDeletionInProgress(e),
+            StreamerError::StreamDeletionPending(e) => Self::StreamDeletionPending(e),
         }
     }
 }
@@ -271,11 +271,11 @@ pub enum CreateStreamError {
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
-    BasinDeletionInProgress(#[from] BasinDeletionInProgressError),
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamAlreadyExists(#[from] StreamAlreadyExistsError),
     #[error(transparent)]
-    StreamDeletionInProgress(#[from] StreamDeletionInProgressError),
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
 }
 
 impl From<slatedb::Error> for CreateStreamError {
@@ -346,7 +346,7 @@ pub enum CreateBasinError {
     #[error(transparent)]
     BasinAlreadyExists(#[from] BasinAlreadyExistsError),
     #[error(transparent)]
-    BasinDeletionInProgress(#[from] BasinDeletionInProgressError),
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
 }
 
 impl From<slatedb::Error> for CreateBasinError {
@@ -372,7 +372,7 @@ pub enum ReconfigureBasinError {
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
-    BasinDeletionInProgress(#[from] BasinDeletionInProgressError),
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
 }
 
 impl From<slatedb::Error> for ReconfigureBasinError {
@@ -396,7 +396,7 @@ pub enum ReconfigureStreamError {
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
-    StreamDeletionInProgress(#[from] StreamDeletionInProgressError),
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
 }
 
 impl From<slatedb::Error> for ReconfigureStreamError {

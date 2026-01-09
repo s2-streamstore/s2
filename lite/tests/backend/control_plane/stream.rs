@@ -21,7 +21,7 @@ use s2_lite::backend::{
     Backend,
     error::{
         AppendError, CheckTailError, CreateStreamError, DeleteStreamError, GetStreamConfigError,
-        ReadError, ReconfigureStreamError, StreamDeletionInProgressError,
+        ReadError, ReconfigureStreamError, StreamDeletionPendingError,
     },
 };
 
@@ -335,7 +335,7 @@ async fn test_create_stream_fails_when_basin_deleting() {
 
     assert!(matches!(
         result,
-        Err(CreateStreamError::BasinDeletionInProgress(_))
+        Err(CreateStreamError::BasinDeletionPending(_))
     ));
 }
 
@@ -379,8 +379,8 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
         .await;
     assert!(matches!(
         recreate_result,
-        Err(CreateStreamError::StreamDeletionInProgress(
-            StreamDeletionInProgressError { basin, stream }
+        Err(CreateStreamError::StreamDeletionPending(
+            StreamDeletionPendingError { basin, stream }
         )) if basin == basin_name && stream == stream_name
     ));
 
@@ -393,7 +393,7 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
         .await;
     assert!(matches!(
         reconfigure_result,
-        Err(ReconfigureStreamError::StreamDeletionInProgress(_))
+        Err(ReconfigureStreamError::StreamDeletionPending(_))
     ));
 
     backend
@@ -432,7 +432,7 @@ async fn test_delete_stream_blocks_data_operations() {
         .await;
     assert!(matches!(
         tail,
-        Err(CheckTailError::StreamDeletionInProgress(_))
+        Err(CheckTailError::StreamDeletionPending(_))
     ));
 
     let input = AppendInput {
@@ -445,7 +445,7 @@ async fn test_delete_stream_blocks_data_operations() {
         .await;
     assert!(matches!(
         append_result,
-        Err(AppendError::StreamDeletionInProgress(_))
+        Err(AppendError::StreamDeletionPending(_))
     ));
 
     let start = ReadStart {
@@ -458,7 +458,7 @@ async fn test_delete_stream_blocks_data_operations() {
         .await;
     assert!(matches!(
         read_result,
-        Err(ReadError::StreamDeletionInProgress(_))
+        Err(ReadError::StreamDeletionPending(_))
     ));
 }
 
