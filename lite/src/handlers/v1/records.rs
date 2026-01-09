@@ -78,7 +78,7 @@ pub async fn read(
             let mut end: ReadEnd = end.into();
             end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
             end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
-            let session = backend.read(basin, stream, start, end.clone()).await?;
+            let session = backend.read(basin, stream, start, end).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
                 JsonOrProto::Json => {

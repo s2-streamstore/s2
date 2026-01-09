@@ -7,7 +7,7 @@ use s2_api::{
     v1::{
         self as v1t,
         error::{ErrorCode, ErrorInfo, ErrorResponse, GenericError},
-        stream::{extract::AppendRequestRejection, s2s, AppendInputStreamError},
+        stream::{AppendInputStreamError, extract::AppendRequestRejection, s2s},
     },
 };
 use s2_common::{http::extract::HeaderRejection, types::ValidationError};
