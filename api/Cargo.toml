@@ -1,8 +1,13 @@
 [package]
 name = "s2-api"
+description = "API types for S2, the durable streams API"
 edition.workspace = true
 license.workspace = true
-version.workspace = true
+version = "0.1.0"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["s2", "durable", "streams", "log", "api"]
+categories = ["api-bindings"]
 
 [features]
 axum = ["dep:axum", "s2-common/axum"]
@@ -21,7 +26,7 @@ http = { workspace = true }
 itertools = { workspace = true }
 mime = { workspace = true }
 prost = { workspace = true }
-s2-common = { path = "../common" }
+s2-common = { version = "0.1.0", path = "../common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 strum = { workspace = true }
