@@ -47,10 +47,11 @@ impl Backend {
                 return Err(UnwrittenError(tail).into());
             }
         }
-        if let ReadPosition::SeqNum(start_seq_num) = read_pos {
-            if start_seq_num == tail.seq_num && !end.may_follow() {
-                return Err(UnwrittenError(tail).into());
-            }
+        if let ReadPosition::SeqNum(start_seq_num) = read_pos
+            && start_seq_num == tail.seq_num
+            && !end.may_follow()
+        {
+            return Err(UnwrittenError(tail).into());
         }
         Ok(match read_pos {
             ReadPosition::SeqNum(start_seq_num) => start_seq_num,
