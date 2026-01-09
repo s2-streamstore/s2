@@ -61,8 +61,8 @@ pub struct StreamDeletionPendingError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("tail position exceeded: {0}")]
-pub struct TailExceededError(pub StreamPosition);
+#[error("unwritten position: {0}")]
+pub struct UnwrittenError(pub StreamPosition);
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum UnavailableError {
@@ -217,7 +217,7 @@ pub enum ReadError {
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
-    TailExceeded(#[from] TailExceededError),
+    Unwritten(#[from] UnwrittenError),
 }
 
 impl From<StreamerError> for ReadError {

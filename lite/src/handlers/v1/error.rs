@@ -231,11 +231,9 @@ impl ServiceError {
                 ReadError::StreamDeletionPending(e) => {
                     generic(ErrorCode::StreamDeletionPending, e.to_string())
                 }
-                ReadError::TailExceeded(tail) => {
-                    ErrorResponse::TailExceeded(v1t::stream::TailResponse {
-                        tail: tail.0.into(),
-                    })
-                }
+                ReadError::Unwritten(tail) => ErrorResponse::Unwritten(v1t::stream::TailResponse {
+                    tail: tail.0.into(),
+                }),
             },
         }
     }

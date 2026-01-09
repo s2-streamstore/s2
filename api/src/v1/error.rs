@@ -85,7 +85,7 @@ pub struct GenericError {
 #[derive(Debug, Clone)]
 pub enum ErrorResponse {
     AppendConditionFailed(super::stream::AppendConditionFailed),
-    TailExceeded(super::stream::TailResponse),
+    Unwritten(super::stream::TailResponse),
     Generic(GenericError),
 }
 
@@ -96,7 +96,7 @@ impl ErrorResponse {
                 http::StatusCode::PRECONDITION_FAILED,
                 serde_json::to_string(&payload),
             ),
-            ErrorResponse::TailExceeded(payload) => (
+            ErrorResponse::Unwritten(payload) => (
                 http::StatusCode::RANGE_NOT_SATISFIABLE,
                 serde_json::to_string(&payload),
             ),

@@ -10,7 +10,7 @@ use s2_common::{
         stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
     },
 };
-use s2_lite::backend::error::{CheckTailError, ReadError};
+use s2_lite::backend::error::{CheckTailError, ReadError, UnwrittenError};
 
 use super::common::*;
 
@@ -107,44 +107,32 @@ async fn test_read_with_limit() {
 }
 
 #[tokio::test]
-async fn test_read_tail_exceeded_without_clamp() {
+async fn test_read_unwritten_clamp_behavior() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-tail-exceeded",
-        "no-clamp",
+        "read-unwritten-clamp",
+        "stream",
         OptionalStreamConfig::default(),
     )
     .await;
 
-    append_payloads(&backend, &basin_name, &stream_name, &[b"initial record"]).await;
+    append_payloads(&backend, &basin_name, &stream_name, &[b"record"]).await;
 
+    // Without clamp: returns Unwritten error
     let start = ReadStart {
-        from: ReadFrom::SeqNum(10),
+        from: ReadFrom::SeqNum(100),
         clamp: false,
     };
-    let end = ReadEnd::default();
+    let result = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            ReadEnd::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(ReadError::Unwritten(_))));
 
-    let result = backend.read(basin_name, stream_name, start, end).await;
-
-    assert!(matches!(result, Err(ReadError::TailExceeded(_))));
-}
-
-#[tokio::test]
-async fn test_read_tail_exceeded_with_clamp() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-tail-clamped",
-        "clamp",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    append_payloads(
-        &backend,
-        &basin_name,
-        &stream_name,
-        &[b"record 1", b"record 2", b"record 3"],
-    )
-    .await;
-
+    // With clamp: succeeds with empty result
     let start = ReadStart {
         from: ReadFrom::SeqNum(100),
         clamp: true,
@@ -154,15 +142,74 @@ async fn test_read_tail_exceeded_with_clamp() {
         until: ReadUntil::Unbounded,
         wait: Some(Duration::ZERO),
     };
-
     let session = backend
         .read(basin_name, stream_name, start, end)
         .await
-        .expect("Read should succeed with clamp when tail exceeded");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
+        .expect("should succeed with clamp");
+    let records = collect_records(&mut Box::pin(session)).await;
     assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn test_read_at_tail_without_follow_returns_unwritten() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-at-tail-no-follow",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let input = AppendInput {
+        records: create_test_record_batch_with_timestamps(vec![
+            (Bytes::from_static(b"record 1"), 1000),
+            (Bytes::from_static(b"record 2"), 2000),
+        ]),
+        match_seq_num: None,
+        fencing_token: None,
+    };
+    let ack = backend
+        .append(basin_name.clone(), stream_name.clone(), input)
+        .await
+        .expect("append");
+
+    let starts = [
+        ReadFrom::TailOffset(0),
+        ReadFrom::SeqNum(ack.end.seq_num),
+        ReadFrom::Timestamp(ack.end.timestamp + 1),
+    ];
+    let ends = [
+        ReadEnd {
+            limit: ReadLimit::Count(10),
+            until: ReadUntil::Unbounded,
+            wait: None,
+        },
+        ReadEnd {
+            limit: ReadLimit::Count(10),
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::ZERO),
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Timestamp(u64::MAX),
+            wait: None,
+        },
+    ];
+
+    for from in starts {
+        for end in ends {
+            let start = ReadStart { from, clamp: false };
+            let result = backend
+                .read(basin_name.clone(), stream_name.clone(), start, end)
+                .await;
+            match result {
+                Err(ReadError::Unwritten(UnwrittenError(tail))) => {
+                    assert_eq!(tail, ack.end);
+                }
+                Ok(_) => panic!("Expected Unwritten error for {from:?} / {end:?}, got Ok"),
+                Err(e) => panic!("Expected Unwritten error for {from:?} / {end:?}, got: {e:?}"),
+            }
+        }
+    }
 }
 
 #[tokio::test]

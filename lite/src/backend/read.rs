@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 
 use super::Backend;
 use crate::backend::{
-    error::{CheckTailError, ReadError, TailExceededError, UnavailableError},
+    error::{CheckTailError, ReadError, UnavailableError, UnwrittenError},
     kv,
     stream_id::StreamId,
 };
@@ -25,6 +25,7 @@ impl Backend {
         &self,
         stream_id: StreamId,
         start: ReadStart,
+        end: ReadEnd,
         tail: StreamPosition,
     ) -> Result<SeqNum, ReadError> {
         let mut read_pos = match start.from {
@@ -43,7 +44,12 @@ impl Backend {
             if start.clamp {
                 read_pos = ReadPosition::SeqNum(tail.seq_num);
             } else {
-                return Err(TailExceededError(tail).into());
+                return Err(UnwrittenError(tail).into());
+            }
+        }
+        if let ReadPosition::SeqNum(start_seq_num) = read_pos {
+            if start_seq_num == tail.seq_num && !end.may_follow() {
+                return Err(UnwrittenError(tail).into());
             }
         }
         Ok(match read_pos {
@@ -86,14 +92,11 @@ impl Backend {
         let stream_id = client.stream_id();
         let tail = client.check_tail().await?;
         let mut state = ReadSessionState {
-            start_seq_num: self.read_start_seq_num(stream_id, start, tail).await?,
+            start_seq_num: self.read_start_seq_num(stream_id, start, end, tail).await?,
             limit: EvaluatedReadLimit::Remaining(end.limit),
             until: end.until,
             tail,
         };
-        if state.start_seq_num == tail.seq_num && !end.may_follow() {
-            return Err(TailExceededError(tail).into());
-        }
         let db = self.db.clone();
         let session = async_stream::try_stream! {
             'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
