@@ -40,3 +40,9 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 uuid = { workspace = true }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
