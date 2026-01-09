@@ -1,0 +1,33 @@
+name: Update protos submodule
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  repository_dispatch:
+    types: [s2-proto-update]
+
+jobs:
+  update-submodule:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Update Submodules
+        id: submodules
+        uses: sgoudham/update-git-submodules@v2.1.1
+        with:
+          submodules: protos
+
+      - name: Create Pull Request
+        if: ${{ steps.submodules.outputs['protos--updated'] }}
+        uses: peter-evans/create-pull-request@v7
+        with:
+          committer: s2-helper[bot] <194906454+s2-helper[bot]@users.noreply.github.com>
+          author: s2-helper[bot] <194906454+s2-helper[bot]@users.noreply.github.com>
+          title: "chore: update s2-protos submodule"
+          branch: "protos/update-${{ steps.submodules.outputs['protos--latestShortCommitSha'] }}"
+          body: ${{ steps.submodules.outputs.prBody }}
