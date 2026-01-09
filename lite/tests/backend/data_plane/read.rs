@@ -197,16 +197,22 @@ async fn test_read_at_tail_without_follow_returns_unwritten() {
 
     for from in starts {
         for end in ends {
-            let start = ReadStart { from, clamp: false };
-            let result = backend
-                .read(basin_name.clone(), stream_name.clone(), start, end)
-                .await;
-            match result {
-                Err(ReadError::Unwritten(UnwrittenError(tail))) => {
-                    assert_eq!(tail, ack.end);
+            for clamp in [false, true] {
+                let start = ReadStart { from, clamp };
+                let result = backend
+                    .read(basin_name.clone(), stream_name.clone(), start, end)
+                    .await;
+                match result {
+                    Err(ReadError::Unwritten(UnwrittenError(tail))) => {
+                        assert_eq!(tail, ack.end);
+                    }
+                    Ok(_) => panic!(
+                        "Expected Unwritten error for {from:?} / clamp={clamp} / {end:?}, got Ok"
+                    ),
+                    Err(e) => panic!(
+                        "Expected Unwritten error for {from:?} / clamp={clamp} / {end:?}, got: {e:?}"
+                    ),
                 }
-                Ok(_) => panic!("Expected Unwritten error for {from:?} / {end:?}, got Ok"),
-                Err(e) => panic!("Expected Unwritten error for {from:?} / {end:?}, got: {e:?}"),
             }
         }
     }
