@@ -20,10 +20,8 @@ blake3 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
-const_format = { workspace = true }
 enum-ordinalize = { workspace = true }
 enumset = { workspace = true }
-futures = { workspace = true }
 http = { workspace = true }
 rkyv = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }

@@ -13,7 +13,6 @@ categories = ["database-implementations"]
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["macros"] }
-axum-extra = { workspace = true }
 axum-server = { workspace = true, features = ["tls-rustls"] }
 blake3 = { workspace = true }
 bytes = { workspace = true }
