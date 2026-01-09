@@ -91,6 +91,9 @@ impl Backend {
             until: end.until,
             tail,
         };
+        if state.start_seq_num == tail.seq_num && !end.may_follow() {
+            return Err(TailExceededError(tail).into());
+        }
         let db = self.db.clone();
         let session = async_stream::try_stream! {
             'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
