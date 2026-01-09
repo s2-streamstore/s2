@@ -3,7 +3,7 @@ name = "s2-lite"
 description = "Lightweight server implementation of S2, the durable streams API, backed by object storage"
 edition.workspace = true
 license.workspace = true
-version = "0.1.1"
+version = "0.1.2"
 repository.workspace = true
 homepage.workspace = true
 keywords = ["s2", "durable", "streams", "object", "storage"]
@@ -28,8 +28,8 @@ parking_lot = { workspace = true, features = ["arc_lock"] }
 prost = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
-s2-api = { version = "0.1.1", path = "../api", features = ["axum"] }
-s2-common = { version = "0.1.1", path = "../common", features = ["clap"] }
+s2-api = { version = "0.1.2", path = "../api", features = ["axum"] }
+s2-common = { version = "0.1.2", path = "../common", features = ["clap"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slatedb = { workspace = true }
