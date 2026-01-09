@@ -13,7 +13,7 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, store::db_txn_get};
+use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, CreateBasinError,
@@ -77,7 +77,7 @@ impl Backend {
         basin: BasinName,
         config: BasinConfig,
         mode: CreateMode,
-    ) -> Result<BasinInfo, CreateBasinError> {
+    ) -> Result<CreatedOrReconfigured<BasinInfo>, CreateBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -101,11 +101,11 @@ impl Backend {
                     return if creation_idempotency_key.is_some()
                         && existing_meta.creation_idempotency_key == creation_idempotency_key
                     {
-                        Ok(BasinInfo {
+                        Ok(CreatedOrReconfigured::Created(BasinInfo {
                             name: basin,
                             scope: None,
                             state: BasinState::Active,
-                        })
+                        }))
                     } else {
                         Err(BasinAlreadyExistsError { basin }.into())
                     };
@@ -132,10 +132,16 @@ impl Backend {
         };
         txn.commit_with_options(&WRITE_OPTS).await?;
 
-        Ok(BasinInfo {
+        let info = BasinInfo {
             name: basin,
             scope: None,
             state: BasinState::Active,
+        };
+
+        Ok(if existing_created_at.is_some() {
+            CreatedOrReconfigured::Reconfigured(info)
+        } else {
+            CreatedOrReconfigured::Created(info)
         })
     }
 

@@ -68,7 +68,7 @@ pub async fn create(
             CreateMode::CreateOnly(request_token),
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(info.into())))
+    Ok((StatusCode::CREATED, Json(info.into_inner().into())))
 }
 
 #[derive(FromRequest)]
@@ -107,7 +107,7 @@ pub async fn create_or_reconfigure(
         stream,
         config: JsonOpt(config),
     }: CreateOrReconfigureArgs,
-) -> Result<Json<v1t::stream::StreamInfo>, ServiceError> {
+) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
     let config: OptionalStreamConfig = config
         .map(TryInto::try_into)
         .transpose()?
@@ -115,8 +115,12 @@ pub async fn create_or_reconfigure(
     let info = backend
         .create_stream(basin, stream, config, CreateMode::CreateOrReconfigure)
         .await?;
-    // TODO response when reconfigured to be NO_CONTENT
-    Ok(Json(info.into()))
+    let status = if info.is_created() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(info.into_inner().into())))
 }
 
 #[derive(FromRequest)]

@@ -57,7 +57,7 @@ pub async fn create(
     let info = backend
         .create_basin(request.basin, config, CreateMode::CreateOnly(request_token))
         .await?;
-    Ok((StatusCode::CREATED, Json(info.into())))
+    Ok((StatusCode::CREATED, Json(info.into_inner().into())))
 }
 
 #[derive(FromRequest)]
@@ -89,7 +89,7 @@ pub async fn create_or_reconfigure(
         basin,
         request: JsonOpt(request),
     }: CreateOrReconfigureArgs,
-) -> Result<Json<v1t::basin::BasinInfo>, ServiceError> {
+) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
     let config: BasinConfig = request
         .and_then(|req| req.config)
         .map(TryInto::try_into)
@@ -98,8 +98,12 @@ pub async fn create_or_reconfigure(
     let info = backend
         .create_basin(basin, config, CreateMode::CreateOrReconfigure)
         .await?;
-    // TODO response when reconfigured to be NO_CONTENT
-    Ok(Json(info.into()))
+    let status = if info.is_created() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(info.into_inner().into())))
 }
 
 #[derive(FromRequest)]

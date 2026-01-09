@@ -13,7 +13,7 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, store::db_txn_get};
+use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
 use crate::backend::{
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
@@ -76,7 +76,7 @@ impl Backend {
         stream: StreamName,
         mut config: OptionalStreamConfig,
         mode: CreateMode,
-    ) -> Result<StreamInfo, CreateStreamError> {
+    ) -> Result<CreatedOrReconfigured<StreamInfo>, CreateStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -117,11 +117,11 @@ impl Backend {
                     return if creation_idempotency_key.is_some()
                         && existing_meta.creation_idempotency_key == creation_idempotency_key
                     {
-                        Ok(StreamInfo {
+                        Ok(CreatedOrReconfigured::Created(StreamInfo {
                             name: stream,
                             created_at: existing_meta.created_at,
                             deleted_at: None,
-                        })
+                        }))
                     } else {
                         Err(StreamAlreadyExistsError { basin, stream }.into())
                     };
@@ -155,10 +155,16 @@ impl Backend {
             client.reconfigure(config).await?;
         }
 
-        Ok(StreamInfo {
+        let info = StreamInfo {
             name: stream,
             created_at,
             deleted_at: None,
+        };
+
+        Ok(if existing_created_at.is_some() {
+            CreatedOrReconfigured::Reconfigured(info)
+        } else {
+            CreatedOrReconfigured::Created(info)
         })
     }
 
