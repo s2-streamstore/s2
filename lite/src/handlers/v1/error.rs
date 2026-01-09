@@ -7,7 +7,7 @@ use s2_api::{
     v1::{
         self as v1t,
         error::{ErrorCode, ErrorInfo, ErrorResponse, GenericError},
-        stream::{AppendInputStreamError, extract::AppendRequestRejection, s2s},
+        stream::{extract::AppendRequestRejection, s2s, AppendInputStreamError},
     },
 };
 use s2_common::{http::extract::HeaderRejection, types::ValidationError};
@@ -85,11 +85,9 @@ impl ServiceError {
                 AppendInputStreamError::FrameDecode(e) => {
                     generic(ErrorCode::BadFrame, e.to_string())
                 }
-                AppendInputStreamError::Validation(e) => {
-                    generic(ErrorCode::Validation, e.to_string())
-                }
+                AppendInputStreamError::Validation(e) => generic(ErrorCode::Invalid, e.to_string()),
             },
-            ServiceError::Validation(e) => generic(ErrorCode::Validation, e.to_string()),
+            ServiceError::Validation(e) => generic(ErrorCode::Invalid, e.to_string()),
             ServiceError::ListBasins(e) => match e {
                 ListBasinsError::Storage(e) => generic(ErrorCode::Storage, e.to_string()),
             },
@@ -210,14 +208,14 @@ impl ServiceError {
                     generic(ErrorCode::StreamDeletionPending, e.to_string())
                 }
                 AppendError::ConditionFailed(e) => ErrorResponse::AppendConditionFailed(match e {
-                    AppendConditionFailedError::FencingTokenMismatch { expected, .. } => {
-                        v1t::stream::AppendConditionFailed::FencingTokenMismatch(expected.clone())
+                    AppendConditionFailedError::FencingTokenMismatch { actual, .. } => {
+                        v1t::stream::AppendConditionFailed::FencingTokenMismatch(actual.clone())
                     }
                     AppendConditionFailedError::SeqNumMismatch {
                         assigned_seq_num, ..
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
-                AppendError::TimestampMissing(e) => generic(ErrorCode::Validation, e.to_string()),
+                AppendError::TimestampMissing(e) => generic(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => generic(ErrorCode::Storage, e.to_string()),

@@ -28,6 +28,7 @@ pub enum ErrorCode {
     BasinNotFound,
     ClientHangup,
     HotServer,
+    Invalid,
     Other,
     PermissionDenied,
     QuotaExhausted,
@@ -39,7 +40,6 @@ pub enum ErrorCode {
     Timeout,
     TransactionConflict,
     Unavailable,
-    Validation,
 }
 
 impl ErrorCode {
@@ -51,7 +51,7 @@ impl ErrorCode {
             | Self::BadPath
             | Self::BadProto
             | Self::BadQuery => http::StatusCode::BAD_REQUEST,
-            Self::Validation => http::StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Invalid => http::StatusCode::UNPROCESSABLE_ENTITY,
             Self::AccessTokenNotFound | Self::BasinNotFound | Self::StreamNotFound => {
                 http::StatusCode::NOT_FOUND
             }
