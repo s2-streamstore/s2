@@ -78,7 +78,7 @@ pub struct ErrorInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct GenericError {
+pub struct StandardError {
     pub status: http::StatusCode,
     pub info: ErrorInfo,
 }
@@ -87,7 +87,7 @@ pub struct GenericError {
 pub enum ErrorResponse {
     AppendConditionFailed(super::stream::AppendConditionFailed),
     Unwritten(super::stream::TailResponse),
-    Generic(GenericError),
+    Standard(StandardError),
 }
 
 impl ErrorResponse {
@@ -101,7 +101,7 @@ impl ErrorResponse {
                 http::StatusCode::RANGE_NOT_SATISFIABLE,
                 serde_json::to_string(&payload),
             ),
-            ErrorResponse::Generic(err) => (err.status, serde_json::to_string(&err.info)),
+            ErrorResponse::Standard(err) => (err.status, serde_json::to_string(&err.info)),
         };
         (status, res.expect("basic json ser"))
     }
