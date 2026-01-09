@@ -16,7 +16,7 @@ codegen = ["dep:prost-build"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
-base64ct = { workspace = true }
+base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }
 enum-ordinalize = { workspace = true }
@@ -27,13 +27,13 @@ itertools = { workspace = true }
 mime = { workspace = true }
 prost = { workspace = true }
 s2-common = { version = "0.1.0", path = "../common" }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-strum = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-time = { workspace = true }
+time = { workspace = true, features = ["serde", "parsing", "formatting"] }
 tokio-util = { workspace = true, features = ["rt", "codec", "io"] }
-utoipa = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true, features = ["time"] }
 zstd = { workspace = true }
 
 [build-dependencies]

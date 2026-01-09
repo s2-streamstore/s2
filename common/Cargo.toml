@@ -15,10 +15,10 @@ rkyv = ["dep:rkyv", "compact_str/rkyv"]
 utoipa = ["dep:utoipa"]
 
 [dependencies]
-axum = { workspace = true, optional = true  }
-bytes = { workspace = true }
+axum = { workspace = true, optional = true }
 blake3 = { workspace = true }
-clap = { workspace = true, optional = true }
+bytes = { workspace = true }
+clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
 const_format = { workspace = true }
 enum-ordinalize = { workspace = true }
@@ -26,11 +26,11 @@ enumset = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 rkyv = { workspace = true, optional = true }
-serde = { workspace = true }
-strum = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-time = { workspace = true }
-utoipa = { workspace = true, optional = true }
+time = { workspace = true, features = ["serde", "parsing", "formatting"] }
+utoipa = { workspace = true, optional = true, features = ["time"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
