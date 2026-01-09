@@ -62,7 +62,8 @@ impl ErrorCode {
             Self::ClientHangup => http::StatusCode::from_u16(499).expect("valid status code"),
             Self::PermissionDenied | Self::QuotaExhausted => http::StatusCode::FORBIDDEN,
             Self::RateLimited => http::StatusCode::TOO_MANY_REQUESTS,
-            Self::HotServer | Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
+            Self::HotServer => http::StatusCode::BAD_GATEWAY,
+            Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
             Self::Other | Self::Storage => http::StatusCode::INTERNAL_SERVER_ERROR,
             Self::Timeout => http::StatusCode::REQUEST_TIMEOUT,
         }
