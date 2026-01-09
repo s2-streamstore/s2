@@ -29,7 +29,7 @@ rkyv = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-time = { workspace = true, features = ["serde", "parsing", "formatting"] }
+time = { workspace = true }
 utoipa = { workspace = true, optional = true, features = ["time"] }
 
 [dev-dependencies]

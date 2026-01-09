@@ -35,7 +35,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slatedb = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true, features = ["serde", "parsing", "formatting"] }
+time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tower-http = { workspace = true, features = ["trace"] }
