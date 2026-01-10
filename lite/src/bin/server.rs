@@ -89,7 +89,14 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
-    let db_settings = slatedb::Settings::from_env("SL8_")?;
+    let db_settings = slatedb::Settings::from_env_with_default(
+        "SL8_",
+        slatedb::Settings {
+            flush_interval: Some(Duration::from_millis(40)),
+            ..Default::default()
+        },
+    )?;
+
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)
         .build()
