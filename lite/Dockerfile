@@ -12,7 +12,7 @@ RUN --mount=type=bind,source=api,target=/build/api \
     --mount=type=cache,id=s2-rust,sharing=locked,target=/build/target \
     --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,sharing=locked,target=/usr/local/cargo/git \
-    cargo build --release --package s2-lite --bin server
+    cargo build --locked --release --package s2-lite --bin server
 
 # Copy the binary from the cache volume
 RUN --mount=type=cache,id=s2-rust,sharing=locked,target=/cache \
