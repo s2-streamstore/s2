@@ -35,6 +35,8 @@ rand = "0.9"
 rcgen = "0.14"
 rkyv = "0.8"
 rstest = "0.26"
+s2-api = { version = "0.1.2", path = "api" }
+s2-common = { version = "0.1.2", path = "common" }
 serde = "1.0"
 serde_json = "1.0"
 slatedb = "0.10"

@@ -28,8 +28,8 @@ parking_lot = { workspace = true, features = ["arc_lock"] }
 prost = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
-s2-api = { version = "0.1.2", path = "../api", features = ["axum"] }
-s2-common = { version = "0.1.2", path = "../common", features = ["clap"] }
+s2-api = { workspace = true, features = ["axum"] }
+s2-common = { workspace = true, features = ["clap"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slatedb = { workspace = true }
