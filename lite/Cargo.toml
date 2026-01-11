@@ -12,6 +12,8 @@ categories = ["database-implementations"]
 [dependencies]
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
 axum = { workspace = true, features = ["macros"] }
 axum-server = { workspace = true, features = ["tls-rustls"] }
 blake3 = { workspace = true }
