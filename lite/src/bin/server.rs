@@ -105,7 +105,7 @@ async fn main() -> eyre::Result<()> {
         },
     )?;
 
-    info!("sl8 init");
+    info!(?db_settings, "sl8 init");
 
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)
