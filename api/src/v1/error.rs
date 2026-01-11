@@ -33,13 +33,14 @@ pub enum ErrorCode {
     PermissionDenied,
     QuotaExhausted,
     RateLimited,
+    RequestTimeout,
     ResourceAlreadyExists,
     Storage,
     StreamDeletionPending,
     StreamNotFound,
-    Timeout,
     TransactionConflict,
     Unavailable,
+    UpstreamTimeout,
 }
 
 impl ErrorCode {
@@ -51,21 +52,22 @@ impl ErrorCode {
             | Self::BadPath
             | Self::BadProto
             | Self::BadQuery => http::StatusCode::BAD_REQUEST,
-            Self::Invalid => http::StatusCode::UNPROCESSABLE_ENTITY,
+            Self::PermissionDenied | Self::QuotaExhausted => http::StatusCode::FORBIDDEN,
             Self::AccessTokenNotFound | Self::BasinNotFound | Self::StreamNotFound => {
                 http::StatusCode::NOT_FOUND
             }
+            Self::RequestTimeout => http::StatusCode::REQUEST_TIMEOUT,
             Self::BasinDeletionPending
             | Self::ResourceAlreadyExists
             | Self::StreamDeletionPending
             | Self::TransactionConflict => http::StatusCode::CONFLICT,
-            Self::ClientHangup => http::StatusCode::from_u16(499).expect("valid status code"),
-            Self::PermissionDenied | Self::QuotaExhausted => http::StatusCode::FORBIDDEN,
+            Self::Invalid => http::StatusCode::UNPROCESSABLE_ENTITY,
             Self::RateLimited => http::StatusCode::TOO_MANY_REQUESTS,
+            Self::ClientHangup => http::StatusCode::from_u16(499).expect("valid status code"),
+            Self::Other | Self::Storage => http::StatusCode::INTERNAL_SERVER_ERROR,
             Self::HotServer => http::StatusCode::BAD_GATEWAY,
             Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
-            Self::Other | Self::Storage => http::StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Timeout => http::StatusCode::REQUEST_TIMEOUT,
+            Self::UpstreamTimeout => http::StatusCode::GATEWAY_TIMEOUT,
         }
     }
 }
