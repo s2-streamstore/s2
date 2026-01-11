@@ -1,21 +1,50 @@
-use std::sync::LazyLock;
+use std::{sync::LazyLock, time::Duration};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use prometheus::{Encoder, Histogram, TextEncoder, register_histogram};
 
-static APPEND_ACK_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
-    register_histogram!(
-        "s2_append_ack_latency_seconds",
-        "Append ack latency in seconds",
-        vec![
-            0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500
-        ]
-    )
-    .unwrap()
-});
+pub fn observe_append_ack_latency(latency: Duration) {
+    static HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+        register_histogram!(
+            "s2_append_ack_latency_seconds",
+            "Append ack latency in seconds",
+            vec![
+                0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500
+            ]
+        )
+        .unwrap()
+    });
+    HISTOGRAM.observe(latency.as_secs_f64());
+}
 
-pub fn observe_append_ack_latency(latency: std::time::Duration) {
-    APPEND_ACK_LATENCY.observe(latency.as_secs_f64());
+pub fn observe_append_batch_size(count: usize, bytes: usize) {
+    static BYTES: LazyLock<Histogram> = LazyLock::new(|| {
+        register_histogram!(
+            "s2_append_batch_bytes",
+            "Append batch size in bytes",
+            vec![
+                512.0,
+                (1 * 1024) as f64,
+                (4 * 1024) as f64,
+                (16 * 1024) as f64,
+                (64 * 1024) as f64,
+                (256 * 1024) as f64,
+                (512 * 1024) as f64,
+                (1024 * 1024) as f64,
+            ]
+        )
+        .unwrap()
+    });
+    static RECORDS: LazyLock<Histogram> = LazyLock::new(|| {
+        register_histogram!(
+            "s2_append_batch_records",
+            "Append batch size in number of records",
+            vec![1.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
+        )
+        .unwrap()
+    });
+    RECORDS.observe(count as f64);
+    BYTES.observe(bytes as f64);
 }
 
 pub fn gather() -> Bytes {
