@@ -2,6 +2,7 @@ use std::{
     collections::VecDeque,
     ops::{DerefMut as _, Range, RangeTo},
     sync::Arc,
+    time::Instant,
 };
 
 use futures::{FutureExt as _, Stream, StreamExt as _, stream::FuturesOrdered};
@@ -28,12 +29,14 @@ impl Backend {
         stream: StreamName,
         input: AppendInput,
     ) -> Result<AppendAck, AppendError> {
+        let start = Instant::now();
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
         let ack = client.append(input, None).await?;
+        crate::metrics::observe_append_ack_latency(start.elapsed());
         Ok(ack)
     }
 
@@ -57,13 +60,17 @@ impl Backend {
                     ) => {
                         let metered_size = input.records.metered_size();
                         inflight_bytes += metered_size;
+                        let start = Instant::now();
                         let fut = client
                             .append(input, Some(session.clone()))
-                            .map(move |res| (metered_size, res));
+                            .map(move |res| (metered_size, start, res));
                         futs.push_back(fut);
                     }
-                    Some((metered_size, res)) = futs.next() => {
+                    Some((metered_size, start, res)) = futs.next() => {
                         inflight_bytes -= metered_size;
+                        if res.is_ok() {
+                            crate::metrics::observe_append_ack_latency(start.elapsed());
+                        }
                         yield res.map_err(AppendError::from);
                     }
                     else => {
