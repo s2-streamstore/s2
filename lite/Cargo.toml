@@ -27,6 +27,7 @@ futures = { workspace = true }
 http = { workspace = true }
 itertools = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }
+prometheus = { workspace = true, features = ["process"] }
 prost = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
