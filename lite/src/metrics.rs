@@ -24,7 +24,7 @@ pub fn observe_append_batch_size(count: usize, bytes: usize) {
             "Append batch size in bytes",
             vec![
                 512.0,
-                (1 * 1024) as f64,
+                1024.0,
                 (4 * 1024) as f64,
                 (16 * 1024) as f64,
                 (64 * 1024) as f64,
