@@ -9,6 +9,8 @@ repository = "https://github.com/s2-streamstore/s2"
 homepage = "https://s2.dev"
 
 [workspace.dependencies]
+aws-config = "1"
+aws-credential-types = "1"
 async-stream = "0.3"
 async-trait = "0.1"
 axum = "0.8"

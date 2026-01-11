@@ -1,9 +1,10 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser as _;
 use s2_lite::{backend::Backend, handlers};
-use slatedb::object_store;
+use slatedb::object_store::{self, CredentialProvider, aws::AwsCredential};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -71,16 +72,23 @@ async fn main() -> eyre::Result<()> {
         format!("0.0.0.0:{port}")
     };
 
-    let server_handle = axum_server::Handle::new();
-
-    tokio::spawn(shutdown_signal(server_handle.clone()));
-
     let object_store: Arc<dyn object_store::ObjectStore> = match args.bucket {
         Some(bucket) if !bucket.is_empty() => {
             info!(bucket, "using s3 object store");
-            let store = object_store::aws::AmazonS3Builder::from_env()
-                .with_bucket_name(bucket)
-                .build()?;
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let mut builder =
+                object_store::aws::AmazonS3Builder::from_env().with_bucket_name(&bucket);
+            if let Some(region) = aws_config.region() {
+                info!(region = region.as_ref());
+                builder = builder.with_region(region.to_string());
+            }
+            if let Some(credentials_provider) = aws_config.credentials_provider() {
+                info!("using aws-config credentials provider");
+                builder = builder.with_credentials(Arc::new(S3CredentialProvider {
+                    credentials: credentials_provider.clone(),
+                }));
+            }
+            let store = builder.build()?;
             Arc::new(store)
         }
         _ => {
@@ -97,6 +105,8 @@ async fn main() -> eyre::Result<()> {
         },
     )?;
 
+    info!("sl8 init");
+
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)
         .build()
@@ -109,6 +119,8 @@ async fn main() -> eyre::Result<()> {
             .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
     );
 
+    let server_handle = axum_server::Handle::new();
+    tokio::spawn(shutdown_signal(server_handle.clone()));
     match (
         args.tls.tls_self,
         args.tls.tls_cert.clone(),
@@ -187,5 +199,29 @@ async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
         },
     }
 
-    handle.graceful_shutdown(Some(Duration::from_secs(30)));
+    handle.graceful_shutdown(Some(Duration::from_secs(10)));
+}
+
+#[derive(Debug)]
+struct S3CredentialProvider {
+    credentials: SharedCredentialsProvider,
+}
+
+#[async_trait::async_trait]
+impl CredentialProvider for S3CredentialProvider {
+    type Credential = AwsCredential;
+
+    async fn get_credential(&self) -> object_store::Result<Arc<AwsCredential>> {
+        let creds = self.credentials.provide_credentials().await.map_err(|e| {
+            object_store::Error::Generic {
+                store: "S3",
+                source: Box::new(e),
+            }
+        })?;
+        Ok(Arc::new(AwsCredential {
+            key_id: creds.access_key_id().to_string(),
+            secret_key: creds.secret_access_key().to_string(),
+            token: creds.session_token().map(ToString::to_string),
+        }))
+    }
 }
