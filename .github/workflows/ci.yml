@@ -49,3 +49,42 @@ jobs:
       - uses: arduino/setup-protoc@v3
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features
+
+  build-server:
+    name: Build s2-lite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: arduino/setup-protoc@v3
+      - name: Build s2-lite
+        run: cargo build --release -p s2-lite
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary
+          path: target/release/server
+          retention-days: 1
+
+  sdk-integration-tests:
+    name: SDK Integration Tests
+    needs: [build-server]
+    uses: s2-streamstore/s2-ci/.github/workflows/sdk-integration-tests.yml@main
+    with:
+      mode: local
+      server-binary: server
+      server-port: 80
+      sdks: |
+        [
+          {
+            "name": "go",
+            "repo": "s2-streamstore/s2-sdk-go-old",
+            "ref": "main",
+            "lang": "go",
+            "go-version": "1.23",
+            "test_cmd": "go test -v -count=1 ./s2/..."
+          }
+        ]
