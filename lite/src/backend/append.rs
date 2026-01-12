@@ -43,24 +43,24 @@ impl Backend {
         let session = SessionHandle::new();
         Ok(async_stream::stream! {
             tokio::pin!(inputs);
-            let mut permit = None;
-            let mut futs = FuturesOrdered::new();
+            let mut permit_opt = None;
+            let mut append_futs = FuturesOrdered::new();
             loop {
                 tokio::select! {
-                    Some(input) = inputs.next(), if permit.is_none() => {
-                        permit = Some(Box::pin(client.append(input, Some(session.clone()))));
+                    Some(input) = inputs.next(), if permit_opt.is_none() => {
+                        permit_opt = Some(Box::pin(client.append(input, Some(session.clone()))));
                     }
-                    Some(res) = OptionFuture::from(permit.as_mut()) => {
-                        permit = None;
+                    Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
+                        permit_opt = None;
                         match res {
-                            Ok(permit) => futs.push_back(permit.submit()),
+                            Ok(permit) => append_futs.push_back(permit.submit()),
                             Err(e) => {
                                 yield Err(e.into());
                                 break;
                             }
                         }
                     }
-                    Some(res) = futs.next(), if !futs.is_empty() => {
+                    Some(res) = append_futs.next(), if !append_futs.is_empty() => {
                         match res {
                             Ok(ack) => {
                                 yield Ok(ack);
