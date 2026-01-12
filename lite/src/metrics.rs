@@ -32,6 +32,16 @@ pub fn observe_append_ack_latency(latency: Duration) {
 }
 
 pub fn observe_append_batch_size(count: usize, bytes: usize) {
+    static RECORDS: LazyLock<Histogram> = LazyLock::new(|| {
+        register_histogram!(
+            "s2_append_batch_records",
+            "Append batch size in number of records",
+            vec![1.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
+        )
+        .unwrap()
+    });
+    RECORDS.observe(count as f64);
+
     static BYTES: LazyLock<Histogram> = LazyLock::new(|| {
         register_histogram!(
             "s2_append_batch_bytes",
@@ -49,15 +59,6 @@ pub fn observe_append_batch_size(count: usize, bytes: usize) {
         )
         .unwrap()
     });
-    static RECORDS: LazyLock<Histogram> = LazyLock::new(|| {
-        register_histogram!(
-            "s2_append_batch_records",
-            "Append batch size in number of records",
-            vec![1.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
-        )
-        .unwrap()
-    });
-    RECORDS.observe(count as f64);
     BYTES.observe(bytes as f64);
 }
 
