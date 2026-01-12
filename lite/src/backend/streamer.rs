@@ -8,8 +8,8 @@ use dashmap::DashMap;
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
 use s2_common::{
     record::{
-        CommandRecord, FencingToken, Metered, Record, SeqNum, SequencedRecord, StreamPosition,
-        Timestamp,
+        CommandRecord, FencingToken, Metered, MeteredSize, Record, SeqNum, SequencedRecord,
+        StreamPosition, Timestamp,
     },
     types::{
         config::{
@@ -27,14 +27,17 @@ use tokio::{
     time::Instant,
 };
 
-use crate::backend::{
-    append,
-    error::{
-        AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-        DeleteStreamError, StreamerError, UnavailableError,
+use crate::{
+    backend::{
+        append,
+        error::{
+            AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
+            DeleteStreamError, StreamerError, UnavailableError,
+        },
+        kv,
+        stream_id::StreamId,
     },
-    kv,
-    stream_id::StreamId,
+    metrics,
 };
 
 // TODO: bump once sl8 supports pipelining (https://github.com/slatedb/slatedb/issues/1138)
@@ -360,21 +363,20 @@ impl StreamerClient {
         &self,
         input: AppendInput,
         session: Option<append::SessionHandle>,
-    ) -> Result<AppendAck, AppendErrorInternal> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.append_tx
-            .send(AppendMessage {
-                input,
-                session,
-                reply_tx,
-                append_type: AppendType::Regular,
-            })
+    ) -> Result<AppendPermit<'_>, UnavailableError> {
+        metrics::observe_append_batch_size(input.records.len(), input.records.metered_size());
+        let start = Instant::now();
+        let permit = self
+            .append_tx
+            .reserve()
             .await
             .map_err(|_| UnavailableError::MissingInAction)?;
-        let ack = reply_rx
-            .await
-            .map_err(|_| UnavailableError::RequestDrop)??;
-        Ok(ack)
+        metrics::observe_append_permit_latency(start.elapsed());
+        Ok(AppendPermit {
+            permit,
+            input,
+            session,
+        })
     }
 
     pub async fn reconfigure(&self, config: OptionalStreamConfig) -> Result<(), UnavailableError> {
@@ -437,6 +439,31 @@ fn timestamp_now() -> Timestamp {
         .as_millis()
         .try_into()
         .expect("Milliseconds since Unix epoch fits into a u64")
+}
+
+#[derive(Debug)]
+pub struct AppendPermit<'a> {
+    permit: mpsc::Permit<'a, AppendMessage>,
+    input: AppendInput,
+    session: Option<append::SessionHandle>,
+}
+
+impl AppendPermit<'_> {
+    pub async fn submit(self) -> Result<AppendAck, AppendErrorInternal> {
+        let start = Instant::now();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.permit.send(AppendMessage {
+            input: self.input,
+            session: self.session,
+            reply_tx,
+            append_type: AppendType::Regular,
+        });
+        let ack = reply_rx
+            .await
+            .map_err(|_| UnavailableError::RequestDrop)??;
+        metrics::observe_append_ack_latency(start.elapsed());
+        Ok(ack)
+    }
 }
 
 pub fn next_pos<T>(records: &[T]) -> StreamPosition
