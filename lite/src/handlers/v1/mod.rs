@@ -1,7 +1,13 @@
-mod basins;
+pub mod basins;
 mod error;
-mod records;
-mod streams;
+#[cfg(feature = "utoipa")]
+pub mod metrics;
+#[cfg(feature = "utoipa")]
+pub mod paths;
+pub mod records;
+pub mod streams;
+#[cfg(feature = "utoipa")]
+pub mod tokens;
 
 const MAX_UNARY_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 

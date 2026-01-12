@@ -1,3 +1,6 @@
+#[cfg(feature = "utoipa")]
+pub mod v1;
+#[cfg(not(feature = "utoipa"))]
 mod v1;
 
 async fn metrics() -> impl axum::response::IntoResponse {

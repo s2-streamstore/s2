@@ -13,6 +13,8 @@ use s2_common::{
     },
 };
 
+#[cfg(feature = "utoipa")]
+use super::paths;
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 #[derive(FromRequest)]
@@ -22,6 +24,20 @@ pub struct ListArgs {
     request: v1t::basin::ListBasinsRequest,
 }
 
+/// List basins.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = paths::basins::LIST,
+    tag = paths::basins::TAG,
+    operation_id = "list_basins",
+    responses(
+        (status = StatusCode::OK, body = v1t::basin::ListBasinsResponse),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+    params(v1t::basin::ListBasinsRequest),
+))]
 pub async fn list(
     State(backend): State<Backend>,
     ListArgs { request }: ListArgs,
@@ -42,6 +58,23 @@ pub struct CreateArgs {
     request: v1t::basin::CreateBasinRequest,
 }
 
+/// Create a basin.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = paths::basins::CREATE,
+    tag = paths::basins::TAG,
+    operation_id = "create_basin",
+    params(v1t::S2RequestTokenHeader),
+    request_body = v1t::basin::CreateBasinRequest,
+    responses(
+        (status = StatusCode::OK, body = v1t::basin::BasinInfo),
+        (status = StatusCode::CREATED, body = v1t::basin::BasinInfo),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+))]
 pub async fn create(
     State(backend): State<Backend>,
     CreateArgs {
@@ -67,6 +100,21 @@ pub struct GetConfigArgs {
     basin: BasinName,
 }
 
+/// Get basin configuration.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = paths::basins::GET_CONFIG,
+    tag = paths::basins::TAG,
+    operation_id = "get_basin_config",
+    responses(
+        (status = StatusCode::OK, body = v1t::config::BasinConfig),
+        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+    params(v1t::BasinNamePathSegment),
+))]
 pub async fn get_config(
     State(backend): State<Backend>,
     GetConfigArgs { basin }: GetConfigArgs,
@@ -83,6 +131,21 @@ pub struct CreateOrReconfigureArgs {
     request: JsonOpt<v1t::basin::CreateOrReconfigureBasinRequest>,
 }
 
+/// Create or reconfigure a basin.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    put,
+    path = paths::basins::CREATE_OR_RECONFIGURE,
+    tag = paths::basins::TAG,
+    operation_id = "create_or_reconfigure_basin",
+    request_body = Option<v1t::basin::CreateOrReconfigureBasinRequest>,
+    params(v1t::BasinNamePathSegment),
+    responses(
+        (status = StatusCode::OK, body = v1t::basin::BasinInfo),
+        (status = StatusCode::CREATED, body = v1t::basin::BasinInfo),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+))]
 pub async fn create_or_reconfigure(
     State(backend): State<Backend>,
     CreateOrReconfigureArgs {
@@ -113,6 +176,21 @@ pub struct DeleteArgs {
     basin: BasinName,
 }
 
+/// Delete a basin.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    delete,
+    path = paths::basins::DELETE,
+    tag = paths::basins::TAG,
+    operation_id = "delete_basin",
+    responses(
+        (status = StatusCode::ACCEPTED),
+        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+    params(v1t::BasinNamePathSegment),
+))]
 pub async fn delete(
     State(backend): State<Backend>,
     DeleteArgs { basin }: DeleteArgs,
@@ -130,6 +208,22 @@ pub struct ReconfigureArgs {
     reconfiguration: v1t::config::BasinReconfiguration,
 }
 
+/// Reconfigure a basin.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    patch,
+    path = paths::basins::RECONFIGURE,
+    tag = paths::basins::TAG,
+    operation_id = "reconfigure_basin",
+    request_body = v1t::config::BasinReconfiguration,
+    responses(
+        (status = StatusCode::OK, body = v1t::config::BasinConfig),
+        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+    params(v1t::BasinNamePathSegment),
+))]
 pub async fn reconfigure(
     State(backend): State<Backend>,
     ReconfigureArgs {
