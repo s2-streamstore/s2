@@ -3,6 +3,20 @@ use std::{sync::LazyLock, time::Duration};
 use bytes::{BufMut, Bytes, BytesMut};
 use prometheus::{Encoder, Histogram, TextEncoder, register_histogram};
 
+pub fn observe_append_permit_latency(latency: Duration) {
+    static HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+        register_histogram!(
+            "s2_append_permit_latency_seconds",
+            "Append permit latency in seconds",
+            vec![
+                0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500
+            ]
+        )
+        .unwrap()
+    });
+    HISTOGRAM.observe(latency.as_secs_f64());
+}
+
 pub fn observe_append_ack_latency(latency: Duration) {
     static HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
         register_histogram!(

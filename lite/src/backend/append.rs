@@ -2,12 +2,11 @@ use std::{
     collections::VecDeque,
     ops::{DerefMut as _, Range, RangeTo},
     sync::Arc,
-    time::Instant,
 };
 
-use futures::{FutureExt as _, Stream, StreamExt as _, stream::FuturesOrdered};
+use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
-    record::{MeteredSize as _, SeqNum, StreamPosition},
+    record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
         stream::{AppendAck, AppendInput, StreamName},
@@ -16,14 +15,7 @@ use s2_common::{
 use tokio::sync::oneshot;
 
 use super::Backend;
-use crate::{
-    backend::error::{AppendError, AppendErrorInternal, StorageError},
-    metrics,
-};
-
-// N.B. Ultimately capped by streamer::MAX_INFLIGHT_APPENDS
-const MAX_INFLIGHT_BATCHES: usize = 100;
-const MAX_INFLIGHT_BYTES: usize = 10 * 1024 * 1024;
+use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
     pub async fn append(
@@ -32,15 +24,12 @@ impl Backend {
         stream: StreamName,
         input: AppendInput,
     ) -> Result<AppendAck, AppendError> {
-        metrics::observe_append_batch_size(input.records.metered_size(), input.records.len());
-        let start = Instant::now();
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
-        let ack = client.append(input, None).await?;
-        metrics::observe_append_ack_latency(start.elapsed());
+        let ack = client.append(input, None).await?.submit().await?;
         Ok(ack)
     }
 
@@ -54,29 +43,33 @@ impl Backend {
         let session = SessionHandle::new();
         Ok(async_stream::stream! {
             tokio::pin!(inputs);
+            let mut permit = None;
             let mut futs = FuturesOrdered::new();
-            let mut inflight_bytes = 0;
             loop {
                 tokio::select! {
-                    Some(input) = inputs.next(), if (
-                        futs.len() < MAX_INFLIGHT_BATCHES
-                        && inflight_bytes <= MAX_INFLIGHT_BYTES
-                    ) => {
-                        let metered_size = input.records.metered_size();
-                        metrics::observe_append_batch_size(input.records.len(), metered_size);
-                        inflight_bytes += metered_size;
-                        let start = Instant::now();
-                        let fut = client
-                            .append(input, Some(session.clone()))
-                            .map(move |res| (metered_size, start, res));
-                        futs.push_back(fut);
+                    Some(input) = inputs.next(), if permit.is_none() => {
+                        permit = Some(Box::pin(client.append(input, Some(session.clone()))));
                     }
-                    Some((metered_size, start, res)) = futs.next() => {
-                        inflight_bytes -= metered_size;
-                        if res.is_ok() {
-                            metrics::observe_append_ack_latency(start.elapsed());
+                    Some(res) = OptionFuture::from(permit.as_mut()) => {
+                        permit = None;
+                        match res {
+                            Ok(permit) => futs.push_back(permit.submit()),
+                            Err(e) => {
+                                yield Err(e.into());
+                                break;
+                            }
                         }
-                        yield res.map_err(AppendError::from);
+                    }
+                    Some(res) = futs.next(), if !futs.is_empty() => {
+                        match res {
+                            Ok(ack) => {
+                                yield Ok(ack);
+                            },
+                            Err(e) => {
+                                yield Err(e.into());
+                                break;
+                            }
+                        }
                     }
                     else => {
                         break;
