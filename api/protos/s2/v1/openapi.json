@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "S2 API",
-    "description": "Serverless API for streaming data backed by object storage.",
+    "title": "S2, the durable streams API",
+    "description": "Streams as a cloud storage primitive.",
     "termsOfService": "https://s2.dev/terms",
     "contact": {
       "email": "hi@s2.dev"

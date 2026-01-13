@@ -30,8 +30,8 @@ use utoipa::{
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "S2 API",
-        description = "Serverless API for streaming data backed by object storage.",
+        title = "S2, the durable streams API",
+        description = "Streams as a cloud storage primitive.",
         version = "1.0.0",
         license(
             name = "Apache 2.0"
