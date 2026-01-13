@@ -65,10 +65,10 @@ pub struct StreamDeletionPendingError {
 pub struct UnwrittenError(pub StreamPosition);
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum UnavailableError {
-    #[error("unavailable: missing in action")]
+pub enum MessagingError {
+    #[error("messaging: missing in action")]
     MissingInAction,
-    #[error("unavailable: request drop")]
+    #[error("messaging: request drop")]
     RequestDrop,
 }
 
@@ -95,7 +95,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    Unavailable(#[from] UnavailableError),
+    Messaging(#[from] MessagingError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -109,7 +109,7 @@ pub enum CheckTailError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
-    Unavailable(#[from] UnavailableError),
+    Messaging(#[from] MessagingError),
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
@@ -137,7 +137,7 @@ pub enum AppendError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
-    Unavailable(#[from] UnavailableError),
+    Messaging(#[from] MessagingError),
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
@@ -156,7 +156,7 @@ impl From<AppendErrorInternal> for AppendError {
     fn from(e: AppendErrorInternal) -> Self {
         match e {
             AppendErrorInternal::Storage(e) => AppendError::Storage(e),
-            AppendErrorInternal::Unavailable(e) => AppendError::Unavailable(e),
+            AppendErrorInternal::Messaging(e) => AppendError::Messaging(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
         }
@@ -207,7 +207,7 @@ pub enum ReadError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
-    Unavailable(#[from] UnavailableError),
+    Messaging(#[from] MessagingError),
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
@@ -267,8 +267,6 @@ pub enum CreateStreamError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
-    Unavailable(#[from] UnavailableError),
-    #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
     BasinDeletionPending(#[from] BasinDeletionPendingError),
@@ -310,7 +308,7 @@ pub enum DeleteStreamError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    Unavailable(#[from] UnavailableError),
+    Messaging(#[from] MessagingError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
 }
@@ -391,8 +389,6 @@ pub enum ReconfigureStreamError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
-    #[error(transparent)]
-    Unavailable(#[from] UnavailableError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]

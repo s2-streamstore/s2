@@ -15,7 +15,8 @@ use s2_common::{http::extract::HeaderRejection, types::ValidationError};
 use crate::backend::error::{
     AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError, CreateStreamError,
     DeleteBasinError, DeleteStreamError, GetBasinConfigError, GetStreamConfigError,
-    ListBasinsError, ListStreamsError, ReadError, ReconfigureBasinError, ReconfigureStreamError,
+    ListBasinsError, ListStreamsError, MessagingError, ReadError, ReconfigureBasinError,
+    ReconfigureStreamError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -136,9 +137,6 @@ impl ServiceError {
                 CreateStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                CreateStreamError::Unavailable(e) => {
-                    standard(ErrorCode::Unavailable, e.to_string())
-                }
                 CreateStreamError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
@@ -160,9 +158,15 @@ impl ServiceError {
             },
             ServiceError::DeleteStream(e) => match e {
                 DeleteStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
-                DeleteStreamError::Unavailable(e) => {
-                    standard(ErrorCode::Unavailable, e.to_string())
-                }
+                DeleteStreamError::Messaging(e) => match e {
+                    MessagingError::MissingInAction => {
+                        standard(ErrorCode::Unavailable, e.to_string())
+                    }
+                    MessagingError::RequestDrop => {
+                        // AppendType::Terminal may have become durable prior to drop.
+                        standard(ErrorCode::Other, e.to_string())
+                    }
+                },
                 DeleteStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
@@ -171,9 +175,6 @@ impl ServiceError {
                 ReconfigureStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 ReconfigureStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
-                }
-                ReconfigureStreamError::Unavailable(e) => {
-                    standard(ErrorCode::Unavailable, e.to_string())
                 }
                 ReconfigureStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
@@ -187,7 +188,7 @@ impl ServiceError {
                 CheckTailError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                CheckTailError::Unavailable(e) => standard(ErrorCode::Unavailable, e.to_string()),
+                CheckTailError::Messaging(e) => standard(ErrorCode::Unavailable, e.to_string()),
                 CheckTailError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
@@ -206,7 +207,16 @@ impl ServiceError {
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                AppendError::Unavailable(e) => standard(ErrorCode::Unavailable, e.to_string()),
+                AppendError::Messaging(e) => match e {
+                    MessagingError::MissingInAction => {
+                        standard(ErrorCode::Unavailable, e.to_string())
+                    }
+                    MessagingError::RequestDrop => {
+                        // Unavailable should be free of side-effect.
+                        // Append may have become durable prior to drop.
+                        standard(ErrorCode::Other, e.to_string())
+                    }
+                },
                 AppendError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),
                 AppendError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
@@ -232,7 +242,7 @@ impl ServiceError {
                 ReadError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                ReadError::Unavailable(e) => standard(ErrorCode::Unavailable, e.to_string()),
+                ReadError::Messaging(e) => standard(ErrorCode::Unavailable, e.to_string()),
                 ReadError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),
                 ReadError::StreamNotFound(e) => standard(ErrorCode::StreamNotFound, e.to_string()),
                 ReadError::BasinDeletionPending(e) => {

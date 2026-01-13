@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 
 use super::Backend;
 use crate::backend::{
-    error::{CheckTailError, ReadError, UnavailableError, UnwrittenError},
+    error::{CheckTailError, MessagingError, ReadError, UnwrittenError},
     kv,
     stream_id::StreamId,
 };
@@ -218,7 +218,7 @@ impl Backend {
                                     }
                                 }
                             }
-                            Err(UnavailableError::MissingInAction)?;
+                            Err(MessagingError::MissingInAction)?;
                         }
                         Err(tail) => {
                             assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");

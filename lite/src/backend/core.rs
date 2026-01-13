@@ -19,7 +19,7 @@ use super::{
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
         StorageError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
-        TransactionConflictError, UnavailableError,
+        TransactionConflictError,
     },
     kv,
     stream_id::StreamId,
@@ -225,7 +225,6 @@ impl Backend {
             + From<StorageError>
             + From<BasinNotFoundError>
             + From<TransactionConflictError>
-            + From<UnavailableError>
             + From<BasinDeletionPendingError>
             + From<StreamDeletionPendingError>
             + From<StreamNotFoundError>,
@@ -251,7 +250,6 @@ impl Backend {
                         match e {
                             CreateStreamError::Storage(e) => Err(e)?,
                             CreateStreamError::TransactionConflict(e) => Err(e)?,
-                            CreateStreamError::Unavailable(e) => Err(e)?,
                             CreateStreamError::BasinDeletionPending(e) => Err(e)?,
                             CreateStreamError::StreamDeletionPending(e) => Err(e)?,
                             CreateStreamError::BasinNotFound(e) => Err(e)?,
