@@ -6,7 +6,7 @@ use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
-pub struct AccountMetricsArgs {
+pub struct AccountArgs {
     #[from_request(via(Query))]
     _request: v1t::metrics::AccountMetricSetRequest,
 }
@@ -26,14 +26,14 @@ pub struct AccountMetricsArgs {
 ))]
 pub async fn account_metrics(
     State(_backend): State<Backend>,
-    AccountMetricsArgs { .. }: AccountMetricsArgs,
+    AccountArgs { .. }: AccountArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
     Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
 }
 
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
-pub struct BasinMetricsArgs {
+pub struct BasinArgs {
     #[from_request(via(Path))]
     _basin: BasinName,
     #[from_request(via(Query))]
@@ -55,14 +55,14 @@ pub struct BasinMetricsArgs {
 ))]
 pub async fn basin_metrics(
     State(_backend): State<Backend>,
-    BasinMetricsArgs { .. }: BasinMetricsArgs,
+    BasinArgs { .. }: BasinArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
     Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
 }
 
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
-pub struct StreamMetricsArgs {
+pub struct StreamArgs {
     #[from_request(via(Path))]
     _basin_and_stream: (BasinName, StreamName),
     #[from_request(via(Query))]
@@ -84,7 +84,7 @@ pub struct StreamMetricsArgs {
 ))]
 pub async fn stream_metrics(
     State(_backend): State<Backend>,
-    StreamMetricsArgs { .. }: StreamMetricsArgs,
+    StreamArgs { .. }: StreamArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
     Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
 }
