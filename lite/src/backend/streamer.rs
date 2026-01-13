@@ -55,7 +55,7 @@ pub(super) fn spawn_streamer(
 ) -> StreamerClient {
     let (msg_tx, msg_rx) = mpsc::unbounded_channel();
     let append_inflight_bytes_max =
-        (append_inflight_bytes_max.as_u64() as usize).min(Semaphore::MAX_PERMITS as usize);
+        (append_inflight_bytes_max.as_u64() as usize).min(Semaphore::MAX_PERMITS);
     let append_inflight_bytes_sema = Arc::new(Semaphore::new(append_inflight_bytes_max));
 
     let streamer = Streamer {
