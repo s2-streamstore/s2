@@ -13,7 +13,7 @@ use s2_common::types::{self, resources::RequestToken};
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
 pub struct S2RequestTokenHeader {
     /// Client-specified request token for idempotent retries.
-    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-request-token", inline))]
+    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-request-token"))]
     pub s2_request_token: RequestToken,
 }
 

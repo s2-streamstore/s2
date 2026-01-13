@@ -324,8 +324,7 @@
             "description": "Client-specified request token for idempotent retries.",
             "required": false,
             "schema": {
-              "type": "string",
-              "maxLength": 36
+              "$ref": "#/components/schemas/RequestToken"
             }
           }
         ],
@@ -1119,8 +1118,7 @@
             "description": "Client-specified request token for idempotent retries.",
             "required": false,
             "schema": {
-              "type": "string",
-              "maxLength": 36
+              "$ref": "#/components/schemas/RequestToken"
             }
           }
         ],
@@ -2872,6 +2870,10 @@
             "default": false
           }
         }
+      },
+      "RequestToken": {
+        "type": "string",
+        "maxLength": 36
       },
       "ResourceSet": {
         "oneOf": [

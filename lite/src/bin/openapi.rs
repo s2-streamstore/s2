@@ -2,6 +2,7 @@ use s2_api::{
     data::Format,
     v1::metrics::{AccountMetricSet, BasinMetricSet, StreamMetricSet},
 };
+use s2_common::types::resources::RequestToken;
 use s2_lite::handlers::v1::{
     basins::{
         __path_create, __path_create_or_reconfigure, __path_delete, __path_get_config, __path_list,
@@ -82,7 +83,7 @@ use utoipa::{
         basin_metrics,
         stream_metrics,
     ),
-    components(schemas(Format, AccountMetricSet, BasinMetricSet, StreamMetricSet))
+    components(schemas(Format, RequestToken, AccountMetricSet, BasinMetricSet, StreamMetricSet))
 )]
 pub struct ApiDoc;
 
