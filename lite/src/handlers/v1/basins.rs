@@ -13,8 +13,6 @@ use s2_common::{
     },
 };
 
-#[cfg(feature = "utoipa")]
-use super::paths;
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 #[derive(FromRequest)]
@@ -27,8 +25,8 @@ pub struct ListArgs {
 /// List basins.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::basins::LIST,
-    tag = paths::basins::TAG,
+    path = super::paths::basins::LIST,
+    tag = super::paths::basins::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::basin::ListBasinsResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -60,8 +58,8 @@ pub struct CreateArgs {
 /// Create a basin.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     post,
-    path = paths::basins::CREATE,
-    tag = paths::basins::TAG,
+    path = super::paths::basins::CREATE,
+    tag = super::paths::basins::TAG,
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::basin::CreateBasinRequest,
     responses(
@@ -101,8 +99,8 @@ pub struct GetConfigArgs {
 /// Get basin configuration.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::basins::GET_CONFIG,
-    tag = paths::basins::TAG,
+    path = super::paths::basins::GET_CONFIG,
+    tag = super::paths::basins::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::config::BasinConfig),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -131,8 +129,8 @@ pub struct CreateOrReconfigureArgs {
 /// Create or reconfigure a basin.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
-    path = paths::basins::CREATE_OR_RECONFIGURE,
-    tag = paths::basins::TAG,
+    path = super::paths::basins::CREATE_OR_RECONFIGURE,
+    tag = super::paths::basins::TAG,
     request_body = Option<v1t::basin::CreateOrReconfigureBasinRequest>,
     params(v1t::BasinNamePathSegment),
     responses(
@@ -175,8 +173,8 @@ pub struct DeleteArgs {
 /// Delete a basin.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     delete,
-    path = paths::basins::DELETE,
-    tag = paths::basins::TAG,
+    path = super::paths::basins::DELETE,
+    tag = super::paths::basins::TAG,
     responses(
         (status = StatusCode::ACCEPTED),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -206,8 +204,8 @@ pub struct ReconfigureArgs {
 /// Reconfigure a basin.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     patch,
-    path = paths::basins::RECONFIGURE,
-    tag = paths::basins::TAG,
+    path = super::paths::basins::RECONFIGURE,
+    tag = super::paths::basins::TAG,
     request_body = v1t::config::BasinReconfiguration,
     responses(
         (status = StatusCode::OK, body = v1t::config::BasinConfig),

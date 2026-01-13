@@ -14,8 +14,6 @@ use s2_common::{
     },
 };
 
-#[cfg(feature = "utoipa")]
-use super::paths::{self, cloud_endpoints};
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 #[derive(FromRequest)]
@@ -30,8 +28,8 @@ pub struct ListArgs {
 /// List streams.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::streams::LIST,
-    tag = paths::streams::TAG,
+    path = super::paths::streams::LIST,
+    tag = super::paths::streams::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::stream::ListStreamsResponse),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -41,7 +39,7 @@ pub struct ListArgs {
     ),
     params(v1t::stream::ListStreamsRequest),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -73,8 +71,8 @@ pub struct CreateArgs {
 /// Create a stream.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     post,
-    path = paths::streams::CREATE,
-    tag = paths::streams::TAG,
+    path = super::paths::streams::CREATE,
+    tag = super::paths::streams::TAG,
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::stream::CreateStreamRequest,
     responses(
@@ -86,7 +84,7 @@ pub struct CreateArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -129,8 +127,8 @@ pub struct GetConfigArgs {
 /// Get stream configuration.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::streams::GET_CONFIG,
-    tag = paths::streams::TAG,
+    path = super::paths::streams::GET_CONFIG,
+    tag = super::paths::streams::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::config::StreamConfig),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -141,7 +139,7 @@ pub struct GetConfigArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -171,8 +169,8 @@ pub struct CreateOrReconfigureArgs {
 /// Create or reconfigure a stream.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
-    path = paths::streams::CREATE_OR_RECONFIGURE,
-    tag = paths::streams::TAG,
+    path = super::paths::streams::CREATE_OR_RECONFIGURE,
+    tag = super::paths::streams::TAG,
     request_body = Option<v1t::config::StreamConfig>,
     params(v1t::StreamNamePathSegment),
     responses(
@@ -185,7 +183,7 @@ pub struct CreateOrReconfigureArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -227,8 +225,8 @@ pub struct DeleteArgs {
 /// Delete a stream.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     delete,
-    path = paths::streams::DELETE,
-    tag = paths::streams::TAG,
+    path = super::paths::streams::DELETE,
+    tag = super::paths::streams::TAG,
     responses(
         (status = StatusCode::ACCEPTED),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -238,7 +236,7 @@ pub struct DeleteArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -267,8 +265,8 @@ pub struct ReconfigureArgs {
 /// Reconfigure a stream.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     patch,
-    path = paths::streams::RECONFIGURE,
-    tag = paths::streams::TAG,
+    path = super::paths::streams::RECONFIGURE,
+    tag = super::paths::streams::TAG,
     request_body = v1t::config::StreamReconfiguration,
     responses(
         (status = StatusCode::OK, body = v1t::config::StreamConfig),
@@ -280,7 +278,7 @@ pub struct ReconfigureArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))

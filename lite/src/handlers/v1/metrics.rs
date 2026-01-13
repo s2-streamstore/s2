@@ -2,8 +2,6 @@ use axum::extract::{FromRequest, Path, Query, State};
 use s2_api::{data::Json, v1 as v1t};
 use s2_common::types::{basin::BasinName, stream::StreamName};
 
-#[cfg(feature = "utoipa")]
-use super::paths;
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 #[derive(FromRequest)]
@@ -16,8 +14,8 @@ pub struct AccountMetricsArgs {
 /// Account-level metrics.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::metrics::ACCOUNT,
-    tag = paths::metrics::TAG,
+    path = super::paths::metrics::ACCOUNT,
+    tag = super::paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -45,8 +43,8 @@ pub struct BasinMetricsArgs {
 /// Basin-level metrics.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::metrics::BASIN,
-    tag = paths::metrics::TAG,
+    path = super::paths::metrics::BASIN,
+    tag = super::paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -74,8 +72,8 @@ pub struct StreamMetricsArgs {
 /// Stream-level metrics.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::metrics::STREAM,
-    tag = paths::metrics::TAG,
+    path = super::paths::metrics::STREAM,
+    tag = super::paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

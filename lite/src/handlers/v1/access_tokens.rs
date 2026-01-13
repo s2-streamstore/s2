@@ -3,8 +3,6 @@ use http::StatusCode;
 use s2_api::{data::Json, v1 as v1t};
 use s2_common::types::access::AccessTokenId;
 
-#[cfg(feature = "utoipa")]
-use super::paths;
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 #[derive(FromRequest)]
@@ -17,8 +15,8 @@ pub struct ListArgs {
 /// List access tokens.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::access_tokens::LIST,
-    tag = paths::access_tokens::TAG,
+    path = super::paths::access_tokens::LIST,
+    tag = super::paths::access_tokens::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::access::ListAccessTokensResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -47,8 +45,8 @@ pub struct IssueArgs {
 /// Issue a new access token.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     post,
-    path = paths::access_tokens::ISSUE,
-    tag = paths::access_tokens::TAG,
+    path = super::paths::access_tokens::ISSUE,
+    tag = super::paths::access_tokens::TAG,
     request_body = v1t::access::AccessTokenInfo,
     responses(
         (status = StatusCode::CREATED, body = v1t::access::IssueAccessTokenResponse),
@@ -80,8 +78,8 @@ pub struct RevokeArgs {
 /// Revoke an access token.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     delete,
-    path = paths::access_tokens::REVOKE,
-    tag = paths::access_tokens::TAG,
+    path = super::paths::access_tokens::REVOKE,
+    tag = super::paths::access_tokens::TAG,
     responses(
         (status = StatusCode::NO_CONTENT),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

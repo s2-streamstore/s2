@@ -23,8 +23,6 @@ use s2_common::{
     },
 };
 
-#[cfg(feature = "utoipa")]
-use super::paths::{self, cloud_endpoints};
 use crate::{
     backend::{Backend, error::ReadError},
     handlers::v1::error::ServiceError,
@@ -42,8 +40,8 @@ pub struct CheckTailArgs {
 /// Check the tail.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::streams::records::CHECK_TAIL,
-    tag = paths::streams::records::TAG,
+    path = super::paths::streams::records::CHECK_TAIL,
+    tag = super::paths::streams::records::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::stream::TailResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -54,7 +52,7 @@ pub struct CheckTailArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -86,8 +84,8 @@ pub struct ReadArgs {
 /// Read records.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::streams::records::READ,
-    tag = paths::streams::records::TAG,
+    path = super::paths::streams::records::READ,
+    tag = super::paths::streams::records::TAG,
     responses(
         (status = StatusCode::OK, content(
             (v1t::stream::ReadBatch = "application/json"),
@@ -107,7 +105,7 @@ pub struct ReadArgs {
         v1t::stream::ReadEnd,
     ),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -280,8 +278,8 @@ pub struct AppendArgs {
 /// Append records.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     post,
-    path = paths::streams::records::APPEND,
-    tag = paths::streams::records::TAG,
+    path = super::paths::streams::records::APPEND,
+    tag = super::paths::streams::records::TAG,
     request_body(content = v1t::stream::AppendInput, content_type = "application/json"),
     responses(
         (status = StatusCode::OK, body = v1t::stream::AppendAck),
@@ -294,7 +292,7 @@ pub struct AppendArgs {
     ),
     params(v1t::StreamNamePathSegment, s2_api::data::S2FormatHeader),
     servers(
-        (url = cloud_endpoints::BASIN, variables(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
