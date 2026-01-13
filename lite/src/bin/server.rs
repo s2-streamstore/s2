@@ -2,6 +2,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use axum_server::tls_rustls::RustlsConfig;
+use bytesize::ByteSize;
 use clap::Parser as _;
 use s2_lite::{backend::Backend, handlers};
 use slatedb::object_store::{self, CredentialProvider, aws::AwsCredential};
@@ -45,6 +46,15 @@ struct Args {
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
     port: Option<u16>,
+
+    /// Whether to pipeline appends per stream.
+    ///
+    /// This improves performance with high-latency object storage,
+    /// however it is unsafe for now (risk of data loss).
+    ///
+    /// It will be enabled by default in future and this knob removed.
+    #[arg(long, default_value_t = false)]
+    pipeline: bool,
 }
 
 #[tokio::main]
@@ -112,7 +122,17 @@ async fn main() -> eyre::Result<()> {
         .build()
         .await?;
 
-    let app = handlers::router(Backend::new(db)).layer(
+    let backend = Backend::new(
+        db,
+        if args.pipeline {
+            ByteSize::mib(10)
+        } else {
+            // No pipelining
+            ByteSize::b(1)
+        },
+    );
+
+    let app = handlers::router(backend).layer(
         TraceLayer::new_for_http()
             .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
             .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))

@@ -25,6 +25,7 @@ axum = { workspace = true, features = ["macros"] }
 axum-server = { workspace = true, features = ["tls-rustls"] }
 blake3 = { workspace = true }
 bytes = { workspace = true }
+bytesize = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 compact_str = { workspace = true }
 dashmap = { workspace = true }
