@@ -274,6 +274,7 @@ impl Streamer {
         loop {
             if self.trim_point.state.end == SeqNum::MAX {
                 if self.trim_point.applied_point.end == self.stable_pos.seq_num {
+                    // Terminal trim is durable.
                     break;
                 } else {
                     assert!(self.stable_pos.seq_num < self.trim_point.applied_point.end);
@@ -366,7 +367,10 @@ impl StreamerClient {
         reply_rx.await.map_err(|_| UnavailableError::RequestDrop)
     }
 
-    pub async fn append(&self, input: AppendInput) -> Result<AppendPermit<'_>, UnavailableError> {
+    pub async fn append_permit(
+        &self,
+        input: AppendInput,
+    ) -> Result<AppendPermit<'_>, UnavailableError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
         let start = Instant::now();
@@ -407,7 +411,7 @@ impl StreamerClient {
             fencing_token: None,
         };
         match self
-            .append(input)
+            .append_permit(input)
             .await?
             .submit_internal(None, AppendType::Terminal)
             .await

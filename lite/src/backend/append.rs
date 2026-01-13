@@ -29,7 +29,7 @@ impl Backend {
                 config.create_stream_on_append
             })
             .await?;
-        let ack = client.append(input).await?.submit().await?;
+        let ack = client.append_permit(input).await?.submit().await?;
         Ok(ack)
     }
 
@@ -48,7 +48,7 @@ impl Backend {
             loop {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
-                        permit_opt = Some(Box::pin(client.append(input)));
+                        permit_opt = Some(Box::pin(client.append_permit(input)));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
                         permit_opt = None;
