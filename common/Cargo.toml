@@ -28,7 +28,7 @@ serde = { workspace = true, features = ["derive"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true }
-utoipa = { workspace = true, optional = true, features = ["time"] }
+utoipa = { version = "5.4", optional = true, features = ["time"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -59,7 +59,10 @@ pub struct BasinMetricsArgs {
 ))]
 pub async fn basin_metrics(
     State(_backend): State<Backend>,
-    BasinMetricsArgs { basin: _, request: _ }: BasinMetricsArgs,
+    BasinMetricsArgs {
+        basin: _,
+        request: _,
+    }: BasinMetricsArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
     Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
 }

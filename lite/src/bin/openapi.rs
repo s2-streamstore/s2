@@ -8,9 +8,7 @@ use s2_lite::handlers::v1::{
         __path_create, __path_create_or_reconfigure, __path_delete, __path_get_config, __path_list,
         __path_reconfigure,
     },
-    metrics::{
-        __path_account_metrics, __path_basin_metrics, __path_stream_metrics,
-    },
+    metrics::{__path_account_metrics, __path_basin_metrics, __path_stream_metrics},
     paths::{self, endpoints},
     records::{__path_append, __path_check_tail, __path_read},
     streams::{

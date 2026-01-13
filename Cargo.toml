@@ -52,7 +52,6 @@ tokio-util = "0.7"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-utoipa = { version = "5.4", features = ["time"] }
 uuid = "1.19"
 zstd = "0.13"
 
