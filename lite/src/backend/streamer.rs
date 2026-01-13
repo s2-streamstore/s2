@@ -53,7 +53,7 @@ pub(super) fn spawn_streamer(
     append_inflight_bytes_max: ByteSize,
     client_states: Arc<DashMap<StreamId, StreamerClientState>>,
 ) -> StreamerClient {
-    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (msg_tx, msg_rx) = mpsc::unbounded_channel();
     let append_inflight_bytes_max =
         (append_inflight_bytes_max.as_u64() as usize).max(Semaphore::MAX_PERMITS as usize);
     let append_inflight_bytes_sema = Arc::new(Semaphore::new(append_inflight_bytes_max));
@@ -77,13 +77,13 @@ pub(super) fn spawn_streamer(
     };
 
     tokio::spawn(async move {
-        streamer.run(command_rx).await;
+        streamer.run(msg_rx).await;
         client_states.remove(&stream_id);
     });
 
     StreamerClient {
         stream_id,
-        command_tx,
+        msg_tx,
         append_inflight_bytes_sema,
         append_inflight_bytes_max,
     }
@@ -236,9 +236,9 @@ impl Streamer {
         }
     }
 
-    fn handle_command(&mut self, msg: CommandMessage) {
+    fn handle_message(&mut self, msg: Message) {
         match msg {
-            CommandMessage::Append {
+            Message::Append {
                 input,
                 session,
                 reply_tx,
@@ -248,7 +248,7 @@ impl Streamer {
                     self.handle_append(input, session, reply_tx, append_type);
                 }
             }
-            CommandMessage::Follow {
+            Message::Follow {
                 start_seq_num,
                 reply_tx,
             } => {
@@ -259,16 +259,16 @@ impl Streamer {
                 };
                 let _ = reply_tx.send(reply);
             }
-            CommandMessage::CheckTail { reply_tx } => {
+            Message::CheckTail { reply_tx } => {
                 let _ = reply_tx.send(self.stable_pos);
             }
-            CommandMessage::Reconfigure { config } => {
+            Message::Reconfigure { config } => {
                 self.config = config;
             }
         }
     }
 
-    async fn run(mut self, mut command_rx: mpsc::UnboundedReceiver<CommandMessage>) {
+    async fn run(mut self, mut msg_rx: mpsc::UnboundedReceiver<Message>) {
         let dormancy = tokio::time::sleep(Duration::MAX);
         tokio::pin!(dormancy);
         loop {
@@ -281,8 +281,8 @@ impl Streamer {
             }
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
-                Some(msg) = command_rx.recv() => {
-                    self.handle_command(msg);
+                Some(msg) = msg_rx.recv() => {
+                    self.handle_message(msg);
                 }
                 Some(res) = self.append_futs.next() => {
                     match res {
@@ -307,7 +307,7 @@ impl Streamer {
     }
 }
 
-enum CommandMessage {
+enum Message {
     Append {
         input: AppendInput,
         session: Option<append::SessionHandle>,
@@ -331,7 +331,7 @@ enum CommandMessage {
 #[derive(Debug, Clone)]
 pub(super) struct StreamerClient {
     stream_id: StreamId,
-    command_tx: mpsc::UnboundedSender<CommandMessage>,
+    msg_tx: mpsc::UnboundedSender<Message>,
     append_inflight_bytes_sema: Arc<Semaphore>,
     append_inflight_bytes_max: usize,
 }
@@ -343,8 +343,8 @@ impl StreamerClient {
 
     pub async fn check_tail(&self) -> Result<StreamPosition, UnavailableError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.command_tx
-            .send(CommandMessage::CheckTail { reply_tx })
+        self.msg_tx
+            .send(Message::CheckTail { reply_tx })
             .map_err(|_| UnavailableError::MissingInAction)?;
         reply_rx.await.map_err(|_| UnavailableError::RequestDrop)
     }
@@ -357,8 +357,8 @@ impl StreamerClient {
         UnavailableError,
     > {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.command_tx
-            .send(CommandMessage::Follow {
+        self.msg_tx
+            .send(Message::Follow {
                 start_seq_num,
                 reply_tx,
             })
@@ -376,21 +376,21 @@ impl StreamerClient {
             res = self.append_inflight_bytes_sema.acquire_many(num_permits) => {
                 res.map_err(|_| UnavailableError::MissingInAction)
             }
-            _ = self.command_tx.closed() => {
+            _ = self.msg_tx.closed() => {
                 Err(UnavailableError::MissingInAction)
             }
         }?;
         metrics::observe_append_permit_latency(start.elapsed());
         Ok(AppendPermit {
             sema_permit,
-            command_tx: &self.command_tx,
+            msg_tx: &self.msg_tx,
             input,
         })
     }
 
     pub async fn reconfigure(&self, config: OptionalStreamConfig) -> Result<(), UnavailableError> {
-        self.command_tx
-            .send(CommandMessage::Reconfigure { config })
+        self.msg_tx
+            .send(Message::Reconfigure { config })
             .map_err(|_| UnavailableError::MissingInAction)
     }
 
@@ -448,7 +448,7 @@ fn timestamp_now() -> Timestamp {
 #[derive(Debug)]
 pub struct AppendPermit<'a> {
     sema_permit: SemaphorePermit<'a>,
-    command_tx: &'a mpsc::UnboundedSender<CommandMessage>,
+    msg_tx: &'a mpsc::UnboundedSender<Message>,
     input: AppendInput,
 }
 
@@ -473,12 +473,12 @@ impl AppendPermit<'_> {
         let start = Instant::now();
         let AppendPermit {
             sema_permit,
-            command_tx,
+            msg_tx,
             input,
         } = self;
         let (reply_tx, reply_rx) = oneshot::channel();
-        command_tx
-            .send(CommandMessage::Append {
+        msg_tx
+            .send(Message::Append {
                 input,
                 session,
                 reply_tx,
