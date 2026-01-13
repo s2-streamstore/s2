@@ -28,7 +28,7 @@ pub async fn account_metrics(
     State(_backend): State<Backend>,
     AccountArgs { .. }: AccountArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
-    Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
+    Err(ServiceError::NotImplemented)
 }
 
 #[derive(FromRequest)]
@@ -57,7 +57,7 @@ pub async fn basin_metrics(
     State(_backend): State<Backend>,
     BasinArgs { .. }: BasinArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
-    Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
+    Err(ServiceError::NotImplemented)
 }
 
 #[derive(FromRequest)]
@@ -86,5 +86,5 @@ pub async fn stream_metrics(
     State(_backend): State<Backend>,
     StreamArgs { .. }: StreamArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
-    Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
+    Err(ServiceError::NotImplemented)
 }

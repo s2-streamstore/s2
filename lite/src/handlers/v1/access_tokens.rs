@@ -29,10 +29,7 @@ pub async fn list_access_tokens(
     State(_backend): State<Backend>,
     ListArgs { .. }: ListArgs,
 ) -> Result<Json<v1t::access::ListAccessTokensResponse>, ServiceError> {
-    Ok(Json(v1t::access::ListAccessTokensResponse {
-        access_tokens: vec![],
-        has_more: false,
-    }))
+    Err(ServiceError::NotImplemented)
 }
 
 #[derive(FromRequest)]
@@ -60,12 +57,7 @@ pub async fn issue_access_token(
     State(_backend): State<Backend>,
     IssueArgs { .. }: IssueArgs,
 ) -> Result<(StatusCode, Json<v1t::access::IssueAccessTokenResponse>), ServiceError> {
-    Ok((
-        StatusCode::CREATED,
-        Json(v1t::access::IssueAccessTokenResponse {
-            access_token: "mock-token".to_string(),
-        }),
-    ))
+    Err(ServiceError::NotImplemented)
 }
 
 #[derive(FromRequest)]
@@ -92,5 +84,5 @@ pub async fn revoke_access_token(
     State(_backend): State<Backend>,
     RevokeArgs { .. }: RevokeArgs,
 ) -> Result<StatusCode, ServiceError> {
-    Ok(StatusCode::NO_CONTENT)
+    Err(ServiceError::NotImplemented)
 }
