@@ -65,12 +65,12 @@ pub struct StreamDeletionPendingError {
 pub struct UnwrittenError(pub StreamPosition);
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum MessagingError {
-    #[error("messaging: missing in action")]
-    MissingInAction,
-    #[error("messaging: request drop")]
-    RequestDrop,
-}
+#[error("streamer missing in action")]
+pub struct StreamerMissingInActionError;
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("request dropped")]
+pub struct RequestDroppedError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("record timestamp was required but was missing")]
@@ -95,7 +95,9 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    Messaging(#[from] MessagingError),
+    StreamerMissingInActionError(#[from] StreamerMissingInActionError),
+    #[error(transparent)]
+    RequestDroppedError(#[from] RequestDroppedError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -109,7 +111,9 @@ pub enum CheckTailError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
-    Messaging(#[from] MessagingError),
+    StreamerMissingInActionError(#[from] StreamerMissingInActionError),
+    #[error(transparent)]
+    RequestDroppedError(#[from] RequestDroppedError),
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
@@ -137,7 +141,9 @@ pub enum AppendError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
-    Messaging(#[from] MessagingError),
+    StreamerMissingInActionError(#[from] StreamerMissingInActionError),
+    #[error(transparent)]
+    RequestDroppedError(#[from] RequestDroppedError),
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
@@ -156,7 +162,10 @@ impl From<AppendErrorInternal> for AppendError {
     fn from(e: AppendErrorInternal) -> Self {
         match e {
             AppendErrorInternal::Storage(e) => AppendError::Storage(e),
-            AppendErrorInternal::Messaging(e) => AppendError::Messaging(e),
+            AppendErrorInternal::StreamerMissingInActionError(e) => {
+                AppendError::StreamerMissingInActionError(e)
+            }
+            AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
         }
@@ -207,7 +216,9 @@ pub enum ReadError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
-    Messaging(#[from] MessagingError),
+    StreamerMissingInActionError(#[from] StreamerMissingInActionError),
+    #[error(transparent)]
+    RequestDroppedError(#[from] RequestDroppedError),
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
@@ -239,6 +250,23 @@ impl From<kv::DeserializationError> for ReadError {
 impl From<slatedb::Error> for ReadError {
     fn from(e: slatedb::Error) -> Self {
         Self::Storage(e.into())
+    }
+}
+
+impl From<CheckTailError> for ReadError {
+    fn from(e: CheckTailError) -> Self {
+        match e {
+            CheckTailError::Storage(e) => Self::Storage(e),
+            CheckTailError::TransactionConflict(e) => Self::TransactionConflict(e),
+            CheckTailError::StreamerMissingInActionError(e) => {
+                Self::StreamerMissingInActionError(e)
+            }
+            CheckTailError::RequestDroppedError(e) => Self::RequestDroppedError(e),
+            CheckTailError::BasinNotFound(e) => Self::BasinNotFound(e),
+            CheckTailError::StreamNotFound(e) => Self::StreamNotFound(e),
+            CheckTailError::BasinDeletionPending(e) => Self::BasinDeletionPending(e),
+            CheckTailError::StreamDeletionPending(e) => Self::StreamDeletionPending(e),
+        }
     }
 }
 
@@ -308,7 +336,9 @@ pub enum DeleteStreamError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    Messaging(#[from] MessagingError),
+    StreamerMissingInActionError(#[from] StreamerMissingInActionError),
+    #[error(transparent)]
+    RequestDroppedError(#[from] RequestDroppedError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
 }

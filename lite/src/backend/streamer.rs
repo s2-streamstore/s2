@@ -32,7 +32,8 @@ use crate::{
         append,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, MessagingError, StreamerError,
+            CheckTailError, DeleteStreamError, ReadError, RequestDroppedError, StreamerError,
+            StreamerMissingInActionError,
         },
         kv,
         stream_id::StreamId,
@@ -356,35 +357,33 @@ impl StreamerClient {
         self.stream_id
     }
 
-    pub async fn check_tail(&self) -> Result<StreamPosition, MessagingError> {
+    pub async fn check_tail(&self) -> Result<StreamPosition, CheckTailError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::CheckTail { reply_tx })
-            .map_err(|_| MessagingError::MissingInAction)?;
-        reply_rx.await.map_err(|_| MessagingError::RequestDrop)
+            .map_err(|_| StreamerMissingInActionError)?;
+        Ok(reply_rx.await.map_err(|_| RequestDroppedError)?)
     }
 
     pub async fn follow(
         &self,
         start_seq_num: SeqNum,
-    ) -> Result<
-        Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>,
-        MessagingError,
-    > {
+    ) -> Result<Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>, ReadError>
+    {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::Follow {
                 start_seq_num,
                 reply_tx,
             })
-            .map_err(|_| MessagingError::MissingInAction)?;
-        reply_rx.await.map_err(|_| MessagingError::RequestDrop)
+            .map_err(|_| StreamerMissingInActionError)?;
+        Ok(reply_rx.await.map_err(|_| RequestDroppedError)?)
     }
 
     pub async fn append_permit(
         &self,
         input: AppendInput,
-    ) -> Result<AppendPermit<'_>, MessagingError> {
+    ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
         let start = Instant::now();
@@ -392,10 +391,10 @@ impl StreamerClient {
         let num_permits = metered_size.clamp(1, self.append_inflight_bytes_max) as u32;
         let sema_permit = tokio::select! {
             res = self.append_inflight_bytes_sema.acquire_many(num_permits) => {
-                res.map_err(|_| MessagingError::MissingInAction)
+                res.map_err(|_| StreamerMissingInActionError)
             }
             _ = self.msg_tx.closed() => {
-                Err(MessagingError::MissingInAction)
+                Err(StreamerMissingInActionError)
             }
         }?;
         metrics::observe_append_permit_latency(start.elapsed());
@@ -431,7 +430,12 @@ impl StreamerClient {
             Ok(_ack) => Ok(()),
             Err(e) => Err(match e {
                 AppendErrorInternal::Storage(e) => DeleteStreamError::Storage(e),
-                AppendErrorInternal::Messaging(e) => DeleteStreamError::Messaging(e),
+                AppendErrorInternal::StreamerMissingInActionError(e) => {
+                    DeleteStreamError::StreamerMissingInActionError(e)
+                }
+                AppendErrorInternal::RequestDroppedError(e) => {
+                    DeleteStreamError::RequestDroppedError(e)
+                }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
             }),
@@ -500,8 +504,8 @@ impl AppendPermit<'_> {
                 reply_tx,
                 append_type,
             })
-            .map_err(|_| MessagingError::MissingInAction)?;
-        let ack = reply_rx.await.map_err(|_| MessagingError::RequestDrop)??;
+            .map_err(|_| StreamerMissingInActionError)?;
+        let ack = reply_rx.await.map_err(|_| RequestDroppedError)??;
         drop(sema_permit);
         metrics::observe_append_ack_latency(start.elapsed());
         Ok(ack)
