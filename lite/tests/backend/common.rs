@@ -1,6 +1,7 @@
 use std::{pin::Pin, sync::Arc};
 
 use bytes::Bytes;
+use bytesize::ByteSize;
 use futures::StreamExt;
 use s2_common::{
     record::{CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp},
@@ -31,7 +32,7 @@ pub async fn create_in_memory_db() -> Db {
 
 pub async fn create_backend() -> Backend {
     let db = create_in_memory_db().await;
-    Backend::new(db)
+    Backend::new(db, ByteSize::mib(10))
 }
 
 pub fn test_basin_name(suffix: &str) -> BasinName {

@@ -8,7 +8,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures::Stream;
-use zstd::zstd_safe::WriteBuf;
 
 /*
   REGULAR MESSAGE:
@@ -124,14 +123,14 @@ impl CompressedData {
         match self.compression {
             CompressionAlgorithm::None => Ok(self.payload),
             CompressionAlgorithm::Gzip => {
-                let mut decoder = GzDecoder::new(self.payload.as_slice());
+                let mut decoder = GzDecoder::new(&self.payload[..]);
                 let mut buf = Vec::with_capacity(self.payload.len() * 2);
                 decoder.read_to_end(&mut buf)?;
                 Ok(Bytes::from(buf.into_boxed_slice()))
             }
             CompressionAlgorithm::Zstd => {
                 let mut buf = Vec::with_capacity(self.payload.len() * 2);
-                zstd::stream::copy_decode(self.payload.as_slice(), &mut buf)?;
+                zstd::stream::copy_decode(&self.payload[..], &mut buf)?;
                 Ok(Bytes::from(buf.into_boxed_slice()))
             }
         }

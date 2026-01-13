@@ -147,6 +147,12 @@ impl Default for AccessTokenIdStartAfter {
     }
 }
 
+impl From<AccessTokenId> for AccessTokenIdStartAfter {
+    fn from(value: AccessTokenId) -> Self {
+        Self(value.0, PhantomData)
+    }
+}
+
 #[derive(Debug, Hash, EnumSetType, strum::EnumCount)]
 pub enum Operation {
     ListBasins = 1,

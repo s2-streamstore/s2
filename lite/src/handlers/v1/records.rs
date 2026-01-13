@@ -37,6 +37,28 @@ pub struct CheckTailArgs {
     stream: StreamName,
 }
 
+/// Check the tail.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = super::paths::streams::records::CHECK_TAIL,
+    tag = super::paths::streams::records::TAG,
+    responses(
+        (status = StatusCode::OK, body = v1t::stream::TailResponse),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
+        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+    params(v1t::StreamNamePathSegment),
+    servers(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
+            ("basin" = (
+                description = "Basin name",
+            ))
+        ), description = "Endpoint for the basin"),
+    )
+))]
 pub async fn check_tail(
     State(backend): State<Backend>,
     CheckTailArgs { basin, stream }: CheckTailArgs,
@@ -59,6 +81,37 @@ pub struct ReadArgs {
     request: v1t::stream::ReadRequest,
 }
 
+/// Read records.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = super::paths::streams::records::READ,
+    tag = super::paths::streams::records::TAG,
+    responses(
+        (status = StatusCode::OK, content(
+            (v1t::stream::ReadBatch = "application/json"),
+            (v1t::stream::sse::ReadEvent = "text/event-stream"),
+        )),
+        (status = StatusCode::RANGE_NOT_SATISFIABLE, body = v1t::stream::TailResponse),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
+        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+    params(
+        v1t::StreamNamePathSegment,
+        s2_api::data::S2FormatHeader,
+        v1t::stream::ReadStart,
+        v1t::stream::ReadEnd,
+    ),
+    servers(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
+            ("basin" = (
+                description = "Basin name",
+            ))
+        ), description = "Endpoint for the basin"),
+    )
+))]
 pub async fn read(
     State(backend): State<Backend>,
     ReadArgs {
@@ -222,6 +275,30 @@ pub struct AppendArgs {
     request: v1t::stream::AppendRequest,
 }
 
+/// Append records.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = super::paths::streams::records::APPEND,
+    tag = super::paths::streams::records::TAG,
+    request_body(content = v1t::stream::AppendInput, content_type = "application/json"),
+    responses(
+        (status = StatusCode::OK, body = v1t::stream::AppendAck),
+        (status = StatusCode::PRECONDITION_FAILED, body = v1t::stream::AppendConditionFailed),
+        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
+        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
+        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+    ),
+    params(v1t::StreamNamePathSegment, s2_api::data::S2FormatHeader),
+    servers(
+        (url = super::paths::cloud_endpoints::BASIN, variables(
+            ("basin" = (
+                description = "Basin name",
+            ))
+        ), description = "Endpoint for the basin"),
+    )
+))]
 pub async fn append(
     State(backend): State<Backend>,
     AppendArgs {

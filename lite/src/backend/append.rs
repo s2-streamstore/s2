@@ -4,9 +4,9 @@ use std::{
     sync::Arc,
 };
 
-use futures::{FutureExt as _, Stream, StreamExt as _, stream::FuturesOrdered};
+use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
-    record::{MeteredSize as _, SeqNum, StreamPosition},
+    record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
         stream::{AppendAck, AppendInput, StreamName},
@@ -16,10 +16,6 @@ use tokio::sync::oneshot;
 
 use super::Backend;
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
-
-// N.B. Ultimately capped by streamer::MAX_INFLIGHT_APPENDS
-const MAX_INFLIGHT_BATCHES: usize = 100;
-const MAX_INFLIGHT_BYTES: usize = 10 * 1024 * 1024;
 
 impl Backend {
     pub async fn append(
@@ -33,7 +29,7 @@ impl Backend {
                 config.create_stream_on_append
             })
             .await?;
-        let ack = client.append(input, None).await?;
+        let ack = client.append_permit(input).await?.submit().await?;
         Ok(ack)
     }
 
@@ -47,24 +43,33 @@ impl Backend {
         let session = SessionHandle::new();
         Ok(async_stream::stream! {
             tokio::pin!(inputs);
-            let mut futs = FuturesOrdered::new();
-            let mut inflight_bytes = 0;
+            let mut permit_opt = None;
+            let mut append_futs = FuturesOrdered::new();
             loop {
                 tokio::select! {
-                    Some(input) = inputs.next(), if (
-                        futs.len() < MAX_INFLIGHT_BATCHES
-                        && inflight_bytes <= MAX_INFLIGHT_BYTES
-                    ) => {
-                        let metered_size = input.records.metered_size();
-                        inflight_bytes += metered_size;
-                        let fut = client
-                            .append(input, Some(session.clone()))
-                            .map(move |res| (metered_size, res));
-                        futs.push_back(fut);
+                    Some(input) = inputs.next(), if permit_opt.is_none() => {
+                        permit_opt = Some(Box::pin(client.append_permit(input)));
                     }
-                    Some((metered_size, res)) = futs.next() => {
-                        inflight_bytes -= metered_size;
-                        yield res.map_err(AppendError::from);
+                    Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
+                        permit_opt = None;
+                        match res {
+                            Ok(permit) => append_futs.push_back(permit.submit_session(session.clone())),
+                            Err(e) => {
+                                yield Err(e.into());
+                                break;
+                            }
+                        }
+                    }
+                    Some(res) = append_futs.next(), if !append_futs.is_empty() => {
+                        match res {
+                            Ok(ack) => {
+                                yield Ok(ack);
+                            },
+                            Err(e) => {
+                                yield Err(e.into());
+                                break;
+                            }
+                        }
                     }
                     else => {
                         break;
@@ -124,9 +129,9 @@ pub struct PendingAppends {
 }
 
 impl PendingAppends {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            queue: VecDeque::with_capacity(capacity),
+            queue: VecDeque::new(),
             next_ack_pos: None,
         }
     }
@@ -168,6 +173,11 @@ impl PendingAppends {
             .count();
         for sender in self.queue.drain(..completable) {
             sender.unblock(Ok(stable_pos));
+        }
+        // Lots of small appends could cause this,
+        // as we bound only on total bytes not num batches.
+        if self.queue.capacity() >= 4 * self.queue.len() {
+            self.queue.shrink_to(self.queue.len() * 2);
         }
     }
 

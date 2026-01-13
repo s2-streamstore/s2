@@ -60,6 +60,8 @@ pub enum ServiceError {
     Append(#[from] AppendError),
     #[error(transparent)]
     Read(#[from] ReadError),
+    #[error("Not implemented")]
+    NotImplemented,
 }
 
 impl From<AppendRequestRejection> for ServiceError {
@@ -243,6 +245,9 @@ impl ServiceError {
                     tail: tail.0.into(),
                 }),
             },
+            ServiceError::NotImplemented => {
+                standard(ErrorCode::PermissionDenied, "Not implemented".to_string())
+            }
         }
     }
 }

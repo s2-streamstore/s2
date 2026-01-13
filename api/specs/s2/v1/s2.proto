@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package s2.v1;
+
+option java_multiple_files = true;
+option java_package = "s2.v1";
+
+// Position of a record in a stream.
+message StreamPosition {
+  // Sequence number assigned by the service.
+  uint64 seq_num = 1;
+  // Timestamp, which may be user-specified or assigned by the service.
+  // If it is assigned by the service, it will represent milliseconds since Unix epoch.
+  uint64 timestamp = 2;
+}
+
+// Headers add structured information to a record as name-value pairs.
+message Header {
+  // Header name blob.
+  // The name cannot be empty, with the exception of an S2 command record.
+  bytes name = 1;
+  // Header value blob.
+  bytes value = 2;
+}
+
+// Record to be appended to a stream.
+message AppendRecord {
+  // Timestamp for this record.
+  // Precise semantics depend on the stream's `timestamping` config.
+  optional uint64 timestamp = 1;
+  // Series of name-value pairs for this record.
+  repeated Header headers = 2;
+  // Body of this record.
+  bytes body = 3;
+}
+
+// Payload of an Append request message.
+message AppendInput {
+  // Batch of records to append atomically, which must contain at least one record, and no more than 1000.
+  // The total size of a batch of records may not exceed 1MiB of metered bytes.
+  repeated AppendRecord records = 1;
+  // Enforce that the sequence number issued to the first record matches.
+  optional uint64 match_seq_num = 2;
+  // Enforce a fencing token which must have been previously set by a `fence` command record.
+  optional string fencing_token = 3;
+}
+
+// Success response message to an Append request.
+message AppendAck {
+  // Sequence number and timestamp of the first record that was appended.
+  StreamPosition start = 1;
+  // Sequence number of the last record that was appended + 1, and timestamp of the last record that was appended.
+  // The difference between `end.seq_num` and `start.seq_num` will be the number of records appended.
+  StreamPosition end = 2;
+  // Sequence number that will be assigned to the next record on the stream, and timestamp of the last record on the stream.
+  // This can be greater than the `end` position in case of concurrent appends.
+  StreamPosition tail = 3;
+}
+
+// Record that is durably sequenced on a stream.
+message SequencedRecord {
+  // Sequence number assigned to this record.
+  uint64 seq_num = 1;
+  // Timestamp for this record.
+  uint64 timestamp = 2;
+  // Series of name-value pairs for this record.
+  repeated Header headers = 3;
+  // Body of this record.
+  bytes body = 4;
+}
+
+// Success response message to a Read request.
+message ReadBatch {
+  // Records that are durably sequenced on the stream, retrieved based on the requested criteria.
+  // This can only be empty in response to a unary read if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
+  // In the context of a session, it can be empty as a heartbeat message. A heartbeat will be sent whenever a switch to following in real-time happens, and then at a randomized gap between 5 and 15 seconds if no records have become available.
+  repeated SequencedRecord records = 1;
+  // Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
+  // It will only be present when reading recent records.
+  optional StreamPosition tail = 2;
+}

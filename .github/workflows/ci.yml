@@ -72,7 +72,7 @@ jobs:
   sdk-integration-tests:
     name: SDK Integration Tests
     needs: [build-server]
-    uses: s2-streamstore/s2-ci/.github/workflows/sdk-integration-tests.yml@main
+    uses: s2-streamstore/s2-ci/.github/workflows/sdk-tests.yml@main
     with:
       mode: local
       server-binary: server
@@ -81,10 +81,25 @@ jobs:
         [
           {
             "name": "go",
-            "repo": "s2-streamstore/s2-sdk-go-old",
+            "repo": "s2-streamstore/s2-sdk-go",
             "ref": "main",
             "lang": "go",
             "go-version": "1.23",
             "test_cmd": "go test -v -count=1 ./s2/..."
+          },
+          {
+            "name": "typescript",
+            "repo": "s2-streamstore/s2-sdk-typescript",
+            "ref": "main",
+            "lang": "bun",
+            "bun-version": "latest",
+            "test_cmd": "vitest --run --exclude '**/account-basin*'"
+          },
+          {
+            "name": "rust",
+            "repo": "s2-streamstore/s2-sdk-rust",
+            "ref": "main",
+            "lang": "rust",
+            "test_cmd": "cargo test --all-features -- --skip access_token"
           }
         ]
