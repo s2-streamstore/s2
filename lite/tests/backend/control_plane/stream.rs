@@ -17,12 +17,9 @@ use s2_common::{
         },
     },
 };
-use s2_lite::backend::{
-    Backend,
-    error::{
-        AppendError, CheckTailError, CreateStreamError, DeleteStreamError, GetStreamConfigError,
-        ReadError, ReconfigureStreamError, StreamDeletionPendingError,
-    },
+use s2_lite::backend::error::{
+    AppendError, CheckTailError, CreateStreamError, DeleteStreamError, GetStreamConfigError,
+    ReadError, ReconfigureStreamError, StreamDeletionPendingError,
 };
 
 use super::common::*;
@@ -404,43 +401,37 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
 
 #[tokio::test]
 async fn test_delete_stream_blocks_data_operations() {
-    let db = create_in_memory_db().await;
-    let backend_delete = Backend::new(db.clone());
-    let backend_new_client = Backend::new(db);
+    let backend = create_backend().await;
 
-    let basin_name = create_test_basin(
-        &backend_delete,
-        "stream-delete-blocks",
-        BasinConfig::default(),
-    )
-    .await;
+    let basin_name =
+        create_test_basin(&backend, "stream-delete-blocks", BasinConfig::default()).await;
     let stream_name = create_test_stream(
-        &backend_delete,
+        &backend,
         &basin_name,
         "stream-delete-blocks",
         OptionalStreamConfig::default(),
     )
     .await;
 
-    backend_delete
+    backend
         .delete_stream(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to delete stream");
 
-    let tail = backend_new_client
+    let tail = backend
         .check_tail(basin_name.clone(), stream_name.clone())
         .await;
     assert!(matches!(
         tail,
         Err(CheckTailError::StreamDeletionPending(_))
-    ));
+    ),);
 
     let input = AppendInput {
         records: create_test_record_batch(vec![Bytes::from_static(b"should fail")]),
         match_seq_num: None,
         fencing_token: None,
     };
-    let append_result = backend_new_client
+    let append_result = backend
         .append(basin_name.clone(), stream_name.clone(), input)
         .await;
     assert!(matches!(
@@ -453,9 +444,7 @@ async fn test_delete_stream_blocks_data_operations() {
         clamp: false,
     };
     let end = ReadEnd::default();
-    let read_result = backend_new_client
-        .read(basin_name, stream_name, start, end)
-        .await;
+    let read_result = backend.read(basin_name, stream_name, start, end).await;
     assert!(matches!(
         read_result,
         Err(ReadError::StreamDeletionPending(_))
