@@ -5,7 +5,6 @@ use std::{
 };
 
 use bytesize::ByteSize;
-use dashmap::DashMap;
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
 use s2_common::{
     record::{
@@ -43,49 +42,64 @@ use crate::{
 
 const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub(super) fn spawn_streamer(
-    db: slatedb::Db,
-    stream_id: StreamId,
-    config: OptionalStreamConfig,
-    tail_pos: StreamPosition,
-    fencing_token: FencingToken,
-    trim_point: RangeTo<SeqNum>,
-    append_inflight_bytes_max: ByteSize,
-    client_states: Arc<DashMap<StreamId, StreamerClientState>>,
-) -> StreamerClient {
-    let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-    let append_inflight_bytes_max =
-        (append_inflight_bytes_max.as_u64() as usize).min(Semaphore::MAX_PERMITS);
-    let append_inflight_bytes_sema = Arc::new(Semaphore::new(append_inflight_bytes_max));
+pub(super) struct Spawner {
+    pub db: slatedb::Db,
+    pub stream_id: StreamId,
+    pub config: OptionalStreamConfig,
+    pub tail_pos: StreamPosition,
+    pub fencing_token: FencingToken,
+    pub trim_point: RangeTo<SeqNum>,
+    pub append_inflight_max: ByteSize,
+}
 
-    let streamer = Streamer {
-        db,
-        stream_id,
-        config,
-        fencing_token: CommandState {
-            state: fencing_token,
-            applied_point: ..tail_pos.seq_num,
-        },
-        trim_point: CommandState {
-            state: trim_point,
-            applied_point: ..tail_pos.seq_num,
-        },
-        append_futs: FuturesOrdered::new(),
-        pending_appends: append::PendingAppends::new(),
-        stable_pos: tail_pos,
-        follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
-    };
+impl Spawner {
+    pub fn spawn(self, on_exit: impl FnOnce() + Send + 'static) -> StreamerClient {
+        let Self {
+            db,
+            stream_id,
+            config,
+            tail_pos,
+            fencing_token,
+            trim_point,
+            append_inflight_max,
+        } = self;
 
-    tokio::spawn(async move {
-        streamer.run(msg_rx).await;
-        client_states.remove(&stream_id);
-    });
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
 
-    StreamerClient {
-        stream_id,
-        msg_tx,
-        append_inflight_bytes_sema,
-        append_inflight_bytes_max,
+        let append_inflight_bytes_max =
+            (append_inflight_max.as_u64() as usize).min(Semaphore::MAX_PERMITS);
+
+        let append_inflight_bytes_sema = Arc::new(Semaphore::new(append_inflight_bytes_max));
+
+        let streamer = Streamer {
+            db,
+            stream_id,
+            config,
+            fencing_token: CommandState {
+                state: fencing_token,
+                applied_point: ..tail_pos.seq_num,
+            },
+            trim_point: CommandState {
+                state: trim_point,
+                applied_point: ..tail_pos.seq_num,
+            },
+            append_futs: FuturesOrdered::new(),
+            pending_appends: append::PendingAppends::new(),
+            stable_pos: tail_pos,
+            follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
+        };
+
+        tokio::spawn(async move {
+            streamer.run(msg_rx).await;
+            on_exit();
+        });
+
+        StreamerClient {
+            stream_id,
+            msg_tx,
+            append_inflight_bytes_sema,
+            append_inflight_bytes_max,
+        }
     }
 }
 

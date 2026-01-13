@@ -88,16 +88,18 @@ impl Backend {
         }
 
         let client_states = self.client_states.clone();
-        Ok(super::streamer::spawn_streamer(
-            self.db.clone(),
+        Ok(super::streamer::Spawner {
+            db: self.db.clone(),
             stream_id,
-            meta.config,
+            config: meta.config,
             tail_pos,
             fencing_token,
             trim_point,
-            self.append_inflight_max,
-            client_states,
-        ))
+            append_inflight_max: self.append_inflight_max,
+        }
+        .spawn(move || {
+            client_states.remove(&stream_id);
+        }))
     }
 
     async fn assert_no_records_following_tail(
