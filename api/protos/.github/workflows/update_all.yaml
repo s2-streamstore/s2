@@ -1,0 +1,25 @@
+name: Trigger all s2-proto-update for downstream sdks
+on:
+  push:
+    paths:
+      - 's2/**'
+jobs:
+  dispatch:
+    strategy:
+      matrix:
+        repo: ['s2-streamstore/docs']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_SECRET_KEY }}
+          owner: ${{ github.repository_owner }}
+      - name: Repository Dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ matrix.repo }}
+          event-type: s2-proto-update
+          client-payload: '{"ref": "${{ github.ref }}", "sha": "${{ github.sha }}"}'
