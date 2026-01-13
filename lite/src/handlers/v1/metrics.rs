@@ -1,6 +1,4 @@
 use axum::extract::{FromRequest, Path, Query, State};
-#[cfg(feature = "utoipa")]
-use http::StatusCode;
 use s2_api::{data::Json, v1 as v1t};
 use s2_common::types::{basin::BasinName, stream::StreamName};
 
@@ -12,7 +10,7 @@ use crate::{backend::Backend, handlers::v1::error::ServiceError};
 #[from_request(rejection(ServiceError))]
 pub struct AccountMetricsArgs {
     #[from_request(via(Query))]
-    request: v1t::metrics::AccountMetricSetRequest,
+    _request: v1t::metrics::AccountMetricSetRequest,
 }
 
 /// Account-level metrics.
@@ -30,7 +28,7 @@ pub struct AccountMetricsArgs {
 ))]
 pub async fn account_metrics(
     State(_backend): State<Backend>,
-    AccountMetricsArgs { request: _ }: AccountMetricsArgs,
+    AccountMetricsArgs { .. }: AccountMetricsArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
     Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
 }
@@ -39,9 +37,9 @@ pub async fn account_metrics(
 #[from_request(rejection(ServiceError))]
 pub struct BasinMetricsArgs {
     #[from_request(via(Path))]
-    basin: BasinName,
+    _basin: BasinName,
     #[from_request(via(Query))]
-    request: v1t::metrics::BasinMetricSetRequest,
+    _request: v1t::metrics::BasinMetricSetRequest,
 }
 
 /// Basin-level metrics.
@@ -59,10 +57,7 @@ pub struct BasinMetricsArgs {
 ))]
 pub async fn basin_metrics(
     State(_backend): State<Backend>,
-    BasinMetricsArgs {
-        basin: _,
-        request: _,
-    }: BasinMetricsArgs,
+    BasinMetricsArgs { .. }: BasinMetricsArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
     Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
 }
@@ -71,9 +66,9 @@ pub async fn basin_metrics(
 #[from_request(rejection(ServiceError))]
 pub struct StreamMetricsArgs {
     #[from_request(via(Path))]
-    basin_and_stream: (BasinName, StreamName),
+    _basin_and_stream: (BasinName, StreamName),
     #[from_request(via(Query))]
-    request: v1t::metrics::StreamMetricSetRequest,
+    _request: v1t::metrics::StreamMetricSetRequest,
 }
 
 /// Stream-level metrics.
@@ -91,10 +86,7 @@ pub struct StreamMetricsArgs {
 ))]
 pub async fn stream_metrics(
     State(_backend): State<Backend>,
-    StreamMetricsArgs {
-        basin_and_stream: _,
-        request: _,
-    }: StreamMetricsArgs,
+    StreamMetricsArgs { .. }: StreamMetricsArgs,
 ) -> Result<Json<v1t::metrics::MetricSetResponse>, ServiceError> {
     Ok(Json(v1t::metrics::MetricSetResponse { values: vec![] }))
 }

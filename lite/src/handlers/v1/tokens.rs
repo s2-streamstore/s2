@@ -11,7 +11,7 @@ use crate::{backend::Backend, handlers::v1::error::ServiceError};
 #[from_request(rejection(ServiceError))]
 pub struct ListArgs {
     #[from_request(via(Query))]
-    request: v1t::access::ListAccessTokensRequest,
+    _request: v1t::access::ListAccessTokensRequest,
 }
 
 /// List access tokens.
@@ -30,7 +30,7 @@ pub struct ListArgs {
 ))]
 pub async fn list(
     State(_backend): State<Backend>,
-    ListArgs { request: _ }: ListArgs,
+    ListArgs { .. }: ListArgs,
 ) -> Result<Json<v1t::access::ListAccessTokensResponse>, ServiceError> {
     Ok(Json(v1t::access::ListAccessTokensResponse {
         access_tokens: vec![],
@@ -42,7 +42,7 @@ pub async fn list(
 #[from_request(rejection(ServiceError))]
 pub struct IssueArgs {
     #[from_request(via(Json))]
-    request: v1t::access::AccessTokenInfo,
+    _request: v1t::access::AccessTokenInfo,
 }
 
 /// Issue a new access token.
@@ -62,7 +62,7 @@ pub struct IssueArgs {
 ))]
 pub async fn issue(
     State(_backend): State<Backend>,
-    IssueArgs { request: _ }: IssueArgs,
+    IssueArgs { .. }: IssueArgs,
 ) -> Result<(StatusCode, Json<v1t::access::IssueAccessTokenResponse>), ServiceError> {
     Ok((
         StatusCode::CREATED,
@@ -76,7 +76,7 @@ pub async fn issue(
 #[from_request(rejection(ServiceError))]
 pub struct RevokeArgs {
     #[from_request(via(Path))]
-    id: AccessTokenId,
+    _id: AccessTokenId,
 }
 
 /// Revoke an access token.
@@ -95,7 +95,7 @@ pub struct RevokeArgs {
 ))]
 pub async fn revoke(
     State(_backend): State<Backend>,
-    RevokeArgs { id: _ }: RevokeArgs,
+    RevokeArgs { .. }: RevokeArgs,
 ) -> Result<StatusCode, ServiceError> {
     Ok(StatusCode::NO_CONTENT)
 }
