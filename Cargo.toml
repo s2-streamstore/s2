@@ -53,6 +53,7 @@ tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = "1.19"
+utoipa = "5.4"
 zstd = "0.13"
 
 [patch.crates-io]

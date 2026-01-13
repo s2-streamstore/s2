@@ -4,6 +4,7 @@ use s2_api::{
 };
 use s2_common::types::resources::RequestToken;
 use s2_lite::handlers::v1::{
+    access_tokens::{__path_issue, __path_list as __path_list_tokens, __path_revoke},
     basins::{
         __path_create, __path_create_or_reconfigure, __path_delete, __path_get_config, __path_list,
         __path_reconfigure,
@@ -17,7 +18,6 @@ use s2_lite::handlers::v1::{
         __path_delete as __path_delete_stream, __path_get_config as __path_get_config_stream,
         __path_list as __path_list_streams, __path_reconfigure as __path_reconfigure_stream,
     },
-    tokens::{__path_issue, __path_list as __path_list_tokens, __path_revoke},
 };
 use utoipa::{
     Modify, OpenApi,
