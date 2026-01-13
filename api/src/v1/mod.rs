@@ -44,16 +44,6 @@ pub struct StreamNamePathSegment {
     pub stream: types::stream::StreamName,
 }
 
-#[rustfmt::skip]
-#[derive(Debug)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
-#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
-pub struct BasinNameHeader {
-    /// Basin name.
-    #[cfg_attr(feature = "utoipa", param(rename = "s2-basin"))]
-    pub basin: types::basin::BasinName,
-}
-
 macro_rules! impl_list_request_conversions {
     ($name:ident, $prefix:ty, $start_after:ty) => {
         impl TryFrom<$name> for types::resources::ListItemsRequest<$prefix, $start_after> {
