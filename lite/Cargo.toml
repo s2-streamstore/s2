@@ -13,6 +13,9 @@ categories = ["database-implementations"]
 name = "openapi"
 required-features = ["utoipa"]
 
+[[bin]]
+name = "server"
+
 [features]
 utoipa = ["dep:utoipa", "s2-api/utoipa", "s2-common/utoipa"]
 
@@ -56,9 +59,3 @@ utoipa = { version = "5.4", optional = true, features = ["time"] }
 [dev-dependencies]
 proptest = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
