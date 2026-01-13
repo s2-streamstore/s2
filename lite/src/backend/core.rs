@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use bytesize::ByteSize;
 use dashmap::DashMap;
 use enum_ordinalize::Ordinalize;
 use s2_common::{
@@ -31,15 +32,17 @@ pub const FOLLOWER_MAX_LAG: usize = 25;
 pub struct Backend {
     pub(super) db: slatedb::Db,
     client_states: Arc<DashMap<StreamId, StreamerClientState>>,
+    append_inflight_max: ByteSize,
 }
 
 impl Backend {
     const FAILED_INIT_MEMORY: Duration = Duration::from_secs(1);
 
-    pub fn new(db: slatedb::Db) -> Self {
+    pub fn new(db: slatedb::Db, append_inflight_max: ByteSize) -> Self {
         Self {
             db,
             client_states: Arc::new(DashMap::new()),
+            append_inflight_max,
         }
     }
 
@@ -92,6 +95,7 @@ impl Backend {
             tail_pos,
             fencing_token,
             trim_point,
+            self.append_inflight_max,
             client_states,
         ))
     }
@@ -283,7 +287,7 @@ mod tests {
             .await
             .unwrap();
 
-        let backend = Backend::new(db.clone());
+        let backend = Backend::new(db.clone(), ByteSize::b(1));
 
         let basin = BasinName::from_str("testbasin1").unwrap();
         let stream = StreamName::from_str("stream1").unwrap();

@@ -4,12 +4,13 @@ use std::{
     time::Duration,
 };
 
+use bytesize::ByteSize;
 use dashmap::DashMap;
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
 use s2_common::{
     record::{
-        CommandRecord, FencingToken, Metered, Record, SeqNum, SequencedRecord, StreamPosition,
-        Timestamp,
+        CommandRecord, FencingToken, Metered, MeteredSize, Record, SeqNum, SequencedRecord,
+        StreamPosition, Timestamp,
     },
     types::{
         config::{
@@ -23,22 +24,22 @@ use slatedb::{
     config::{PutOptions, Ttl, WriteOptions},
 };
 use tokio::{
-    sync::{self, broadcast, mpsc, oneshot},
+    sync::{self, Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
     time::Instant,
 };
 
-use crate::backend::{
-    append,
-    error::{
-        AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-        DeleteStreamError, StreamerError, UnavailableError,
+use crate::{
+    backend::{
+        append,
+        error::{
+            AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
+            DeleteStreamError, StreamerError, UnavailableError,
+        },
+        kv,
+        stream_id::StreamId,
     },
-    kv,
-    stream_id::StreamId,
+    metrics,
 };
-
-// TODO: bump once sl8 supports pipelining (https://github.com/slatedb/slatedb/issues/1138)
-const MAX_INFLIGHT_APPENDS: usize = 1;
 
 const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -49,10 +50,13 @@ pub(super) fn spawn_streamer(
     tail_pos: StreamPosition,
     fencing_token: FencingToken,
     trim_point: RangeTo<SeqNum>,
+    append_inflight_bytes_max: ByteSize,
     client_states: Arc<DashMap<StreamId, StreamerClientState>>,
 ) -> StreamerClient {
-    let (append_tx, append_rx) = mpsc::channel(MAX_INFLIGHT_APPENDS);
-    let (control_tx, control_rx) = mpsc::unbounded_channel();
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let append_inflight_bytes_max =
+        (append_inflight_bytes_max.as_u64() as usize).max(Semaphore::MAX_PERMITS as usize);
+    let append_inflight_bytes_sema = Arc::new(Semaphore::new(append_inflight_bytes_max));
 
     let streamer = Streamer {
         db,
@@ -67,21 +71,21 @@ pub(super) fn spawn_streamer(
             applied_point: ..tail_pos.seq_num,
         },
         append_futs: FuturesOrdered::new(),
-        pending_appends: append::PendingAppends::new(MAX_INFLIGHT_APPENDS),
+        pending_appends: append::PendingAppends::new(),
         stable_pos: tail_pos,
         follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
     };
 
-    let task_stream_id = stream_id;
     tokio::spawn(async move {
-        streamer.run(append_rx, control_rx).await;
-        client_states.remove(&task_stream_id);
+        streamer.run(command_rx).await;
+        client_states.remove(&stream_id);
     });
 
     StreamerClient {
         stream_id,
-        append_tx,
-        control_tx,
+        command_tx,
+        append_inflight_bytes_sema,
+        append_inflight_bytes_max,
     }
 }
 
@@ -182,13 +186,19 @@ impl Streamer {
         }
     }
 
-    fn handle_append(&mut self, msg: AppendMessage) {
-        let Some(ticket) = append::admit(msg.reply_tx, msg.session) else {
+    fn handle_append(
+        &mut self,
+        input: AppendInput,
+        session: Option<append::SessionHandle>,
+        reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
+        append_type: AppendType,
+    ) {
+        let Some(ticket) = append::admit(reply_tx, session) else {
             return;
         };
-        match self.sequence_records(msg.input) {
+        match self.sequence_records(input) {
             Ok(sequenced_records) => {
-                if msg.append_type == AppendType::Terminal {
+                if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
                         sequenced_records[0].record,
@@ -197,7 +207,7 @@ impl Streamer {
                 }
                 for sr in sequenced_records.iter() {
                     if let Record::Command(cmd) = &sr.record {
-                        self.apply_command(sr.position.seq_num, cmd, msg.append_type);
+                        self.apply_command(sr.position.seq_num, cmd, append_type);
                     }
                 }
                 let first_pos = sequenced_records.first().expect("non-empty").position;
@@ -226,9 +236,19 @@ impl Streamer {
         }
     }
 
-    fn handle_control(&mut self, msg: ControlMessage) {
+    fn handle_command(&mut self, msg: CommandMessage) {
         match msg {
-            ControlMessage::Follow {
+            CommandMessage::Append {
+                input,
+                session,
+                reply_tx,
+                append_type,
+            } => {
+                if self.trim_point.state.end < SeqNum::MAX {
+                    self.handle_append(input, session, reply_tx, append_type);
+                }
+            }
+            CommandMessage::Follow {
                 start_seq_num,
                 reply_tx,
             } => {
@@ -239,20 +259,16 @@ impl Streamer {
                 };
                 let _ = reply_tx.send(reply);
             }
-            ControlMessage::CheckTail { reply_tx } => {
+            CommandMessage::CheckTail { reply_tx } => {
                 let _ = reply_tx.send(self.stable_pos);
             }
-            ControlMessage::Reconfigure { config } => {
+            CommandMessage::Reconfigure { config } => {
                 self.config = config;
             }
         }
     }
 
-    async fn run(
-        mut self,
-        mut appends_rx: mpsc::Receiver<AppendMessage>,
-        mut control_rx: mpsc::UnboundedReceiver<ControlMessage>,
-    ) {
+    async fn run(mut self, mut command_rx: mpsc::UnboundedReceiver<CommandMessage>) {
         let dormancy = tokio::time::sleep(Duration::MAX);
         tokio::pin!(dormancy);
         loop {
@@ -265,14 +281,8 @@ impl Streamer {
             }
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
-                Some(msg) = appends_rx.recv(), if (
-                    self.trim_point.state.end < SeqNum::MAX &&
-                    self.append_futs.len() < MAX_INFLIGHT_APPENDS
-                ) => {
-                    self.handle_append(msg);
-                }
-                Some(msg) = control_rx.recv() => {
-                    self.handle_control(msg);
+                Some(msg) = command_rx.recv() => {
+                    self.handle_command(msg);
                 }
                 Some(res) = self.append_futs.next() => {
                     match res {
@@ -297,14 +307,13 @@ impl Streamer {
     }
 }
 
-struct AppendMessage {
-    input: AppendInput,
-    session: Option<append::SessionHandle>,
-    reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
-    append_type: AppendType,
-}
-
-enum ControlMessage {
+enum CommandMessage {
+    Append {
+        input: AppendInput,
+        session: Option<append::SessionHandle>,
+        reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
+        append_type: AppendType,
+    },
     Follow {
         start_seq_num: SeqNum,
         reply_tx: oneshot::Sender<
@@ -322,8 +331,9 @@ enum ControlMessage {
 #[derive(Debug, Clone)]
 pub(super) struct StreamerClient {
     stream_id: StreamId,
-    append_tx: mpsc::Sender<AppendMessage>,
-    control_tx: mpsc::UnboundedSender<ControlMessage>,
+    command_tx: mpsc::UnboundedSender<CommandMessage>,
+    append_inflight_bytes_sema: Arc<Semaphore>,
+    append_inflight_bytes_max: usize,
 }
 
 impl StreamerClient {
@@ -333,8 +343,8 @@ impl StreamerClient {
 
     pub async fn check_tail(&self) -> Result<StreamPosition, UnavailableError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.control_tx
-            .send(ControlMessage::CheckTail { reply_tx })
+        self.command_tx
+            .send(CommandMessage::CheckTail { reply_tx })
             .map_err(|_| UnavailableError::MissingInAction)?;
         reply_rx.await.map_err(|_| UnavailableError::RequestDrop)
     }
@@ -347,8 +357,8 @@ impl StreamerClient {
         UnavailableError,
     > {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.control_tx
-            .send(ControlMessage::Follow {
+        self.command_tx
+            .send(CommandMessage::Follow {
                 start_seq_num,
                 reply_tx,
             })
@@ -356,35 +366,35 @@ impl StreamerClient {
         reply_rx.await.map_err(|_| UnavailableError::RequestDrop)
     }
 
-    pub async fn append(
-        &self,
-        input: AppendInput,
-        session: Option<append::SessionHandle>,
-    ) -> Result<AppendAck, AppendErrorInternal> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.append_tx
-            .send(AppendMessage {
-                input,
-                session,
-                reply_tx,
-                append_type: AppendType::Regular,
-            })
-            .await
-            .map_err(|_| UnavailableError::MissingInAction)?;
-        let ack = reply_rx
-            .await
-            .map_err(|_| UnavailableError::RequestDrop)??;
-        Ok(ack)
+    pub async fn append(&self, input: AppendInput) -> Result<AppendPermit<'_>, UnavailableError> {
+        let metered_size = input.records.metered_size();
+        metrics::observe_append_batch_size(input.records.len(), metered_size);
+        let start = Instant::now();
+        // Allow admitting at least one batch if none are in flight.
+        let num_permits = metered_size.clamp(1, self.append_inflight_bytes_max) as u32;
+        let sema_permit = tokio::select! {
+            res = self.append_inflight_bytes_sema.acquire_many(num_permits) => {
+                res.map_err(|_| UnavailableError::MissingInAction)
+            }
+            _ = self.command_tx.closed() => {
+                Err(UnavailableError::MissingInAction)
+            }
+        }?;
+        metrics::observe_append_permit_latency(start.elapsed());
+        Ok(AppendPermit {
+            sema_permit,
+            command_tx: &self.command_tx,
+            input,
+        })
     }
 
     pub async fn reconfigure(&self, config: OptionalStreamConfig) -> Result<(), UnavailableError> {
-        self.control_tx
-            .send(ControlMessage::Reconfigure { config })
+        self.command_tx
+            .send(CommandMessage::Reconfigure { config })
             .map_err(|_| UnavailableError::MissingInAction)
     }
 
     pub async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
         let record: AppendRecord = AppendRecordParts {
             timestamp: Some(Timestamp::MAX),
             record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
@@ -396,16 +406,12 @@ impl StreamerClient {
             match_seq_num: None,
             fencing_token: None,
         };
-        self.append_tx
-            .send(AppendMessage {
-                input,
-                session: None,
-                reply_tx,
-                append_type: AppendType::Terminal,
-            })
+        match self
+            .append(input)
+            .await?
+            .submit_internal(None, AppendType::Terminal)
             .await
-            .map_err(|_| UnavailableError::MissingInAction)?;
-        match reply_rx.await.map_err(|_| UnavailableError::RequestDrop)? {
+        {
             Ok(_ack) => Ok(()),
             Err(e) => Err(match e {
                 AppendErrorInternal::Storage(e) => DeleteStreamError::Storage(e),
@@ -433,10 +439,59 @@ pub enum StreamerClientState {
 fn timestamp_now() -> Timestamp {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .expect("21st century")
         .as_millis()
         .try_into()
         .expect("Milliseconds since Unix epoch fits into a u64")
+}
+
+#[derive(Debug)]
+pub struct AppendPermit<'a> {
+    sema_permit: SemaphorePermit<'a>,
+    command_tx: &'a mpsc::UnboundedSender<CommandMessage>,
+    input: AppendInput,
+}
+
+impl AppendPermit<'_> {
+    pub async fn submit(self) -> Result<AppendAck, AppendErrorInternal> {
+        self.submit_internal(None, AppendType::Regular).await
+    }
+
+    pub async fn submit_session(
+        self,
+        session: append::SessionHandle,
+    ) -> Result<AppendAck, AppendErrorInternal> {
+        self.submit_internal(Some(session), AppendType::Regular)
+            .await
+    }
+
+    async fn submit_internal(
+        self,
+        session: Option<append::SessionHandle>,
+        append_type: AppendType,
+    ) -> Result<AppendAck, AppendErrorInternal> {
+        let start = Instant::now();
+        let AppendPermit {
+            sema_permit,
+            command_tx,
+            input,
+        } = self;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(CommandMessage::Append {
+                input,
+                session,
+                reply_tx,
+                append_type,
+            })
+            .map_err(|_| UnavailableError::MissingInAction)?;
+        let ack = reply_rx
+            .await
+            .map_err(|_| UnavailableError::RequestDrop)??;
+        drop(sema_permit);
+        metrics::observe_append_ack_latency(start.elapsed());
+        Ok(ack)
+    }
 }
 
 pub fn next_pos<T>(records: &[T]) -> StreamPosition
