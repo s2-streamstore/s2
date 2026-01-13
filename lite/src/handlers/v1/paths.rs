@@ -15,12 +15,12 @@ pub mod metrics {
     pub const TAG: &str = "metrics";
     pub const DESCRIPTION: &str = "Usage metrics and data.";
 
-    pub const ACCOUNT_METRICS: &str = "/metrics";
-    pub const BASIN_METRICS: &str = "/metrics/{basin}";
-    pub const STREAM_METRICS: &str = "/metrics/{basin}/{stream}";
+    pub const ACCOUNT: &str = "/metrics";
+    pub const BASIN: &str = "/metrics/{basin}";
+    pub const STREAM: &str = "/metrics/{basin}/{stream}";
 }
 
-pub mod tokens {
+pub mod access_tokens {
     pub const TAG: &str = "access-tokens";
     pub const DESCRIPTION: &str = "Manage access tokens";
 
@@ -50,7 +50,7 @@ pub mod streams {
     }
 }
 
-pub mod endpoints {
+pub mod cloud_endpoints {
     pub const ACCOUNT: &str = "https://aws.s2.dev/v1";
     pub const BASIN: &str = "https://{basin}.b.aws.s2.dev/v1";
 }

@@ -24,7 +24,7 @@ use s2_common::{
 };
 
 #[cfg(feature = "utoipa")]
-use super::paths::{self, endpoints};
+use super::paths::{self, cloud_endpoints};
 use crate::{
     backend::{Backend, error::ReadError},
     handlers::v1::error::ServiceError,
@@ -54,7 +54,7 @@ pub struct CheckTailArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -107,7 +107,7 @@ pub struct ReadArgs {
         v1t::stream::ReadEnd,
     ),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
@@ -294,7 +294,7 @@ pub struct AppendArgs {
     ),
     params(v1t::StreamNamePathSegment, s2_api::data::S2FormatHeader),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))

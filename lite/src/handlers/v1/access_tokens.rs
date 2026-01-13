@@ -17,9 +17,8 @@ pub struct ListArgs {
 /// List access tokens.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::tokens::LIST,
-    tag = paths::tokens::TAG,
-    operation_id = "list_access_tokens",
+    path = paths::access_tokens::LIST,
+    tag = paths::access_tokens::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::access::ListAccessTokensResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -28,7 +27,7 @@ pub struct ListArgs {
     ),
     params(v1t::access::ListAccessTokensRequest),
 ))]
-pub async fn list(
+pub async fn list_access_tokens(
     State(_backend): State<Backend>,
     ListArgs { .. }: ListArgs,
 ) -> Result<Json<v1t::access::ListAccessTokensResponse>, ServiceError> {
@@ -48,9 +47,8 @@ pub struct IssueArgs {
 /// Issue a new access token.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     post,
-    path = paths::tokens::ISSUE,
-    tag = paths::tokens::TAG,
-    operation_id = "issue_access_token",
+    path = paths::access_tokens::ISSUE,
+    tag = paths::access_tokens::TAG,
     request_body = v1t::access::AccessTokenInfo,
     responses(
         (status = StatusCode::CREATED, body = v1t::access::IssueAccessTokenResponse),
@@ -60,7 +58,7 @@ pub struct IssueArgs {
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
     ),
 ))]
-pub async fn issue(
+pub async fn issue_access_token(
     State(_backend): State<Backend>,
     IssueArgs { .. }: IssueArgs,
 ) -> Result<(StatusCode, Json<v1t::access::IssueAccessTokenResponse>), ServiceError> {
@@ -82,9 +80,8 @@ pub struct RevokeArgs {
 /// Revoke an access token.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     delete,
-    path = paths::tokens::REVOKE,
-    tag = paths::tokens::TAG,
-    operation_id = "revoke_access_token",
+    path = paths::access_tokens::REVOKE,
+    tag = paths::access_tokens::TAG,
     responses(
         (status = StatusCode::NO_CONTENT),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -93,7 +90,7 @@ pub struct RevokeArgs {
     ),
     params(v1t::AccessTokenIdPathSegment),
 ))]
-pub async fn revoke(
+pub async fn revoke_access_token(
     State(_backend): State<Backend>,
     RevokeArgs { .. }: RevokeArgs,
 ) -> Result<StatusCode, ServiceError> {

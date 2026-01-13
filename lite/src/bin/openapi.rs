@@ -4,19 +4,19 @@ use s2_api::{
 };
 use s2_common::types::resources::RequestToken;
 use s2_lite::handlers::v1::{
-    access_tokens::{__path_issue, __path_list as __path_list_tokens, __path_revoke},
+    access_tokens::{
+        __path_issue_access_token, __path_list_access_tokens, __path_revoke_access_token,
+    },
     basins::{
-        __path_create, __path_create_or_reconfigure, __path_delete, __path_get_config, __path_list,
-        __path_reconfigure,
+        __path_create_basin, __path_create_or_reconfigure_basin, __path_delete_basin,
+        __path_get_basin_config, __path_list_basins, __path_reconfigure_basin,
     },
     metrics::{__path_account_metrics, __path_basin_metrics, __path_stream_metrics},
-    paths::{self, endpoints},
+    paths::{self, cloud_endpoints},
     records::{__path_append, __path_check_tail, __path_read},
     streams::{
-        __path_create as __path_create_stream,
-        __path_create_or_reconfigure as __path_create_or_reconfigure_stream,
-        __path_delete as __path_delete_stream, __path_get_config as __path_get_config_stream,
-        __path_list as __path_list_streams, __path_reconfigure as __path_reconfigure_stream,
+        __path_create_or_reconfigure_stream, __path_create_stream, __path_delete_stream,
+        __path_get_stream_config, __path_list_streams, __path_reconfigure_stream,
     },
 };
 use utoipa::{
@@ -42,7 +42,7 @@ use utoipa::{
         )
     ),
     servers(
-        (url = endpoints::ACCOUNT)
+        (url = cloud_endpoints::ACCOUNT)
     ),
     modifiers(&SecurityAddon, &PathLevelServersAddon),
     security(
@@ -51,33 +51,33 @@ use utoipa::{
     tags(
         (name = paths::metrics::TAG, description = paths::metrics::DESCRIPTION),
         (name = paths::basins::TAG, description = paths::basins::DESCRIPTION),
-        (name = paths::tokens::TAG, description = paths::tokens::DESCRIPTION),
+        (name = paths::access_tokens::TAG, description = paths::access_tokens::DESCRIPTION),
         (name = paths::streams::TAG, description = paths::streams::DESCRIPTION),
         (name = paths::streams::records::TAG, description = paths::streams::records::DESCRIPTION),
     ),
     paths(
-        // Basin ops
-        list,
-        create_or_reconfigure,
-        create,
-        delete,
-        get_config,
-        reconfigure,
-        // Token ops
-        issue,
-        revoke,
-        list_tokens,
-        // Stream ops
-        list_streams,
-        create_or_reconfigure_stream,
-        create_stream,
-        delete_stream,
-        get_config_stream,
-        reconfigure_stream,
         // Record ops
-        check_tail,
         append,
         read,
+        check_tail,
+        // Stream ops
+        list_streams,
+        create_stream,
+        get_stream_config,
+        create_or_reconfigure_stream,
+        delete_stream,
+        reconfigure_stream,
+        // Basin ops
+        list_basins,
+        create_basin,
+        get_basin_config,
+        create_or_reconfigure_basin,
+        delete_basin,
+        reconfigure_basin,
+        // Access token ops
+        list_access_tokens,
+        issue_access_token,
+        revoke_access_token,
         // Metrics ops
         account_metrics,
         basin_metrics,

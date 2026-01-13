@@ -29,7 +29,6 @@ pub struct ListArgs {
     get,
     path = paths::basins::LIST,
     tag = paths::basins::TAG,
-    operation_id = "list_basins",
     responses(
         (status = StatusCode::OK, body = v1t::basin::ListBasinsResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -38,7 +37,7 @@ pub struct ListArgs {
     ),
     params(v1t::basin::ListBasinsRequest),
 ))]
-pub async fn list(
+pub async fn list_basins(
     State(backend): State<Backend>,
     ListArgs { request }: ListArgs,
 ) -> Result<Json<v1t::basin::ListBasinsResponse>, ServiceError> {
@@ -63,7 +62,6 @@ pub struct CreateArgs {
     post,
     path = paths::basins::CREATE,
     tag = paths::basins::TAG,
-    operation_id = "create_basin",
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::basin::CreateBasinRequest,
     responses(
@@ -75,7 +73,7 @@ pub struct CreateArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
 ))]
-pub async fn create(
+pub async fn create_basin(
     State(backend): State<Backend>,
     CreateArgs {
         request_token: HeaderOpt(request_token),
@@ -105,7 +103,6 @@ pub struct GetConfigArgs {
     get,
     path = paths::basins::GET_CONFIG,
     tag = paths::basins::TAG,
-    operation_id = "get_basin_config",
     responses(
         (status = StatusCode::OK, body = v1t::config::BasinConfig),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -115,7 +112,7 @@ pub struct GetConfigArgs {
     ),
     params(v1t::BasinNamePathSegment),
 ))]
-pub async fn get_config(
+pub async fn get_basin_config(
     State(backend): State<Backend>,
     GetConfigArgs { basin }: GetConfigArgs,
 ) -> Result<Json<v1t::config::BasinConfig>, ServiceError> {
@@ -136,7 +133,6 @@ pub struct CreateOrReconfigureArgs {
     put,
     path = paths::basins::CREATE_OR_RECONFIGURE,
     tag = paths::basins::TAG,
-    operation_id = "create_or_reconfigure_basin",
     request_body = Option<v1t::basin::CreateOrReconfigureBasinRequest>,
     params(v1t::BasinNamePathSegment),
     responses(
@@ -146,7 +142,7 @@ pub struct CreateOrReconfigureArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
 ))]
-pub async fn create_or_reconfigure(
+pub async fn create_or_reconfigure_basin(
     State(backend): State<Backend>,
     CreateOrReconfigureArgs {
         basin,
@@ -181,7 +177,6 @@ pub struct DeleteArgs {
     delete,
     path = paths::basins::DELETE,
     tag = paths::basins::TAG,
-    operation_id = "delete_basin",
     responses(
         (status = StatusCode::ACCEPTED),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -191,7 +186,7 @@ pub struct DeleteArgs {
     ),
     params(v1t::BasinNamePathSegment),
 ))]
-pub async fn delete(
+pub async fn delete_basin(
     State(backend): State<Backend>,
     DeleteArgs { basin }: DeleteArgs,
 ) -> Result<StatusCode, ServiceError> {
@@ -213,7 +208,6 @@ pub struct ReconfigureArgs {
     patch,
     path = paths::basins::RECONFIGURE,
     tag = paths::basins::TAG,
-    operation_id = "reconfigure_basin",
     request_body = v1t::config::BasinReconfiguration,
     responses(
         (status = StatusCode::OK, body = v1t::config::BasinConfig),
@@ -224,7 +218,7 @@ pub struct ReconfigureArgs {
     ),
     params(v1t::BasinNamePathSegment),
 ))]
-pub async fn reconfigure(
+pub async fn reconfigure_basin(
     State(backend): State<Backend>,
     ReconfigureArgs {
         basin,

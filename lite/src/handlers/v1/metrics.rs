@@ -16,7 +16,7 @@ pub struct AccountMetricsArgs {
 /// Account-level metrics.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::metrics::ACCOUNT_METRICS,
+    path = paths::metrics::ACCOUNT,
     tag = paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
@@ -45,7 +45,7 @@ pub struct BasinMetricsArgs {
 /// Basin-level metrics.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::metrics::BASIN_METRICS,
+    path = paths::metrics::BASIN,
     tag = paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
@@ -74,7 +74,7 @@ pub struct StreamMetricsArgs {
 /// Stream-level metrics.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
-    path = paths::metrics::STREAM_METRICS,
+    path = paths::metrics::STREAM,
     tag = paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),

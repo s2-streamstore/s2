@@ -15,7 +15,7 @@ use s2_common::{
 };
 
 #[cfg(feature = "utoipa")]
-use super::paths::{self, endpoints};
+use super::paths::{self, cloud_endpoints};
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 #[derive(FromRequest)]
@@ -32,7 +32,6 @@ pub struct ListArgs {
     get,
     path = paths::streams::LIST,
     tag = paths::streams::TAG,
-    operation_id = "list_streams",
     responses(
         (status = StatusCode::OK, body = v1t::stream::ListStreamsResponse),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -42,14 +41,14 @@ pub struct ListArgs {
     ),
     params(v1t::stream::ListStreamsRequest),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
         ), description = "Endpoint for the basin"),
     )
 ))]
-pub async fn list(
+pub async fn list_streams(
     State(backend): State<Backend>,
     ListArgs { basin, request }: ListArgs,
 ) -> Result<Json<v1t::stream::ListStreamsResponse>, ServiceError> {
@@ -76,7 +75,6 @@ pub struct CreateArgs {
     post,
     path = paths::streams::CREATE,
     tag = paths::streams::TAG,
-    operation_id = "create_stream",
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::stream::CreateStreamRequest,
     responses(
@@ -88,14 +86,14 @@ pub struct CreateArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
         ), description = "Endpoint for the basin"),
     )
 ))]
-pub async fn create(
+pub async fn create_stream(
     State(backend): State<Backend>,
     CreateArgs {
         request_token: HeaderOpt(request_token),
@@ -133,7 +131,6 @@ pub struct GetConfigArgs {
     get,
     path = paths::streams::GET_CONFIG,
     tag = paths::streams::TAG,
-    operation_id = "get_stream_config",
     responses(
         (status = StatusCode::OK, body = v1t::config::StreamConfig),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -144,14 +141,14 @@ pub struct GetConfigArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
         ), description = "Endpoint for the basin"),
     )
 ))]
-pub async fn get_config(
+pub async fn get_stream_config(
     State(backend): State<Backend>,
     GetConfigArgs { basin, stream }: GetConfigArgs,
 ) -> Result<Json<v1t::config::StreamConfig>, ServiceError> {
@@ -176,7 +173,6 @@ pub struct CreateOrReconfigureArgs {
     put,
     path = paths::streams::CREATE_OR_RECONFIGURE,
     tag = paths::streams::TAG,
-    operation_id = "create_or_reconfigure_stream",
     request_body = Option<v1t::config::StreamConfig>,
     params(v1t::StreamNamePathSegment),
     responses(
@@ -189,14 +185,14 @@ pub struct CreateOrReconfigureArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
         ), description = "Endpoint for the basin"),
     )
 ))]
-pub async fn create_or_reconfigure(
+pub async fn create_or_reconfigure_stream(
     State(backend): State<Backend>,
     CreateOrReconfigureArgs {
         basin,
@@ -233,7 +229,6 @@ pub struct DeleteArgs {
     delete,
     path = paths::streams::DELETE,
     tag = paths::streams::TAG,
-    operation_id = "delete_stream",
     responses(
         (status = StatusCode::ACCEPTED),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -243,14 +238,14 @@ pub struct DeleteArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
         ), description = "Endpoint for the basin"),
     )
 ))]
-pub async fn delete(
+pub async fn delete_stream(
     State(backend): State<Backend>,
     DeleteArgs { basin, stream }: DeleteArgs,
 ) -> Result<StatusCode, ServiceError> {
@@ -274,7 +269,6 @@ pub struct ReconfigureArgs {
     patch,
     path = paths::streams::RECONFIGURE,
     tag = paths::streams::TAG,
-    operation_id = "reconfigure_stream",
     request_body = v1t::config::StreamReconfiguration,
     responses(
         (status = StatusCode::OK, body = v1t::config::StreamConfig),
@@ -286,14 +280,14 @@ pub struct ReconfigureArgs {
     ),
     params(v1t::StreamNamePathSegment),
     servers(
-        (url = endpoints::BASIN, variables(
+        (url = cloud_endpoints::BASIN, variables(
             ("basin" = (
                 description = "Basin name",
             ))
         ), description = "Endpoint for the basin"),
     )
 ))]
-pub async fn reconfigure(
+pub async fn reconfigure_stream(
     State(backend): State<Backend>,
     ReconfigureArgs {
         basin,
