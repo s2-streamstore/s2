@@ -362,7 +362,7 @@ impl StreamerClient {
         self.msg_tx
             .send(Message::CheckTail { reply_tx })
             .map_err(|_| StreamerMissingInActionError)?;
-        Ok(reply_rx.await.map_err(|_| RequestDroppedError)?)
+        Ok(reply_rx.await.map_err(|_| StreamerMissingInActionError)?)
     }
 
     pub async fn follow(
@@ -377,7 +377,7 @@ impl StreamerClient {
                 reply_tx,
             })
             .map_err(|_| StreamerMissingInActionError)?;
-        Ok(reply_rx.await.map_err(|_| RequestDroppedError)?)
+        Ok(reply_rx.await.map_err(|_| StreamerMissingInActionError)?)
     }
 
     pub async fn append_permit(

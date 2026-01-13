@@ -113,8 +113,6 @@ pub enum CheckTailError {
     #[error(transparent)]
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
-    RequestDroppedError(#[from] RequestDroppedError),
-    #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
@@ -218,8 +216,6 @@ pub enum ReadError {
     #[error(transparent)]
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
-    RequestDroppedError(#[from] RequestDroppedError),
-    #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
@@ -261,7 +257,6 @@ impl From<CheckTailError> for ReadError {
             CheckTailError::StreamerMissingInActionError(e) => {
                 Self::StreamerMissingInActionError(e)
             }
-            CheckTailError::RequestDroppedError(e) => Self::RequestDroppedError(e),
             CheckTailError::BasinNotFound(e) => Self::BasinNotFound(e),
             CheckTailError::StreamNotFound(e) => Self::StreamNotFound(e),
             CheckTailError::BasinDeletionPending(e) => Self::BasinDeletionPending(e),

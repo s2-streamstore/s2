@@ -186,8 +186,7 @@ impl ServiceError {
                 CheckTailError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                CheckTailError::StreamerMissingInActionError(_)
-                | CheckTailError::RequestDroppedError(_) => {
+                CheckTailError::StreamerMissingInActionError(_) => {
                     standard(ErrorCode::Unavailable, e.to_string())
                 }
                 CheckTailError::BasinNotFound(e) => {
@@ -241,7 +240,7 @@ impl ServiceError {
                 ReadError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                ReadError::StreamerMissingInActionError(_) | ReadError::RequestDroppedError(_) => {
+                ReadError::StreamerMissingInActionError(_) => {
                     standard(ErrorCode::Unavailable, e.to_string())
                 }
                 ReadError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),
