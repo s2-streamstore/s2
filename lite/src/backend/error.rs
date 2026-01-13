@@ -249,22 +249,6 @@ impl From<slatedb::Error> for ReadError {
     }
 }
 
-impl From<CheckTailError> for ReadError {
-    fn from(e: CheckTailError) -> Self {
-        match e {
-            CheckTailError::Storage(e) => Self::Storage(e),
-            CheckTailError::TransactionConflict(e) => Self::TransactionConflict(e),
-            CheckTailError::StreamerMissingInActionError(e) => {
-                Self::StreamerMissingInActionError(e)
-            }
-            CheckTailError::BasinNotFound(e) => Self::BasinNotFound(e),
-            CheckTailError::StreamNotFound(e) => Self::StreamNotFound(e),
-            CheckTailError::BasinDeletionPending(e) => Self::BasinDeletionPending(e),
-            CheckTailError::StreamDeletionPending(e) => Self::StreamDeletionPending(e),
-        }
-    }
-}
-
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ListStreamsError {
     #[error(transparent)]

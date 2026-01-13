@@ -32,8 +32,7 @@ use crate::{
         append,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            CheckTailError, DeleteStreamError, ReadError, RequestDroppedError, StreamerError,
-            StreamerMissingInActionError,
+            DeleteStreamError, RequestDroppedError, StreamerError, StreamerMissingInActionError,
         },
         kv,
         stream_id::StreamId,
@@ -357,7 +356,7 @@ impl StreamerClient {
         self.stream_id
     }
 
-    pub async fn check_tail(&self) -> Result<StreamPosition, CheckTailError> {
+    pub async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::CheckTail { reply_tx })
@@ -368,8 +367,10 @@ impl StreamerClient {
     pub async fn follow(
         &self,
         start_seq_num: SeqNum,
-    ) -> Result<Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>, ReadError>
-    {
+    ) -> Result<
+        Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>,
+        StreamerMissingInActionError,
+    > {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::Follow {
