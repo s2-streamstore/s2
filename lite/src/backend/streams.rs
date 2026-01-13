@@ -152,7 +152,7 @@ impl Backend {
         if existing_created_at.is_some()
             && let Some(client) = self.streamer_client_if_active(&basin, &stream)
         {
-            client.reconfigure(config).await?;
+            client.advise_reconfig(config);
         }
 
         let info = StreamInfo {
@@ -214,7 +214,7 @@ impl Backend {
         txn.commit_with_options(&WRITE_OPTS).await?;
 
         if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.reconfigure(meta.config.clone()).await?;
+            client.advise_reconfig(meta.config.clone());
         }
 
         Ok(meta.config)

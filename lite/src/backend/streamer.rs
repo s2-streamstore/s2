@@ -32,7 +32,7 @@ use crate::{
         append,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, StreamerError, UnavailableError,
+            DeleteStreamError, RequestDroppedError, StreamerError, StreamerMissingInActionError,
         },
         kv,
         stream_id::StreamId,
@@ -356,12 +356,12 @@ impl StreamerClient {
         self.stream_id
     }
 
-    pub async fn check_tail(&self) -> Result<StreamPosition, UnavailableError> {
+    pub async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::CheckTail { reply_tx })
-            .map_err(|_| UnavailableError::MissingInAction)?;
-        reply_rx.await.map_err(|_| UnavailableError::RequestDrop)
+            .map_err(|_| StreamerMissingInActionError)?;
+        reply_rx.await.map_err(|_| StreamerMissingInActionError)
     }
 
     pub async fn follow(
@@ -369,7 +369,7 @@ impl StreamerClient {
         start_seq_num: SeqNum,
     ) -> Result<
         Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>,
-        UnavailableError,
+        StreamerMissingInActionError,
     > {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
@@ -377,14 +377,14 @@ impl StreamerClient {
                 start_seq_num,
                 reply_tx,
             })
-            .map_err(|_| UnavailableError::MissingInAction)?;
-        reply_rx.await.map_err(|_| UnavailableError::RequestDrop)
+            .map_err(|_| StreamerMissingInActionError)?;
+        reply_rx.await.map_err(|_| StreamerMissingInActionError)
     }
 
     pub async fn append_permit(
         &self,
         input: AppendInput,
-    ) -> Result<AppendPermit<'_>, UnavailableError> {
+    ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
         let start = Instant::now();
@@ -392,10 +392,10 @@ impl StreamerClient {
         let num_permits = metered_size.clamp(1, self.append_inflight_bytes_max) as u32;
         let sema_permit = tokio::select! {
             res = self.append_inflight_bytes_sema.acquire_many(num_permits) => {
-                res.map_err(|_| UnavailableError::MissingInAction)
+                res.map_err(|_| StreamerMissingInActionError)
             }
             _ = self.msg_tx.closed() => {
-                Err(UnavailableError::MissingInAction)
+                Err(StreamerMissingInActionError)
             }
         }?;
         metrics::observe_append_permit_latency(start.elapsed());
@@ -406,10 +406,8 @@ impl StreamerClient {
         })
     }
 
-    pub async fn reconfigure(&self, config: OptionalStreamConfig) -> Result<(), UnavailableError> {
-        self.msg_tx
-            .send(Message::Reconfigure { config })
-            .map_err(|_| UnavailableError::MissingInAction)
+    pub fn advise_reconfig(&self, config: OptionalStreamConfig) -> bool {
+        self.msg_tx.send(Message::Reconfigure { config }).is_ok()
     }
 
     pub async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
@@ -433,7 +431,12 @@ impl StreamerClient {
             Ok(_ack) => Ok(()),
             Err(e) => Err(match e {
                 AppendErrorInternal::Storage(e) => DeleteStreamError::Storage(e),
-                AppendErrorInternal::Unavailable(e) => DeleteStreamError::Unavailable(e),
+                AppendErrorInternal::StreamerMissingInActionError(e) => {
+                    DeleteStreamError::StreamerMissingInActionError(e)
+                }
+                AppendErrorInternal::RequestDroppedError(e) => {
+                    DeleteStreamError::RequestDroppedError(e)
+                }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
             }),
@@ -502,10 +505,8 @@ impl AppendPermit<'_> {
                 reply_tx,
                 append_type,
             })
-            .map_err(|_| UnavailableError::MissingInAction)?;
-        let ack = reply_rx
-            .await
-            .map_err(|_| UnavailableError::RequestDrop)??;
+            .map_err(|_| StreamerMissingInActionError)?;
+        let ack = reply_rx.await.map_err(|_| RequestDroppedError)??;
         drop(sema_permit);
         metrics::observe_append_ack_latency(start.elapsed());
         Ok(ack)

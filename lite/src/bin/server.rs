@@ -31,11 +31,12 @@ struct TlsConfig {
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Name of the S3 bucket to back the database.
+    ///
     /// If not specified, in-memory storage is used.
     #[arg(long)]
     bucket: Option<String>,
 
-    /// Path on object storage.
+    /// Base path on object storage.
     #[arg(long, default_value = "")]
     path: String,
 
@@ -49,10 +50,8 @@ struct Args {
 
     /// Whether to pipeline appends per stream.
     ///
-    /// This improves performance with high-latency object storage,
-    /// however it is unsafe for now (risk of data loss).
-    ///
-    /// It will be enabled by default in future and this knob removed.
+    /// This improves performance with high-latency object storage, however it is unsafe for now
+    /// (risk of data loss). It will be enabled by default in future and this knob removed.
     #[arg(long, default_value_t = false)]
     pipeline: bool,
 }
