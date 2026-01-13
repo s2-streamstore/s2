@@ -5,10 +5,10 @@
     "description": "Streams as a cloud storage primitive.",
     "termsOfService": "https://s2.dev/terms",
     "contact": {
-      "email": "hi@s2.dev"
+      "email": "support@s2.dev"
     },
     "license": {
-      "name": "Apache 2.0"
+      "name": "MIT"
     },
     "version": "1.0.0"
   },

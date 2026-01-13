@@ -33,21 +33,15 @@ use utoipa::{
         title = "S2, the durable streams API",
         description = "Streams as a cloud storage primitive.",
         version = "1.0.0",
-        license(
-            name = "Apache 2.0"
-        ),
+        license(name = "MIT"),
         terms_of_service = "https://s2.dev/terms",
-        contact(
-            email = "hi@s2.dev"
-        )
+        contact(email = "support@s2.dev")
     ),
     servers(
         (url = cloud_endpoints::ACCOUNT)
     ),
     modifiers(&SecurityAddon, &PathLevelServersAddon),
-    security(
-        ("access_token" = [])
-    ),
+    security(("access_token" = [])),
     tags(
         (name = paths::metrics::TAG, description = paths::metrics::DESCRIPTION),
         (name = paths::basins::TAG, description = paths::basins::DESCRIPTION),
