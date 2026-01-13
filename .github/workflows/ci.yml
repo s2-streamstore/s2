@@ -76,7 +76,8 @@ jobs:
     with:
       mode: local
       server-binary: server
-      server-port: 80
+      server-args: "--port 8080"
+      server-port: 8080
       sdks: |
         [
           {
