@@ -9,6 +9,10 @@ homepage.workspace = true
 keywords = ["s2", "durable", "streams", "object", "storage"]
 categories = ["database-implementations"]
 
+[[bin]]
+name = "openapi"
+required-features = ["utoipa"]
+
 [features]
 utoipa = ["dep:utoipa", "s2-api/utoipa", "s2-common/utoipa"]
 
@@ -47,10 +51,6 @@ tower-http = { workspace = true, features = ["trace"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 utoipa = { version = "5.4", optional = true, features = ["time"] }
-
-[[bin]]
-name = "openapi"
-required-features = ["utoipa"]
 
 [dev-dependencies]
 proptest = { workspace = true }

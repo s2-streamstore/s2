@@ -10,10 +10,10 @@ repository = "https://github.com/s2-streamstore/s2"
 homepage = "https://s2.dev"
 
 [workspace.dependencies]
-aws-config = "1"
-aws-credential-types = "1"
 async-stream = "0.3"
 async-trait = "0.1"
+aws-config = "1"
+aws-credential-types = "1"
 axum = "0.8"
 axum-server = "0.8"
 base64ct = "1.8"
@@ -52,8 +52,8 @@ tokio-util = "0.7"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-uuid = "1.19"
 utoipa = "5.4"
+uuid = "1.19"
 zstd = "0.13"
 
 [patch.crates-io]
