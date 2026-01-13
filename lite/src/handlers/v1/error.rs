@@ -161,7 +161,7 @@ impl ServiceError {
                     standard(ErrorCode::Unavailable, e.to_string())
                 }
                 DeleteStreamError::RequestDroppedError(e) => {
-                    // Unavailable error code promised side-effect free,
+                    // Unavailable error code promised to be side-effect free,
                     // AppendType::Terminal may have become durable prior to drop.
                     standard(ErrorCode::Other, e.to_string())
                 }
@@ -211,7 +211,7 @@ impl ServiceError {
                     standard(ErrorCode::Unavailable, e.to_string())
                 }
                 AppendError::RequestDroppedError(e) => {
-                    // Unavailable error code promised side-effect free,
+                    // Unavailable error code promised to be side-effect free,
                     // AppendType::Regular may have become durable prior to drop.
                     standard(ErrorCode::Other, e.to_string())
                 }
