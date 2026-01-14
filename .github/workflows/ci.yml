@@ -85,7 +85,7 @@ jobs:
             "repo": "s2-streamstore/s2-sdk-go",
             "ref": "main",
             "lang": "go",
-            "go-version": "1.23",
+            "go-version": "1.24",
             "test_cmd": "go test -v -count=1 ./s2/..."
           },
           {
