@@ -94,7 +94,7 @@ jobs:
             "ref": "main",
             "lang": "bun",
             "bun-version": "latest",
-            "test_cmd": "vitest --run --exclude '**/account-basin*'"
+            "test_cmd": "bun run vitest --run --exclude '**/account-basin*'"
           },
           {
             "name": "rust",
