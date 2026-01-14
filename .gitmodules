@@ -1,0 +1,3 @@
+[submodule "api/specs"]
+	path = api/specs
+	url = git@github.com:s2-streamstore/s2-specs.git
