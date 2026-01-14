@@ -49,3 +49,58 @@ jobs:
       - uses: arduino/setup-protoc@v3
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features
+
+  build-server:
+    name: Build s2-lite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: arduino/setup-protoc@v3
+      - name: Build s2-lite
+        run: cargo build --release -p s2-lite
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary
+          path: target/release/server
+          retention-days: 1
+
+  sdk-integration-tests:
+    name: SDK Integration Tests
+    needs: [build-server]
+    uses: s2-streamstore/s2-ci/.github/workflows/sdk-tests.yml@main
+    with:
+      mode: local
+      server-binary: server
+      server-args: "--port 8080"
+      server-port: 8080
+      sdks: |
+        [
+          {
+            "name": "go",
+            "repo": "s2-streamstore/s2-sdk-go",
+            "ref": "main",
+            "lang": "go",
+            "go-version": "1.24",
+            "test_cmd": "go test -v -count=1 -skip 'WithScope' ./s2/..."
+          },
+          {
+            "name": "typescript",
+            "repo": "s2-streamstore/s2-sdk-typescript",
+            "ref": "main",
+            "lang": "bun",
+            "bun-version": "latest",
+            "test_cmd": "bun run vitest --run --exclude '**/account-basin*'"
+          },
+          {
+            "name": "rust",
+            "repo": "s2-streamstore/s2-sdk-rust",
+            "ref": "main",
+            "lang": "rust",
+            "test_cmd": "cargo test --all-features -- --skip access_token"
+          }
+        ]
