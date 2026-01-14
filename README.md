@@ -62,9 +62,9 @@ SL8_FLUSH_INTERVAL=10ms
 - Pipelining needs to be made safe and default https://github.com/s2-streamstore/s2/issues/48
 
 **Compatibility**
-- CLI ✅ v0.23+
-- TypeScript SDK ✅ v0.22+
-- Go SDK ✅ v0.11+
-- Rust SDK ✅ v0.22+
-- Python 🚧 _needs to be migrated to v1 API_
-- Java 🚧 _needs to be migrated to v1 API_
+- [CLI](https://github.com/s2-streamstore/s2-cli) ✅ v0.23+
+- [TypeScript SDK](https://github.com/s2-streamstore/s2-sdk-typescript) ✅ v0.22+
+- [Go SDK](https://github.com/s2-streamstore/s2-sdk-go) ✅ v0.11+
+- [Rust SDK](https://github.com/s2-streamstore/s2-sdk-rust) ✅ v0.22+
+- [Python](https://github.com/s2-streamstore/s2-sdk-python) 🚧 _needs to be migrated to v1 API_
+- [Java](https://github.com/s2-streamstore/s2-sdk-java) 🚧 _needs to be migrated to v1 API_
