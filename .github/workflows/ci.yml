@@ -20,6 +20,19 @@ jobs:
           components: rustfmt
       - run: cargo +nightly fmt --all --check
 
+  lockfile:
+    name: lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Cargo.lock is up-to-date
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -38,7 +51,7 @@ jobs:
       - run: cargo clippy --workspace --all-features --all-targets -- -D warnings --allow deprecated
 
   test:
-    name: Test
+    name: Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
