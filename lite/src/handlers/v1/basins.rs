@@ -15,6 +15,20 @@ use s2_common::{
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
+pub fn router() -> axum::Router<Backend> {
+    use axum::routing::{delete, get, patch, post, put};
+    axum::Router::new()
+        .route(super::paths::basins::LIST, get(list_basins))
+        .route(super::paths::basins::CREATE, post(create_basin))
+        .route(super::paths::basins::GET_CONFIG, get(get_basin_config))
+        .route(
+            super::paths::basins::CREATE_OR_RECONFIGURE,
+            put(create_or_reconfigure_basin),
+        )
+        .route(super::paths::basins::DELETE, delete(delete_basin))
+        .route(super::paths::basins::RECONFIGURE, patch(reconfigure_basin))
+}
+
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct ListArgs {

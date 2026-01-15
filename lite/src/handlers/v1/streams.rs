@@ -16,6 +16,23 @@ use s2_common::{
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
+pub fn router() -> axum::Router<Backend> {
+    use axum::routing::{delete, get, patch, post, put};
+    axum::Router::new()
+        .route(super::paths::streams::LIST, get(list_streams))
+        .route(super::paths::streams::CREATE, post(create_stream))
+        .route(super::paths::streams::GET_CONFIG, get(get_stream_config))
+        .route(
+            super::paths::streams::CREATE_OR_RECONFIGURE,
+            put(create_or_reconfigure_stream),
+        )
+        .route(super::paths::streams::DELETE, delete(delete_stream))
+        .route(
+            super::paths::streams::RECONFIGURE,
+            patch(reconfigure_stream),
+        )
+}
+
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct ListArgs {

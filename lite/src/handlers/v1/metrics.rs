@@ -4,6 +4,14 @@ use s2_common::types::{basin::BasinName, stream::StreamName};
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
+pub fn router() -> axum::Router<Backend> {
+    use axum::routing::get;
+    axum::Router::new()
+        .route(super::paths::metrics::ACCOUNT, get(account_metrics))
+        .route(super::paths::metrics::BASIN, get(basin_metrics))
+        .route(super::paths::metrics::STREAM, get(stream_metrics))
+}
+
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct AccountArgs {

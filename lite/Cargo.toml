@@ -51,7 +51,13 @@ thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
-tower-http = { workspace = true, features = ["trace"] }
+tower-http = { workspace = true, features = [
+    "trace",
+    "compression-zstd",
+    "compression-gzip",
+    "decompression-zstd",
+    "decompression-gzip",
+] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 utoipa = { version = "5.4", optional = true, features = ["time"] }
