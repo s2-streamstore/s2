@@ -200,12 +200,13 @@ fn extract_stream_from_path(path: &str) -> Option<String> {
     // Look for "streams" followed by a stream name.
     for (i, segment) in segments.iter().enumerate() {
         if *segment == "streams"
-            && let Some(stream) = segments.get(i + 1) {
-                // Skip if it looks like a sub-resource keyword.
-                if *stream != "records" && *stream != "tail" {
-                    return Some((*stream).to_string());
-                }
+            && let Some(stream) = segments.get(i + 1)
+        {
+            // Skip if it looks like a sub-resource keyword.
+            if *stream != "records" && *stream != "tail" {
+                return Some((*stream).to_string());
             }
+        }
     }
     None
 }
