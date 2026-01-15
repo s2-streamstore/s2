@@ -38,7 +38,7 @@ SL8_FLUSH_INTERVAL=10ms
 ### API Coverage
 
 > [!TIP]
-> Complete [specs](api/specs/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions for binary efficiency, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) for the streaming session protocol supported by S2.
+> Complete [specs](api/specs/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
 
 **Fully supported**
 - `/basins`
@@ -46,13 +46,13 @@ SL8_FLUSH_INTERVAL=10ms
 - `/streams/{stream}/records`
 
 > [!IMPORTANT]
-> Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. S2 SDKs take care of this automatically.
+> Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. The SDKs take care of this automatically.
 
 **Not supported**
 - `/access-tokens` https://github.com/s2-streamstore/s2/issues/28
 - `/metrics`
 
-### Current limitations
+### Limitations
 
 - Deletion is not fully plumbed up yet
   - basins https://github.com/s2-streamstore/s2/issues/53
