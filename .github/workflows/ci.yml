@@ -21,7 +21,7 @@ jobs:
       - run: cargo +nightly fmt --all --check
 
   lockfile:
-    name: lockfile
+    name: Lockfile
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -58,6 +58,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features
 
@@ -71,6 +73,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build s2-lite
         run: cargo build --release -p s2-lite
       - name: Upload binary
@@ -82,7 +86,7 @@ jobs:
 
   sdk-integration-tests:
     name: SDK Integration Tests
-    needs: [build-server]
+    needs: [build-server, test, clippy]
     uses: s2-streamstore/s2-ci/.github/workflows/sdk-tests.yml@main
     with:
       mode: local
