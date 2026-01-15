@@ -20,14 +20,14 @@ jobs:
         id: submodules
         uses: sgoudham/update-git-submodules@v2.1.1
         with:
-          submodules: specs
+          submodules: api/specs
 
       - name: Create pull request
-        if: ${{ steps.submodules.outputs['specs--updated'] }}
+        if: ${{ steps.submodules.outputs['api/specs--updated'] }}
         uses: peter-evans/create-pull-request@v7
         with:
           committer: s2-helper[bot] <194906454+s2-helper[bot]@users.noreply.github.com>
           author: s2-helper[bot] <194906454+s2-helper[bot]@users.noreply.github.com>
           title: "chore: sync specs submodule"
-          branch: "specs/sync-${{ steps.submodules.outputs['specs--latestShortCommitSha'] }}"
+          branch: "specs/sync-${{ steps.submodules.outputs['api/specs--latestShortCommitSha'] }}"
           body: ${{ steps.submodules.outputs.prBody }}
