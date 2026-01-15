@@ -61,7 +61,7 @@ async fn main() -> eyre::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "server=trace,s2_lite=trace,tower_http=trace".into()),
+                .unwrap_or_else(|_| "trace".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
