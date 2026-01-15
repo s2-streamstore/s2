@@ -1,3 +1,5 @@
+use tower_http::{compression::CompressionLayer, decompression::RequestDecompressionLayer};
+
 pub mod access_tokens;
 pub mod basins;
 mod error;
@@ -12,6 +14,13 @@ pub fn router(backend: crate::backend::Backend) -> axum::Router {
     use axum::routing::{delete, get, patch, post, put};
 
     // TODO: timeout layer that respects long-poll read wait
+
+    let compress_when = {
+        use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
+        SizeAbove::new(1024)
+            .and(NotForContentType::SSE)
+            .and(NotForContentType::const_new("s2s/proto"))
+    };
 
     axum::Router::new()
         // Basin ops
@@ -62,4 +71,8 @@ pub fn router(backend: crate::backend::Backend) -> axum::Router {
         .route(paths::metrics::BASIN, get(metrics::basin_metrics))
         .route(paths::metrics::STREAM, get(metrics::stream_metrics))
         .with_state(backend)
+        .route_layer((
+            CompressionLayer::new().compress_when(compress_when),
+            RequestDecompressionLayer::new(),
+        ))
 }
