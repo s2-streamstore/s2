@@ -5,6 +5,17 @@ use s2_common::types::access::AccessTokenId;
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
+pub fn router() -> axum::Router<Backend> {
+    use axum::routing::{delete, get, post};
+    axum::Router::new()
+        .route(super::paths::access_tokens::LIST, get(list_access_tokens))
+        .route(super::paths::access_tokens::ISSUE, post(issue_access_token))
+        .route(
+            super::paths::access_tokens::REVOKE,
+            delete(revoke_access_token),
+        )
+}
+
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct ListArgs {

@@ -28,6 +28,14 @@ use crate::{
     handlers::v1::error::ServiceError,
 };
 
+pub fn router() -> axum::Router<Backend> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route(super::paths::streams::records::CHECK_TAIL, get(check_tail))
+        .route(super::paths::streams::records::READ, get(read))
+        .route(super::paths::streams::records::APPEND, post(append))
+}
+
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct CheckTailArgs {
