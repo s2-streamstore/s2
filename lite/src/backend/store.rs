@@ -35,7 +35,7 @@ impl Backend {
     ) -> Result<Option<StreamPosition>, StorageError> {
         let start_key = kv::stream_record_timestamp::ser_key(stream_id, timestamp, SeqNum::MIN);
         static SCAN_OPTS: ScanOptions = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::Memory,
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,

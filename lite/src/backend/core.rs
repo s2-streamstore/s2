@@ -117,7 +117,7 @@ impl Backend {
             },
         );
         static SCAN_OPTS: ScanOptions = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::Memory,
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
