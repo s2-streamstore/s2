@@ -15,7 +15,7 @@ impl Backend {
         deser: impl FnOnce(Bytes) -> Result<V, kv::DeserializationError>,
     ) -> Result<Option<V>, StorageError> {
         static READ_OPTS: ReadOptions = ReadOptions {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::Memory,
             dirty: false,
             cache_blocks: true,
         };
