@@ -4,9 +4,8 @@ use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvid
 use axum_server::tls_rustls::RustlsConfig;
 use bytesize::ByteSize;
 use clap::Parser as _;
-use s2_lite::{backend::Backend, handlers};
+use s2_lite::{backend::Backend, handlers, request_log::RequestLogLayer};
 use slatedb::object_store::{self, CredentialProvider, aws::AwsCredential};
-use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -130,12 +129,7 @@ async fn main() -> eyre::Result<()> {
         },
     );
 
-    let app = handlers::router(backend).layer(
-        TraceLayer::new_for_http()
-            .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
-            .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
-            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-    );
+    let app = handlers::router(backend).layer(RequestLogLayer::new());
 
     let server_handle = axum_server::Handle::new();
     tokio::spawn(shutdown_signal(server_handle.clone()));

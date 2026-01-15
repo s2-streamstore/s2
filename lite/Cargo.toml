@@ -38,6 +38,7 @@ futures = { workspace = true }
 http = { workspace = true }
 itertools = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }
+pin-project = { workspace = true }
 prometheus = { workspace = true, features = ["process"] }
 prost = { workspace = true }
 rand = { workspace = true }
@@ -51,6 +52,7 @@ thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
+tower = { workspace = true }
 tower-http = { workspace = true, features = [
     "trace",
     "compression-zstd",
