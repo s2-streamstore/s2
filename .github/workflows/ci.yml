@@ -26,10 +26,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
       - name: Verify Cargo.lock is up-to-date
         run: cargo metadata --locked --format-version 1 >/dev/null
 
