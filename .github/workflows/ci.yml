@@ -65,24 +65,9 @@ jobs:
 
   build-server:
     name: Build s2-lite
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build s2-lite
-        run: cargo build --release -p s2-lite
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-binary
-          path: target/release/server
-          retention-days: 1
+    uses: ./.github/workflows/build-s2-lite.yml
+    with:
+      ref: ${{ github.sha }}
 
   sdk-integration-tests:
     name: SDK Integration Tests
