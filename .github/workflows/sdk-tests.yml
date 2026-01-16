@@ -1,0 +1,152 @@
+name: SDK Integration Tests
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "local or remote"
+        required: false
+        type: string
+        default: "local"
+
+      server-binary:
+        description: "Binary name in downloaded artifact"
+        required: false
+        type: string
+        default: "s2-mem"
+      server-args:
+        description: "Arguments to pass to server"
+        required: false
+        type: string
+        default: ""
+      server-port:
+        description: "Port the server listens on (local mode)"
+        required: false
+        type: number
+        default: 4243
+
+      account-endpoint:
+        description: "Account endpoint"
+        required: false
+        type: string
+      basin-endpoint:
+        description: "Basin endpoint"
+        required: false
+        type: string
+
+      sdks:
+        description: "JSON array of SDK configs"
+        required: true
+        type: string
+      runner:
+        description: "Runner to use"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+    secrets:
+      GH_TOKEN:
+        required: false
+      S2_ACCESS_TOKEN:
+        required: false
+
+jobs:
+  test:
+    name: ${{ matrix.sdk.name }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: ${{ fromJson(inputs.sdks) }}
+    steps:
+      - name: Checkout SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.sdk.repo }}
+          ref: ${{ matrix.sdk.ref }}
+          token: ${{ secrets.GH_TOKEN || github.token }}
+          path: sdk
+
+      - name: Setup Go
+        if: matrix.sdk.lang == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.sdk.go-version }}
+          cache-dependency-path: sdk/go.sum
+
+      - name: Setup Python
+        if: matrix.sdk.lang == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.sdk.python-version }}
+
+      - name: Setup Node
+        if: matrix.sdk.lang == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.sdk.node-version }}
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Setup Bun
+        if: matrix.sdk.lang == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.sdk.bun-version }}
+      - name: Install dependencies (Bun)
+        if: matrix.sdk.lang == 'bun'
+        working-directory: sdk
+        run: bun install
+
+      - name: Setup Rust
+        if: matrix.sdk.lang == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.sdk.rust-version || 'stable' }}
+
+      - name: Download server binary
+        if: inputs.mode == 'local'
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary
+          path: server
+
+      - name: Start server
+        if: inputs.mode == 'local'
+        run: |
+          chmod +x server/${{ inputs.server-binary }}
+          server/${{ inputs.server-binary }} ${{ inputs.server-args }} > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in {1..30}; do
+            if curl -sf http://localhost:${{ inputs.server-port }}/ping; then
+              echo "Server is ready"
+              exit 0
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 1
+          done
+          echo "Server failed to start"
+          cat /tmp/server.log
+          exit 1
+
+      - name: Extract token (local)
+        if: inputs.mode == 'local'
+        id: local-token
+        run: |
+          token=$(sed -n 's/.*S2_ACCESS_TOKEN="\([^"]*\)".*/\1/p' /tmp/server.log | head -1)
+          token="${token:-test}"
+          echo "::add-mask::$token"
+          echo "value=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        working-directory: sdk
+        env:
+          S2_ACCESS_TOKEN: ${{ inputs.mode == 'local' && steps.local-token.outputs.value || secrets.S2_ACCESS_TOKEN }}
+          S2_ACCOUNT_ENDPOINT: ${{ inputs.mode == 'local' && format('http://localhost:{0}', inputs.server-port) || inputs.account-endpoint }}
+          S2_BASIN_ENDPOINT: ${{ inputs.mode == 'local' && format('http://localhost:{0}', inputs.server-port) || inputs.basin-endpoint }}
+        run: ${{ matrix.sdk.test_cmd }}
+
+      - name: Dump server logs
+        if: failure() && inputs.mode == 'local'
+        run: cat /tmp/server.log

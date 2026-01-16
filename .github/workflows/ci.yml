@@ -72,7 +72,7 @@ jobs:
   sdk-integration-tests:
     name: SDK Integration Tests
     needs: [build-server, test, clippy]
-    uses: s2-streamstore/s2-ci/.github/workflows/sdk-tests.yml@main
+    uses: ./.github/workflows/sdk-tests.yml
     with:
       mode: local
       server-binary: server
