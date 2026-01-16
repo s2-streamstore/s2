@@ -24,10 +24,11 @@ jobs:
 
       - name: Create pull request
         if: ${{ steps.submodules.outputs['api/specs--updated'] }}
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           committer: s2-helper[bot] <194906454+s2-helper[bot]@users.noreply.github.com>
           author: s2-helper[bot] <194906454+s2-helper[bot]@users.noreply.github.com>
+          sign-commits: true
           title: "chore: sync specs submodule"
           branch: "specs/sync-${{ steps.submodules.outputs['api/specs--latestShortCommitSha'] }}"
           body: ${{ steps.submodules.outputs.prBody }}
