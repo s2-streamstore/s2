@@ -59,3 +59,4 @@ zstd = "0.13"
 
 [patch.crates-io]
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
+slatedb = { git = "https://github.com/slatedb/slatedb", rev = "5281e6e0990477b1176cb49e907e26e706a39ac4" }
