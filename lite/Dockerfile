@@ -31,4 +31,4 @@ WORKDIR /app
 # Copy the binary from builder stage
 COPY --from=builder /build/target/release/server /app/s2-lite
 
-CMD ["./s2-lite"]
+ENTRYPOINT ["./s2-lite"]
