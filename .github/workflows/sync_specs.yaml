@@ -7,7 +7,6 @@ permissions:
 on:
   repository_dispatch:
     types: [s2-specs-update]
-  workflow_dispatch: # temporary for testing
 
 jobs:
   sync-submodule:
