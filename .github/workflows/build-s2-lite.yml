@@ -1,0 +1,63 @@
+name: Build s2-lite
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to checkout"
+        required: false
+        type: string
+        default: "main"
+      artifact-name:
+        description: "Name for the uploaded artifact"
+        required: false
+        type: string
+        default: "server-binary"
+      binary-name:
+        description: "Name of the binary in the artifact"
+        required: false
+        type: string
+        default: "server"
+      retention-days:
+        description: "Number of days to retain the artifact"
+        required: false
+        type: number
+        default: 1
+      runner:
+        description: "Runner to use"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+jobs:
+  build:
+    name: Build s2-lite
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: s2-streamstore/s2
+          ref: ${{ inputs.ref }}
+          submodules: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build s2-lite
+        run: cargo build --release -p s2-lite
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: target/release/${{ inputs.binary-name }}
+          retention-days: ${{ inputs.retention-days }}
