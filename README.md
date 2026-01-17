@@ -111,6 +111,17 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Internals
 
+#### SlateDB settings
+
+[Settings reference](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#fields)
+
+Use `SL8_` prefixed environment variables, e.g.:
+
+```bash
+# defaults to 40ms
+SL8_FLUSH_INTERVAL=10ms
+```
+
 #### Design
 
 [Concepts](https://s2.dev/docs/concepts)
@@ -120,33 +131,6 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 - Appends are pipelined to improve performance against high-latency object storage. 
   - **Temporary** this is unsafe for now so [disabled by default](https://github.com/s2-streamstore/s2/issues/48), you can try it with `S2LITE_PIPELINE=true`.
 - [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data modeling in SlateDB.
-
-#### SlateDB settings
-
-[Settings reference](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#fields)
-
-Use `SL8_` prefixed environment variables, e.g.:
-
-```bash
-SL8_FLUSH_INTERVAL=10ms
-```
-
-### API Coverage
-
-> [!TIP]
-> Complete [specs](api/specs/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
-
-**Fully supported**
-- `/basins`
-- `/streams`
-- `/streams/{stream}/records`
-
-> [!IMPORTANT]
-> Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. The SDKs take care of this automatically.
-
-**Not supported**
-- `/access-tokens` https://github.com/s2-streamstore/s2/issues/28
-- `/metrics`
 
 ### Caveats
 
@@ -164,3 +148,20 @@ SL8_FLUSH_INTERVAL=10ms
 - [Rust SDK](https://github.com/s2-streamstore/s2-sdk-rust) ✅ v0.22+
 - [Python](https://github.com/s2-streamstore/s2-sdk-python) 🚧 _needs to be migrated to v1 API_
 - [Java](https://github.com/s2-streamstore/s2-sdk-java) 🚧 _needs to be migrated to v1 API_
+
+### API Coverage
+
+> [!TIP]
+> Complete [specs](api/specs/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
+
+**Fully supported**
+- `/basins`
+- `/streams`
+- `/streams/{stream}/records`
+
+> [!IMPORTANT]
+> Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. The SDKs take care of this automatically.
+
+**Not supported**
+- `/access-tokens` https://github.com/s2-streamstore/s2/issues/28
+- `/metrics`
