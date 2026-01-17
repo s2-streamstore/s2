@@ -1,11 +1,16 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
-use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use axum_server::tls_rustls::RustlsConfig;
 use bytesize::ByteSize;
 use clap::Parser as _;
 use s2_lite::{backend::Backend, handlers};
-use slatedb::object_store::{self, CredentialProvider, aws::AwsCredential};
+use slatedb::object_store;
+use tokio::time::Instant;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -47,13 +52,6 @@ struct Args {
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
     port: Option<u16>,
-
-    /// Whether to pipeline appends per stream.
-    ///
-    /// This improves performance with high-latency object storage, however it is unsafe for now
-    /// (risk of data loss). It will be enabled by default in future and this knob removed.
-    #[arg(long, default_value_t = false)]
-    pipeline: bool,
 }
 
 #[tokio::main]
@@ -93,7 +91,8 @@ async fn main() -> eyre::Result<()> {
             if let Some(credentials_provider) = aws_config.credentials_provider() {
                 info!("using aws-config credentials provider");
                 builder = builder.with_credentials(Arc::new(S3CredentialProvider {
-                    credentials: credentials_provider.clone(),
+                    aws: credentials_provider.clone(),
+                    cache: tokio::sync::Mutex::new(None),
                 }));
             }
             let store = builder.build()?;
@@ -113,22 +112,24 @@ async fn main() -> eyre::Result<()> {
         },
     )?;
 
-    info!(?db_settings, "sl8 init");
-
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)
         .build()
         .await?;
 
-    let backend = Backend::new(
-        db,
-        if args.pipeline {
+    let append_inflight_max = {
+        let pipeline = std::env::var("S2LITE_PIPELINE")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1");
+        if pipeline {
+            info!("pipelining enabled");
             ByteSize::mib(10)
         } else {
-            // No pipelining
+            info!("pipelining disabled");
             ByteSize::b(1)
-        },
-    );
+        }
+    };
+
+    let backend = Backend::new(db, append_inflight_max);
 
     let app = handlers::router(backend).layer(
         TraceLayer::new_for_http()
@@ -221,25 +222,63 @@ async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
 }
 
 #[derive(Debug)]
+struct CachedCredential {
+    credential: Arc<object_store::aws::AwsCredential>,
+    expiry: Option<SystemTime>,
+}
+
+impl CachedCredential {
+    fn is_valid(&self) -> bool {
+        self.expiry
+            .is_none_or(|exp| exp > SystemTime::now() + Duration::from_secs(60))
+    }
+}
+
+#[derive(Debug)]
 struct S3CredentialProvider {
-    credentials: SharedCredentialsProvider,
+    aws: aws_credential_types::provider::SharedCredentialsProvider,
+    cache: tokio::sync::Mutex<Option<CachedCredential>>,
 }
 
 #[async_trait::async_trait]
-impl CredentialProvider for S3CredentialProvider {
-    type Credential = AwsCredential;
+impl object_store::CredentialProvider for S3CredentialProvider {
+    type Credential = object_store::aws::AwsCredential;
 
-    async fn get_credential(&self) -> object_store::Result<Arc<AwsCredential>> {
-        let creds = self.credentials.provide_credentials().await.map_err(|e| {
-            object_store::Error::Generic {
-                store: "S3",
-                source: Box::new(e),
-            }
-        })?;
-        Ok(Arc::new(AwsCredential {
-            key_id: creds.access_key_id().to_string(),
-            secret_key: creds.secret_access_key().to_string(),
-            token: creds.session_token().map(ToString::to_string),
-        }))
+    async fn get_credential(&self) -> object_store::Result<Arc<object_store::aws::AwsCredential>> {
+        let mut cached = self.cache.lock().await;
+        if let Some(cached) = cached.as_ref().filter(|c| c.is_valid()) {
+            return Ok(cached.credential.clone());
+        }
+
+        use aws_credential_types::provider::ProvideCredentials as _;
+
+        let start = Instant::now();
+        let creds =
+            self.aws
+                .provide_credentials()
+                .await
+                .map_err(|e| object_store::Error::Generic {
+                    store: "S3",
+                    source: Box::new(e),
+                })?;
+        info!(
+            key_id = creds.access_key_id(),
+            expiry_s = creds
+                .expiry()
+                .and_then(|t| t.duration_since(SystemTime::now()).ok())
+                .map(|d| d.as_secs()),
+            elapsed_ms = start.elapsed().as_millis(),
+            "fetched credentials"
+        );
+        let credential = Arc::new(object_store::aws::AwsCredential {
+            key_id: creds.access_key_id().to_owned(),
+            secret_key: creds.secret_access_key().to_owned(),
+            token: creds.session_token().map(|s| s.to_owned()),
+        });
+        *cached = Some(CachedCredential {
+            credential: credential.clone(),
+            expiry: creds.expiry(),
+        });
+        Ok(credential)
     }
 }
