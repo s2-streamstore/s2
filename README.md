@@ -12,9 +12,80 @@ It is easy to run `s2-lite` against object stores like AWS S3, GCP GCS, and Clou
 
 You can also simply not specify a `--bucket`, which makes it operate entirely in-memory. This is great for integration tests involving S2.
 
-### Try it out
+### Quickstart
 
-_TODO: `docker run` cmd & quickstart_
+> [!NOTE]
+> Point CLI or SDKs at your lite instance like this:
+> ```bash
+> export S2_ACCOUNT_ENDPOINT="http://localhost:8080"
+> export S2_BASIN_ENDPOINT="http://localhost:8080"
+> export S2_ACCESS_TOKEN="redundant"
+> ```
+
+Here's how you can run in-memory without any external dependency:
+```bash
+docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
+```
+
+<details>
+<summary>AWS S3 bucket example</summary>
+
+```bash
+docker run -p 8080:80 \
+  -e AWS_PROFILE=${AWS_PROFILE} \
+  -v ~/.aws:/root/.aws:ro \
+  ghcr.io/s2-streamstore/s2-lite \
+  --bucket ${S3_BUCKET} \
+  --path s2lite
+```
+</details>
+
+<details>
+<summary>Static credentials example (Tigris, R2 etc)</summary>
+
+```bash
+docker run -p 8080:80 \
+  -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
+  -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \
+  -e AWS_ENDPOINT_URL_S3=${AWS_ENDPOINT_URL_S3} \
+  ghcr.io/s2-streamstore/s2-lite \
+  --bucket ${S3_BUCKET} \
+  --path s2lite
+```
+</details>
+
+Let's make sure the server is ready:
+```bash
+while ! curl -sf ${S2_ACCOUNT_ENDPOINT}/ping -o /dev/null; do echo Waiting...; sleep 2; done && echo Up!
+```
+
+[Install the CLI](https://github.com/s2-streamstore/s2-cli?tab=readme-ov-file#installation) or upgrade it if `s2 --version` is older than `0.23`
+
+Let's create a [basin](https://s2.dev/docs/concepts) with auto-creation of streams enabled:
+```bash
+s2 create-basin liteness --create-stream-on-append --create-stream-on-read
+```
+
+Test your latencies:
+```bash
+s2 ping s2://liteness/pinger
+```
+
+Now let's try streaming sessions. In one or more new terminals (make sure you re-export the env vars noted above),
+```bash
+s2 read s2://liteness/starwars 2> /dev/null
+```
+
+Now back from your original terminal, let's write to the stream:
+```bash
+nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
+```
+
+### Monitoring
+
+**Readiness** `/ping` will `pong`
+
+**Metrics** `/metrics` returns Prometheus text format
 
 ### Design
 

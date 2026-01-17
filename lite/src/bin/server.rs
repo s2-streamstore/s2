@@ -78,31 +78,7 @@ async fn main() -> eyre::Result<()> {
         format!("0.0.0.0:{port}")
     };
 
-    let object_store: Arc<dyn object_store::ObjectStore> = match args.bucket {
-        Some(bucket) if !bucket.is_empty() => {
-            info!(bucket, "using s3 object store");
-            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            let mut builder =
-                object_store::aws::AmazonS3Builder::from_env().with_bucket_name(&bucket);
-            if let Some(region) = aws_config.region() {
-                info!(region = region.as_ref());
-                builder = builder.with_region(region.to_string());
-            }
-            if let Some(credentials_provider) = aws_config.credentials_provider() {
-                info!("using aws-config credentials provider");
-                builder = builder.with_credentials(Arc::new(S3CredentialProvider {
-                    aws: credentials_provider.clone(),
-                    cache: tokio::sync::Mutex::new(None),
-                }));
-            }
-            let store = builder.build()?;
-            Arc::new(store)
-        }
-        _ => {
-            info!("using in-memory object store");
-            Arc::new(object_store::memory::InMemory::new())
-        }
-    };
+    let object_store = init_object_store(args.bucket).await?;
 
     let db_settings = slatedb::Settings::from_env_with_default(
         "SL8_",
@@ -191,6 +167,59 @@ async fn main() -> eyre::Result<()> {
     }
 
     Ok(())
+}
+
+async fn init_object_store(
+    bucket: Option<String>,
+) -> eyre::Result<Arc<dyn object_store::ObjectStore>> {
+    match bucket {
+        Some(bucket) if !bucket.is_empty() => {
+            info!(bucket, "using s3 object store");
+            let mut builder =
+                object_store::aws::AmazonS3Builder::from_env().with_bucket_name(&bucket);
+            match (
+                std::env::var_os("AWS_ENDPOINT_URL_S3").and_then(|s| s.into_string().ok()),
+                std::env::var_os("AWS_ACCESS_KEY_ID").and_then(|s| s.into_string().ok()),
+                std::env::var_os("AWS_SECRET_ACCESS_KEY").and_then(|s| s.into_string().ok()),
+            ) {
+                (endpoint, Some(key_id), Some(secret_key)) => {
+                    info!(key_id, "using static credentials from env vars");
+                    if let Some(endpoint) = endpoint {
+                        builder = builder.with_endpoint(endpoint);
+                    }
+                    builder = builder.with_credentials(Arc::new(
+                        object_store::StaticCredentialProvider::new(
+                            object_store::aws::AwsCredential {
+                                key_id,
+                                secret_key,
+                                token: None,
+                            },
+                        ),
+                    ));
+                }
+                _ => {
+                    let aws_config =
+                        aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+                    if let Some(region) = aws_config.region() {
+                        info!(region = region.as_ref());
+                        builder = builder.with_region(region.to_string());
+                    }
+                    if let Some(credentials_provider) = aws_config.credentials_provider() {
+                        info!("using aws-config credentials provider");
+                        builder = builder.with_credentials(Arc::new(S3CredentialProvider {
+                            aws: credentials_provider.clone(),
+                            cache: tokio::sync::Mutex::new(None),
+                        }));
+                    }
+                }
+            }
+            Ok(Arc::new(builder.build()?))
+        }
+        _ => {
+            info!("using in-memory object store");
+            Ok(Arc::new(object_store::memory::InMemory::new()))
+        }
+    }
 }
 
 async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
