@@ -105,20 +105,23 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Monitoring
 
-**Readiness** `/ping` will `pong`
+*Readiness* `/ping` will `pong`
 
-**Metrics** `/metrics` returns Prometheus text format
+*Metrics* `/metrics` returns Prometheus text format
 
-### Design
+### Internals
+
+#### Design
 
 [Concepts](https://s2.dev/docs/concepts)
 
 - HTTP API is implemented using [axum](https://github.com/tokio-rs/axum).
 - Each stream maps to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current `tail` position, serializes appends, and broadcasts acknowledged records to followers.
-- Appends are pipelined to improve performance against high-latency object storage.
-- [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data model in sl8.
+- Appends are pipelined to improve performance against high-latency object storage. 
+  - **Temporary** this is unsafe for now so [disabled by default](https://github.com/s2-streamstore/s2/issues/48), you can try it with `S2LITE_PIPELINE=true`.
+- [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data modeling in SlateDB.
 
-### SlateDB settings
+#### SlateDB settings
 
 [Settings reference](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#fields)
 
