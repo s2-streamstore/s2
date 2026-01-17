@@ -114,7 +114,7 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 [Concepts](https://s2.dev/docs/concepts)
 
 - HTTP API is implemented using [axum](https://github.com/tokio-rs/axum).
-- Each stream maps to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current tail position, serializes appends, and broadcasts acknowledged records to followers.
+- Each stream maps to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current `tail` position, serializes appends, and broadcasts acknowledged records to followers.
 - Appends are pipelined to improve performance against high-latency object storage.
 - [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data model in sl8.
 
@@ -145,7 +145,7 @@ SL8_FLUSH_INTERVAL=10ms
 - `/access-tokens` https://github.com/s2-streamstore/s2/issues/28
 - `/metrics`
 
-### Limitations
+### Caveats
 
 - Deletion is not fully plumbed up yet
   - basins https://github.com/s2-streamstore/s2/issues/53
@@ -153,7 +153,8 @@ SL8_FLUSH_INTERVAL=10ms
   - records https://github.com/s2-streamstore/s2/issues/51
 - Pipelining needs to be made safe and default https://github.com/s2-streamstore/s2/issues/48
 
-**Compatibility**
+### Compatibility
+
 - [CLI](https://github.com/s2-streamstore/s2-cli) ✅ v0.23+
 - [TypeScript SDK](https://github.com/s2-streamstore/s2-sdk-typescript) ✅ v0.22+
 - [Go SDK](https://github.com/s2-streamstore/s2-sdk-go) ✅ v0.11+
