@@ -1,4 +1,26 @@
-# S2, the durable streams API
+<div align="center">
+  <p>
+    <!-- Light mode logo -->
+    <a href="https://s2.dev#gh-light-mode-only">
+      <img src="./assets/s2-black.png" height="60">
+    </a>
+    <!-- Dark mode logo -->
+    <a href="https://s2.dev#gh-dark-mode-only">
+      <img src="./assets/s2-white.png" height="60">
+    </a>
+  </p>
+
+  <h1>S2, the durable streams API</h1>
+
+  <p>
+    <!-- Github Actions (CI) -->
+    <a href="https://github.com/s2-streamstore/s2/actions?query=branch%3Amain++"><img src="https://github.com/s2-streamstore/s2/actions/workflows/ci.yml/badge.svg" /></a>
+    <!-- Discord (chat) -->
+    <a href="https://discord.gg/vTCs7kMkAf"><img src="https://img.shields.io/discord/1209937852528599092?logo=discord" /></a>
+    <!-- LICENSE -->
+    <a href="./LICENSE"><img src="https://img.shields.io/github/license/s2-streamstore/s2" /></a>
+  </p>
+</div>
 
 [s2.dev](https://s2.dev) is a serverless datastore for real-time, streaming data.
 
