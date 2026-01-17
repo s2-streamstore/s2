@@ -30,7 +30,7 @@
 
 It uses [SlateDB](https://slatedb.io) as its storage engine, which relies entirely on object storage for durability.
 
-It is easy to run `s2-lite` against object stores like AWS S3, GCP GCS, and Cloudflare R2. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
+It is easy to run `s2-lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
 
 You can also simply not specify a `--bucket`, which makes it operate entirely in-memory. This is great for integration tests involving S2.
 
@@ -126,11 +126,11 @@ SL8_FLUSH_INTERVAL=10ms
 
 [Concepts](https://s2.dev/docs/concepts)
 
-- HTTP API is implemented using [axum](https://github.com/tokio-rs/axum).
-- Each stream maps to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current `tail` position, serializes appends, and broadcasts acknowledged records to followers.
-- Appends are pipelined to improve performance against high-latency object storage. 
-  - **Temporary** this is unsafe for now so [disabled by default](https://github.com/s2-streamstore/s2/issues/48), you can try it with `S2LITE_PIPELINE=true`.
-- [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data modeling in SlateDB.
+- HTTP serving is implemented using [axum](https://github.com/tokio-rs/axum)
+- Each stream corresponds to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current `tail` position, serializes appends, and broadcasts acknowledged records to followers
+- Appends are pipelined to improve performance against high-latency object storage
+  - **Temporary** [disabled by default](https://github.com/s2-streamstore/s2/issues/48), you can try it with `S2LITE_PIPELINE=true`
+- [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data modeling in SlateDB
 
 ### Caveats
 
