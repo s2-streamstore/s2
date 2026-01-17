@@ -24,7 +24,7 @@ You can also simply not specify a `--bucket`, which makes it operate entirely in
 
 Here's how you can run in-memory without any external dependency:
 ```bash
-docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite:latest
+docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
 ```
 
 <details>
@@ -34,7 +34,7 @@ docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite:latest
 docker run -p 8080:80 \
   -e AWS_PROFILE=${AWS_PROFILE} \
   -v ~/.aws:/root/.aws:ro \
-  ghcr.io/s2-streamstore/s2-lite:latest \
+  ghcr.io/s2-streamstore/s2-lite \
   --bucket ${S3_BUCKET} \
   --path s2lite
 ```
@@ -48,7 +48,7 @@ docker run -p 8080:80 \
   -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
   -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \
   -e AWS_ENDPOINT_URL_S3=${AWS_ENDPOINT_URL_S3} \
-  ghcr.io/s2-streamstore/s2-lite:latest \
+  ghcr.io/s2-streamstore/s2-lite \
   --bucket ${S3_BUCKET} \
   --path s2lite
 ```
