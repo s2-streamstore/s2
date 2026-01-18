@@ -93,6 +93,8 @@ Test your latencies:
 s2 ping s2://liteness/pinger
 ```
 
+![S2 Ping Test](./assets/pingtest.gif)
+
 Now let's try streaming sessions. In one or more new terminals (make sure you re-export the env vars noted above),
 ```bash
 s2 read s2://liteness/starwars 2> /dev/null
@@ -102,6 +104,8 @@ Now back from your original terminal, let's write to the stream:
 ```bash
 nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 ```
+
+![S2 Star Wars Streaming](./assets/starwars.gif)
 
 ### Monitoring
 
