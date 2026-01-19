@@ -78,32 +78,32 @@ async fn main() -> eyre::Result<()> {
         format!("0.0.0.0:{port}")
     };
 
-    let object_store = init_object_store(args.bucket).await?;
+    let object_store = init_object_store(args.bucket.as_deref()).await?;
+
+    let default_flush_interval = Duration::from_millis(if args.bucket.is_some() { 50 } else { 5 });
 
     let db_settings = slatedb::Settings::from_env_with_default(
         "SL8_",
         slatedb::Settings {
-            flush_interval: Some(Duration::from_millis(40)),
+            flush_interval: Some(default_flush_interval),
             ..Default::default()
         },
     )?;
+
+    let append_inflight_max = if std::env::var("S2LITE_PIPELINE")
+        .is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
+    {
+        info!("pipelining enabled on append sessions up to 10MiB");
+        ByteSize::mib(10)
+    } else {
+        info!("pipelining disabled");
+        ByteSize::b(1)
+    };
 
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)
         .build()
         .await?;
-
-    let append_inflight_max = {
-        let pipeline = std::env::var("S2LITE_PIPELINE")
-            .is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1");
-        if pipeline {
-            info!("pipelining enabled");
-            ByteSize::mib(10)
-        } else {
-            info!("pipelining disabled");
-            ByteSize::b(1)
-        }
-    };
 
     let backend = Backend::new(db, append_inflight_max);
 
@@ -170,13 +170,13 @@ async fn main() -> eyre::Result<()> {
 }
 
 async fn init_object_store(
-    bucket: Option<String>,
+    bucket: Option<&str>,
 ) -> eyre::Result<Arc<dyn object_store::ObjectStore>> {
     match bucket {
         Some(bucket) if !bucket.is_empty() => {
             info!(bucket, "using s3 object store");
             let mut builder =
-                object_store::aws::AmazonS3Builder::from_env().with_bucket_name(&bucket);
+                object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket);
             match (
                 std::env::var_os("AWS_ENDPOINT_URL_S3").and_then(|s| s.into_string().ok()),
                 std::env::var_os("AWS_ACCESS_KEY_ID").and_then(|s| s.into_string().ok()),

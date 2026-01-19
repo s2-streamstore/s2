@@ -122,7 +122,7 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 Use `SL8_` prefixed environment variables, e.g.:
 
 ```bash
-# defaults to 40ms
+# Defaults to 50ms for remote bucket / 5ms in-memory
 SL8_FLUSH_INTERVAL=10ms
 ```
 

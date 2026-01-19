@@ -1,4 +1,4 @@
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
@@ -24,7 +24,10 @@ pub async fn create_in_memory_db() -> Db {
     let db_path = format!("/tmp/test_{}", Uuid::new_v4());
 
     Db::builder(db_path, object_store)
-        .with_settings(Settings::default())
+        .with_settings(Settings {
+            flush_interval: Some(Duration::from_millis(5)),
+            ..Default::default()
+        })
         .build()
         .await
         .expect("Failed to create in-memory database")
