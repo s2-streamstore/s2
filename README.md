@@ -109,9 +109,9 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Monitoring
 
-*Readiness* `/ping` will `pong`
+`/ping` will `pong`
 
-*Metrics* `/metrics` returns Prometheus text format
+`/metrics` returns Prometheus text format
 
 ### Internals
 
