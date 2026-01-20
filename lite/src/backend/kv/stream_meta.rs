@@ -89,10 +89,12 @@ pub fn ser_key_range(
     prefix: &StreamNamePrefix,
     start_after: &StreamNameStartAfter,
 ) -> Range<Bytes> {
+    let prefix_start = ser_key_prefix(basin, prefix);
     let start = if !start_after.is_empty() {
-        ser_key_start_after(basin, start_after)
+        let start_after_key = ser_key_start_after(basin, start_after);
+        std::cmp::max(prefix_start, start_after_key)
     } else {
-        ser_key_prefix(basin, prefix)
+        prefix_start
     };
     let end = ser_key_prefix_end(basin, prefix);
     start..end
@@ -152,8 +154,9 @@ mod tests {
     use s2_common::{
         bash::Bash,
         types::{
+            basin::BasinName,
             config::{OptionalStreamConfig, StorageClass},
-            stream::{StreamNamePrefix, StreamNameStartAfter},
+            stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
         },
     };
     use time::OffsetDateTime;
@@ -238,6 +241,34 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn stream_meta_range_start_after_before_prefix() {
+        let basin = BasinName::from_str("my-basin").unwrap();
+        let prefix = StreamNamePrefix::from_str("staging-").unwrap();
+        let start_after = StreamNameStartAfter::from_str("prod-api").unwrap();
+
+        let range = super::ser_key_range(&basin, &prefix, &start_after);
+
+        assert!(
+            range.start < range.end,
+            "range should be valid when start_after is before prefix range"
+        );
+
+        let staging_stream = StreamName::from_str("staging-api").unwrap();
+        let staging_key = super::ser_key(&basin, &staging_stream);
+        assert!(
+            staging_key >= range.start && staging_key < range.end,
+            "streams matching prefix should be in range"
+        );
+
+        let prod_stream = StreamName::from_str("prod-service").unwrap();
+        let prod_key = super::ser_key(&basin, &prod_stream);
+        assert!(
+            prod_key < range.start,
+            "streams before prefix should NOT be in range"
+        );
+    }
+
     proptest! {
         #[test]
         fn roundtrip_stream_meta_key(
@@ -303,8 +334,14 @@ mod tests {
             let key1 = super::ser_key(&basin, &stream1);
             let key2 = super::ser_key(&basin, &stream2);
 
+            let prefix_str = prefix.as_ref();
+            let stream1_matches = prefix_str.is_empty() || stream1.as_ref().starts_with(prefix_str);
+            let stream2_matches = prefix_str.is_empty() || stream2.as_ref().starts_with(prefix_str);
+
             prop_assert!(key1 < range.start, "cursor stream should be excluded (before range.start)");
-            prop_assert!(key2 >= range.start, "later stream should be included (at or after range.start)");
+            if stream2_matches && (stream1_matches || stream2.as_ref() > prefix_str) {
+                prop_assert!(key2 >= range.start, "later stream matching prefix should be included (at or after range.start)");
+            }
         }
     }
 }
