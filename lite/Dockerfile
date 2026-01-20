@@ -19,12 +19,22 @@ RUN --mount=type=cache,id=s2-rust,sharing=locked,target=/cache \
     mkdir -p /build/target/release/ && \
     cp /cache/release/server /build/target/release/server
 
-# Runtime stage
-FROM ubuntu:latest
+# Debug runtime - ubuntu with shell access
+# Build with: docker build --target debug .
+FROM ubuntu:latest AS debug
 
 RUN apt-get update && \
     apt-get install -y ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/server /app/s2-lite
+
+ENTRYPOINT ["./s2-lite"]
+
+# Production runtime (default) - minimal distroless image
+FROM gcr.io/distroless/cc-debian13 AS runtime
 
 WORKDIR /app
 
