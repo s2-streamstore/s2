@@ -1,6 +1,6 @@
 ---
 name: release
-description: Release a new version of the project with semver validation, Cargo.toml updates, and crates.io publishing
+description: Release a new version of the project
 ---
 
 # /release
@@ -17,45 +17,18 @@ If version is not provided, prompt the user for it.
 
 ## Steps
 
-1. **Verify prerequisites**
-   - Confirm on `main` branch
-   - Confirm working directory is clean (`git status`)
-   - Pull latest (`git pull`)
+1. **Validate version** - should be semver (X.Y.Z) and greater than current
 
-2. **Validate version**
-   - Version should follow semver (X.Y.Z)
-   - Confirm it's greater than current version in Cargo.toml
-
-3. **Update Cargo.toml**
-   - Edit root `Cargo.toml` to update version in all 3 places:
-     - `workspace.package.version`
-     - `workspace.dependencies.s2-api`
-     - `workspace.dependencies.s2-common`
-
-4. **Update lockfile**
+2. **Run release**
    ```bash
-   cargo generate-lockfile
+   just release X.Y.Z
    ```
 
-5. **Commit and push**
-   ```bash
-   git add Cargo.toml Cargo.lock
-   git commit -m "release: X.Y.Z"
-   git push
-   ```
-
-6. **Publish to crates.io**
-   ```bash
-   just publish
-   ```
-   Wait for this to complete successfully before proceeding.
-
-7. **Tag and trigger release**
-   ```bash
-   just tag X.Y.Z
-   ```
+This handles: cargo credentials check, version bump in Cargo.toml (3 places), lockfile update, commit, push, crates.io publish, and git tag.
 
 ## Notes
 
+- Must be on `main` branch with clean working directory
+- Requires cargo credentials (`cargo login` or `CARGO_REGISTRY_TOKEN`)
 - If any step fails, stop and report the error
-- The `just tag` command triggers GitHub Actions to build Docker images and create the GitHub release
+- The git tag triggers GitHub Actions to build Docker images and create the GitHub release

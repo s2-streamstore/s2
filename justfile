@@ -83,6 +83,60 @@ publish:
 
     echo "✓ All crates published successfully"
 
+# Full release: bump version, publish to crates.io, tag, push
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Validate version format
+    if ! [[ "{{VERSION}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "❌ Invalid version format. Use semver: X.Y.Z"
+        exit 1
+    fi
+
+    # Check for cargo credentials early (fail fast)
+    if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]] && [[ ! -f ~/.cargo/credentials.toml ]]; then
+        echo "❌ No cargo credentials found. Run 'cargo login' or set CARGO_REGISTRY_TOKEN."
+        exit 1
+    fi
+
+    # Must be on main branch
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$BRANCH" != "main" ]]; then
+        echo "❌ Must be on main branch (currently on: $BRANCH)"
+        exit 1
+    fi
+
+    # Check for clean working directory
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "❌ Working directory not clean. Commit or stash changes first."
+        exit 1
+    fi
+
+    # Pull latest
+    git pull --ff-only
+
+    echo "📦 Releasing version {{VERSION}}..."
+
+    # Bump version in all 3 places in Cargo.toml
+    sed -i '' 's/^version = "[^"]*"/version = "{{VERSION}}"/' Cargo.toml
+    sed -i '' 's/s2-api = { version = "[^"]*"/s2-api = { version = "{{VERSION}}"/' Cargo.toml
+    sed -i '' 's/s2-common = { version = "[^"]*"/s2-common = { version = "{{VERSION}}"/' Cargo.toml
+
+    # Update Cargo.lock
+    cargo generate-lockfile
+
+    # Commit and push
+    git add Cargo.toml Cargo.lock
+    git commit -m "release: {{VERSION}}"
+    git push
+
+    # Publish to crates.io
+    just publish
+
+    # Tag and trigger release workflow
+    just tag {{VERSION}}
+
 # Create and push a release tag
 tag TAG:
     #!/usr/bin/env bash
