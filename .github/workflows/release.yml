@@ -116,6 +116,7 @@ jobs:
       - name: Tag as latest (pushed last to appear at top)
         if: github.event_name != 'workflow_dispatch'
         run: |
+          sleep 60
           docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-x86-64 \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64
