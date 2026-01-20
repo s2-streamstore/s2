@@ -90,7 +90,7 @@ s2 create-basin liteness --create-stream-on-append --create-stream-on-read
 
 Test your latencies:
 ```bash
-s2 ping s2://liteness/pinger
+s2 bench liteness -t 10 -d 5s -w 0s
 ```
 
 ![S2 Ping Test](./assets/pingtest.gif)
