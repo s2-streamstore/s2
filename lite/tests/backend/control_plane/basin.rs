@@ -73,6 +73,56 @@ async fn test_create_basin_idempotency_respects_request_token() {
 }
 
 #[tokio::test]
+async fn test_create_or_reconfigure_preserves_idempotency_key() {
+    let backend = create_backend().await;
+    let basin_name = test_basin_name("idempotency-key-preserve");
+    let config = BasinConfig {
+        create_stream_on_append: true,
+        ..Default::default()
+    };
+
+    let token: RequestToken = "my-request-token".parse().unwrap();
+
+    backend
+        .create_basin(
+            basin_name.clone(),
+            config.clone(),
+            CreateMode::CreateOnly(Some(token.clone())),
+        )
+        .await
+        .expect("Failed to create basin");
+
+    backend
+        .create_basin(
+            basin_name.clone(),
+            config.clone(),
+            CreateMode::CreateOnly(Some(token.clone())),
+        )
+        .await
+        .expect("Idempotency should work before CreateOrReconfigure");
+
+    let mut updated_config = config.clone();
+    updated_config.create_stream_on_read = true;
+    backend
+        .create_basin(
+            basin_name.clone(),
+            updated_config,
+            CreateMode::CreateOrReconfigure,
+        )
+        .await
+        .expect("CreateOrReconfigure should succeed");
+
+    backend
+        .create_basin(
+            basin_name.clone(),
+            config.clone(),
+            CreateMode::CreateOnly(Some(token.clone())),
+        )
+        .await
+        .expect("Idempotency should still work after CreateOrReconfigure");
+}
+
+#[tokio::test]
 async fn test_create_basin_create_or_reconfigure_updates_config() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("basin-recreate");

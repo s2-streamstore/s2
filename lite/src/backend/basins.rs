@@ -82,7 +82,7 @@ impl Backend {
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
-        let creation_idempotency_key = match &mode {
+        let new_creation_idempotency_key = match &mode {
             CreateMode::CreateOnly(Some(req_token)) => {
                 Some(creation_idempotency_key(req_token, &config))
             }
@@ -90,6 +90,7 @@ impl Backend {
         };
 
         let mut existing_created_at = None;
+        let mut existing_creation_idempotency_key = None;
         if let Some(existing_meta) =
             db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?
         {
@@ -98,8 +99,8 @@ impl Backend {
             }
             match mode {
                 CreateMode::CreateOnly(_) => {
-                    return if creation_idempotency_key.is_some()
-                        && existing_meta.creation_idempotency_key == creation_idempotency_key
+                    return if new_creation_idempotency_key.is_some()
+                        && existing_meta.creation_idempotency_key == new_creation_idempotency_key
                     {
                         Ok(CreatedOrReconfigured::Created(BasinInfo {
                             name: basin,
@@ -112,11 +113,14 @@ impl Backend {
                 }
                 CreateMode::CreateOrReconfigure => {
                     existing_created_at = Some(existing_meta.created_at);
+                    existing_creation_idempotency_key = existing_meta.creation_idempotency_key;
                 }
             }
         }
 
         let created_at = existing_created_at.unwrap_or_else(OffsetDateTime::now_utc);
+        let creation_idempotency_key =
+            existing_creation_idempotency_key.or(new_creation_idempotency_key);
 
         let meta = kv::basin_meta::BasinMeta {
             config,
