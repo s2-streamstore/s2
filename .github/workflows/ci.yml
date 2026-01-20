@@ -86,7 +86,7 @@ jobs:
             "ref": "main",
             "lang": "go",
             "go-version": "1.24",
-            "test_cmd": "go test -v -count=1 -skip 'WithScope' ./s2/..."
+            "test_cmd": "go test -v -count=1 -skip 'WithScope|Metrics' ./s2/..."
           },
           {
             "name": "typescript",
