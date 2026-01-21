@@ -15,29 +15,15 @@ env:
 
 jobs:
   build-images:
-    name: Build ${{ matrix.arch }} ${{ matrix.target }} image
+    name: Build ${{ matrix.arch }} image
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - name: x86-64
-            runner: ubuntu-latest
-          - name: arm64
-            runner: ubuntu-24.04-arm
-        target:
-          - name: runtime
-            suffix: ""
-          - name: debug
-            suffix: "-debug"
         include:
-          - arch:
-              name: x86-64
-              runner: ubuntu-latest
+          - arch: x86-64
             runner: ubuntu-latest
-          - arch:
-              name: arm64
-              runner: ubuntu-24.04-arm
+          - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
@@ -61,14 +47,21 @@ jobs:
             echo "version=dev-$(date +%s)" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and push architecture-specific image
+      - name: Build image
         run: |
           docker build \
             -f lite/Dockerfile \
-            --target ${{ matrix.target.name }} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}${{ matrix.target.suffix }}-${{ matrix.arch.name }} \
+            --target runtime \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-${{ matrix.arch }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }} \
             .
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}${{ matrix.target.suffix }}-${{ matrix.arch.name }}
+
+      - name: Push latest arch image first
+        if: github.event_name != 'workflow_dispatch'
+        run: docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+
+      - name: Push versioned arch image
+        run: docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-${{ matrix.arch }}
 
   create-manifest:
     name: Create multi-arch manifests
@@ -98,35 +91,10 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64
           docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
 
-      - name: Create and push debug versioned manifest
-        run: |
-          docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-debug \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-debug-x86-64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-debug-arm64
-          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-debug
-
-      - name: Tag debug as latest
+      - name: Create and push latest manifest
         if: github.event_name != 'workflow_dispatch'
         run: |
-          docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:debug \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-debug-x86-64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-debug-arm64
-          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:debug
-
-      - name: Tag as latest (pushed last to appear at top)
-        if: github.event_name != 'workflow_dispatch'
-        run: |
-          sleep 60
-          # Re-tag runtime images with fresh timestamps so latest appears at top
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-x86-64
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64
-          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-x86-64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-x86-64
-          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-x86-64
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64
-          docker manifest create --amend ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-x86-64 \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64
           docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
