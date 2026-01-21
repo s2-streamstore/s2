@@ -81,19 +81,19 @@ Let's make sure the server is ready:
 while ! curl -sf ${S2_ACCOUNT_ENDPOINT}/ping -o /dev/null; do echo Waiting...; sleep 2; done && echo Up!
 ```
 
-[Install the CLI](https://github.com/s2-streamstore/s2-cli?tab=readme-ov-file#installation) or upgrade it if `s2 --version` is older than `0.23`
+[Install the CLI](https://github.com/s2-streamstore/s2-cli?tab=readme-ov-file#installation) or upgrade it if `s2 --version` is older than `0.25`
 
 Let's create a [basin](https://s2.dev/docs/concepts) with auto-creation of streams enabled:
 ```bash
 s2 create-basin liteness --create-stream-on-append --create-stream-on-read
 ```
 
-Test your latencies:
+Test your performance:
 ```bash
-s2 bench liteness -t 10 -d 5s -w 0s
+s2 bench liteness --target-mibps 10 --duration 5s --catchup-delay 0s
 ```
 
-![S2 Ping Test](./assets/pingtest.gif)
+![S2 Ping Test](./assets/bench.gif)
 
 Now let's try streaming sessions. In one or more new terminals (make sure you re-export the env vars noted above),
 ```bash
@@ -146,7 +146,7 @@ SL8_FLUSH_INTERVAL=10ms
 
 ### Compatibility
 
-- [CLI](https://github.com/s2-streamstore/s2-cli) ✅ v0.23+
+- [CLI](https://github.com/s2-streamstore/s2-cli) ✅ v0.25+
 - [TypeScript SDK](https://github.com/s2-streamstore/s2-sdk-typescript) ✅ v0.22+
 - [Go SDK](https://github.com/s2-streamstore/s2-sdk-go) ✅ v0.11+
 - [Rust SDK](https://github.com/s2-streamstore/s2-sdk-rust) ✅ v0.22+
