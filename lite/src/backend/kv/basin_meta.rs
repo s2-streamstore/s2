@@ -82,10 +82,12 @@ pub fn ser_key_start_after(start_after: &BasinNameStartAfter) -> Bytes {
 }
 
 pub fn ser_key_range(prefix: &BasinNamePrefix, start_after: &BasinNameStartAfter) -> Range<Bytes> {
+    let prefix_start = ser_key_prefix(prefix);
     let start = if !start_after.is_empty() {
-        ser_key_start_after(start_after)
+        let start_after_key = ser_key_start_after(start_after);
+        std::cmp::max(prefix_start, start_after_key)
     } else {
-        ser_key_prefix(prefix)
+        prefix_start
     };
     let end = ser_key_prefix_end(prefix);
     start..end
@@ -335,6 +337,33 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn basin_meta_range_start_after_before_prefix() {
+        let prefix = BasinNamePrefix::from_str("staging-").unwrap();
+        let start_after = BasinNameStartAfter::from_str("prod-api").unwrap();
+
+        let range = super::ser_key_range(&prefix, &start_after);
+
+        assert!(
+            range.start < range.end,
+            "range should be valid when start_after is before prefix range"
+        );
+
+        let staging_basin = BasinName::from_str("staging-api").unwrap();
+        let staging_key = super::ser_key(&staging_basin);
+        assert!(
+            staging_key >= range.start && staging_key < range.end,
+            "basins matching prefix should be in range"
+        );
+
+        let prod_basin = BasinName::from_str("prod-service").unwrap();
+        let prod_key = super::ser_key(&prod_basin);
+        assert!(
+            prod_key < range.start,
+            "basins before prefix should NOT be in range"
+        );
+    }
+
     proptest! {
         #[test]
         fn roundtrip_basin_meta_key(basin in basin_name_strategy()) {
@@ -393,8 +422,14 @@ mod tests {
             let key1 = super::ser_key(&basin1);
             let key2 = super::ser_key(&basin2);
 
+            let prefix_str = prefix.as_ref();
+            let basin1_matches = prefix_str.is_empty() || basin1.as_ref().starts_with(prefix_str);
+            let basin2_matches = prefix_str.is_empty() || basin2.as_ref().starts_with(prefix_str);
+
             prop_assert!(key1 < range.start, "cursor basin should be excluded (before range.start)");
-            prop_assert!(key2 >= range.start, "later basin should be included (at or after range.start)");
+            if basin2_matches && (basin1_matches || basin2.as_ref() > prefix_str) {
+                prop_assert!(key2 >= range.start, "later basin matching prefix should be included (at or after range.start)");
+            }
         }
     }
 }
