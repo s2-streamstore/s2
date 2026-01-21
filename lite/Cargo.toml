@@ -34,6 +34,7 @@ compact_str = { workspace = true }
 dashmap = { workspace = true }
 enum-ordinalize = { workspace = true }
 eyre = { workspace = true }
+mimalloc = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 itertools = { workspace = true }

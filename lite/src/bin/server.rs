@@ -1,3 +1,6 @@
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{
     net::SocketAddr,
     path::PathBuf,
