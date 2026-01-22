@@ -156,7 +156,7 @@ SL8_FLUSH_INTERVAL=10ms
 ### API Coverage
 
 > [!TIP]
-> Complete [specs](api/specs/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
+> Complete [specs](https://github.com/s2-streamstore/s2-specs/tree/main/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
 
 **Fully supported**
 - `/basins`
