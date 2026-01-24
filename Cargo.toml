@@ -58,6 +58,14 @@ utoipa = "5.4"
 uuid = "1.19"
 zstd = "0.13"
 
+# Auth dependencies
+biscuit-auth = "6.0"
+bs58 = "0.5"
+hex = "0.4"
+httpsig = "0.0.20"
+p256 = "0.13"
+sha2 = "0.10"
+
 [patch.crates-io]
 slatedb = { git = "https://github.com/slatedb/slatedb", rev = "5281e6e0990477b1176cb49e907e26e706a39ac4" }
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
