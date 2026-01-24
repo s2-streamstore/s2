@@ -1,6 +1,6 @@
 # Authorization Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Status:** Completed. See [lite/docs/authentication.md](../../lite/docs/authentication.md) for usage documentation.
 
 **Goal:** Add stateless authorization to s2-lite using Biscuit tokens and RFC 9421 HTTP Message Signatures.
 

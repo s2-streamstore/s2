@@ -29,7 +29,7 @@ axum-server = { workspace = true, features = ["tls-rustls"] }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 compact_str = { workspace = true }
 dashmap = { workspace = true }
 enum-ordinalize = { workspace = true }
@@ -74,4 +74,5 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
 uuid = { workspace = true, features = ["v4"] }

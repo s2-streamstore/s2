@@ -55,6 +55,22 @@ struct Args {
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
     port: Option<u16>,
+
+    /// Root key for signing access tokens (base58-encoded P-256 private key).
+    /// If not set, authentication is disabled.
+    #[arg(long, env = "S2_ROOT_KEY")]
+    root_key: Option<String>,
+
+    /// Signature timestamp window in seconds (default 300).
+    /// Requests with signatures older than this are rejected.
+    #[arg(long, env = "S2_SIGNATURE_WINDOW", default_value = "300")]
+    signature_window: u64,
+
+    /// Bearer token for metrics endpoints.
+    /// If set, metrics endpoints require "Authorization: Bearer <token>".
+    /// If not set, metrics endpoints are publicly accessible.
+    #[arg(long, env = "S2_METRICS_TOKEN")]
+    metrics_token: Option<String>,
 }
 
 #[tokio::main]
@@ -69,6 +85,20 @@ async fn main() -> eyre::Result<()> {
     let args = Args::parse();
 
     info!(?args);
+
+    // Parse and validate root key for auth
+    let root_key = args
+        .root_key
+        .as_ref()
+        .map(|k| s2_lite::auth::RootKey::from_base58(k))
+        .transpose()
+        .map_err(|e| eyre::eyre!("invalid root key: {}", e))?;
+
+    if let Some(ref key) = root_key {
+        info!(public_key = %key.public_key(), "auth enabled");
+    } else {
+        info!("auth disabled (no root key provided)");
+    }
 
     let addr = {
         let port = args.port.unwrap_or_else(|| {
@@ -110,7 +140,24 @@ async fn main() -> eyre::Result<()> {
 
     let backend = Backend::new(db, append_inflight_max);
 
-    let app = handlers::router(backend).layer(
+    // Create auth state
+    let auth_state = match root_key {
+        Some(key) => {
+            s2_lite::auth::AuthState::new(key, args.signature_window, args.metrics_token.clone())
+        }
+        None => match args.metrics_token {
+            Some(token) => s2_lite::auth::AuthState::metrics_only(token),
+            None => s2_lite::auth::AuthState::disabled(),
+        },
+    };
+
+    if auth_state.metrics_token().is_some() {
+        info!("metrics auth enabled");
+    } else {
+        info!("metrics endpoints are publicly accessible");
+    }
+
+    let app = handlers::router(backend, auth_state).layer(
         TraceLayer::new_for_http()
             .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
             .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))

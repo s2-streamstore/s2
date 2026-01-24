@@ -1,9 +1,10 @@
+use std::fmt;
+
 use p256::{
+    EncodedPoint, PublicKey, SecretKey,
     ecdsa::{SigningKey, VerifyingKey},
     elliptic_curve::sec1::FromEncodedPoint,
-    EncodedPoint, PublicKey, SecretKey,
 };
-use std::fmt;
 
 /// P-256 private key for signing
 #[derive(Clone)]
@@ -23,8 +24,8 @@ impl RootKey {
                 got: bytes.len(),
             });
         }
-        let secret = SecretKey::from_slice(&bytes)
-            .map_err(|e| KeyError::InvalidKey(e.to_string()))?;
+        let secret =
+            SecretKey::from_slice(&bytes).map_err(|e| KeyError::InvalidKey(e.to_string()))?;
         Ok(Self {
             inner: SigningKey::from(secret),
         })
@@ -67,8 +68,8 @@ impl RootPublicKey {
                 got: bytes.len(),
             });
         }
-        let point = EncodedPoint::from_bytes(&bytes)
-            .map_err(|e| KeyError::InvalidKey(e.to_string()))?;
+        let point =
+            EncodedPoint::from_bytes(&bytes).map_err(|e| KeyError::InvalidKey(e.to_string()))?;
         let public = PublicKey::from_encoded_point(&point)
             .into_option()
             .ok_or_else(|| KeyError::InvalidKey("invalid point".into()))?;

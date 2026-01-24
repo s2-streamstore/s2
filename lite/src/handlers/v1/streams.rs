@@ -1,4 +1,4 @@
-use axum::extract::{FromRequest, Path, Query, State};
+use axum::extract::{Extension, FromRequest, Path, Query, State};
 use http::StatusCode;
 use s2_api::{
     data::{Json, extract::JsonOpt},
@@ -7,6 +7,7 @@ use s2_api::{
 use s2_common::{
     http::extract::{Header, HeaderOpt},
     types::{
+        access::Operation,
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
         resources::{CreateMode, Page, RequestToken},
@@ -14,9 +15,33 @@ use s2_common::{
     },
 };
 
-use crate::{backend::Backend, handlers::v1::error::ServiceError};
+use crate::{
+    auth,
+    backend::Backend,
+    handlers::v1::{AppState, error::ServiceError, middleware::AuthenticatedRequest},
+};
 
-pub fn router() -> axum::Router<Backend> {
+/// Authorize an operation if auth is enabled
+fn authorize_op(
+    auth_req: Option<&AuthenticatedRequest>,
+    basin: &str,
+    stream: Option<&str>,
+    operation: Operation,
+) -> Result<(), ServiceError> {
+    if let Some(auth) = auth_req {
+        auth::authorize(
+            &auth.token,
+            &auth.client_public_key,
+            Some(basin),
+            stream,
+            None,
+            operation,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn router() -> axum::Router<AppState> {
     use axum::routing::{delete, get, patch, post, put};
     axum::Router::new()
         .route(super::paths::streams::LIST, get(list_streams))
@@ -65,8 +90,16 @@ pub struct ListArgs {
 ))]
 pub async fn list_streams(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     ListArgs { basin, request }: ListArgs,
 ) -> Result<Json<v1t::stream::ListStreamsResponse>, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        None,
+        Operation::ListStreams,
+    )?;
+
     let request: ListStreamsRequest = request.try_into()?;
     let Page { values, has_more } = backend.list_streams(basin, request).await?;
     Ok(Json(v1t::stream::ListStreamsResponse {
@@ -110,12 +143,20 @@ pub struct CreateArgs {
 ))]
 pub async fn create_stream(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     CreateArgs {
         request_token: HeaderOpt(request_token),
         basin,
         request,
     }: CreateArgs,
 ) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        Some(request.stream.as_ref()),
+        Operation::CreateStream,
+    )?;
+
     let config: OptionalStreamConfig = request
         .config
         .map(TryInto::try_into)
@@ -165,8 +206,16 @@ pub struct GetConfigArgs {
 ))]
 pub async fn get_stream_config(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     GetConfigArgs { basin, stream }: GetConfigArgs,
 ) -> Result<Json<v1t::config::StreamConfig>, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        Some(stream.as_ref()),
+        Operation::GetStreamConfig,
+    )?;
+
     let config = backend.get_stream_config(basin, stream).await?;
     Ok(Json(
         v1t::config::StreamConfig::to_opt(config).unwrap_or_default(),
@@ -209,12 +258,21 @@ pub struct CreateOrReconfigureArgs {
 ))]
 pub async fn create_or_reconfigure_stream(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     CreateOrReconfigureArgs {
         basin,
         stream,
         config: JsonOpt(config),
     }: CreateOrReconfigureArgs,
 ) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
+    // This operation can either create or reconfigure - check create permission
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        Some(stream.as_ref()),
+        Operation::CreateStream,
+    )?;
+
     let config: OptionalStreamConfig = config
         .map(TryInto::try_into)
         .transpose()?
@@ -262,8 +320,16 @@ pub struct DeleteArgs {
 ))]
 pub async fn delete_stream(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     DeleteArgs { basin, stream }: DeleteArgs,
 ) -> Result<StatusCode, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        Some(stream.as_ref()),
+        Operation::DeleteStream,
+    )?;
+
     backend.delete_stream(basin, stream).await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -304,12 +370,20 @@ pub struct ReconfigureArgs {
 ))]
 pub async fn reconfigure_stream(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     ReconfigureArgs {
         basin,
         stream,
         reconfiguration,
     }: ReconfigureArgs,
 ) -> Result<Json<v1t::config::StreamConfig>, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        Some(stream.as_ref()),
+        Operation::ReconfigureStream,
+    )?;
+
     let reconfiguration: StreamReconfiguration = reconfiguration.try_into()?;
     let config = backend
         .reconfigure_stream(basin, stream, reconfiguration)

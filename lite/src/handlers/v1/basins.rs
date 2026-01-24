@@ -1,4 +1,4 @@
-use axum::extract::{FromRequest, Path, Query, State};
+use axum::extract::{Extension, FromRequest, Path, Query, State};
 use http::StatusCode;
 use s2_api::{
     data::{Json, extract::JsonOpt},
@@ -7,15 +7,40 @@ use s2_api::{
 use s2_common::{
     http::extract::HeaderOpt,
     types::{
+        access::Operation,
         basin::{BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
         resources::{CreateMode, Page, RequestToken},
     },
 };
 
-use crate::{backend::Backend, handlers::v1::error::ServiceError};
+use crate::{
+    auth,
+    backend::Backend,
+    handlers::v1::{AppState, error::ServiceError, middleware::AuthenticatedRequest},
+};
 
-pub fn router() -> axum::Router<Backend> {
+/// Authorize an operation if auth is enabled
+fn authorize_op(
+    auth_req: Option<&AuthenticatedRequest>,
+    basin: Option<&str>,
+    stream: Option<&str>,
+    operation: Operation,
+) -> Result<(), ServiceError> {
+    if let Some(auth) = auth_req {
+        auth::authorize(
+            &auth.token,
+            &auth.client_public_key,
+            basin,
+            stream,
+            None,
+            operation,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn router() -> axum::Router<AppState> {
     use axum::routing::{delete, get, patch, post, put};
     axum::Router::new()
         .route(super::paths::basins::LIST, get(list_basins))
@@ -51,8 +76,16 @@ pub struct ListArgs {
 ))]
 pub async fn list_basins(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     ListArgs { request }: ListArgs,
 ) -> Result<Json<v1t::basin::ListBasinsResponse>, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        None,
+        None,
+        Operation::ListBasins,
+    )?;
+
     let request: ListBasinsRequest = request.try_into()?;
     let Page { values, has_more } = backend.list_basins(request).await?;
     Ok(Json(v1t::basin::ListBasinsResponse {
@@ -87,11 +120,19 @@ pub struct CreateArgs {
 ))]
 pub async fn create_basin(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     CreateArgs {
         request_token: HeaderOpt(request_token),
         request,
     }: CreateArgs,
 ) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        Some(request.basin.as_ref()),
+        None,
+        Operation::CreateBasin,
+    )?;
+
     let config: BasinConfig = request
         .config
         .map(TryInto::try_into)
@@ -126,8 +167,16 @@ pub struct GetConfigArgs {
 ))]
 pub async fn get_basin_config(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     GetConfigArgs { basin }: GetConfigArgs,
 ) -> Result<Json<v1t::config::BasinConfig>, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        Some(basin.as_ref()),
+        None,
+        Operation::GetBasinConfig,
+    )?;
+
     let config = backend.get_basin_config(basin).await?;
     Ok(Json(config.into()))
 }
@@ -156,11 +205,20 @@ pub struct CreateOrReconfigureArgs {
 ))]
 pub async fn create_or_reconfigure_basin(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     CreateOrReconfigureArgs {
         basin,
         request: JsonOpt(request),
     }: CreateOrReconfigureArgs,
 ) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
+    // This operation can either create or reconfigure - check both permissions
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        Some(basin.as_ref()),
+        None,
+        Operation::CreateBasin,
+    )?;
+
     let config: BasinConfig = request
         .and_then(|req| req.config)
         .map(TryInto::try_into)
@@ -200,8 +258,16 @@ pub struct DeleteArgs {
 ))]
 pub async fn delete_basin(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     DeleteArgs { basin }: DeleteArgs,
 ) -> Result<StatusCode, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        Some(basin.as_ref()),
+        None,
+        Operation::DeleteBasin,
+    )?;
+
     backend.delete_basin(basin).await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -232,11 +298,19 @@ pub struct ReconfigureArgs {
 ))]
 pub async fn reconfigure_basin(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     ReconfigureArgs {
         basin,
         reconfiguration,
     }: ReconfigureArgs,
 ) -> Result<Json<v1t::config::BasinConfig>, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        Some(basin.as_ref()),
+        None,
+        Operation::ReconfigureBasin,
+    )?;
+
     let reconfiguration: BasinReconfiguration = reconfiguration.try_into()?;
     let config = backend.reconfigure_basin(basin, reconfiguration).await?;
     Ok(Json(config.into()))

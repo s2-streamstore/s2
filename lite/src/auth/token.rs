@@ -1,4 +1,7 @@
-use biscuit_auth::{builder::Algorithm, builder::BiscuitBuilder, Biscuit, KeyPair, PrivateKey};
+use biscuit_auth::{
+    Biscuit, KeyPair, PrivateKey,
+    builder::{Algorithm, BiscuitBuilder},
+};
 use s2_common::types::access::{
     AccessTokenScope, Operation, PermittedOperationGroups, ResourceSet,
 };
@@ -13,6 +16,16 @@ pub fn build_token(
     expires_at: OffsetDateTime,
     scope: &AccessTokenScope,
 ) -> Result<Biscuit, TokenBuildError> {
+    // Validate expiration is in the future
+    if expires_at <= OffsetDateTime::now_utc() {
+        return Err(TokenBuildError::ExpirationInPast);
+    }
+
+    // Validate token grants some permissions
+    if !has_any_permissions(scope) {
+        return Err(TokenBuildError::NoPermissions);
+    }
+
     // Convert to Biscuit's PrivateKey format (P-256 = secp256r1)
     let secret_bytes = root_key.signing_key().to_bytes();
     let private_key = PrivateKey::from_bytes(&secret_bytes, Algorithm::Secp256r1)
@@ -61,11 +74,29 @@ where
 {
     let fact = match resource {
         ResourceSet::None => format!("{}(\"none\", \"\")", name),
-        ResourceSet::Exact(e) => format!("{}(\"exact\", \"{}\")", name, e.as_ref()),
-        ResourceSet::Prefix(p) => format!("{}(\"prefix\", \"{}\")", name, p.as_ref()),
+        ResourceSet::Exact(e) => {
+            let value = e.as_ref();
+            validate_scope_value(value)?;
+            format!("{}(\"exact\", \"{}\")", name, value)
+        }
+        ResourceSet::Prefix(p) => {
+            let value = p.as_ref();
+            validate_scope_value(value)?;
+            format!("{}(\"prefix\", \"{}\")", name, value)
+        }
     };
     builder = builder.fact(fact.as_str())?;
     Ok(builder)
+}
+
+/// Validate that a scope value is safe for Datalog embedding
+fn validate_scope_value(value: &str) -> Result<(), TokenBuildError> {
+    // Reject characters that could break Datalog parsing or enable injection
+    const FORBIDDEN: &[char] = &['"', '\\', ')', '(', ';', '\n', '\r'];
+    if value.chars().any(|c| FORBIDDEN.contains(&c)) {
+        return Err(TokenBuildError::InvalidScopeValue(value.to_string()));
+    }
+    Ok(())
 }
 
 fn add_op_groups(
@@ -93,7 +124,7 @@ fn add_op_groups(
     Ok(builder)
 }
 
-fn op_to_string(op: Operation) -> &'static str {
+pub(crate) fn op_to_string(op: Operation) -> &'static str {
     match op {
         Operation::ListBasins => "list_basins",
         Operation::CreateBasin => "create_basin",
@@ -119,10 +150,33 @@ fn op_to_string(op: Operation) -> &'static str {
     }
 }
 
+fn has_any_permissions(scope: &AccessTokenScope) -> bool {
+    // Check if any op_group permission is granted
+    let groups = &scope.op_groups;
+    if groups.account.read
+        || groups.account.write
+        || groups.basin.read
+        || groups.basin.write
+        || groups.stream.read
+        || groups.stream.write
+    {
+        return true;
+    }
+
+    // Check if any individual operation is granted
+    !scope.ops.is_empty()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TokenBuildError {
     #[error("biscuit error: {0}")]
     Biscuit(#[from] biscuit_auth::error::Token),
     #[error("key conversion error: {0}")]
     KeyConversion(String),
+    #[error("expiration must be in the future")]
+    ExpirationInPast,
+    #[error("token must grant at least one permission")]
+    NoPermissions,
+    #[error("invalid scope value (contains forbidden characters): {0}")]
+    InvalidScopeValue(String),
 }

@@ -46,6 +46,11 @@ impl Backend {
         }
     }
 
+    /// Get a reference to the database.
+    pub fn db(&self) -> &slatedb::Db {
+        &self.db
+    }
+
     async fn start_streamer(
         &self,
         basin: BasinName,

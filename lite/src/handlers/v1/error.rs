@@ -12,10 +12,14 @@ use s2_api::{
 };
 use s2_common::{http::extract::HeaderRejection, types::ValidationError};
 
-use crate::backend::error::{
-    AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError, CreateStreamError,
-    DeleteBasinError, DeleteStreamError, GetBasinConfigError, GetStreamConfigError,
-    ListBasinsError, ListStreamsError, ReadError, ReconfigureBasinError, ReconfigureStreamError,
+use crate::{
+    auth::{AuthorizeError, RevocationError, SignatureError, TokenBuildError, VerifyError},
+    backend::error::{
+        AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError,
+        CreateStreamError, DeleteBasinError, DeleteStreamError, GetBasinConfigError,
+        GetStreamConfigError, ListBasinsError, ListStreamsError, ReadError, ReconfigureBasinError,
+        ReconfigureStreamError,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +64,21 @@ pub enum ServiceError {
     Append(#[from] AppendError),
     #[error(transparent)]
     Read(#[from] ReadError),
+    // Auth errors
+    #[error("authentication required")]
+    AuthRequired,
+    #[error("token build error: {0}")]
+    TokenBuild(#[from] TokenBuildError),
+    #[error("invalid token: {0}")]
+    InvalidToken(#[from] VerifyError),
+    #[error("invalid signature: {0}")]
+    InvalidSignature(#[from] SignatureError),
+    #[error("authorization denied: {0}")]
+    AuthorizationDenied(#[from] AuthorizeError),
+    #[error("revocation error: {0}")]
+    Revocation(#[from] RevocationError),
+    #[error("token revoked")]
+    TokenRevoked,
     #[error("Not implemented")]
     NotImplemented,
 }
@@ -255,6 +274,28 @@ impl ServiceError {
                     tail: tail.0.into(),
                 }),
             },
+            // Auth errors
+            ServiceError::AuthRequired => {
+                standard(ErrorCode::PermissionDenied, "Authentication required")
+            }
+            ServiceError::TokenBuild(e) => {
+                standard(ErrorCode::Invalid, format!("Token build error: {e}"))
+            }
+            ServiceError::InvalidToken(e) => {
+                standard(ErrorCode::PermissionDenied, format!("Invalid token: {e}"))
+            }
+            ServiceError::InvalidSignature(e) => standard(
+                ErrorCode::PermissionDenied,
+                format!("Invalid signature: {e}"),
+            ),
+            ServiceError::AuthorizationDenied(e) => standard(
+                ErrorCode::PermissionDenied,
+                format!("Authorization denied: {e}"),
+            ),
+            ServiceError::Revocation(e) => standard(ErrorCode::Storage, e.to_string()),
+            ServiceError::TokenRevoked => {
+                standard(ErrorCode::PermissionDenied, "Token has been revoked")
+            }
             ServiceError::NotImplemented => {
                 standard(ErrorCode::PermissionDenied, "Not implemented".to_string())
             }

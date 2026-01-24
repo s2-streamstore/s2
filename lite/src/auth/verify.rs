@@ -1,10 +1,17 @@
-use biscuit_auth::{builder::Algorithm, builder::AuthorizerBuilder, Biscuit, PublicKey};
+use biscuit_auth::{
+    Biscuit, PublicKey,
+    builder::{Algorithm, AuthorizerBuilder},
+};
 use s2_common::types::access::Operation;
 use time::OffsetDateTime;
 
-use super::keys::{ClientPublicKey, RootPublicKey};
+use super::{
+    keys::{ClientPublicKey, RootPublicKey},
+    token::op_to_string,
+};
 
 /// Verified token with extracted claims
+#[derive(Clone)]
 pub struct VerifiedToken {
     pub biscuit: Biscuit,
     /// All public keys in token (authority + attenuation blocks)
@@ -13,11 +20,20 @@ pub struct VerifiedToken {
     pub revocation_ids: Vec<Vec<u8>>,
 }
 
+/// Maximum token size in bytes (64 KB)
+/// Prevents DoS via massive tokens with thousands of facts
+const MAX_TOKEN_SIZE: usize = 64 * 1024;
+
 /// Verify a Biscuit token and extract allowed public keys
 pub fn verify_token(
     token_bytes: &[u8],
     root_public_key: &RootPublicKey,
 ) -> Result<VerifiedToken, VerifyError> {
+    // Reject oversized tokens to prevent DoS
+    if token_bytes.len() > MAX_TOKEN_SIZE {
+        return Err(VerifyError::TokenTooLarge(token_bytes.len()));
+    }
+
     // Convert root public key to Biscuit's PublicKey type
     let biscuit_pubkey = public_key_to_biscuit(root_public_key)?;
 
@@ -38,13 +54,28 @@ pub fn verify_token(
 }
 
 /// Authorize an operation on a resource
+///
+/// Parameters:
+/// - `basin`: The basin being accessed (None for account-level operations)
+/// - `stream`: The stream being accessed (None for basin/account-level operations)
+/// - `access_token_id`: The access token being operated on (for IssueAccessToken,
+///   RevokeAccessToken, etc.)
 pub fn authorize(
     token: &VerifiedToken,
     signer_public_key: &ClientPublicKey,
     basin: Option<&str>,
     stream: Option<&str>,
+    access_token_id: Option<&str>,
     operation: Operation,
 ) -> Result<(), AuthorizeError> {
+    // Verify the request signer is authorized by this token
+    if !token.allowed_public_keys.contains(signer_public_key) {
+        return Err(AuthorizeError::UnauthorizedSigner);
+    }
+
+    // Check resource scopes in Rust (simpler than Datalog negation)
+    check_resource_scopes(&token.biscuit, basin, stream, access_token_id)?;
+
     let mut builder = AuthorizerBuilder::new();
 
     // Add current time
@@ -81,6 +112,80 @@ pub fn authorize(
     Ok(())
 }
 
+/// Check that the requested resources are within the token's scope
+fn check_resource_scopes(
+    biscuit: &Biscuit,
+    basin: Option<&str>,
+    stream: Option<&str>,
+    access_token_id: Option<&str>,
+) -> Result<(), AuthorizeError> {
+    let mut authorizer = biscuit.authorizer()?;
+
+    // Extract scope facts from the token
+    // Query failures indicate a malformed token - don't silently allow access
+    let basin_scopes: Vec<(String, String)> = authorizer
+        .query("data($type, $value) <- basin_scope($type, $value)")
+        .map_err(|e| AuthorizeError::MalformedToken(e.to_string()))?;
+
+    let stream_scopes: Vec<(String, String)> = authorizer
+        .query("data($type, $value) <- stream_scope($type, $value)")
+        .map_err(|e| AuthorizeError::MalformedToken(e.to_string()))?;
+
+    let access_token_scopes: Vec<(String, String)> = authorizer
+        .query("data($type, $value) <- access_token_scope($type, $value)")
+        .map_err(|e| AuthorizeError::MalformedToken(e.to_string()))?;
+
+    // Check basin scope
+    if let Some(basin_name) = basin {
+        if !is_resource_in_scope(basin_name, &basin_scopes) {
+            return Err(AuthorizeError::OutOfScope("basin".into()));
+        }
+    }
+
+    // Check stream scope
+    if let Some(stream_name) = stream {
+        if !is_resource_in_scope(stream_name, &stream_scopes) {
+            return Err(AuthorizeError::OutOfScope("stream".into()));
+        }
+    }
+
+    // Check access_token scope (for IssueAccessToken, RevokeAccessToken, etc.)
+    if let Some(token_id) = access_token_id {
+        if !is_resource_in_scope(token_id, &access_token_scopes) {
+            return Err(AuthorizeError::OutOfScope("access_token".into()));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_resource_in_scope(resource: &str, scopes: &[(String, String)]) -> bool {
+    // If no scopes defined, deny by default
+    if scopes.is_empty() {
+        return false;
+    }
+
+    for (scope_type, scope_value) in scopes {
+        match scope_type.as_str() {
+            "none" => return false, // No access allowed
+            "exact" => {
+                if resource == scope_value {
+                    return true;
+                }
+            }
+            "prefix" => {
+                if resource.starts_with(scope_value) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // No matching scope found
+    false
+}
+
 fn public_key_to_biscuit(key: &RootPublicKey) -> Result<PublicKey, VerifyError> {
     // Biscuit expects the public key in compressed SEC1 format for secp256r1
     let point = key.verifying_key().to_encoded_point(true);
@@ -89,28 +194,99 @@ fn public_key_to_biscuit(key: &RootPublicKey) -> Result<PublicKey, VerifyError> 
 }
 
 fn extract_client_public_keys(biscuit: &Biscuit) -> Result<Vec<ClientPublicKey>, VerifyError> {
-    // Query for all public_key facts (from authority + attenuation blocks)
-    let mut authorizer = biscuit.authorizer()?;
+    // Extract public_key facts from all blocks (authority + attenuation)
+    // We iterate through each block individually to handle trust origin issues
+    let mut public_keys = Vec::new();
 
-    // Use authorizer query to extract all public_key facts
-    let facts: Vec<(String,)> = authorizer
-        .query("data($pk) <- public_key($pk)")
-        .map_err(VerifyError::Biscuit)?;
+    let block_count = biscuit.block_count();
+    for block_idx in 0..block_count {
+        if let Ok(block_source) = biscuit.print_block_source(block_idx) {
+            extract_public_keys_from_source(&block_source, &mut public_keys);
+        }
+    }
 
-    if facts.is_empty() {
+    if public_keys.is_empty() {
         return Err(VerifyError::MissingPublicKey);
     }
 
-    facts
-        .into_iter()
-        .map(|(pk,)| {
-            ClientPublicKey::from_base58(&pk)
-                .map_err(|e| VerifyError::InvalidPublicKey(e.to_string()))
-        })
-        .collect()
+    Ok(public_keys)
+}
+
+/// Extract public_key("...") facts from block source text
+///
+/// SECURITY: Only extracts from top-level fact declarations, not from string literals
+/// inside checks/rules. A fact must appear at a statement boundary (start of source,
+/// after newline, or after semicolon) to be considered valid.
+fn extract_public_keys_from_source(source: &str, public_keys: &mut Vec<ClientPublicKey>) {
+    const MARKER: &str = "public_key(\"";
+    let mut search_start = 0;
+
+    while let Some(marker_pos) = source[search_start..].find(MARKER) {
+        let abs_pos = search_start + marker_pos;
+
+        // Security check: only accept if at a statement boundary
+        // This prevents injection via nested string literals like:
+        //   check if foo.contains("public_key(\"ATTACKER\")")
+        let at_statement_boundary = if abs_pos == 0 {
+            true
+        } else {
+            let prev_char = source[..abs_pos].chars().last().unwrap();
+            // Valid boundaries: newline, semicolon, or start of block after whitespace
+            prev_char == '\n'
+                || prev_char == ';'
+                || (prev_char.is_whitespace() && {
+                    // Check if this is the start of a statement (no preceding content on this line)
+                    let line_start = source[..abs_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                    source[line_start..abs_pos].trim().is_empty()
+                })
+        };
+
+        let key_start = abs_pos + MARKER.len();
+
+        if at_statement_boundary {
+            // Find the closing quote and verify it's followed by ");" or ")\n" or ")" at end
+            if let Some(key_len) = source[key_start..].find('"') {
+                let key_str = &source[key_start..key_start + key_len];
+                let after_quote = key_start + key_len + 1; // position after closing quote
+
+                // Verify this is a complete fact: public_key("...") followed by ; or newline or end
+                let valid_termination = if after_quote >= source.len() {
+                    false // need at least the closing paren
+                } else if source[after_quote..].starts_with(')') {
+                    let after_paren = after_quote + 1;
+                    after_paren >= source.len()
+                        || source[after_paren..].starts_with(';')
+                        || source[after_paren..].starts_with('\n')
+                        || source[after_paren..].starts_with(' ')
+                } else {
+                    false
+                };
+
+                if valid_termination {
+                    if let Ok(pk) = ClientPublicKey::from_base58(key_str) {
+                        if !public_keys.contains(&pk) {
+                            public_keys.push(pk);
+                        }
+                    }
+                }
+
+                search_start = key_start + key_len;
+            } else {
+                break;
+            }
+        } else {
+            // Skip this match - it's inside a string literal or other construct
+            search_start = abs_pos + MARKER.len();
+        }
+    }
 }
 
 const AUTHORIZATION_POLICY: &str = r#"
+// Scope enforcement via checks in token
+// The token contains checks like:
+//   check if basin($b), $b.starts_with("prefix")
+// These are enforced automatically by the authorizer
+
 // Allow if operation is in explicit ops list
 allow if operation($op), op($op);
 
@@ -143,32 +319,6 @@ allow if operation($op), op_group("stream", "write"),
 deny if true;
 "#;
 
-fn op_to_string(op: Operation) -> &'static str {
-    match op {
-        Operation::ListBasins => "list_basins",
-        Operation::CreateBasin => "create_basin",
-        Operation::DeleteBasin => "delete_basin",
-        Operation::ReconfigureBasin => "reconfigure_basin",
-        Operation::GetBasinConfig => "get_basin_config",
-        Operation::IssueAccessToken => "issue_access_token",
-        Operation::RevokeAccessToken => "revoke_access_token",
-        Operation::ListAccessTokens => "list_access_tokens",
-        Operation::ListStreams => "list_streams",
-        Operation::CreateStream => "create_stream",
-        Operation::DeleteStream => "delete_stream",
-        Operation::GetStreamConfig => "get_stream_config",
-        Operation::ReconfigureStream => "reconfigure_stream",
-        Operation::CheckTail => "check_tail",
-        Operation::Append => "append",
-        Operation::Read => "read",
-        Operation::Trim => "trim",
-        Operation::Fence => "fence",
-        Operation::AccountMetrics => "account_metrics",
-        Operation::BasinMetrics => "basin_metrics",
-        Operation::StreamMetrics => "stream_metrics",
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
     #[error("biscuit error: {0}")]
@@ -179,10 +329,18 @@ pub enum VerifyError {
     MissingPublicKey,
     #[error("invalid public key: {0}")]
     InvalidPublicKey(String),
+    #[error("token too large: {0} bytes (max {MAX_TOKEN_SIZE})")]
+    TokenTooLarge(usize),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthorizeError {
     #[error("biscuit error: {0}")]
     Biscuit(#[from] biscuit_auth::error::Token),
+    #[error("{0} out of scope")]
+    OutOfScope(String),
+    #[error("request signer not authorized by token")]
+    UnauthorizedSigner,
+    #[error("malformed token: {0}")]
+    MalformedToken(String),
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::{
     body::Body,
-    extract::{FromRequest, Path, Query, State},
+    extract::{Extension, FromRequest, Path, Query, State},
     response::{IntoResponse, Response},
 };
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -18,17 +18,39 @@ use s2_common::{
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
     types::{
+        access::Operation,
         basin::BasinName,
         stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
     },
 };
 
 use crate::{
+    auth,
     backend::{Backend, error::ReadError},
-    handlers::v1::error::ServiceError,
+    handlers::v1::{AppState, error::ServiceError, middleware::AuthenticatedRequest},
 };
 
-pub fn router() -> axum::Router<Backend> {
+/// Authorize an operation if auth is enabled
+fn authorize_op(
+    auth_req: Option<&AuthenticatedRequest>,
+    basin: &str,
+    stream: &str,
+    operation: Operation,
+) -> Result<(), ServiceError> {
+    if let Some(auth) = auth_req {
+        auth::authorize(
+            &auth.token,
+            &auth.client_public_key,
+            Some(basin),
+            Some(stream),
+            None,
+            operation,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn router() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route(super::paths::streams::records::CHECK_TAIL, get(check_tail))
@@ -69,8 +91,16 @@ pub struct CheckTailArgs {
 ))]
 pub async fn check_tail(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     CheckTailArgs { basin, stream }: CheckTailArgs,
 ) -> Result<Json<v1t::stream::TailResponse>, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        stream.as_ref(),
+        Operation::CheckTail,
+    )?;
+
     let tail = backend.check_tail(basin, stream).await?;
     Ok(Json(v1t::stream::TailResponse { tail: tail.into() }))
 }
@@ -122,6 +152,7 @@ pub struct ReadArgs {
 ))]
 pub async fn read(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     ReadArgs {
         basin,
         stream,
@@ -130,6 +161,13 @@ pub async fn read(
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        stream.as_ref(),
+        Operation::Read,
+    )?;
+
     match request {
         v1t::stream::ReadRequest::Unary {
             format,
@@ -309,12 +347,20 @@ pub struct AppendArgs {
 ))]
 pub async fn append(
     State(backend): State<Backend>,
+    auth: Option<Extension<AuthenticatedRequest>>,
     AppendArgs {
         basin,
         stream,
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
+    authorize_op(
+        auth.as_ref().map(|e| &e.0),
+        basin.as_ref(),
+        stream.as_ref(),
+        Operation::Append,
+    )?;
+
     match request {
         v1t::stream::AppendRequest::Unary {
             input,

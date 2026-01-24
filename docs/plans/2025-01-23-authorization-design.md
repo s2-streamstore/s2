@@ -1,5 +1,7 @@
 # Authorization Design
 
+> **Status:** Implemented. See [lite/docs/authentication.md](../../lite/docs/authentication.md) for usage documentation.
+
 Stateless authorization for s2-lite using Biscuit tokens and RFC 9421 HTTP Message Signatures.
 
 ## Overview
