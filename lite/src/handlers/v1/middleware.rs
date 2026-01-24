@@ -2,7 +2,7 @@
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{OriginalUri, Request, State},
     middleware::Next,
     response::Response,
 };
@@ -72,7 +72,13 @@ pub async fn auth_middleware(
 
     // Verify RFC 9421 signature against any allowed public key
     let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    // Use OriginalUri to get the path BEFORE nested routing strips prefixes
+    // (e.g., .nest("/v1", ...) strips "/v1" from the path the middleware sees)
+    let path = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|uri| uri.path().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
     let authority = request
         .uri()
         .authority()

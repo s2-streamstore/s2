@@ -113,27 +113,27 @@ pub fn authorize(
 }
 
 /// Check that the requested resources are within the token's scope
+///
+/// Extracts scope facts directly from block source to avoid Datalog evaluation overhead.
 fn check_resource_scopes(
     biscuit: &Biscuit,
     basin: Option<&str>,
     stream: Option<&str>,
     access_token_id: Option<&str>,
 ) -> Result<(), AuthorizeError> {
-    let mut authorizer = biscuit.authorizer()?;
+    // Extract scope facts directly from block source (avoids Datalog evaluation)
+    let mut basin_scopes = Vec::new();
+    let mut stream_scopes = Vec::new();
+    let mut access_token_scopes = Vec::new();
 
-    // Extract scope facts from the token
-    // Query failures indicate a malformed token - don't silently allow access
-    let basin_scopes: Vec<(String, String)> = authorizer
-        .query("data($type, $value) <- basin_scope($type, $value)")
-        .map_err(|e| AuthorizeError::MalformedToken(e.to_string()))?;
-
-    let stream_scopes: Vec<(String, String)> = authorizer
-        .query("data($type, $value) <- stream_scope($type, $value)")
-        .map_err(|e| AuthorizeError::MalformedToken(e.to_string()))?;
-
-    let access_token_scopes: Vec<(String, String)> = authorizer
-        .query("data($type, $value) <- access_token_scope($type, $value)")
-        .map_err(|e| AuthorizeError::MalformedToken(e.to_string()))?;
+    let block_count = biscuit.block_count();
+    for block_idx in 0..block_count {
+        if let Ok(block_source) = biscuit.print_block_source(block_idx) {
+            extract_scope_facts(&block_source, "basin_scope", &mut basin_scopes);
+            extract_scope_facts(&block_source, "stream_scope", &mut stream_scopes);
+            extract_scope_facts(&block_source, "access_token_scope", &mut access_token_scopes);
+        }
+    }
 
     // Check basin scope
     if let Some(basin_name) = basin {
@@ -157,6 +157,62 @@ fn check_resource_scopes(
     }
 
     Ok(())
+}
+
+/// Extract scope facts like `basin_scope("prefix", "")` from block source text.
+///
+/// Similar security considerations as extract_public_keys_from_source - only extracts
+/// from top-level fact declarations, not from string literals inside checks/rules.
+fn extract_scope_facts(source: &str, fact_name: &str, scopes: &mut Vec<(String, String)>) {
+    let marker = format!("{}(\"", fact_name);
+    let mut search_start = 0;
+
+    while let Some(marker_pos) = source[search_start..].find(&marker) {
+        let abs_pos = search_start + marker_pos;
+
+        // Security check: only accept if at a statement boundary
+        let at_statement_boundary = if abs_pos == 0 {
+            true
+        } else {
+            let prev_char = source[..abs_pos].chars().last().unwrap();
+            prev_char == '\n'
+                || prev_char == ';'
+                || (prev_char.is_whitespace() && {
+                    let line_start = source[..abs_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                    source[line_start..abs_pos].trim().is_empty()
+                })
+        };
+
+        let first_arg_start = abs_pos + marker.len();
+
+        if at_statement_boundary {
+            // Parse: fact_name("arg1", "arg2")
+            if let Some(first_quote_end) = source[first_arg_start..].find('"') {
+                let first_arg = &source[first_arg_start..first_arg_start + first_quote_end];
+                let after_first = first_arg_start + first_quote_end + 1;
+
+                // Look for ", " followed by second argument
+                if source[after_first..].starts_with(", \"") {
+                    let second_arg_start = after_first + 3;
+                    if let Some(second_quote_end) = source[second_arg_start..].find('"') {
+                        let second_arg =
+                            &source[second_arg_start..second_arg_start + second_quote_end];
+                        let after_second = second_arg_start + second_quote_end + 1;
+
+                        // Verify proper termination: )
+                        if source[after_second..].starts_with(')') {
+                            scopes.push((first_arg.to_string(), second_arg.to_string()));
+                        }
+
+                        search_start = after_second;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        search_start = abs_pos + marker.len();
+    }
 }
 
 fn is_resource_in_scope(resource: &str, scopes: &[(String, String)]) -> bool {
@@ -343,4 +399,176 @@ pub enum AuthorizeError {
     UnauthorizedSigner,
     #[error("malformed token: {0}")]
     MalformedToken(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use biscuit_auth::{KeyPair, PrivateKey, builder::BiscuitBuilder};
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    /// Simulate exactly what the CLI does in bootstrap mode:
+    /// 1. Parse root_key as 32 bytes
+    /// 2. Create p256 SigningKey
+    /// 3. Get compressed public key as base58
+    /// 4. Create Biscuit with public_key("...") fact
+    /// 5. Extract public keys from Biscuit
+    /// 6. Verify the extracted key matches the signing key
+    #[test]
+    fn test_cli_bootstrap_flow_public_key_extraction() {
+        // 1. Generate a random key (simulating root_key)
+        let signing_key = SigningKey::random(&mut OsRng);
+        let key_bytes = signing_key.to_bytes();
+
+        // 2. Get public key as compressed base58 (exactly like CLI does)
+        let public_key = signing_key.verifying_key();
+        let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+        println!("Public key base58: {}", public_key_base58);
+
+        // 3. Create Biscuit keypair from same bytes (exactly like CLI does)
+        let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1)
+            .expect("should create biscuit private key");
+        let biscuit_keypair = KeyPair::from(&biscuit_private);
+
+        // 4. Build Biscuit with public_key fact (exactly like CLI does)
+        let mut builder = BiscuitBuilder::new();
+        builder = builder
+            .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+            .expect("should add public_key fact");
+
+        let biscuit = builder
+            .build(&biscuit_keypair)
+            .expect("should build biscuit");
+
+        // 5. Print block source to see what we're working with
+        let block_source = biscuit.print_block_source(0).expect("should print block");
+        println!("Block source:\n{}", block_source);
+
+        // 6. Extract public keys using server's extraction logic
+        let extracted_keys = extract_client_public_keys(&biscuit)
+            .expect("should extract public keys");
+
+        println!("Extracted {} public keys", extracted_keys.len());
+        for (i, key) in extracted_keys.iter().enumerate() {
+            println!("  Key {}: {}", i, key.to_base58());
+        }
+
+        // 7. Verify we got exactly one key and it matches
+        assert_eq!(extracted_keys.len(), 1, "Should extract exactly one public key");
+        assert_eq!(
+            extracted_keys[0].to_base58(),
+            public_key_base58,
+            "Extracted key should match original"
+        );
+    }
+
+    /// Test the full flow: create Biscuit like CLI, verify token, check public keys match
+    #[test]
+    fn test_cli_bootstrap_full_token_verification() {
+        // Generate root key
+        let signing_key = SigningKey::random(&mut OsRng);
+        let key_bytes = signing_key.to_bytes();
+
+        // Get public key
+        let public_key = signing_key.verifying_key();
+        let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+
+        // Create Biscuit keypair
+        let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
+        let biscuit_keypair = KeyPair::from(&biscuit_private);
+
+        // Build Biscuit with all the facts the CLI adds
+        let expires_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+
+        let mut builder = BiscuitBuilder::new();
+        builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
+        builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
+        builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+        builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
+        builder = builder.fact("op_group(\"account\", \"write\")").unwrap();
+        builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
+
+        let biscuit = builder.build(&biscuit_keypair).unwrap();
+        let token_bytes = biscuit.to_vec().unwrap();
+
+        // Now verify the token like the server does
+        let root_public_key = RootPublicKey::from_base58(&public_key_base58).unwrap();
+        let verified = verify_token(&token_bytes, &root_public_key)
+            .expect("should verify token");
+
+        // Check that the public key was extracted correctly
+        assert_eq!(verified.allowed_public_keys.len(), 1);
+        assert_eq!(verified.allowed_public_keys[0].to_base58(), public_key_base58);
+
+        println!("Token verified successfully!");
+        println!("Allowed public keys: {:?}", verified.allowed_public_keys.iter().map(|k| k.to_base58()).collect::<Vec<_>>());
+    }
+
+    /// Test with the ACTUAL root key from the CLI config to ensure we get the same public key
+    #[test]
+    fn test_with_actual_root_key() {
+        // This is the root key from the user's config
+        let root_key_base58 = "ByDGSRM82bqEVQoGYpZzvmmHujrB32UN1sr7WbKN6TPQ";
+
+        // Decode root key
+        let key_bytes = bs58::decode(root_key_base58).into_vec().unwrap();
+        assert_eq!(key_bytes.len(), 32, "Root key should be 32 bytes");
+
+        // Create signing key (like CLI does)
+        let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
+
+        // Get public key (like CLI does)
+        let public_key = signing_key.verifying_key();
+        let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+
+        println!("Root key: {}", root_key_base58);
+        println!("Public key: {}", public_key_base58);
+
+        // This should match what the server logs: pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW
+        assert_eq!(
+            public_key_base58,
+            "pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW",
+            "Public key should match server's expected public key"
+        );
+
+        // Now create Biscuit like CLI does
+        let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
+        let biscuit_keypair = KeyPair::from(&biscuit_private);
+
+        let expires_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+
+        let mut builder = BiscuitBuilder::new();
+        builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
+        builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
+        builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+        builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
+        builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
+
+        let biscuit = builder.build(&biscuit_keypair).unwrap();
+
+        // Print block source
+        let block_source = biscuit.print_block_source(0).unwrap();
+        println!("Biscuit block source:\n{}", block_source);
+
+        let token_bytes = biscuit.to_vec().unwrap();
+
+        // Verify with the same public key the server uses
+        let root_public_key = RootPublicKey::from_base58(&public_key_base58).unwrap();
+        let verified = verify_token(&token_bytes, &root_public_key).unwrap();
+
+        println!("Extracted public keys: {:?}",
+            verified.allowed_public_keys.iter().map(|k| k.to_base58()).collect::<Vec<_>>());
+
+        assert_eq!(verified.allowed_public_keys.len(), 1);
+        assert_eq!(verified.allowed_public_keys[0].to_base58(), public_key_base58);
+    }
 }
