@@ -40,9 +40,15 @@ struct TlsConfig {
 struct Args {
     /// Name of the S3 bucket to back the database.
     ///
-    /// If not specified, in-memory storage is used.
-    #[arg(long)]
+    /// If not specified, in-memory storage is used (unless --local-path is set).
+    #[arg(long, conflicts_with = "local_path")]
     bucket: Option<String>,
+
+    /// Local filesystem path for storage.
+    ///
+    /// Use this for persistent local storage instead of S3 or in-memory.
+    #[arg(long, conflicts_with = "bucket")]
+    local_path: Option<PathBuf>,
 
     /// Base path on object storage.
     #[arg(long, default_value = "")]
@@ -139,9 +145,11 @@ async fn main() -> eyre::Result<()> {
         format!("0.0.0.0:{port}")
     };
 
-    let object_store = init_object_store(args.bucket.as_deref()).await?;
+    let object_store =
+        init_object_store(args.bucket.as_deref(), args.local_path.as_deref()).await?;
 
-    let default_flush_interval = Duration::from_millis(if args.bucket.is_some() { 50 } else { 5 });
+    let uses_remote_storage = args.bucket.is_some();
+    let default_flush_interval = Duration::from_millis(if uses_remote_storage { 50 } else { 5 });
 
     let db_settings = slatedb::Settings::from_env_with_default(
         "SL8_",
@@ -268,7 +276,16 @@ async fn main() -> eyre::Result<()> {
 
 async fn init_object_store(
     bucket: Option<&str>,
+    local_path: Option<&std::path::Path>,
 ) -> eyre::Result<Arc<dyn object_store::ObjectStore>> {
+    // Local filesystem takes precedence
+    if let Some(path) = local_path {
+        info!(?path, "using local filesystem object store");
+        return Ok(Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(path)?,
+        ));
+    }
+
     match bucket {
         Some(bucket) if !bucket.is_empty() => {
             info!(bucket, "using s3 object store");
