@@ -103,8 +103,10 @@ pub async fn issue_access_token(
     auth: Option<Extension<AuthenticatedRequest>>,
     IssueArgs { _request: request }: IssueArgs,
 ) -> Result<(StatusCode, Json<v1t::access::IssueAccessTokenResponse>), ServiceError> {
-    // Verify auth is enabled
-    let root_key = auth_state.root_key().ok_or(ServiceError::NotImplemented)?;
+    // Verify token issuance is enabled (requires private key)
+    let root_key = auth_state
+        .root_key()
+        .ok_or(ServiceError::TokenIssuanceDisabled)?;
 
     // Authorize the operation
     if let Some(Extension(ref auth_req)) = auth {

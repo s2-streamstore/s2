@@ -79,6 +79,8 @@ pub enum ServiceError {
     Revocation(#[from] RevocationError),
     #[error("token revoked")]
     TokenRevoked,
+    #[error("token issuance disabled (server running in verify-only mode)")]
+    TokenIssuanceDisabled,
     #[error("Not implemented")]
     NotImplemented,
 }
@@ -296,6 +298,10 @@ impl ServiceError {
             ServiceError::TokenRevoked => {
                 standard(ErrorCode::PermissionDenied, "Token has been revoked")
             }
+            ServiceError::TokenIssuanceDisabled => standard(
+                ErrorCode::PermissionDenied,
+                "Token issuance disabled (server running in verify-only mode)",
+            ),
             ServiceError::NotImplemented => {
                 standard(ErrorCode::PermissionDenied, "Not implemented".to_string())
             }

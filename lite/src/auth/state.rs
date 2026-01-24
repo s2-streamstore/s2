@@ -16,13 +16,15 @@ pub struct AuthState {
 }
 
 struct AuthStateInner {
-    root_key: RootKey,
+    /// Private key for signing tokens. None = verify-only mode.
+    root_key: Option<RootKey>,
+    /// Public key for verifying tokens.
     root_public_key: RootPublicKey,
     signature_window_secs: u64,
 }
 
 impl AuthState {
-    /// Create auth state with the given root key.
+    /// Create auth state with both private and public keys (can issue tokens).
     pub fn new(
         root_key: RootKey,
         signature_window_secs: u64,
@@ -31,7 +33,23 @@ impl AuthState {
         let root_public_key = root_key.public_key();
         Self {
             inner: Some(Arc::new(AuthStateInner {
-                root_key,
+                root_key: Some(root_key),
+                root_public_key,
+                signature_window_secs,
+            })),
+            metrics_token: metrics_token.map(Arc::new),
+        }
+    }
+
+    /// Create auth state with only public key (verify-only, cannot issue tokens).
+    pub fn verify_only(
+        root_public_key: RootPublicKey,
+        signature_window_secs: u64,
+        metrics_token: Option<String>,
+    ) -> Self {
+        Self {
+            inner: Some(Arc::new(AuthStateInner {
+                root_key: None,
                 root_public_key,
                 signature_window_secs,
             })),
@@ -60,9 +78,16 @@ impl AuthState {
         self.inner.is_some()
     }
 
-    /// Get the root key (for signing tokens).
+    /// Check if token issuance is enabled (has private key).
+    pub fn can_issue_tokens(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|i| i.root_key.is_some())
+    }
+
+    /// Get the root key (for signing tokens). None if verify-only mode.
     pub fn root_key(&self) -> Option<&RootKey> {
-        self.inner.as_ref().map(|i| &i.root_key)
+        self.inner.as_ref().and_then(|i| i.root_key.as_ref())
     }
 
     /// Get the root public key (for verifying tokens).
@@ -108,11 +133,12 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_state_enabled() {
+    fn test_auth_state_full() {
         let root_key = generate_test_root_key();
         let state = AuthState::new(root_key, 600, None);
 
         assert!(state.is_enabled());
+        assert!(state.can_issue_tokens());
         assert!(state.root_key().is_some());
         assert!(state.root_public_key().is_some());
         assert_eq!(state.signature_window_secs(), 600);
@@ -120,10 +146,28 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_state_verify_only() {
+        let root_key = generate_test_root_key();
+        let public_key = root_key.public_key();
+        let state = AuthState::verify_only(public_key.clone(), 600, None);
+
+        assert!(state.is_enabled());
+        assert!(!state.can_issue_tokens());
+        assert!(state.root_key().is_none());
+        assert!(state.root_public_key().is_some());
+        assert_eq!(
+            state.root_public_key().unwrap().to_base58(),
+            public_key.to_base58()
+        );
+        assert_eq!(state.signature_window_secs(), 600);
+    }
+
+    #[test]
     fn test_auth_state_disabled() {
         let state = AuthState::disabled();
 
         assert!(!state.is_enabled());
+        assert!(!state.can_issue_tokens());
         assert!(state.root_key().is_none());
         assert!(state.root_public_key().is_none());
         assert_eq!(state.signature_window_secs(), 300); // default

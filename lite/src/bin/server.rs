@@ -56,10 +56,16 @@ struct Args {
     #[arg(long)]
     port: Option<u16>,
 
-    /// Root key for signing access tokens (base58-encoded P-256 private key).
-    /// If not set, authentication is disabled.
-    #[arg(long, env = "S2_ROOT_KEY")]
-    root_key: Option<String>,
+    /// Root public key for verifying access tokens (base58-encoded P-256 compressed public key).
+    /// Required to enable authentication.
+    #[arg(long, env = "S2_ROOT_PUBLIC_KEY")]
+    root_public_key: Option<String>,
+
+    /// Root private key for signing new access tokens (base58-encoded P-256 private key).
+    /// Only needed if server should issue tokens via /access-tokens endpoint.
+    /// If provided without --root-public-key, derives the public key automatically.
+    #[arg(long, env = "S2_ROOT_PRIVATE_KEY")]
+    root_private_key: Option<String>,
 
     /// Signature timestamp window in seconds (default 300).
     /// Requests with signatures older than this are rejected.
@@ -86,18 +92,40 @@ async fn main() -> eyre::Result<()> {
 
     info!(?args);
 
-    // Parse and validate root key for auth
-    let root_key = args
-        .root_key
+    // Parse and validate auth keys
+    let root_private_key = args
+        .root_private_key
         .as_ref()
         .map(|k| s2_lite::auth::RootKey::from_base58(k))
         .transpose()
-        .map_err(|e| eyre::eyre!("invalid root key: {}", e))?;
+        .map_err(|e| eyre::eyre!("invalid root private key: {}", e))?;
 
-    if let Some(ref key) = root_key {
-        info!(public_key = %key.public_key(), "auth enabled");
-    } else {
-        info!("auth disabled (no root key provided)");
+    let root_public_key = match (&args.root_public_key, &root_private_key) {
+        (Some(pk), _) => {
+            // Explicit public key provided
+            Some(
+                s2_lite::auth::RootPublicKey::from_base58(pk)
+                    .map_err(|e| eyre::eyre!("invalid root public key: {}", e))?,
+            )
+        }
+        (None, Some(sk)) => {
+            // Derive public key from private key
+            Some(sk.public_key())
+        }
+        (None, None) => None,
+    };
+
+    match (&root_public_key, &root_private_key) {
+        (Some(pk), Some(_)) => {
+            info!(public_key = %pk, "auth enabled (can issue tokens)");
+        }
+        (Some(pk), None) => {
+            info!(public_key = %pk, "auth enabled (verify only)");
+        }
+        (None, None) => {
+            info!("auth disabled (no root key provided)");
+        }
+        (None, Some(_)) => unreachable!(),
     }
 
     let addr = {
@@ -141,14 +169,33 @@ async fn main() -> eyre::Result<()> {
     let backend = Backend::new(db, append_inflight_max);
 
     // Create auth state
-    let auth_state = match root_key {
-        Some(key) => {
-            s2_lite::auth::AuthState::new(key, args.signature_window, args.metrics_token.clone())
+    let auth_state = match (root_public_key, root_private_key) {
+        (Some(pk), Some(sk)) => {
+            // Full mode: can verify and issue tokens
+            // Verify the keys match
+            if pk != sk.public_key() {
+                return Err(eyre::eyre!(
+                    "root-public-key does not match root-private-key"
+                ));
+            }
+            s2_lite::auth::AuthState::new(sk, args.signature_window, args.metrics_token.clone())
         }
-        None => match args.metrics_token {
-            Some(token) => s2_lite::auth::AuthState::metrics_only(token),
-            None => s2_lite::auth::AuthState::disabled(),
-        },
+        (Some(pk), None) => {
+            // Verify-only mode: can verify but not issue tokens
+            s2_lite::auth::AuthState::verify_only(
+                pk,
+                args.signature_window,
+                args.metrics_token.clone(),
+            )
+        }
+        (None, None) => {
+            // Auth disabled
+            match args.metrics_token {
+                Some(token) => s2_lite::auth::AuthState::metrics_only(token),
+                None => s2_lite::auth::AuthState::disabled(),
+            }
+        }
+        (None, Some(_)) => unreachable!(),
     };
 
     if auth_state.metrics_token().is_some() {
