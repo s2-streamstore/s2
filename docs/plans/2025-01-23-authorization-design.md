@@ -56,7 +56,24 @@ P-256 ECDSA signature by root private key
 check if basin($b), $b.starts_with("tenant-a/project-1/");
 check if operation($op), ["read", "check_tail"].contains($op);
 check if time($t), $t < 2025-06-01T00:00:00Z;  // tighter expiry
+
+// Delegation: rebind to a different client key
+public_key("3ABcd8UVWxyz...");                    // new client's pubkey
+check if signer($s), $s == "3ABcd8UVWxyz...";    // only new client can use
 ```
+
+### Offline Delegation via Attenuation
+
+Token holders can delegate access to another party without server involvement:
+
+1. New client generates keypair (`s2 keygen`)
+2. Token holder attenuates their token, adding:
+   - `public_key("<new-client-pubkey>")` fact
+   - `check if signer($s), $s == "<new-client-pubkey>"` caveat
+   - Any additional scope restrictions
+3. New client receives attenuated token + uses their private key for RFC 9421 signing
+
+The `signer` caveat ensures only the new client can use the attenuated token, even though the original `public_key` fact remains in the authority block. Server adds `signer("<actual-signer>")` fact during verification.
 
 ### Key Formats
 
@@ -83,13 +100,14 @@ Signature: sig1=:BASE64_ECDSA_P256_SIGNATURE:
 
 1. Parse `Authorization: Bearer <token>`, deserialize Biscuit
 2. Verify Biscuit signature against root public key
-3. Extract `public_key` fact from token
-4. Verify RFC 9421 signature using that public key
+3. Extract all `public_key` facts from token (authority + attenuation blocks)
+4. Verify RFC 9421 signature using any matching public key
 5. Check `created` timestamp is within allowed window (default ±5 minutes)
 6. Extract Biscuit revocation IDs, check against SlateDB revocation list
 7. Run Biscuit authorizer:
    - Add facts: `time(now)`, `basin("tenant-a")`, `stream("logs")`, `operation(append)`
-   - Check all caveats pass
+   - Add fact: `signer("<pubkey-that-signed-request>")` for delegation support
+   - Check all caveats pass (including `check if signer(...)` for delegated tokens)
    - Check scope facts allow this basin/stream
    - Check ops/op_groups allow this operation
 
@@ -250,6 +268,7 @@ pub async fn append(
     authorizer.add_fact(format!("stream(\"{}\")", stream));
     authorizer.add_fact("operation(append)");
     authorizer.add_fact(format!("time({})", now_rfc3339()));
+    authorizer.add_fact(format!("signer(\"{}\")", auth.public_key));  // for delegation
     authorizer.authorize(&auth.biscuit)?;
 
     // Proceed with append...

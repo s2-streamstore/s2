@@ -528,11 +528,13 @@ use super::keys::{ClientPublicKey, RootPublicKey};
 /// Verified token with extracted claims
 pub struct VerifiedToken {
     pub biscuit: Biscuit,
-    pub client_public_key: ClientPublicKey,
+    /// All public keys in token (authority + attenuation blocks)
+    /// Used for RFC 9421 signature verification - request signer must match one of these
+    pub allowed_public_keys: Vec<ClientPublicKey>,
     pub revocation_ids: Vec<Vec<u8>>,
 }
 
-/// Verify a Biscuit token and extract the client public key
+/// Verify a Biscuit token and extract allowed public keys
 pub fn verify_token(
     token_bytes: &[u8],
     root_public_key: &RootPublicKey,
@@ -543,15 +545,15 @@ pub fn verify_token(
     // Parse and verify the Biscuit
     let biscuit = Biscuit::from(token_bytes, biscuit_pubkey)?;
 
-    // Extract client public key from facts
-    let client_public_key = extract_client_public_key(&biscuit)?;
+    // Extract all public keys from facts (supports delegation)
+    let allowed_public_keys = extract_client_public_keys(&biscuit)?;
 
     // Get revocation IDs for later checking
     let revocation_ids = biscuit.revocation_identifiers();
 
     Ok(VerifiedToken {
         biscuit,
-        client_public_key,
+        allowed_public_keys,
         revocation_ids,
     })
 }
@@ -559,6 +561,7 @@ pub fn verify_token(
 /// Authorize an operation on a resource
 pub fn authorize(
     token: &VerifiedToken,
+    signer_public_key: &ClientPublicKey,
     basin: Option<&str>,
     stream: Option<&str>,
     operation: Operation,
@@ -568,6 +571,10 @@ pub fn authorize(
     // Add current time
     let now = OffsetDateTime::now_utc().unix_timestamp();
     authorizer.add_fact(format!("time({})", now))?;
+
+    // Add signer fact for delegation support
+    // This allows attenuated tokens to bind to a specific client key
+    authorizer.add_fact(format!("signer(\"{}\")", signer_public_key.to_base58()))?;
 
     // Add resource context
     if let Some(b) = basin {
@@ -598,20 +605,25 @@ fn public_key_to_biscuit(key: &RootPublicKey) -> Result<PublicKey, VerifyError> 
         .map_err(|e| VerifyError::KeyConversion(e.to_string()))
 }
 
-fn extract_client_public_key(biscuit: &Biscuit) -> Result<ClientPublicKey, VerifyError> {
-    // Query for public_key fact
+fn extract_client_public_keys(biscuit: &Biscuit) -> Result<Vec<ClientPublicKey>, VerifyError> {
+    // Query for all public_key facts (from authority + attenuation blocks)
     let mut authorizer = Authorizer::new();
     authorizer.add_token(biscuit)?;
 
-    // Use authorizer query to extract fact
+    // Use authorizer query to extract all public_key facts
     let facts: Vec<(String,)> = authorizer.query("data($pk) <- public_key($pk)")?;
 
     if facts.is_empty() {
         return Err(VerifyError::MissingPublicKey);
     }
 
-    ClientPublicKey::from_base58(&facts[0].0)
-        .map_err(|e| VerifyError::InvalidPublicKey(e.to_string()))
+    facts
+        .into_iter()
+        .map(|(pk,)| {
+            ClientPublicKey::from_base58(&pk)
+                .map_err(|e| VerifyError::InvalidPublicKey(e.to_string()))
+        })
+        .collect()
 }
 
 fn authorization_policy() -> &'static str {
@@ -1380,7 +1392,7 @@ pub async fn auth_middleware(
         return Err(ServiceError::TokenRevoked);
     }
 
-    // Verify RFC 9421 signature
+    // Verify RFC 9421 signature against any allowed public key
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let authority = request
@@ -1400,19 +1412,31 @@ pub async fn auth_middleware(
     // Note: This is tricky with streaming bodies - may need adjustment
     let body = None; // TODO: Handle body digest
 
-    auth::verify_signature(
-        &method,
-        &path,
-        &authority,
-        request.headers(),
-        body,
-        &verified.client_public_key,
-        auth_state.signature_window_secs(),
-    )?;
+    // Try each allowed public key until one succeeds
+    // This supports delegation: attenuated tokens add new public_key facts
+    let mut verified_signer = None;
+    for pubkey in &verified.allowed_public_keys {
+        if auth::verify_signature(
+            &method,
+            &path,
+            &authority,
+            request.headers(),
+            body,
+            pubkey,
+            auth_state.signature_window_secs(),
+        ).is_ok() {
+            verified_signer = Some(pubkey.clone());
+            break;
+        }
+    }
+
+    let client_public_key = verified_signer
+        .ok_or(ServiceError::InvalidSignature(auth::SignatureError::SignatureInvalid))?;
 
     // Insert authenticated request into extensions
+    // client_public_key is the actual signer (for delegation `signer` fact)
     request.extensions_mut().insert(AuthenticatedRequest {
-        client_public_key: verified.client_public_key.clone(),
+        client_public_key,
         token: verified,
     });
 
@@ -1773,7 +1797,7 @@ fn test_token_issue_and_verify() {
     let token_bytes = biscuit.to_vec().unwrap();
 
     let verified = verify_token(&token_bytes, &root_key.public_key()).unwrap();
-    assert_eq!(verified.client_public_key, client_pubkey);
+    assert!(verified.allowed_public_keys.contains(&client_pubkey));
 }
 
 #[test]
@@ -1790,6 +1814,42 @@ fn test_token_expired() {
     // Verification should fail due to expiry check
     let result = verify_token(&token_bytes, &root_key.public_key());
     // The token parses but authorization with time check should fail
+}
+
+#[test]
+fn test_token_delegation_via_attenuation() {
+    let root_key = generate_test_root_key();
+    let (_, alice_pubkey) = generate_test_client_key();
+    let (_, bob_pubkey) = generate_test_client_key();
+
+    // Alice gets a token
+    let scope = AccessTokenScope {
+        basins: ResourceSet::Prefix("alice/".parse().unwrap()),
+        streams: ResourceSet::Prefix("alice/".parse().unwrap()),
+        ..Default::default()
+    };
+    let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let biscuit = build_token(&root_key, &alice_pubkey, expires, &scope).unwrap();
+
+    // Alice attenuates for Bob (offline operation)
+    let mut attenuator = biscuit.create_block();
+    attenuator.add_fact(format!("public_key(\"{}\")", bob_pubkey.to_base58())).unwrap();
+    attenuator.add_check(format!(
+        "check if signer($s), $s == \"{}\"",
+        bob_pubkey.to_base58()
+    )).unwrap();
+    // Narrow scope further
+    attenuator.add_check("check if basin($b), $b.starts_with(\"alice/shared/\")").unwrap();
+
+    let delegated = biscuit.attenuate(attenuator).unwrap();
+    let token_bytes = delegated.to_vec().unwrap();
+
+    // Verify the delegated token
+    let verified = verify_token(&token_bytes, &root_key.public_key()).unwrap();
+
+    // Both public keys should be present
+    assert!(verified.allowed_public_keys.contains(&alice_pubkey));
+    assert!(verified.allowed_public_keys.contains(&bob_pubkey));
 }
 ```
 
@@ -1831,6 +1891,7 @@ pub async fn create_basin(
     if let Some(auth) = request.extensions().get::<AuthenticatedRequest>() {
         auth::authorize(
             &auth.token,
+            &auth.client_public_key,  // signer for delegation support
             Some(&basin_name),
             None,
             s2_common::types::access::Operation::CreateBasin,
@@ -1890,3 +1951,14 @@ This plan implements:
 8. **Tasks 14-16**: Integration and handler authorization
 
 Each task is independently testable and committable. The implementation follows TDD where practical, with failing tests written before implementation.
+
+### Delegation Model
+
+The implementation supports offline token delegation via Biscuit attenuation:
+
+1. **Multiple `public_key` facts**: Tokens can contain multiple public keys (original + delegated)
+2. **Signature verification**: Server tries each allowed public key until one matches the RFC 9421 signature
+3. **`signer` fact**: Server adds `signer("<actual-signer-pubkey>")` to the authorizer
+4. **Attenuation caveat**: Delegated tokens include `check if signer($s), $s == "<delegatee-pubkey>"` to restrict usage
+
+This allows token holders to delegate access to other parties without server involvement - they simply attenuate their token with a new `public_key` fact and a `signer` caveat binding it to the delegatee's key.
