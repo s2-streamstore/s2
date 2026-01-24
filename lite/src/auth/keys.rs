@@ -115,3 +115,50 @@ pub enum KeyError {
     #[error("invalid key: {0}")]
     InvalidKey(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_root_key_roundtrip() {
+        use p256::elliptic_curve::rand_core::OsRng;
+
+        let secret = SecretKey::random(&mut OsRng);
+        let bytes = secret.to_bytes();
+        let base58 = bs58::encode(&bytes).into_string();
+
+        let root_key = RootKey::from_base58(&base58).expect("should parse");
+        let public_key = root_key.public_key();
+
+        let pub_base58 = public_key.to_base58();
+        let parsed = RootPublicKey::from_base58(&pub_base58).expect("should parse");
+        assert_eq!(public_key, parsed);
+    }
+
+    #[test]
+    fn test_root_key_invalid_length() {
+        let short = bs58::encode(&[0u8; 16]).into_string();
+        let err = RootKey::from_base58(&short).unwrap_err();
+        assert!(matches!(
+            err,
+            KeyError::InvalidLength {
+                expected: 32,
+                got: 16
+            }
+        ));
+    }
+
+    #[test]
+    fn test_public_key_invalid_length() {
+        let short = bs58::encode(&[0u8; 32]).into_string();
+        let err = RootPublicKey::from_base58(&short).unwrap_err();
+        assert!(matches!(err, KeyError::InvalidLength { expected: 33, .. }));
+    }
+
+    #[test]
+    fn test_base58_decode_error() {
+        let err = RootKey::from_base58("invalid!@#$").unwrap_err();
+        assert!(matches!(err, KeyError::Base58Decode(_)));
+    }
+}
