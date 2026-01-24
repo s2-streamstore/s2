@@ -154,9 +154,14 @@ impl From<types::access::Operation> for Operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AccessTokenInfo {
-    /// Access token ID.
+    /// Access token ID (legacy).
     /// It must be unique to the account and between 1 and 96 bytes in length.
-    pub id: types::access::AccessTokenId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<types::access::AccessTokenId>,
+    /// Client's P-256 public key for request signing (new auth).
+    /// Base58-encoded compressed point (33 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
     #[serde(default, with = "time::serde::rfc3339::option")]
@@ -175,6 +180,7 @@ impl TryFrom<AccessTokenInfo> for types::access::IssueAccessTokenRequest {
     fn try_from(value: AccessTokenInfo) -> Result<Self, Self::Error> {
         Ok(Self {
             id: value.id,
+            public_key: value.public_key,
             expires_at: value.expires_at,
             auto_prefix_streams: value.auto_prefix_streams.unwrap_or_default(),
             scope: value.scope.try_into()?,
@@ -185,7 +191,8 @@ impl TryFrom<AccessTokenInfo> for types::access::IssueAccessTokenRequest {
 impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
     fn from(value: types::access::AccessTokenInfo) -> Self {
         Self {
-            id: value.id,
+            id: Some(value.id),
+            public_key: None, // Legacy tokens don't have public_key
             expires_at: Some(value.expires_at),
             auto_prefix_streams: Some(value.auto_prefix_streams),
             scope: value.scope.into(),
@@ -197,6 +204,7 @@ impl From<types::access::IssueAccessTokenRequest> for AccessTokenInfo {
     fn from(value: types::access::IssueAccessTokenRequest) -> Self {
         Self {
             id: value.id,
+            public_key: value.public_key,
             expires_at: value.expires_at,
             auto_prefix_streams: Some(value.auto_prefix_streams),
             scope: value.scope.into(),

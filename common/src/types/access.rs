@@ -226,7 +226,10 @@ pub struct AccessTokenInfo {
 
 #[derive(Debug, Clone)]
 pub struct IssueAccessTokenRequest {
-    pub id: AccessTokenId,
+    /// Legacy: access token ID string
+    pub id: Option<AccessTokenId>,
+    /// New auth: client's P-256 public key (base58 compressed)
+    pub public_key: Option<String>,
     pub expires_at: Option<time::OffsetDateTime>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
