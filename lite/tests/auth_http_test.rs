@@ -3,6 +3,7 @@
 //! These tests verify the middleware behavior for:
 //! - Missing auth headers
 //! - Invalid tokens
+//! - Response headers (e.g., X-Git-SHA)
 //!
 //! Note: Full RFC 9421 signature verification is tested in auth module unit tests.
 //! These integration tests verify the HTTP layer integration.
@@ -1353,4 +1354,47 @@ async fn test_live_server_localhost() {
         "Should get 200 OK, got:\n{}",
         response_str
     );
+}
+
+/// Test that responses include X-Git-SHA header.
+#[tokio::test]
+async fn test_response_includes_git_sha_header() {
+    use tower::ServiceExt;
+
+    // Create minimal backend and auth
+    let object_store = std::sync::Arc::new(slatedb::object_store::memory::InMemory::new());
+    let db = slatedb::Db::builder("test", object_store)
+        .build()
+        .await
+        .unwrap();
+    let backend = s2_lite::backend::Backend::new(db, bytesize::ByteSize::b(1));
+    let auth_state = s2_lite::auth::AuthState::disabled();
+
+    // Use the full router (which should include the git SHA layer)
+    let app = s2_lite::handlers::router(backend, auth_state);
+
+    // Make a simple request to /ping
+    let request = Request::builder()
+        .method("GET")
+        .uri("/ping")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Check for X-Git-SHA header
+    let git_sha = response.headers().get("x-git-sha");
+    assert!(
+        git_sha.is_some(),
+        "Response should include X-Git-SHA header"
+    );
+
+    let sha_value = git_sha.unwrap().to_str().unwrap();
+    assert!(
+        !sha_value.is_empty(),
+        "X-Git-SHA header should not be empty"
+    );
+    println!("X-Git-SHA: {}", sha_value);
 }

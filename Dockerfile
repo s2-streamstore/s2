@@ -4,12 +4,16 @@ RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig binuti
 
 WORKDIR /build
 
+# Git SHA passed at build time
+ARG GIT_SHA=unknown
+
 # Copy source
 COPY . .
 
 # Build statically linked with optimizations
 ENV OPENSSL_STATIC=1
 ENV RUSTFLAGS="-C strip=symbols"
+ENV GIT_SHA=${GIT_SHA}
 RUN cargo build --release --package s2-lite --bin server && \
     strip /build/target/release/server
 

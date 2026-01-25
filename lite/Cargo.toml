@@ -58,6 +58,7 @@ tower-http = { workspace = true, features = [
     "compression-gzip",
     "decompression-zstd",
     "decompression-gzip",
+    "set-header",
 ] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
