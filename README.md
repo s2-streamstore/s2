@@ -120,8 +120,8 @@ openssl ecparam -name prime256v1 -genkey -noout | \
 
 # Start with authentication enabled
 docker run -p 8080:80 \
-  -e S2_ROOT_KEY="<your-base58-root-key>" \
-  ghcr.io/s2-streamstore/s2-lite
+  -e S2_ROOT_PRIVATE_KEY="<your-base58-root-key>" \
+  ghcr.io/zshannon/s2/s2-lite:latest
 ```
 
 When auth is enabled:
@@ -134,13 +134,33 @@ When auth is enabled:
 
 | Environment Variable | CLI Argument | Default | Description |
 |---------------------|--------------|---------|-------------|
-| `S2_ROOT_KEY` | `--root-key` | (none) | Base58 P-256 private key for token signing. Auth disabled if not set. |
+| `S2_ROOT_PRIVATE_KEY` | `--root-private-key` | (none) | Base58 P-256 private key for token signing. Auth disabled if not set. |
+| `S2_ROOT_PUBLIC_KEY` | `--root-public-key` | (none) | Base58 P-256 public key for verify-only mode. |
 | `S2_SIGNATURE_WINDOW` | `--signature-window` | `300` | Max age of request signatures in seconds |
 | `S2_METRICS_TOKEN` | `--metrics-token` | (none) | Simple Bearer token for metrics endpoints |
 
 </details>
 
 See [Authentication Documentation](lite/docs/authentication.md) for complete details on token issuance, scopes, delegation, and revocation.
+
+### Deployment
+
+Docker images are automatically built and pushed to GitHub Container Registry on every push to `main`:
+
+```
+ghcr.io/zshannon/s2/s2-lite:latest
+ghcr.io/zshannon/s2/s2-lite:<branch>
+ghcr.io/zshannon/s2/s2-lite:<commit-sha>
+```
+
+Each image includes the git SHA baked in, returned via the `X-Git-SHA` response header on all requests.
+
+For Fly.io deployment, use the pre-built image in your `fly.toml`:
+
+```toml
+[build]
+  image = 'ghcr.io/zshannon/s2/s2-lite:latest'
+```
 
 ### Monitoring
 

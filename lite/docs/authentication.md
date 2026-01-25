@@ -41,18 +41,23 @@ s2 keygen
 ### 2. Start Server with Authentication
 
 ```bash
-# Via environment variable
-export S2_ROOT_KEY="5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
+# Via environment variable (private key - can verify AND issue tokens)
+export S2_ROOT_PRIVATE_KEY="5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
 s2-lite
 
 # Or via CLI argument
-s2-lite --root-key "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
+s2-lite --root-private-key "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
+
+# Verify-only mode (can verify tokens but not issue new ones)
+s2-lite --root-public-key "2NEpo7TZRRrLZSi2U8FxKaAqV3FJ8MFmCxLBqQMZxBGZ"
 ```
 
-The server logs the derived public key on startup:
+The server logs the public key on startup:
 
 ```
-INFO auth enabled public_key=2NEpo7TZRRrLZSi2U...
+INFO auth enabled (can issue tokens) public_key=2NEpo7TZRRrLZSi2U...
+# or
+INFO auth enabled (verify only) public_key=2NEpo7TZRRrLZSi2U...
 ```
 
 ### 3. Generate a Client Key
@@ -109,23 +114,29 @@ Response:
 
 | Argument | Environment Variable | Default | Description |
 |----------|---------------------|---------|-------------|
-| `--root-key` | `S2_ROOT_KEY` | (none) | Base58-encoded P-256 private key for signing tokens. If not set, authentication is disabled. |
+| `--root-private-key` | `S2_ROOT_PRIVATE_KEY` | (none) | Base58-encoded P-256 private key for signing tokens. Enables full auth (verify + issue). |
+| `--root-public-key` | `S2_ROOT_PUBLIC_KEY` | (none) | Base58-encoded P-256 public key for verifying tokens. Enables verify-only mode. |
 | `--signature-window` | `S2_SIGNATURE_WINDOW` | `300` | Maximum age of request signatures in seconds. Requests with older signatures are rejected. |
 | `--metrics-token` | `S2_METRICS_TOKEN` | (none) | Bearer token for metrics endpoints. If not set, metrics are publicly accessible. |
+
+**Note:** If both `--root-private-key` and `--root-public-key` are provided, they must match (public key must be derived from private key).
 
 ### Examples
 
 ```bash
 # Full authentication with 10-minute signature window
-s2-lite --root-key "$S2_ROOT_KEY" --signature-window 600
+s2-lite --root-private-key "$S2_ROOT_PRIVATE_KEY" --signature-window 600
+
+# Verify-only mode (cannot issue new tokens)
+s2-lite --root-public-key "$S2_ROOT_PUBLIC_KEY"
 
 # Authentication disabled, but metrics protected
 s2-lite --metrics-token "secret-metrics-token"
 
 # Docker with authentication
 docker run -p 8080:80 \
-  -e S2_ROOT_KEY="$S2_ROOT_KEY" \
-  ghcr.io/s2-streamstore/s2-lite
+  -e S2_ROOT_PRIVATE_KEY="$S2_ROOT_PRIVATE_KEY" \
+  ghcr.io/zshannon/s2/s2-lite:latest
 ```
 
 ## Token Structure
@@ -297,10 +308,10 @@ Metrics endpoints (`/v1/metrics/*`) support a separate, simpler authentication m
 s2-lite --metrics-token "my-metrics-secret"
 
 # Or with full Biscuit auth
-s2-lite --root-key "$S2_ROOT_KEY"
+s2-lite --root-private-key "$S2_ROOT_PRIVATE_KEY"
 
 # Both (Biscuit takes precedence when used)
-s2-lite --root-key "$S2_ROOT_KEY" --metrics-token "fallback-token"
+s2-lite --root-private-key "$S2_ROOT_PRIVATE_KEY" --metrics-token "fallback-token"
 ```
 
 ### Accessing Metrics
@@ -340,6 +351,22 @@ Set this value based on your tolerance for clock drift between clients and serve
 - **Key formats**:
   - Private keys: 32-byte scalar, base58 encoded (~44 characters)
   - Public keys: 33-byte compressed point, base58 encoded (~45 characters)
+
+### Root Key Restriction
+
+The root key can only be used to sign requests to token management endpoints (`/v1/access-tokens`). Using the root key to sign requests to basin or stream endpoints is rejected with a 403 error.
+
+This prevents using the root key as a "superuser" that bypasses all authorization. To access basins and streams, you must issue an access token and use a separate client key.
+
+**Allowed operations for root key signing:**
+- `IssueAccessToken` - POST /v1/access-tokens
+- `RevokeAccessToken` - DELETE /v1/access-tokens/{id}
+- `ListAccessTokens` - GET /v1/access-tokens
+
+**Rejected operations (use a client key instead):**
+- All basin operations (create, delete, list, configure)
+- All stream operations (append, read, trim, fence)
+- All metrics operations
 
 ### Token Expiration
 
@@ -427,7 +454,7 @@ To run without authentication (e.g., for development or testing):
 s2-lite
 
 # Or with Docker
-docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
+docker run -p 8080:80 ghcr.io/zshannon/s2/s2-lite:latest
 ```
 
 When auth is disabled:

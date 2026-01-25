@@ -190,23 +190,31 @@ Returns list of revoked IDs. No "list active tokens" since we don't track issued
 ### CLI Arguments
 
 ```bash
-s2-lite server \
-  --root-key <base58-p256-private-key> \
+s2-lite \
+  --root-private-key <base58-p256-private-key> \
   --signature-window 300 \
   ...existing args...
+
+# Or verify-only mode (can verify tokens but not issue new ones)
+s2-lite \
+  --root-public-key <base58-p256-public-key> \
+  --signature-window 300
 ```
 
 ### Environment Variables
 
 ```bash
-S2_ROOT_KEY=<base58-p256-private-key>
+S2_ROOT_PRIVATE_KEY=<base58-p256-private-key>
+# or for verify-only mode:
+S2_ROOT_PUBLIC_KEY=<base58-p256-public-key>
 S2_SIGNATURE_WINDOW=300  # seconds, optional, default 300
 ```
 
 ### Startup Behavior
 
-1. Root key is required - server refuses to start without it
-2. Derive root public key from private key
+1. If private key provided: derive public key, enable full auth (verify + issue)
+2. If only public key provided: enable verify-only mode (cannot issue tokens)
+3. If neither provided: auth disabled
 3. Initialize SlateDB (existing) - revocation IDs stored under `revocations/` prefix
 4. Start HTTP server with auth middleware enabled
 
