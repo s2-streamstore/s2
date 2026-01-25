@@ -88,6 +88,11 @@ impl RootPublicKey {
     pub fn verifying_key(&self) -> &VerifyingKey {
         &self.inner
     }
+
+    /// Create from a VerifyingKey directly
+    pub fn from_verifying_key(key: &VerifyingKey) -> Self {
+        Self { inner: *key }
+    }
 }
 
 impl fmt::Debug for RootPublicKey {

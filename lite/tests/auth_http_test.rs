@@ -245,13 +245,19 @@ async fn test_auth_disabled_allows_all() {
 /// This tests the full HTTP stack including hyper parsing.
 #[tokio::test]
 async fn test_real_http_request_bootstrap_mode() {
-    use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use biscuit_auth::{
+        KeyPair, PrivateKey,
+        builder::{Algorithm, BiscuitBuilder},
+    };
     use httpsig::prelude::{
         AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
-        message_component::{HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName},
+        message_component::{
+            HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName,
+        },
     };
     use p256::ecdsa::SigningKey;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::net::TcpListener;
 
     // Setup keys
@@ -260,17 +266,28 @@ async fn test_real_http_request_bootstrap_mode() {
     let key_bytes = bs58::decode(root_key_base58).into_vec().unwrap();
     let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
     let public_key = signing_key.verifying_key();
-    let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+    let public_key_base58 =
+        bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
 
     // Create token
     let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
     let biscuit_keypair = KeyPair::from(&biscuit_private);
-    let expires_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let expires_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
 
     let mut builder = BiscuitBuilder::new();
-    builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-    builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-    builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+    builder = builder
+        .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+        .unwrap();
+    builder = builder
+        .fact(format!("expires({})", expires_ts).as_str())
+        .unwrap();
+    builder = builder
+        .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+        .unwrap();
     builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
     builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
 
@@ -328,7 +345,10 @@ async fn test_real_http_request_bootstrap_mode() {
     }
 
     let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     sig_params.set_created(created);
 
     let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
@@ -342,7 +362,10 @@ async fn test_real_http_request_bootstrap_mode() {
 
     println!("Request URL: {}", url);
     println!("Authority signed: {}", authority);
-    println!("Signature-Input: {}", sig_headers.signature_input_header_value());
+    println!(
+        "Signature-Input: {}",
+        sig_headers.signature_input_header_value()
+    );
 
     // Make ACTUAL HTTP request using raw TCP
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -374,7 +397,11 @@ async fn test_real_http_request_bootstrap_mode() {
 
     println!("=== Raw HTTP Response ===\n{}", response_str);
 
-    assert!(response_str.contains("200 OK"), "Real HTTP request should succeed, got:\n{}", response_str);
+    assert!(
+        response_str.contains("200 OK"),
+        "Real HTTP request should succeed, got:\n{}",
+        response_str
+    );
 }
 
 /// Test that request.uri().path() returns path WITHOUT query string
@@ -408,13 +435,19 @@ async fn test_uri_path_excludes_query_string() {
 /// This is how the CLI works when only root_key is configured.
 #[tokio::test]
 async fn test_bootstrap_mode_root_key_signs_request() {
-    use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use biscuit_auth::{
+        KeyPair, PrivateKey,
+        builder::{Algorithm, BiscuitBuilder},
+    };
     use httpsig::prelude::{
         AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
-        message_component::{HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName},
+        message_component::{
+            HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName,
+        },
     };
     use p256::ecdsa::SigningKey;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
 
     // Use actual root key from config
@@ -427,22 +460,36 @@ async fn test_bootstrap_mode_root_key_signs_request() {
 
     // Get public key (same as CLI does)
     let public_key = signing_key.verifying_key();
-    let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+    let public_key_base58 =
+        bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
     println!("Root/Signing public key: {}", public_key_base58);
 
     // Should be pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW
-    assert_eq!(public_key_base58, "pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW");
+    assert_eq!(
+        public_key_base58,
+        "pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW"
+    );
 
     // Create Biscuit exactly like CLI does in bootstrap mode
     let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
     let biscuit_keypair = KeyPair::from(&biscuit_private);
 
-    let expires_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let expires_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
 
     let mut builder = BiscuitBuilder::new();
-    builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-    builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-    builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+    builder = builder
+        .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+        .unwrap();
+    builder = builder
+        .fact(format!("expires({})", expires_ts).as_str())
+        .unwrap();
+    builder = builder
+        .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+        .unwrap();
     builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
     builder = builder.fact("op_group(\"account\", \"write\")").unwrap();
     builder = builder.fact("op_group(\"basin\", \"read\")").unwrap();
@@ -451,13 +498,18 @@ async fn test_bootstrap_mode_root_key_signs_request() {
     builder = builder.fact("op_group(\"stream\", \"write\")").unwrap();
     builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
     builder = builder.fact("stream_scope(\"prefix\", \"\")").unwrap();
-    builder = builder.fact("access_token_scope(\"prefix\", \"\")").unwrap();
+    builder = builder
+        .fact("access_token_scope(\"prefix\", \"\")")
+        .unwrap();
 
     let biscuit = builder.build(&biscuit_keypair).unwrap();
     let token_bytes = biscuit.to_vec().unwrap();
     let token_base64 = base64ct::Base64::encode_string(&token_bytes);
 
-    println!("Biscuit block source:\n{}", biscuit.print_block_source(0).unwrap());
+    println!(
+        "Biscuit block source:\n{}",
+        biscuit.print_block_source(0).unwrap()
+    );
 
     let app = create_test_app(root_key).await;
 
@@ -496,7 +548,10 @@ async fn test_bootstrap_mode_root_key_signs_request() {
     }
 
     let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     sig_params.set_created(created);
 
     let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
@@ -508,14 +563,20 @@ async fn test_bootstrap_mode_root_key_signs_request() {
         .build_signature_headers(&httpsig_secret, Some("sig1"))
         .unwrap();
 
-    println!("Signature-Input: {}", sig_headers.signature_input_header_value());
+    println!(
+        "Signature-Input: {}",
+        sig_headers.signature_input_header_value()
+    );
 
     let request = Request::builder()
         .method(method)
         .uri(path)
         .header("host", authority)
         .header("authorization", &authorization)
-        .header("signature-input", sig_headers.signature_input_header_value())
+        .header(
+            "signature-input",
+            sig_headers.signature_input_header_value(),
+        )
         .header("signature", sig_headers.signature_header_value())
         .body(Body::empty())
         .unwrap();
@@ -523,19 +584,24 @@ async fn test_bootstrap_mode_root_key_signs_request() {
     let response = app.oneshot(request).await.unwrap();
     println!("Response status: {}", response.status());
 
-    assert_eq!(response.status(), StatusCode::OK, "Bootstrap mode request should succeed");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Bootstrap mode request should succeed"
+    );
 }
 
 /// Test a fully valid request with proper RFC 9421 signature.
 /// This simulates what the CLI/SDK does end-to-end.
 #[tokio::test]
 async fn test_valid_token_with_valid_signature_succeeds() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use httpsig::prelude::{
         AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
         message_component::{HttpMessageComponent, HttpMessageComponentId},
     };
     use p256::ecdsa::SigningKey;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
 
     let root_key = generate_test_root_key();
@@ -580,7 +646,10 @@ async fn test_valid_token_with_valid_signature_succeeds() {
     }
 
     let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     sig_params.set_created(created);
 
     // Create signing key from client secret
@@ -604,34 +673,52 @@ async fn test_valid_token_with_valid_signature_succeeds() {
         .uri(path)
         .header("host", authority)
         .header("authorization", &authorization)
-        .header("signature-input", sig_headers.signature_input_header_value())
+        .header(
+            "signature-input",
+            sig_headers.signature_input_header_value(),
+        )
         .header("signature", sig_headers.signature_header_value())
         .body(Body::empty())
         .unwrap();
 
     println!("Authorization: {}", authorization);
-    println!("Signature-Input: {}", sig_headers.signature_input_header_value());
+    println!(
+        "Signature-Input: {}",
+        sig_headers.signature_input_header_value()
+    );
     println!("Signature: {}", sig_headers.signature_header_value());
 
     let response = app.oneshot(request).await.unwrap();
     println!("Response status: {}", response.status());
 
-    assert_eq!(response.status(), StatusCode::OK, "Valid signed request should succeed");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Valid signed request should succeed"
+    );
 }
 
 /// Test using "localhost" as authority (like the SDK does for http://localhost).
 /// This is the key difference from test_real_http_request_bootstrap_mode which uses IP:PORT.
 #[tokio::test]
 async fn test_localhost_authority_without_port() {
-    use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use biscuit_auth::{
+        KeyPair, PrivateKey,
+        builder::{Algorithm, BiscuitBuilder},
+    };
     use httpsig::prelude::{
         AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
-        message_component::{HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName},
+        message_component::{
+            HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName,
+        },
     };
     use p256::ecdsa::SigningKey;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     // Setup keys
     let root_key_base58 = "ByDGSRM82bqEVQoGYpZzvmmHujrB32UN1sr7WbKN6TPQ";
@@ -639,17 +726,28 @@ async fn test_localhost_authority_without_port() {
     let key_bytes = bs58::decode(root_key_base58).into_vec().unwrap();
     let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
     let public_key = signing_key.verifying_key();
-    let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+    let public_key_base58 =
+        bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
 
     // Create token
     let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
     let biscuit_keypair = KeyPair::from(&biscuit_private);
-    let expires_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let expires_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
 
     let mut builder = BiscuitBuilder::new();
-    builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-    builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-    builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+    builder = builder
+        .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+        .unwrap();
+    builder = builder
+        .fact(format!("expires({})", expires_ts).as_str())
+        .unwrap();
+    builder = builder
+        .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+        .unwrap();
     builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
     builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
 
@@ -705,7 +803,10 @@ async fn test_localhost_authority_without_port() {
     }
 
     let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     sig_params.set_created(created);
 
     let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
@@ -732,7 +833,7 @@ async fn test_localhost_authority_without_port() {
          Connection: close\r\n\
          \r\n",
         path,
-        authority,  // "localhost" without port
+        authority, // "localhost" without port
         authorization,
         sig_headers.signature_input_header_value(),
         sig_headers.signature_header_value()
@@ -749,22 +850,33 @@ async fn test_localhost_authority_without_port() {
     println!("=== Response ===\n{}", response_str);
 
     // This should pass - we signed with "localhost" and sent Host: localhost
-    assert!(response_str.contains("200 OK"),
-        "Request with localhost authority should succeed. Got:\n{}", response_str);
+    assert!(
+        response_str.contains("200 OK"),
+        "Request with localhost authority should succeed. Got:\n{}",
+        response_str
+    );
 }
 
 /// Test using axum_server (like the live server) instead of axum::serve
 #[tokio::test]
 async fn test_with_axum_server_localhost_authority() {
-    use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use biscuit_auth::{
+        KeyPair, PrivateKey,
+        builder::{Algorithm, BiscuitBuilder},
+    };
     use httpsig::prelude::{
         AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
-        message_component::{HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName},
+        message_component::{
+            HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName,
+        },
     };
     use p256::ecdsa::SigningKey;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     // Setup keys
     let root_key_base58 = "ByDGSRM82bqEVQoGYpZzvmmHujrB32UN1sr7WbKN6TPQ";
@@ -772,17 +884,28 @@ async fn test_with_axum_server_localhost_authority() {
     let key_bytes = bs58::decode(root_key_base58).into_vec().unwrap();
     let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
     let public_key = signing_key.verifying_key();
-    let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+    let public_key_base58 =
+        bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
 
     // Create token
     let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
     let biscuit_keypair = KeyPair::from(&biscuit_private);
-    let expires_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let expires_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
 
     let mut builder = BiscuitBuilder::new();
-    builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-    builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-    builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+    builder = builder
+        .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+        .unwrap();
+    builder = builder
+        .fact(format!("expires({})", expires_ts).as_str())
+        .unwrap();
+    builder = builder
+        .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+        .unwrap();
     builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
     builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
 
@@ -845,7 +968,10 @@ async fn test_with_axum_server_localhost_authority() {
     }
 
     let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     sig_params.set_created(created);
 
     let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
@@ -887,25 +1013,36 @@ async fn test_with_axum_server_localhost_authority() {
 
     println!("=== Response ===\n{}", response_str);
 
-    assert!(response_str.contains("200 OK"),
-        "Request with axum_server should succeed. Got:\n{}", response_str);
+    assert!(
+        response_str.contains("200 OK"),
+        "Request with axum_server should succeed. Got:\n{}",
+        response_str
+    );
 }
 
 /// Test with nested router (like the live server uses)
 /// The key issue: when using .nest("/v1", ...), does the middleware see "/v1/basins" or "/basins"?
 #[tokio::test]
 async fn test_nested_router_path_stripping() {
-    use axum::{Router, routing::get, middleware::from_fn_with_state};
-    use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use axum::{Router, middleware::from_fn_with_state, routing::get};
+    use biscuit_auth::{
+        KeyPair, PrivateKey,
+        builder::{Algorithm, BiscuitBuilder},
+    };
     use httpsig::prelude::{
         AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
-        message_component::{HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName},
+        message_component::{
+            HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName,
+        },
     };
     use p256::ecdsa::SigningKey;
     use s2_lite::handlers::v1::middleware::{AppState, auth_middleware};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     // Setup keys
     let root_key_base58 = "ByDGSRM82bqEVQoGYpZzvmmHujrB32UN1sr7WbKN6TPQ";
@@ -913,17 +1050,28 @@ async fn test_nested_router_path_stripping() {
     let key_bytes = bs58::decode(root_key_base58).into_vec().unwrap();
     let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
     let public_key = signing_key.verifying_key();
-    let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+    let public_key_base58 =
+        bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
 
     // Create token
     let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
     let biscuit_keypair = KeyPair::from(&biscuit_private);
-    let expires_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let expires_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
 
     let mut builder = BiscuitBuilder::new();
-    builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-    builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-    builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+    builder = builder
+        .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+        .unwrap();
+    builder = builder
+        .fact(format!("expires({})", expires_ts).as_str())
+        .unwrap();
+    builder = builder
+        .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+        .unwrap();
     builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
     builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
 
@@ -968,7 +1116,7 @@ async fn test_nested_router_path_stripping() {
 
     // Sign with the FULL path /v1/basins (what the client sends)
     let authority = "localhost";
-    let path = "/v1/basins";  // FULL path as sent by client
+    let path = "/v1/basins"; // FULL path as sent by client
     let method = "GET";
 
     let component_ids: Vec<HttpMessageComponentId> =
@@ -999,7 +1147,10 @@ async fn test_nested_router_path_stripping() {
     }
 
     let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     sig_params.set_created(created);
 
     let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
@@ -1025,7 +1176,7 @@ async fn test_nested_router_path_stripping() {
          Signature: {}\r\n\
          Connection: close\r\n\
          \r\n",
-        path,  // /v1/basins
+        path, // /v1/basins
         authority,
         authorization,
         sig_headers.signature_input_header_value(),
@@ -1043,8 +1194,11 @@ async fn test_nested_router_path_stripping() {
     println!("=== Response ===\n{}", response_str);
 
     // This will tell us if the nested router strips the /v1 prefix before auth middleware
-    assert!(response_str.contains("200 OK"),
-        "If this fails, the middleware is seeing a different path than what we signed. Got:\n{}", response_str);
+    assert!(
+        response_str.contains("200 OK"),
+        "If this fails, the middleware is seeing a different path than what we signed. Got:\n{}",
+        response_str
+    );
 }
 
 /// Test against LIVE server on localhost:80 using raw TCP.
@@ -1052,13 +1206,19 @@ async fn test_nested_router_path_stripping() {
 #[tokio::test]
 #[ignore] // Only run manually when server is running on localhost:80
 async fn test_live_server_localhost() {
-    use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use biscuit_auth::{
+        KeyPair, PrivateKey,
+        builder::{Algorithm, BiscuitBuilder},
+    };
     use httpsig::prelude::{
         AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
-        message_component::{HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName},
+        message_component::{
+            HttpMessageComponent, HttpMessageComponentId, HttpMessageComponentName,
+        },
     };
     use p256::ecdsa::SigningKey;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Setup keys - use the actual root key
@@ -1066,19 +1226,30 @@ async fn test_live_server_localhost() {
     let key_bytes = bs58::decode(root_key_base58).into_vec().unwrap();
     let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
     let public_key = signing_key.verifying_key();
-    let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+    let public_key_base58 =
+        bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
 
     println!("Public key: {}", public_key_base58);
 
     // Create token exactly like CLI does
     let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
     let biscuit_keypair = KeyPair::from(&biscuit_private);
-    let expires_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let expires_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
 
     let mut builder = BiscuitBuilder::new();
-    builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-    builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-    builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+    builder = builder
+        .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+        .unwrap();
+    builder = builder
+        .fact(format!("expires({})", expires_ts).as_str())
+        .unwrap();
+    builder = builder
+        .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+        .unwrap();
     builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
     builder = builder.fact("op_group(\"account\", \"write\")").unwrap();
     builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
@@ -1124,7 +1295,10 @@ async fn test_live_server_localhost() {
     }
 
     let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     sig_params.set_created(created);
 
     let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
@@ -1139,10 +1313,14 @@ async fn test_live_server_localhost() {
     println!("=== Signature ===");
     println!("Authority signed: {}", authority);
     println!("Path signed: {}", path);
-    println!("Signature-Input: {}", sig_headers.signature_input_header_value());
+    println!(
+        "Signature-Input: {}",
+        sig_headers.signature_input_header_value()
+    );
 
     // Connect to localhost:80
-    let mut stream = tokio::net::TcpStream::connect("127.0.0.1:80").await
+    let mut stream = tokio::net::TcpStream::connect("127.0.0.1:80")
+        .await
         .expect("Failed to connect to localhost:80 - is the server running?");
 
     let request = format!(
@@ -1170,5 +1348,9 @@ async fn test_live_server_localhost() {
 
     println!("=== Response ===\n{}", response_str);
 
-    assert!(response_str.contains("200 OK"), "Should get 200 OK, got:\n{}", response_str);
+    assert!(
+        response_str.contains("200 OK"),
+        "Should get 200 OK, got:\n{}",
+        response_str
+    );
 }

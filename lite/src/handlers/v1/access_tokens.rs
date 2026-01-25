@@ -49,6 +49,7 @@ pub struct ListArgs {
 ))]
 pub async fn list_access_tokens(
     State(_backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     ListArgs { .. }: ListArgs,
 ) -> Result<Json<v1t::access::ListAccessTokensResponse>, ServiceError> {
@@ -57,6 +58,7 @@ pub async fn list_access_tokens(
         auth::authorize(
             &auth_req.token,
             &auth_req.client_public_key,
+            auth_state.root_public_key(),
             None,
             None,
             None,
@@ -113,6 +115,7 @@ pub async fn issue_access_token(
         auth::authorize(
             &auth_req.token,
             &auth_req.client_public_key,
+            auth_state.root_public_key(),
             None,
             None,
             None, // No specific token ID for issue (creating new)
@@ -204,6 +207,7 @@ pub async fn revoke_access_token(
         auth::authorize(
             &auth_req.token,
             &auth_req.client_public_key,
+            auth_state.root_public_key(),
             None,
             None,
             Some(id.as_ref()), // Token ID being revoked for scope checking

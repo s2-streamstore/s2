@@ -25,7 +25,7 @@ use s2_common::{
 };
 
 use crate::{
-    auth,
+    auth::{self, AuthState},
     backend::{Backend, error::ReadError},
     handlers::v1::{AppState, error::ServiceError, middleware::AuthenticatedRequest},
 };
@@ -33,6 +33,7 @@ use crate::{
 /// Authorize an operation if auth is enabled
 fn authorize_op(
     auth_req: Option<&AuthenticatedRequest>,
+    auth_state: &AuthState,
     basin: &str,
     stream: &str,
     operation: Operation,
@@ -41,6 +42,7 @@ fn authorize_op(
         auth::authorize(
             &auth.token,
             &auth.client_public_key,
+            auth_state.root_public_key(),
             Some(basin),
             Some(stream),
             None,
@@ -91,11 +93,13 @@ pub struct CheckTailArgs {
 ))]
 pub async fn check_tail(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     CheckTailArgs { basin, stream }: CheckTailArgs,
 ) -> Result<Json<v1t::stream::TailResponse>, ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         stream.as_ref(),
         Operation::CheckTail,
@@ -152,6 +156,7 @@ pub struct ReadArgs {
 ))]
 pub async fn read(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     ReadArgs {
         basin,
@@ -163,6 +168,7 @@ pub async fn read(
 ) -> Result<Response, ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         stream.as_ref(),
         Operation::Read,
@@ -347,6 +353,7 @@ pub struct AppendArgs {
 ))]
 pub async fn append(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     AppendArgs {
         basin,
@@ -356,6 +363,7 @@ pub async fn append(
 ) -> Result<Response, ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         stream.as_ref(),
         Operation::Append,

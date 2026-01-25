@@ -94,6 +94,7 @@ fn test_token_authorize_operation() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("test-mybasin"),
         Some("test-mystream"),
         None,
@@ -105,6 +106,7 @@ fn test_token_authorize_operation() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         None,
         None,
         None,
@@ -117,6 +119,7 @@ fn test_token_authorize_operation() {
     let result = authorize(
         &verified,
         &unauthorized_key,
+        Some(&root_key.public_key()),
         Some("test-mybasin"),
         Some("test-mystream"),
         None,
@@ -162,6 +165,7 @@ fn test_token_scope_enforcement() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("allowed-mybasin"),
         Some("allowed-mystream"),
         None,
@@ -173,6 +177,7 @@ fn test_token_scope_enforcement() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("forbidden-otherbasin"),
         Some("forbidden-otherstream"),
         None,
@@ -344,6 +349,7 @@ fn test_path_traversal_blocked() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("tenant-a-foo"), // valid: starts with tenant-a-
         Some("tenant-a-bar"),
         None,
@@ -355,6 +361,7 @@ fn test_path_traversal_blocked() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("tenant-b-foo"),
         Some("tenant-b-bar"),
         None,
@@ -366,6 +373,7 @@ fn test_path_traversal_blocked() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("tenant-a"), // missing the hyphen
         Some("stream"),
         None,
@@ -374,6 +382,470 @@ fn test_path_traversal_blocked() {
     assert!(
         result.is_err(),
         "tenant-a (without hyphen) should be denied"
+    );
+}
+
+/// Helper to create a token where the root key is used as the client key.
+/// This is the bug scenario we're testing against.
+fn create_root_as_client_token() -> (
+    s2_lite::auth::RootKey,
+    ClientPublicKey,
+    s2_lite::auth::VerifiedToken,
+) {
+    let root_key = generate_test_root_key();
+
+    // Get the root PUBLIC key and use it as the "client" public key
+    // This simulates the bug: someone creating a token with the root key as the signer
+    let root_public_key = root_key.public_key();
+    let root_as_client = ClientPublicKey::from_base58(&root_public_key.to_base58()).unwrap();
+
+    // Token with full permissions to isolate the root-key-as-client check
+    let scope = AccessTokenScope {
+        basins: ResourceSet::Prefix("".parse().unwrap()),
+        streams: ResourceSet::Prefix("".parse().unwrap()),
+        access_tokens: ResourceSet::Prefix("".parse().unwrap()),
+        op_groups: PermittedOperationGroups {
+            account: ReadWritePermissions {
+                read: true,
+                write: true,
+            },
+            basin: ReadWritePermissions {
+                read: true,
+                write: true,
+            },
+            stream: ReadWritePermissions {
+                read: true,
+                write: true,
+            },
+        },
+        ops: Default::default(),
+    };
+
+    let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let biscuit = build_token(&root_key, &root_as_client, expires, &scope).unwrap();
+    let token_bytes = biscuit.to_vec().unwrap();
+
+    let verified = verify_token(&token_bytes, &root_key.public_key()).unwrap();
+
+    (root_key, root_as_client, verified)
+}
+
+// =============================================================================
+// ACCOUNT OPERATIONS - Root key must be REJECTED
+// =============================================================================
+
+/// Per design doc: "No superuser bypass - root key only for token management endpoints"
+#[test]
+fn test_root_key_rejected_for_list_basins() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        None,
+        None,
+        None,
+        Operation::ListBasins,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for ListBasins (account operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_create_basin() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("new-basin"),
+        None,
+        None,
+        Operation::CreateBasin,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for CreateBasin (account operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_delete_basin() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        None,
+        Operation::DeleteBasin,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for DeleteBasin (account operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_account_metrics() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        None,
+        None,
+        None,
+        Operation::AccountMetrics,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for AccountMetrics (account operation)"
+    );
+}
+
+// =============================================================================
+// BASIN OPERATIONS - Root key must be REJECTED
+// =============================================================================
+
+#[test]
+fn test_root_key_rejected_for_get_basin_config() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        None,
+        Operation::GetBasinConfig,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for GetBasinConfig (basin operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_reconfigure_basin() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        None,
+        Operation::ReconfigureBasin,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for ReconfigureBasin (basin operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_list_streams() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        None,
+        Operation::ListStreams,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for ListStreams (basin operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_create_stream() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("new-stream"),
+        None,
+        Operation::CreateStream,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for CreateStream (basin operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_delete_stream() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::DeleteStream,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for DeleteStream (basin operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_basin_metrics() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        None,
+        Operation::BasinMetrics,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for BasinMetrics (basin operation)"
+    );
+}
+
+// =============================================================================
+// STREAM OPERATIONS - Root key must be REJECTED
+// =============================================================================
+
+#[test]
+fn test_root_key_rejected_for_get_stream_config() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::GetStreamConfig,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for GetStreamConfig (stream operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_reconfigure_stream() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::ReconfigureStream,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for ReconfigureStream (stream operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_check_tail() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::CheckTail,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for CheckTail (stream operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_append() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::Append,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for Append (stream operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_read() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::Read,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for Read (stream operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_trim() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::Trim,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for Trim (stream operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_fence() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::Fence,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for Fence (stream operation)"
+    );
+}
+
+#[test]
+fn test_root_key_rejected_for_stream_metrics() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        Some("my-stream"),
+        None,
+        Operation::StreamMetrics,
+    );
+    assert!(
+        result.is_err(),
+        "Root key must NOT be usable for StreamMetrics (stream operation)"
+    );
+}
+
+// =============================================================================
+// ACCESS TOKEN OPERATIONS - Root key SHOULD be accepted (the exception)
+// =============================================================================
+
+#[test]
+fn test_root_key_accepted_for_issue_access_token() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        Some("new-token-id"),
+        Operation::IssueAccessToken,
+    );
+    assert!(
+        result.is_ok(),
+        "Root key SHOULD be usable for IssueAccessToken: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_root_key_accepted_for_revoke_access_token() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        Some("token-to-revoke"),
+        Operation::RevokeAccessToken,
+    );
+    assert!(
+        result.is_ok(),
+        "Root key SHOULD be usable for RevokeAccessToken: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_root_key_accepted_for_list_access_tokens() {
+    let (root_key, root_as_client, verified) = create_root_as_client_token();
+
+    let result = authorize(
+        &verified,
+        &root_as_client,
+        Some(&root_key.public_key()),
+        Some("my-basin"),
+        None,
+        None,
+        Operation::ListAccessTokens,
+    );
+    assert!(
+        result.is_ok(),
+        "Root key SHOULD be usable for ListAccessTokens: {:?}",
+        result
     );
 }
 
@@ -413,6 +885,7 @@ fn test_access_token_scope_enforced() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("mybasin"),
         None,
         Some("allowed-token-123"),
@@ -427,6 +900,7 @@ fn test_access_token_scope_enforced() {
     let result = authorize(
         &verified,
         &client_pubkey,
+        Some(&root_key.public_key()),
         Some("mybasin"),
         None,
         Some("forbidden-token-456"),

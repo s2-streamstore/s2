@@ -80,9 +80,7 @@ impl AuthState {
 
     /// Check if token issuance is enabled (has private key).
     pub fn can_issue_tokens(&self) -> bool {
-        self.inner
-            .as_ref()
-            .is_some_and(|i| i.root_key.is_some())
+        self.inner.as_ref().is_some_and(|i| i.root_key.is_some())
     }
 
     /// Get the root key (for signing tokens). None if verify-only mode.

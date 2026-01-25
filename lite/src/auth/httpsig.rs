@@ -308,8 +308,8 @@ mod tests {
         let sig_input = r#"sig1=("@method" "@path" "@authority" "authorization");created=1769292040;alg="ecdsa-p256-sha256";keyid="test""#;
         let signature = "sig1=:dGVzdA==:"; // dummy signature
 
-        let sig_headers = HttpSignatureHeaders::try_parse(signature, sig_input)
-            .expect("should parse");
+        let sig_headers =
+            HttpSignatureHeaders::try_parse(signature, sig_input).expect("should parse");
         let (_, sig_header) = sig_headers.iter().next().expect("should have sig");
         let params = sig_header.signature_params();
 
@@ -323,13 +323,13 @@ mod tests {
     /// This proves SDK and server are compatible.
     #[test]
     fn test_full_signature_roundtrip_sdk_to_server() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         use httpsig::prelude::{
             AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
             message_component::HttpMessageComponentId,
         };
-        use p256::ecdsa::SigningKey;
-        use p256::elliptic_curve::rand_core::OsRng;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
 
         // 1. Generate a random key pair (same as SDK does)
         let signing_key = SigningKey::random(&mut OsRng);
@@ -338,8 +338,8 @@ mod tests {
         // Create ClientPublicKey from verifying key
         let point = verifying_key.to_encoded_point(true); // compressed
         let pub_base58 = bs58::encode(point.as_bytes()).into_string();
-        let client_pubkey = ClientPublicKey::from_base58(&pub_base58)
-            .expect("should create client public key");
+        let client_pubkey =
+            ClientPublicKey::from_base58(&pub_base58).expect("should create client public key");
 
         // 2. Request details
         let method = Method::GET;
@@ -348,10 +348,11 @@ mod tests {
         let authorization = "Bearer test-token-here";
 
         // 3. Build covered components (same as SDK)
-        let component_ids: Vec<HttpMessageComponentId> = ["@method", "@path", "@authority", "authorization"]
-            .iter()
-            .map(|c| HttpMessageComponentId::try_from(*c).unwrap())
-            .collect();
+        let component_ids: Vec<HttpMessageComponentId> =
+            ["@method", "@path", "@authority", "authorization"]
+                .iter()
+                .map(|c| HttpMessageComponentId::try_from(*c).unwrap())
+                .collect();
 
         // 4. Build component lines for signature base (same format as SDK)
         let mut component_lines = Vec::new();
@@ -371,14 +372,14 @@ mod tests {
                     format!("\"{}\": {}", name, authorization)
                 }
             };
-            let component = HttpMessageComponent::try_from(line.as_str())
-                .expect("should parse component");
+            let component =
+                HttpMessageComponent::try_from(line.as_str()).expect("should parse component");
             component_lines.push(component);
         }
 
         // 5. Create signature params with timestamp
-        let mut sig_params = HttpSignatureParams::try_new(&component_ids)
-            .expect("should create params");
+        let mut sig_params =
+            HttpSignatureParams::try_new(&component_ids).expect("should create params");
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -401,10 +402,7 @@ mod tests {
 
         // 8. Build HTTP headers like SDK does
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            authorization.parse().unwrap(),
-        );
+        headers.insert("authorization", authorization.parse().unwrap());
         headers.insert(
             "signature-input",
             sig_headers.signature_input_header_value().parse().unwrap(),
@@ -414,7 +412,10 @@ mod tests {
             sig_headers.signature_header_value().parse().unwrap(),
         );
 
-        println!("Signature-Input: {}", sig_headers.signature_input_header_value());
+        println!(
+            "Signature-Input: {}",
+            sig_headers.signature_input_header_value()
+        );
         println!("Signature: {}", sig_headers.signature_header_value());
 
         // 9. Verify with server code - this is the actual test
@@ -428,18 +429,23 @@ mod tests {
             300, // 5 minute window
         );
 
-        assert!(result.is_ok(), "Signature verification failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Signature verification failed: {:?}",
+            result
+        );
     }
 
     /// Test with actual root key - sign like SDK, verify like server
     #[test]
     fn test_with_actual_root_key_full_signature() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         use httpsig::prelude::{
             AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
             message_component::HttpMessageComponentId,
         };
         use p256::ecdsa::SigningKey;
-        use std::time::{SystemTime, UNIX_EPOCH};
 
         // Actual root key from config
         let root_key_base58 = "ByDGSRM82bqEVQoGYpZzvmmHujrB32UN1sr7WbKN6TPQ";
@@ -450,11 +456,15 @@ mod tests {
 
         // Get public key (like CLI/SDK does)
         let public_key = signing_key.verifying_key();
-        let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+        let public_key_base58 =
+            bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
         println!("Public key: {}", public_key_base58);
 
         // Should be pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW
-        assert_eq!(public_key_base58, "pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW");
+        assert_eq!(
+            public_key_base58,
+            "pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW"
+        );
 
         // Create ClientPublicKey (like server does)
         let client_pubkey = ClientPublicKey::from_base58(&public_key_base58).unwrap();
@@ -494,11 +504,15 @@ mod tests {
         }
 
         let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-        let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         sig_params.set_created(created);
 
         // SDK creates httpsig SecretKey from signing key bytes
-        let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
+        let httpsig_secret =
+            SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
         sig_params.set_key_info(&httpsig_secret);
         sig_params.set_keyid(&public_key_base58);
 
@@ -507,17 +521,34 @@ mod tests {
             .build_signature_headers(&httpsig_secret, Some("sig1"))
             .unwrap();
 
-        println!("Signature-Input: {}", sig_headers.signature_input_header_value());
+        println!(
+            "Signature-Input: {}",
+            sig_headers.signature_input_header_value()
+        );
         println!("Signature: {}", sig_headers.signature_header_value());
 
         // Build headers like SDK does
         let mut headers = HeaderMap::new();
         headers.insert("authorization", authorization.parse().unwrap());
-        headers.insert("signature-input", sig_headers.signature_input_header_value().parse().unwrap());
-        headers.insert("signature", sig_headers.signature_header_value().parse().unwrap());
+        headers.insert(
+            "signature-input",
+            sig_headers.signature_input_header_value().parse().unwrap(),
+        );
+        headers.insert(
+            "signature",
+            sig_headers.signature_header_value().parse().unwrap(),
+        );
 
         // Verify like server does
-        let result = verify_signature(&method, path, authority, &headers, None, &client_pubkey, 300);
+        let result = verify_signature(
+            &method,
+            path,
+            authority,
+            &headers,
+            None,
+            &client_pubkey,
+            300,
+        );
 
         println!("Verification result: {:?}", result);
         assert!(result.is_ok(), "Signature should verify: {:?}", result);
@@ -526,13 +557,13 @@ mod tests {
     /// Test authority handling - SDK signs with just "localhost", verify server accepts it
     #[test]
     fn test_authority_without_port() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         use httpsig::prelude::{
             AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
             message_component::HttpMessageComponentId,
         };
-        use p256::ecdsa::SigningKey;
-        use p256::elliptic_curve::rand_core::OsRng;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
 
         let signing_key = SigningKey::random(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
@@ -574,11 +605,15 @@ mod tests {
         }
 
         let mut sig_params = HttpSignatureParams::try_new(&component_ids).unwrap();
-        let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         sig_params.set_created(created);
 
         let key_bytes = signing_key.to_bytes();
-        let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
+        let httpsig_secret =
+            SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
         sig_params.set_key_info(&httpsig_secret);
         sig_params.set_keyid(&pub_base58);
 
@@ -589,25 +624,43 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert("authorization", authorization.parse().unwrap());
-        headers.insert("signature-input", sig_headers.signature_input_header_value().parse().unwrap());
-        headers.insert("signature", sig_headers.signature_header_value().parse().unwrap());
+        headers.insert(
+            "signature-input",
+            sig_headers.signature_input_header_value().parse().unwrap(),
+        );
+        headers.insert(
+            "signature",
+            sig_headers.signature_header_value().parse().unwrap(),
+        );
 
         // Server verifies with same authority "localhost"
-        let result = verify_signature(&method, path, authority, &headers, None, &client_pubkey, 300);
-        assert!(result.is_ok(), "Should verify with authority 'localhost': {:?}", result);
+        let result = verify_signature(
+            &method,
+            path,
+            authority,
+            &headers,
+            None,
+            &client_pubkey,
+            300,
+        );
+        assert!(
+            result.is_ok(),
+            "Should verify with authority 'localhost': {:?}",
+            result
+        );
     }
 
     /// Test with body and content-digest
     #[test]
     fn test_full_signature_roundtrip_with_body() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         use httpsig::prelude::{
             AlgorithmName, HttpSignatureBase, HttpSignatureParams, SecretKey,
             message_component::HttpMessageComponentId,
         };
-        use p256::ecdsa::SigningKey;
-        use p256::elliptic_curve::rand_core::OsRng;
+        use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
         use sha2::{Digest, Sha256};
-        use std::time::{SystemTime, UNIX_EPOCH};
 
         // 1. Generate key pair
         let signing_key = SigningKey::random(&mut OsRng);
@@ -629,11 +682,16 @@ mod tests {
         let content_digest = format!("sha-256=:{}:", encoded);
 
         // 4. Build covered components including content-digest
-        let component_ids: Vec<HttpMessageComponentId> =
-            ["@method", "@path", "@authority", "authorization", "content-digest"]
-                .iter()
-                .map(|c| HttpMessageComponentId::try_from(*c).unwrap())
-                .collect();
+        let component_ids: Vec<HttpMessageComponentId> = [
+            "@method",
+            "@path",
+            "@authority",
+            "authorization",
+            "content-digest",
+        ]
+        .iter()
+        .map(|c| HttpMessageComponentId::try_from(*c).unwrap())
+        .collect();
 
         // 5. Build component lines
         let mut component_lines = Vec::new();
@@ -671,7 +729,8 @@ mod tests {
         sig_params.set_created(created);
 
         let key_bytes = signing_key.to_bytes();
-        let httpsig_secret = SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
+        let httpsig_secret =
+            SecretKey::from_bytes(AlgorithmName::EcdsaP256Sha256, &key_bytes).unwrap();
         sig_params.set_key_info(&httpsig_secret);
         sig_params.set_keyid(&pub_base58);
 
@@ -685,8 +744,14 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", authorization.parse().unwrap());
         headers.insert("content-digest", content_digest.parse().unwrap());
-        headers.insert("signature-input", sig_headers.signature_input_header_value().parse().unwrap());
-        headers.insert("signature", sig_headers.signature_header_value().parse().unwrap());
+        headers.insert(
+            "signature-input",
+            sig_headers.signature_input_header_value().parse().unwrap(),
+        );
+        headers.insert(
+            "signature",
+            sig_headers.signature_header_value().parse().unwrap(),
+        );
 
         // 9. Verify
         let result = verify_signature(
@@ -699,6 +764,10 @@ mod tests {
             300,
         );
 
-        assert!(result.is_ok(), "Signature verification with body failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Signature verification with body failed: {:?}",
+            result
+        );
     }
 }

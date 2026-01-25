@@ -16,7 +16,7 @@ use s2_common::{
 };
 
 use crate::{
-    auth,
+    auth::{self, AuthState},
     backend::Backend,
     handlers::v1::{AppState, error::ServiceError, middleware::AuthenticatedRequest},
 };
@@ -24,6 +24,7 @@ use crate::{
 /// Authorize an operation if auth is enabled
 fn authorize_op(
     auth_req: Option<&AuthenticatedRequest>,
+    auth_state: &AuthState,
     basin: &str,
     stream: Option<&str>,
     operation: Operation,
@@ -32,6 +33,7 @@ fn authorize_op(
         auth::authorize(
             &auth.token,
             &auth.client_public_key,
+            auth_state.root_public_key(),
             Some(basin),
             stream,
             None,
@@ -90,11 +92,13 @@ pub struct ListArgs {
 ))]
 pub async fn list_streams(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     ListArgs { basin, request }: ListArgs,
 ) -> Result<Json<v1t::stream::ListStreamsResponse>, ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         None,
         Operation::ListStreams,
@@ -143,6 +147,7 @@ pub struct CreateArgs {
 ))]
 pub async fn create_stream(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     CreateArgs {
         request_token: HeaderOpt(request_token),
@@ -152,6 +157,7 @@ pub async fn create_stream(
 ) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         Some(request.stream.as_ref()),
         Operation::CreateStream,
@@ -206,11 +212,13 @@ pub struct GetConfigArgs {
 ))]
 pub async fn get_stream_config(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     GetConfigArgs { basin, stream }: GetConfigArgs,
 ) -> Result<Json<v1t::config::StreamConfig>, ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         Some(stream.as_ref()),
         Operation::GetStreamConfig,
@@ -258,6 +266,7 @@ pub struct CreateOrReconfigureArgs {
 ))]
 pub async fn create_or_reconfigure_stream(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     CreateOrReconfigureArgs {
         basin,
@@ -268,6 +277,7 @@ pub async fn create_or_reconfigure_stream(
     // This operation can either create or reconfigure - check create permission
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         Some(stream.as_ref()),
         Operation::CreateStream,
@@ -320,11 +330,13 @@ pub struct DeleteArgs {
 ))]
 pub async fn delete_stream(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     DeleteArgs { basin, stream }: DeleteArgs,
 ) -> Result<StatusCode, ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         Some(stream.as_ref()),
         Operation::DeleteStream,
@@ -370,6 +382,7 @@ pub struct ReconfigureArgs {
 ))]
 pub async fn reconfigure_stream(
     State(backend): State<Backend>,
+    State(auth_state): State<AuthState>,
     auth: Option<Extension<AuthenticatedRequest>>,
     ReconfigureArgs {
         basin,
@@ -379,6 +392,7 @@ pub async fn reconfigure_stream(
 ) -> Result<Json<v1t::config::StreamConfig>, ServiceError> {
     authorize_op(
         auth.as_ref().map(|e| &e.0),
+        &auth_state,
         basin.as_ref(),
         Some(stream.as_ref()),
         Operation::ReconfigureStream,

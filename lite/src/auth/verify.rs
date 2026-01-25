@@ -56,13 +56,25 @@ pub fn verify_token(
 /// Authorize an operation on a resource
 ///
 /// Parameters:
+/// - `token`: The verified Biscuit token
+/// - `signer_public_key`: The public key that signed the HTTP request
+/// - `root_public_key`: The server's root public key (to prevent root key bypass)
 /// - `basin`: The basin being accessed (None for account-level operations)
 /// - `stream`: The stream being accessed (None for basin/account-level operations)
 /// - `access_token_id`: The access token being operated on (for IssueAccessToken,
 ///   RevokeAccessToken, etc.)
+///
+/// # Security
+///
+/// The root key can ONLY be used as a client signer for access token operations
+/// (IssueAccessToken, RevokeAccessToken, ListAccessTokens). This prevents
+/// "superuser bypass" where the root key could access any resource.
+///
+/// Per design doc: "No superuser bypass - root key only for token management endpoints"
 pub fn authorize(
     token: &VerifiedToken,
     signer_public_key: &ClientPublicKey,
+    root_public_key: Option<&RootPublicKey>,
     basin: Option<&str>,
     stream: Option<&str>,
     access_token_id: Option<&str>,
@@ -71,6 +83,17 @@ pub fn authorize(
     // Verify the request signer is authorized by this token
     if !token.allowed_public_keys.contains(signer_public_key) {
         return Err(AuthorizeError::UnauthorizedSigner);
+    }
+
+    // SECURITY: Reject root key as client signer for non-access-token operations.
+    // The root key should only be usable for token management endpoints.
+    if let Some(root_pk) = root_public_key {
+        let root_as_client = ClientPublicKey::from_verifying_key(root_pk.verifying_key());
+        if signer_public_key == &root_as_client {
+            if !is_access_token_operation(operation) {
+                return Err(AuthorizeError::RootKeyNotAllowed);
+            }
+        }
     }
 
     // Check resource scopes in Rust (simpler than Datalog negation)
@@ -131,7 +154,11 @@ fn check_resource_scopes(
         if let Ok(block_source) = biscuit.print_block_source(block_idx) {
             extract_scope_facts(&block_source, "basin_scope", &mut basin_scopes);
             extract_scope_facts(&block_source, "stream_scope", &mut stream_scopes);
-            extract_scope_facts(&block_source, "access_token_scope", &mut access_token_scopes);
+            extract_scope_facts(
+                &block_source,
+                "access_token_scope",
+                &mut access_token_scopes,
+            );
         }
     }
 
@@ -389,6 +416,15 @@ pub enum VerifyError {
     TokenTooLarge(usize),
 }
 
+/// Check if an operation is an access token management operation.
+/// These are the only operations where the root key is allowed as a client signer.
+fn is_access_token_operation(op: Operation) -> bool {
+    matches!(
+        op,
+        Operation::IssueAccessToken | Operation::RevokeAccessToken | Operation::ListAccessTokens
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthorizeError {
     #[error("biscuit error: {0}")]
@@ -397,16 +433,18 @@ pub enum AuthorizeError {
     OutOfScope(String),
     #[error("request signer not authorized by token")]
     UnauthorizedSigner,
+    #[error("root key cannot be used as client key for this operation")]
+    RootKeyNotAllowed,
     #[error("malformed token: {0}")]
     MalformedToken(String),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use biscuit_auth::{KeyPair, PrivateKey, builder::BiscuitBuilder};
-    use p256::ecdsa::SigningKey;
-    use p256::elliptic_curve::rand_core::OsRng;
+    use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
+
+    use super::*;
 
     /// Simulate exactly what the CLI does in bootstrap mode:
     /// 1. Parse root_key as 32 bytes
@@ -423,7 +461,8 @@ mod tests {
 
         // 2. Get public key as compressed base58 (exactly like CLI does)
         let public_key = signing_key.verifying_key();
-        let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+        let public_key_base58 =
+            bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
         println!("Public key base58: {}", public_key_base58);
 
         // 3. Create Biscuit keypair from same bytes (exactly like CLI does)
@@ -446,8 +485,8 @@ mod tests {
         println!("Block source:\n{}", block_source);
 
         // 6. Extract public keys using server's extraction logic
-        let extracted_keys = extract_client_public_keys(&biscuit)
-            .expect("should extract public keys");
+        let extracted_keys =
+            extract_client_public_keys(&biscuit).expect("should extract public keys");
 
         println!("Extracted {} public keys", extracted_keys.len());
         for (i, key) in extracted_keys.iter().enumerate() {
@@ -455,7 +494,11 @@ mod tests {
         }
 
         // 7. Verify we got exactly one key and it matches
-        assert_eq!(extracted_keys.len(), 1, "Should extract exactly one public key");
+        assert_eq!(
+            extracted_keys.len(),
+            1,
+            "Should extract exactly one public key"
+        );
         assert_eq!(
             extracted_keys[0].to_base58(),
             public_key_base58,
@@ -472,7 +515,8 @@ mod tests {
 
         // Get public key
         let public_key = signing_key.verifying_key();
-        let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+        let public_key_base58 =
+            bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
 
         // Create Biscuit keypair
         let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1).unwrap();
@@ -486,9 +530,15 @@ mod tests {
             + 3600;
 
         let mut builder = BiscuitBuilder::new();
-        builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-        builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-        builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+        builder = builder
+            .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+            .unwrap();
+        builder = builder
+            .fact(format!("expires({})", expires_ts).as_str())
+            .unwrap();
+        builder = builder
+            .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+            .unwrap();
         builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
         builder = builder.fact("op_group(\"account\", \"write\")").unwrap();
         builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
@@ -498,15 +548,24 @@ mod tests {
 
         // Now verify the token like the server does
         let root_public_key = RootPublicKey::from_base58(&public_key_base58).unwrap();
-        let verified = verify_token(&token_bytes, &root_public_key)
-            .expect("should verify token");
+        let verified = verify_token(&token_bytes, &root_public_key).expect("should verify token");
 
         // Check that the public key was extracted correctly
         assert_eq!(verified.allowed_public_keys.len(), 1);
-        assert_eq!(verified.allowed_public_keys[0].to_base58(), public_key_base58);
+        assert_eq!(
+            verified.allowed_public_keys[0].to_base58(),
+            public_key_base58
+        );
 
         println!("Token verified successfully!");
-        println!("Allowed public keys: {:?}", verified.allowed_public_keys.iter().map(|k| k.to_base58()).collect::<Vec<_>>());
+        println!(
+            "Allowed public keys: {:?}",
+            verified
+                .allowed_public_keys
+                .iter()
+                .map(|k| k.to_base58())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// Test with the ACTUAL root key from the CLI config to ensure we get the same public key
@@ -524,15 +583,15 @@ mod tests {
 
         // Get public key (like CLI does)
         let public_key = signing_key.verifying_key();
-        let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+        let public_key_base58 =
+            bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
 
         println!("Root key: {}", root_key_base58);
         println!("Public key: {}", public_key_base58);
 
         // This should match what the server logs: pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW
         assert_eq!(
-            public_key_base58,
-            "pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW",
+            public_key_base58, "pTGh6RCaGt5PcA3evMKB6ZZmsYfALRSPhCH9tq3xzEsW",
             "Public key should match server's expected public key"
         );
 
@@ -547,9 +606,15 @@ mod tests {
             + 3600;
 
         let mut builder = BiscuitBuilder::new();
-        builder = builder.fact(format!("public_key(\"{}\")", public_key_base58).as_str()).unwrap();
-        builder = builder.fact(format!("expires({})", expires_ts).as_str()).unwrap();
-        builder = builder.check(format!("check if time($t), $t < {}", expires_ts).as_str()).unwrap();
+        builder = builder
+            .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+            .unwrap();
+        builder = builder
+            .fact(format!("expires({})", expires_ts).as_str())
+            .unwrap();
+        builder = builder
+            .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+            .unwrap();
         builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
         builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
 
@@ -565,10 +630,19 @@ mod tests {
         let root_public_key = RootPublicKey::from_base58(&public_key_base58).unwrap();
         let verified = verify_token(&token_bytes, &root_public_key).unwrap();
 
-        println!("Extracted public keys: {:?}",
-            verified.allowed_public_keys.iter().map(|k| k.to_base58()).collect::<Vec<_>>());
+        println!(
+            "Extracted public keys: {:?}",
+            verified
+                .allowed_public_keys
+                .iter()
+                .map(|k| k.to_base58())
+                .collect::<Vec<_>>()
+        );
 
         assert_eq!(verified.allowed_public_keys.len(), 1);
-        assert_eq!(verified.allowed_public_keys[0].to_base58(), public_key_base58);
+        assert_eq!(
+            verified.allowed_public_keys[0].to_base58(),
+            public_key_base58
+        );
     }
 }

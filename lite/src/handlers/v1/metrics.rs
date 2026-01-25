@@ -28,6 +28,7 @@ fn authorize_metrics(
         return auth::authorize(
             &auth.token,
             &auth.client_public_key,
+            auth_state.root_public_key(),
             basin,
             stream,
             None,
