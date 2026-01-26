@@ -51,10 +51,10 @@ impl From<types::stream::StreamInfo> for StreamInfo {
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListStreamsRequest {
-    /// Filter to streams whose name begins with this prefix.
+    /// Filter to streams whose names begin with this prefix.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub prefix: Option<StreamNamePrefix>,
-    /// Filter to streams whose name begins with this prefix.
+    /// Filter to streams whose names lexicographically start after this string.
     /// It must be greater than or equal to the `prefix` if specified.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub start_after: Option<StreamNameStartAfter>,
