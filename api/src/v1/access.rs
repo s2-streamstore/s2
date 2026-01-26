@@ -386,10 +386,10 @@ impl From<types::access::ReadWritePermissions> for ReadWritePermissions {
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListAccessTokensRequest {
-    /// Filter to access tokens whose ID begins with this prefix.
+    /// Filter to access tokens whose IDs begin with this prefix.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub prefix: Option<types::access::AccessTokenIdPrefix>,
-    /// Filter to access tokens whose ID lexicographically starts after this string.
+    /// Filter to access tokens whose IDs lexicographically start after this string.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub start_after: Option<types::access::AccessTokenIdStartAfter>,
     /// Number of results, up to a maximum of 1000.
