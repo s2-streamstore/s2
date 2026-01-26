@@ -247,13 +247,13 @@ async fn init_object_store(
             Arc::new(builder.build()?) as Arc<dyn object_store::ObjectStore>
         }
         StoreType::LocalFileSystem(local_root) => {
-            std::fs::create_dir_all(&local_root)?;
+            std::fs::create_dir_all(local_root)?;
             info!(
                 root = %local_root.display(),
                 "using local filesystem object store"
             );
             Arc::new(object_store::local::LocalFileSystem::new_with_prefix(
-                &local_root,
+                local_root,
             )?)
         }
         StoreType::InMemory => {
