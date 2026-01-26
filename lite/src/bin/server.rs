@@ -121,6 +121,8 @@ async fn main() -> eyre::Result<()> {
         },
     )?;
 
+    let manifest_poll_interval = db_settings.manifest_poll_interval;
+
     let append_inflight_max = if std::env::var("S2LITE_PIPELINE")
         .is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
     {
@@ -135,6 +137,13 @@ async fn main() -> eyre::Result<()> {
         .with_settings(db_settings)
         .build()
         .await?;
+
+    info!(
+        ?manifest_poll_interval,
+        "sleeping to ensure prior instance fenced out"
+    );
+
+    tokio::time::sleep(manifest_poll_interval).await;
 
     let backend = Backend::new(db, append_inflight_max);
 
