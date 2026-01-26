@@ -106,7 +106,7 @@ async fn main() -> eyre::Result<()> {
     let store_type = if let Some(bucket) = args.bucket {
         StoreType::S3Bucket(bucket)
     } else if let Some(local_root) = args.local_root {
-        StoreType::LocalFileSystem(local_root.to_path_buf())
+        StoreType::LocalFileSystem(local_root)
     } else {
         StoreType::InMemory
     };
