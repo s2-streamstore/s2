@@ -145,14 +145,14 @@ async fn main() -> eyre::Result<()> {
 
     tokio::time::sleep(manifest_poll_interval).await;
 
-    let backend = Backend::new(db, append_inflight_max);
-
-    let app = handlers::router(backend).layer(
-        TraceLayer::new_for_http()
-            .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
-            .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
-            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-    );
+    let app = handlers::router()
+        .with_state(Backend::new(db, append_inflight_max))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+                .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        );
 
     let server_handle = axum_server::Handle::new();
     tokio::spawn(shutdown_signal(server_handle.clone()));

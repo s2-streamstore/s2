@@ -93,7 +93,7 @@ Test your performance:
 s2 bench liteness --target-mibps 10 --duration 5s --catchup-delay 0s
 ```
 
-![S2 Ping Test](./assets/bench.gif)
+![S2 Benchmark](./assets/bench.gif)
 
 Now let's try streaming sessions. In one or more new terminals (make sure you re-export the env vars noted above),
 ```bash
@@ -109,7 +109,7 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Monitoring
 
-`/ping` will `pong`
+`/ping` will `pong`, you can treat 200 as a success response for readiness and liveness checks
 
 `/metrics` returns Prometheus text format
 

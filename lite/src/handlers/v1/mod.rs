@@ -1,5 +1,7 @@
 use tower_http::{compression::CompressionLayer, decompression::RequestDecompressionLayer};
 
+use crate::backend::Backend;
+
 pub mod access_tokens;
 pub mod basins;
 mod error;
@@ -10,7 +12,7 @@ pub mod streams;
 
 const MAX_UNARY_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
-pub fn router(backend: crate::backend::Backend) -> axum::Router {
+pub fn router() -> axum::Router<Backend> {
     // TODO: timeout layer that respects long-poll read wait
 
     let compress_when = {
@@ -26,7 +28,6 @@ pub fn router(backend: crate::backend::Backend) -> axum::Router {
         .merge(records::router())
         .merge(access_tokens::router())
         .merge(metrics::router())
-        .with_state(backend)
         .route_layer((
             CompressionLayer::new().compress_when(compress_when),
             RequestDecompressionLayer::new(),
