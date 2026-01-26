@@ -40,9 +40,15 @@ struct TlsConfig {
 struct Args {
     /// Name of the S3 bucket to back the database.
     ///
-    /// If not specified, in-memory storage is used.
+    /// If not specified, in-memory storage is used unless --local-root is set.
     #[arg(long)]
     bucket: Option<String>,
+
+    /// Root directory to back the database on the local filesystem.
+    ///
+    /// Conflicts with --bucket.
+    #[arg(long, value_name = "DIR", conflicts_with = "bucket")]
+    local_root: Option<PathBuf>,
 
     /// Base path on object storage.
     #[arg(long, default_value = "")]
@@ -55,6 +61,22 @@ struct Args {
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
     port: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+enum StoreType {
+    S3Bucket(String),
+    LocalFileSystem(PathBuf),
+    InMemory,
+}
+
+impl StoreType {
+    fn default_flush_interval(&self) -> Duration {
+        Duration::from_millis(match self {
+            StoreType::S3Bucket(_) => 50,
+            StoreType::LocalFileSystem(_) | StoreType::InMemory => 5,
+        })
+    }
 }
 
 #[tokio::main]
@@ -81,14 +103,14 @@ async fn main() -> eyre::Result<()> {
         format!("0.0.0.0:{port}")
     };
 
-    let object_store = init_object_store(args.bucket.as_deref()).await?;
+    let store_type = store_type_from_args(args.bucket.as_deref(), args.local_root.as_deref());
 
-    let default_flush_interval = Duration::from_millis(if args.bucket.is_some() { 50 } else { 5 });
+    let object_store = init_object_store(&store_type).await?;
 
     let db_settings = slatedb::Settings::from_env_with_default(
         "SL8_",
         slatedb::Settings {
-            flush_interval: Some(default_flush_interval),
+            flush_interval: Some(store_type.default_flush_interval()),
             ..Default::default()
         },
     )?;
@@ -172,11 +194,21 @@ async fn main() -> eyre::Result<()> {
     Ok(())
 }
 
+fn store_type_from_args(bucket: Option<&str>, local_root: Option<&std::path::Path>) -> StoreType {
+    if let Some(bucket) = bucket.filter(|bucket| !bucket.is_empty()) {
+        return StoreType::S3Bucket(bucket.to_string());
+    }
+    if let Some(local_root) = local_root {
+        return StoreType::LocalFileSystem(local_root.to_path_buf());
+    }
+    StoreType::InMemory
+}
+
 async fn init_object_store(
-    bucket: Option<&str>,
+    store_type: &StoreType,
 ) -> eyre::Result<Arc<dyn object_store::ObjectStore>> {
-    match bucket {
-        Some(bucket) if !bucket.is_empty() => {
+    Ok(match store_type {
+        StoreType::S3Bucket(bucket) => {
             info!(bucket, "using s3 object store");
             let mut builder =
                 object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket);
@@ -216,13 +248,23 @@ async fn init_object_store(
                     }
                 }
             }
-            Ok(Arc::new(builder.build()?))
+            Arc::new(builder.build()?) as Arc<dyn object_store::ObjectStore>
         }
-        _ => {
+        StoreType::LocalFileSystem(local_root) => {
+            std::fs::create_dir_all(&local_root)?;
+            info!(
+                root = %local_root.display(),
+                "using local filesystem object store"
+            );
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(
+                &local_root,
+            )?)
+        }
+        StoreType::InMemory => {
             info!("using in-memory object store");
-            Ok(Arc::new(object_store::memory::InMemory::new()))
+            Arc::new(object_store::memory::InMemory::new())
         }
-    }
+    })
 }
 
 async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {

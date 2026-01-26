@@ -1,4 +1,5 @@
 ## Local Conventions
 
-- Formatting: run `cargo +nightly fmt` or `just fmt`
-- Tests: prefer `cargo nextest` or `just test`
+- Formatting: run `just fmt`
+- Tests: run `just test`
+- PR title + description become the squashed commit message at merge time; use conventional commit format
