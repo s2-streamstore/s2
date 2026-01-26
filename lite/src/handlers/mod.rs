@@ -8,7 +8,7 @@ use axum::{
 
 use crate::backend::Backend;
 
-async fn metrics() -> impl axum::response::IntoResponse {
+async fn metrics(State(_backend): State<Backend>) -> impl axum::response::IntoResponse {
     let body = crate::metrics::gather();
     (
         [(
