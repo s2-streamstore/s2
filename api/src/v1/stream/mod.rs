@@ -261,9 +261,6 @@ pub enum AppendInputStreamError {
     Validation(#[from] types::ValidationError),
 }
 
-/// Headers add structured information to a record as name-value pairs.
-///
-/// The name cannot be empty, with the exception of an S2 command record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Header(pub String, pub String);
