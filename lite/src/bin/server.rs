@@ -103,7 +103,13 @@ async fn main() -> eyre::Result<()> {
         format!("0.0.0.0:{port}")
     };
 
-    let store_type = store_type_from_args(args.bucket.as_deref(), args.local_root.as_deref());
+    let store_type = if let Some(bucket) = args.bucket {
+        StoreType::S3Bucket(bucket)
+    } else if let Some(local_root) = args.local_root {
+        StoreType::LocalFileSystem(local_root.to_path_buf())
+    } else {
+        StoreType::InMemory
+    };
 
     let object_store = init_object_store(&store_type).await?;
 
@@ -192,16 +198,6 @@ async fn main() -> eyre::Result<()> {
     }
 
     Ok(())
-}
-
-fn store_type_from_args(bucket: Option<&str>, local_root: Option<&std::path::Path>) -> StoreType {
-    if let Some(bucket) = bucket.filter(|bucket| !bucket.is_empty()) {
-        return StoreType::S3Bucket(bucket.to_string());
-    }
-    if let Some(local_root) = local_root {
-        return StoreType::LocalFileSystem(local_root.to_path_buf());
-    }
-    StoreType::InMemory
 }
 
 async fn init_object_store(
