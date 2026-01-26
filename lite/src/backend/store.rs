@@ -9,6 +9,11 @@ use super::Backend;
 use crate::backend::{error::StorageError, kv, stream_id::StreamId};
 
 impl Backend {
+    pub async fn db_ping(&self) -> Result<(), slatedb::Error> {
+        let _ = self.db.get(b"ping").await?;
+        Ok(())
+    }
+
     pub(super) async fn db_get<K: AsRef<[u8]> + Send, V>(
         &self,
         key: K,

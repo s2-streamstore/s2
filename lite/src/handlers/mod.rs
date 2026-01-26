@@ -1,5 +1,13 @@
 pub mod v1;
 
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+
+use crate::backend::Backend;
+
 async fn metrics() -> impl axum::response::IntoResponse {
     let body = crate::metrics::gather();
     (
@@ -11,9 +19,16 @@ async fn metrics() -> impl axum::response::IntoResponse {
     )
 }
 
-pub fn router(backend: crate::backend::Backend) -> axum::Router {
+async fn ping(State(backend): State<Backend>) -> Response {
+    match backend.db_ping().await {
+        Ok(()) => "pong".into_response(),
+        Err(err) => (StatusCode::SERVICE_UNAVAILABLE, format!("db error: {err}")).into_response(),
+    }
+}
+
+pub fn router() -> axum::Router<Backend> {
     axum::Router::new()
-        .route("/ping", axum::routing::get(|| async { "pong" }))
+        .route("/ping", axum::routing::get(ping))
         .route("/metrics", axum::routing::get(metrics))
-        .nest("/v1", v1::router(backend))
+        .nest("/v1", v1::router())
 }
