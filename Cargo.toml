@@ -55,9 +55,9 @@ tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 utoipa = "5.4"
-uuid = "1.19"
+uuid = "1.20"
 zstd = "0.13"
 
 [patch.crates-io]
-slatedb = { git = "https://github.com/slatedb/slatedb", rev = "5281e6e0990477b1176cb49e907e26e706a39ac4" }
+slatedb = { git = "https://github.com/slatedb/slatedb", rev = "e9022295cd03c7b3273c9b6518c8daff91d677c5" }
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
