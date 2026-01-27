@@ -90,11 +90,11 @@ pub fn ser_key_range(
     start_after: &StreamNameStartAfter,
 ) -> Range<Bytes> {
     let prefix_start = ser_key_prefix(basin, prefix);
-    let start = if !start_after.is_empty() {
+    let start = if start_after.is_empty() {
+        prefix_start
+    } else {
         let start_after_key = ser_key_start_after(basin, start_after);
         std::cmp::max(prefix_start, start_after_key)
-    } else {
-        prefix_start
     };
     let end = ser_key_prefix_end(basin, prefix);
     start..end

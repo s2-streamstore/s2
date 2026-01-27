@@ -83,11 +83,11 @@ pub fn ser_key_start_after(start_after: &BasinNameStartAfter) -> Bytes {
 
 pub fn ser_key_range(prefix: &BasinNamePrefix, start_after: &BasinNameStartAfter) -> Range<Bytes> {
     let prefix_start = ser_key_prefix(prefix);
-    let start = if !start_after.is_empty() {
+    let start = if start_after.is_empty() {
+        prefix_start
+    } else {
         let start_after_key = ser_key_start_after(start_after);
         std::cmp::max(prefix_start, start_after_key)
-    } else {
-        prefix_start
     };
     let end = ser_key_prefix_end(prefix);
     start..end
