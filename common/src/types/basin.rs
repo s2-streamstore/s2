@@ -237,7 +237,7 @@ mod test {
     #[rstest]
     #[case::too_long("a".repeat(crate::caps::MAX_BASIN_NAME_LEN + 1))]
     #[case::too_short("abcdefg".to_owned())]
-    #[case::empty("".to_owned())]
+    #[case::empty(String::new())]
     #[case::invalid_first_char("Abcdefgh".to_owned())]
     #[case::invalid_last_char("abcdefg-".to_owned())]
     #[case::invalid_characters("abcd_efg".to_owned())]
@@ -246,7 +246,7 @@ mod test {
     }
 
     #[rstest]
-    #[case::empty("".to_owned())]
+    #[case::empty(String::new())]
     #[case::single_char("a".to_owned())]
     #[case::trailing_hyphen("abcdefg-".to_owned())]
     #[case::max_len("a".repeat(crate::caps::MAX_BASIN_NAME_LEN))]
@@ -263,7 +263,7 @@ mod test {
     }
 
     #[rstest]
-    #[case::empty("".to_owned())]
+    #[case::empty(String::new())]
     #[case::single_char("a".to_owned())]
     #[case::trailing_hyphen("abcdefg-".to_owned())]
     fn validate_start_after_ok(#[case] start_after: String) {
