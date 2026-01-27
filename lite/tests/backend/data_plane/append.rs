@@ -524,13 +524,16 @@ async fn test_append_session_large_batches() {
     .await;
 
     let large_record = vec![0u8; 100_000];
-    let batch_count = 50;
+    let batch_count: u64 = 50;
 
-    let inputs = futures::stream::iter((0..batch_count).map(|_| AppendInput {
-        records: create_test_record_batch(vec![Bytes::from(large_record.clone())]),
-        match_seq_num: None,
-        fencing_token: None,
-    }));
+    let inputs = futures::stream::iter(
+        std::iter::repeat_with(|| AppendInput {
+            records: create_test_record_batch(vec![Bytes::from(large_record.clone())]),
+            match_seq_num: None,
+            fencing_token: None,
+        })
+        .take(batch_count as usize),
+    );
 
     let session = backend
         .clone()
