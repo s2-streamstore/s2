@@ -104,6 +104,7 @@ pub struct OptionalTimestampingConfig {
 }
 
 impl OptionalTimestampingConfig {
+    #[must_use]
     pub fn reconfigure(mut self, reconfiguration: TimestampingReconfiguration) -> Self {
         if let Maybe::Specified(mode) = reconfiguration.mode {
             self.mode = mode;
@@ -157,6 +158,7 @@ pub struct OptionalDeleteOnEmptyConfig {
 }
 
 impl OptionalDeleteOnEmptyConfig {
+    #[must_use]
     pub fn reconfigure(mut self, reconfiguration: DeleteOnEmptyReconfiguration) -> Self {
         if let Maybe::Specified(min_age) = reconfiguration.min_age {
             self.min_age = min_age;
@@ -203,6 +205,7 @@ pub struct OptionalStreamConfig {
 }
 
 impl OptionalStreamConfig {
+    #[must_use]
     pub fn reconfigure(mut self, reconfiguration: StreamReconfiguration) -> Self {
         let StreamReconfiguration {
             storage_class,
@@ -315,6 +318,7 @@ pub struct BasinConfig {
 }
 
 impl BasinConfig {
+    #[must_use]
     pub fn reconfigure(mut self, reconfiguration: BasinReconfiguration) -> Self {
         let BasinReconfiguration {
             default_stream_config,
