@@ -29,6 +29,7 @@ use utoipa::{
     },
 };
 
+#[allow(clippy::needless_for_each)]
 #[derive(OpenApi)]
 #[openapi(
     info(

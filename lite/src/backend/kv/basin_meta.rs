@@ -259,7 +259,7 @@ mod tests {
                 .unwrap(),
         );
         let basin_meta = super::BasinMeta {
-            config: config,
+            config,
             created_at,
             deleted_at,
             creation_idempotency_key: Some(Bash::new(&[b"test-basin", b"request-token-123"])),
