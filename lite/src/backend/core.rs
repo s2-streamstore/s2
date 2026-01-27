@@ -234,8 +234,8 @@ impl Backend {
             Err(StreamerError::StreamNotFound(e)) => {
                 let config = match self.get_basin_config(basin.clone()).await {
                     Ok(config) => config,
-                    Err(GetBasinConfigError::Storage(e)) => Err(e)?,
-                    Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
+                    Err(GetBasinConfigError::Storage(e)) => return Err(e.into()),
+                    Err(GetBasinConfigError::BasinNotFound(e)) => return Err(e.into()),
                 };
                 if should_auto_create(&config) {
                     if let Err(e) = self
@@ -248,11 +248,11 @@ impl Backend {
                         .await
                     {
                         match e {
-                            CreateStreamError::Storage(e) => Err(e)?,
-                            CreateStreamError::TransactionConflict(e) => Err(e)?,
-                            CreateStreamError::BasinDeletionPending(e) => Err(e)?,
-                            CreateStreamError::StreamDeletionPending(e) => Err(e)?,
-                            CreateStreamError::BasinNotFound(e) => Err(e)?,
+                            CreateStreamError::Storage(e) => return Err(e.into()),
+                            CreateStreamError::TransactionConflict(e) => return Err(e.into()),
+                            CreateStreamError::BasinDeletionPending(e) => return Err(e.into()),
+                            CreateStreamError::StreamDeletionPending(e) => return Err(e.into()),
+                            CreateStreamError::BasinNotFound(e) => return Err(e.into()),
                             CreateStreamError::StreamAlreadyExists(_) => {}
                         }
                     }

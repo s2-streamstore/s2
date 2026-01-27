@@ -152,21 +152,21 @@ impl Streamer {
         if let Some(provided_token) = fencing_token
             && provided_token != self.fencing_token.state
         {
-            Err(AppendConditionFailedError::FencingTokenMismatch {
+            return Err(AppendConditionFailedError::FencingTokenMismatch {
                 expected: provided_token,
                 actual: self.fencing_token.state.clone(),
                 applied_point: self.fencing_token.applied_point,
-            })?;
+            }.into());
         }
         let next_assignable_pos = self.next_assignable_pos();
         let first_seq_num = next_assignable_pos.seq_num;
         if let Some(match_seq_num) = match_seq_num
             && match_seq_num != first_seq_num
         {
-            Err(AppendConditionFailedError::SeqNumMismatch {
+            return Err(AppendConditionFailedError::SeqNumMismatch {
                 assigned_seq_num: first_seq_num,
                 match_seq_num,
-            })?;
+            }.into());
         }
         sequenced_records(
             records,

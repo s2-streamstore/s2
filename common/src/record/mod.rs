@@ -138,7 +138,7 @@ impl TryFrom<u8> for MagicByte {
                 0 => 1_u8,
                 1 => 2_u8,
                 2 => 3_u8,
-                _ => Err("invalid metered_size_varlen")?,
+                _ => return Err("invalid metered_size_varlen"),
             },
         })
     }
