@@ -179,9 +179,9 @@ async fn main() -> eyre::Result<()> {
                 "starting https server with self-signed certificate, clients will need to use --insecure"
             );
             let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed([
-                "localhost".to_string(),
-                "127.0.0.1".to_string(),
-                "::1".to_string(),
+                "localhost".to_owned(),
+                "127.0.0.1".to_owned(),
+                "::1".to_owned(),
             ])?;
             let rustls_config = RustlsConfig::from_pem(
                 cert.pem().into_bytes(),

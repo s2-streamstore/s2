@@ -256,7 +256,7 @@ impl ServiceError {
                 }),
             },
             ServiceError::NotImplemented => {
-                standard(ErrorCode::PermissionDenied, "Not implemented".to_string())
+                standard(ErrorCode::PermissionDenied, "Not implemented".to_owned())
             }
         }
     }

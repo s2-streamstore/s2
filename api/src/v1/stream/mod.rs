@@ -352,7 +352,7 @@ impl AppendRecord {
         };
 
         types::stream::AppendRecord::try_from(parts)
-            .map_err(|e| types::ValidationError(e.to_string()))
+            .map_err(|e| types::ValidationError(e.to_owned()))
     }
 }
 

@@ -368,7 +368,7 @@ mod test {
         fn from(val: TestError) -> Self {
             TerminalMessage {
                 status: val.status,
-                body: val.body.to_string(),
+                body: val.body.to_owned(),
             }
         }
     }
@@ -523,7 +523,7 @@ mod test {
     fn terminal_session_message_round_trips() {
         let terminal = TerminalMessage {
             status: 418,
-            body: "short-circuit".to_string(),
+            body: "short-circuit".to_owned(),
         };
         let msg = SessionMessage::from(terminal.clone());
         let encoded = msg.encode();

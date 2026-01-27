@@ -78,7 +78,7 @@ impl FromStr for Format {
         match s.trim() {
             "raw" | "json" => Ok(Self::Raw),
             "base64" | "json-binsafe" => Ok(Self::Base64),
-            _ => Err(ValidationError(s.to_string())),
+            _ => Err(ValidationError(s.to_owned())),
         }
     }
 }
