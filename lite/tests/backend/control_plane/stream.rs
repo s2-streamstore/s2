@@ -673,8 +673,7 @@ async fn test_auto_create_race_condition_append() {
                     .await
                 {
                     Ok(ack) => return Ok(ack),
-                    Err(AppendError::TransactionConflict(_))
-                    | Err(AppendError::StreamNotFound(_)) => {
+                    Err(AppendError::TransactionConflict(_) | AppendError::StreamNotFound(_)) => {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                         continue;
                     }
@@ -748,7 +747,7 @@ async fn test_auto_create_race_condition_read() {
                         drop(session);
                         return Ok::<(), ReadError>(());
                     }
-                    Err(ReadError::TransactionConflict(_)) | Err(ReadError::StreamNotFound(_)) => {
+                    Err(ReadError::TransactionConflict(_) | ReadError::StreamNotFound(_)) => {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                         continue;
                     }
