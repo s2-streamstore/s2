@@ -127,7 +127,7 @@ impl Encodable for CommandRecord {
     }
 }
 
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CommandPayloadError {
     #[error("invalid UTF-8")]
     InvalidUtf8(Utf8Error),

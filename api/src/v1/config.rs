@@ -150,7 +150,7 @@ impl From<TimestampingConfig> for types::config::OptionalTimestampingConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct TimestampingReconfiguration {
     /// Timestamping mode for appends that influences how timestamps are handled.
@@ -225,7 +225,7 @@ impl From<DeleteOnEmptyConfig> for types::config::OptionalDeleteOnEmptyConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DeleteOnEmptyReconfiguration {
     /// Minimum age in seconds before an empty stream can be deleted.
@@ -334,7 +334,7 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamReconfiguration {
     /// Storage class for recent writes.
@@ -395,7 +395,7 @@ impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct BasinConfig {
     /// Default stream configuration.

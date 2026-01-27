@@ -45,7 +45,7 @@ impl DeepSize for StreamPosition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InternalRecordError {
     #[error("truncated: {0}")]
     Truncated(&'static str),
@@ -54,7 +54,7 @@ pub enum InternalRecordError {
 }
 
 /// `impl Display` can be safely returned to the client without leaking internal details.
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PublicRecordError {
     #[error("unknown command")]
     UnknownCommand,
@@ -76,14 +76,14 @@ impl DeepSize for Header {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Ordinalize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ordinalize)]
 #[repr(u8)]
 pub enum RecordType {
     Command = 1,
     Envelope = 2,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MagicByte {
     pub record_type: RecordType,
     pub metered_size_varlen: u8,

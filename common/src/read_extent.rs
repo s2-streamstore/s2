@@ -24,7 +24,7 @@ pub enum ReadLimit {
     CountOrBytes(CountOrBytes),
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum EvaluatedReadLimit {
     Remaining(ReadLimit),
     Exhausted,

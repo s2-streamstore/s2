@@ -5,7 +5,7 @@ use bytes::{Buf, BufMut, Bytes};
 use super::{Encodable, Header, InternalRecordError, PublicRecordError};
 use crate::deep_size::DeepSize;
 
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HeaderValidationError {
     #[error("too many")]
     TooMany,
