@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn error_on_invalid_ordinal() {
-        let bytes = Bytes::from(vec![255u8]);
+        let bytes = Bytes::from(vec![255_u8]);
         let result = Key::try_from(bytes);
         assert!(matches!(
             result,

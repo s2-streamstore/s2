@@ -8,7 +8,7 @@ pub struct Bash(blake3::Hash);
 
 impl Bash {
     pub const LEN: usize = 32;
-    const SEPARATOR: u8 = 0u8;
+    const SEPARATOR: u8 = 0_u8;
 
     pub fn new(components: &[&[u8]]) -> Self {
         let mut hasher = blake3::Hasher::new();

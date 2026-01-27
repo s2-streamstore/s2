@@ -523,7 +523,7 @@ async fn test_append_session_large_batches() {
     )
     .await;
 
-    let large_record = vec![0u8; 100_000];
+    let large_record = vec![0_u8; 100_000];
     let batch_count: u64 = 50;
 
     let inputs = futures::stream::iter(

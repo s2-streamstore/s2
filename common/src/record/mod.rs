@@ -133,9 +133,9 @@ impl TryFrom<u8> for MagicByte {
         Ok(Self {
             record_type,
             metered_size_varlen: match (value >> 3) & 0b11 {
-                0 => 1u8,
-                1 => 2u8,
-                2 => 3u8,
+                0 => 1_u8,
+                1 => 2_u8,
+                2 => 3_u8,
                 _ => Err("invalid metered_size_varlen")?,
             },
         })
@@ -496,11 +496,11 @@ mod test {
 
     #[test]
     fn test_read_varint() {
-        let data = [0u8, 0, 0, 1, 0, 0, 0];
+        let data = [0_u8, 0, 0, 1, 0, 0, 0];
 
-        assert_eq!(read_vint_u32_be(&data[..4]), 1u32);
-        assert_eq!(read_vint_u32_be(&data[2..5]), 2u32.pow(8));
-        assert_eq!(read_vint_u32_be(&data[2..6]), 2u32.pow(16));
-        assert_eq!(read_vint_u32_be(&data[3..]), 2u32.pow(24));
+        assert_eq!(read_vint_u32_be(&data[..4]), 1_u32);
+        assert_eq!(read_vint_u32_be(&data[2..5]), 2_u32.pow(8));
+        assert_eq!(read_vint_u32_be(&data[2..6]), 2_u32.pow(16));
+        assert_eq!(read_vint_u32_be(&data[3..]), 2_u32.pow(24));
     }
 }

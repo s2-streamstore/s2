@@ -23,7 +23,7 @@ pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, StreamPosition), Deseria
     if ordinal != KeyType::StreamRecordData.ordinal() {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
-    let mut stream_id_bytes = [0u8; StreamId::LEN];
+    let mut stream_id_bytes = [0_u8; StreamId::LEN];
     bytes.copy_to_slice(&mut stream_id_bytes);
     let seq_num = bytes.get_u64();
     let timestamp = bytes.get_u64();

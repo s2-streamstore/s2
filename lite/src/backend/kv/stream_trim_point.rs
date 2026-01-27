@@ -24,7 +24,7 @@ pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
     if ordinal != KeyType::StreamTrimPoint.ordinal() {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
-    let mut stream_id_bytes = [0u8; StreamId::LEN];
+    let mut stream_id_bytes = [0_u8; StreamId::LEN];
     bytes.copy_to_slice(&mut stream_id_bytes);
     Ok(stream_id_bytes.into())
 }

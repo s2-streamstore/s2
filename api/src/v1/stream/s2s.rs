@@ -440,7 +440,7 @@ mod test {
         fn frame_decoder_handles_chunked_frames(
             algo in compression_strategy(),
             payload in vec(any::<u8>(), 0..=COMPRESSION_THRESHOLD_BYTES * 4),
-            chunk_pattern in vec(0usize..=16, 0..=16)
+            chunk_pattern in vec(0_usize..=16, 0..=16)
         ) {
             let proto = TestProto::new(payload);
             let msg = SessionMessage::regular(algo, &proto).unwrap();
@@ -579,7 +579,7 @@ mod test {
     fn session_message_encode_rejects_frames_over_limit() {
         let data = CompressedData {
             compression: CompressionAlgorithm::None,
-            payload: Bytes::from(vec![0u8; MAX_FRAME_BYTES]),
+            payload: Bytes::from(vec![0_u8; MAX_FRAME_BYTES]),
         };
         let msg = SessionMessage::from(data);
         let _ = msg.encode();

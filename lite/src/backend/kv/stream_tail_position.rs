@@ -22,7 +22,7 @@ pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
     if ordinal != KeyType::StreamTailPosition.ordinal() {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
-    let mut stream_id_bytes = [0u8; StreamId::LEN];
+    let mut stream_id_bytes = [0_u8; StreamId::LEN];
     bytes.copy_to_slice(&mut stream_id_bytes);
     Ok(stream_id_bytes.into())
 }
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn stream_tail_position_value_requires_exact_size() {
-        let err = super::deser_value(Bytes::from_static(&[0u8; 15])).unwrap_err();
+        let err = super::deser_value(Bytes::from_static(&[0_u8; 15])).unwrap_err();
         assert!(matches!(
             err,
             DeserializationError::InvalidSize {

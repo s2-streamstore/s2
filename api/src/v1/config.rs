@@ -765,7 +765,7 @@ mod tests {
         fn reconfigure_specified_some_sets_value(
             base in gen_internal_optional_stream_config(),
             new_sc in gen_storage_class(),
-            new_rp_secs in 1u64..u64::MAX,
+            new_rp_secs in 1_u64..u64::MAX,
         ) {
             let reconfig = types::config::StreamReconfiguration {
                 storage_class: Maybe::Specified(Some(new_sc.into())),
@@ -786,7 +786,7 @@ mod tests {
         #[test]
         fn to_opt_returns_some_for_non_defaults(
             sc in gen_storage_class(),
-            doe_secs in 1u64..u64::MAX,
+            doe_secs in 1_u64..u64::MAX,
             ts_mode in gen_timestamping_mode(),
         ) {
             // non-default storage class -> Some

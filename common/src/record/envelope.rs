@@ -179,7 +179,7 @@ impl TryFrom<u8> for HeaderFlag {
     type Error = &'static str;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if (value & (0b11u8 << 6)) != 0u8 {
+        if (value & (0b11_u8 << 6)) != 0_u8 {
             return Err("reserved bit set");
         }
         Ok(Self {
@@ -220,7 +220,7 @@ impl TryFrom<&[Header]> for EncodingInfo {
         // storing this number.
         fn size_bytes_name_value_len(elems: u64) -> Result<NonZeroU8, HeaderValidationError> {
             if elems == 0 {
-                return Ok(NonZeroU8::new(1u8).unwrap());
+                return Ok(NonZeroU8::new(1_u8).unwrap());
             }
             let size = 8 - (elems.leading_zeros() / 8);
             if size > 4 {
@@ -235,7 +235,7 @@ impl TryFrom<&[Header]> for EncodingInfo {
         }
 
         let (headers_total_bytes, name_max, value_max) = headers.iter().try_fold(
-            (0usize, 0usize, 0usize),
+            (0_usize, 0_usize, 0_usize),
             |(size_bytes_acc, name_max, value_max), Header { name, value }| {
                 if name.is_empty() {
                     return Err(HeaderValidationError::NameEmpty);

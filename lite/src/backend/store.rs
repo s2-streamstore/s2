@@ -101,8 +101,8 @@ mod tests {
         let db = Db::builder("/test", object_store).build().await.unwrap();
         let backend = Backend::new(db, ByteSize::mib(10));
 
-        let stream_a: StreamId = [0u8; 32].into();
-        let stream_b: StreamId = [1u8; 32].into();
+        let stream_a: StreamId = [0_u8; 32].into();
+        let stream_b: StreamId = [1_u8; 32].into();
 
         backend
             .db
