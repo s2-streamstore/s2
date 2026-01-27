@@ -285,9 +285,7 @@ impl<E, P> ResourceSet<MaybeEmpty<E>, P> {
     pub fn to_opt(rs: types::access::ResourceSet<E, P>) -> Option<Self> {
         match rs {
             types::access::ResourceSet::None => None,
-            types::access::ResourceSet::Exact(e) => {
-                Some(Self::Exact(MaybeEmpty::NonEmpty(e)))
-            }
+            types::access::ResourceSet::Exact(e) => Some(Self::Exact(MaybeEmpty::NonEmpty(e))),
             types::access::ResourceSet::Prefix(p) => Some(Self::Prefix(p)),
         }
     }
