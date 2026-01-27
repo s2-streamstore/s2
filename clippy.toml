@@ -1,0 +1,23 @@
+msrv = "1.85"
+
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 8
+type-complexity-threshold = 300
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+doc-valid-idents = [
+    "GitHub",
+    "GitLab",
+    "JavaScript",
+    "TypeScript",
+    "NaN",
+    "OAuth",
+    "OpenSSL",
+    "gRPC",
+    "SlateDB",
+]
+
+avoid-breaking-exported-api = true

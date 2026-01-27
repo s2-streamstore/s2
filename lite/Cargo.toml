@@ -66,3 +66,6 @@ utoipa = { version = "5.4", optional = true, features = ["time"] }
 [dev-dependencies]
 proptest = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+
+[lints]
+workspace = true

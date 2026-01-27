@@ -34,3 +34,6 @@ utoipa = { workspace = true, optional = true, features = ["time"] }
 proptest = { workspace = true }
 rstest = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true
