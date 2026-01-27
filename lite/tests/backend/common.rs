@@ -39,11 +39,11 @@ pub async fn create_backend() -> Backend {
 }
 
 pub fn test_basin_name(suffix: &str) -> BasinName {
-    format!("test-basin-{}", suffix).parse().unwrap()
+    format!("test-basin-{suffix}").parse().unwrap()
 }
 
 pub fn test_stream_name(suffix: &str) -> StreamName {
-    format!("test-stream-{}", suffix).parse().unwrap()
+    format!("test-stream-{suffix}").parse().unwrap()
 }
 
 pub fn create_test_record(body: Bytes) -> AppendRecord {
@@ -171,7 +171,7 @@ where
                 records.extend(batch.records.iter().cloned());
             }
             Ok(ReadSessionOutput::Heartbeat(_)) => {}
-            Err(e) => panic!("Read error: {:?}", e),
+            Err(e) => panic!("Read error: {e:?}"),
         }
     }
     records
@@ -182,7 +182,7 @@ pub fn envelope_bodies(records: &[SequencedRecord]) -> Vec<Vec<u8>> {
         .iter()
         .map(|record| match &record.record {
             Record::Envelope(envelope) => envelope.body().to_vec(),
-            other => panic!("Unexpected record type: {:?}", other),
+            other => panic!("Unexpected record type: {other:?}"),
         })
         .collect()
 }

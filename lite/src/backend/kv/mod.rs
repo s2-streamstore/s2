@@ -180,7 +180,7 @@ where
 {
     let serde_value: S = value.clone().into();
     serde_json::to_vec(&serde_value)
-        .unwrap_or_else(|_| panic!("failed to serialize {}", type_name))
+        .unwrap_or_else(|_| panic!("failed to serialize {type_name}"))
         .into()
 }
 

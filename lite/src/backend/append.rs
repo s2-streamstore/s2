@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    ops::{DerefMut as _, Range, RangeTo},
+    ops::{Range, RangeTo},
     sync::Arc,
 };
 

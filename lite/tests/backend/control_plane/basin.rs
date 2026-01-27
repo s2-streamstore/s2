@@ -343,7 +343,7 @@ async fn test_list_basins_multiple() {
     let backend = create_backend().await;
 
     for i in 0..5 {
-        create_test_basin(&backend, &format!("list-{}", i), BasinConfig::default()).await;
+        create_test_basin(&backend, &format!("list-{i}"), BasinConfig::default()).await;
     }
 
     let page = backend
@@ -362,7 +362,7 @@ async fn test_list_basins_pagination() {
     for i in 0..15 {
         create_test_basin(
             &backend,
-            &format!("paginated-{:02}", i),
+            &format!("paginated-{i:02}"),
             BasinConfig::default(),
         )
         .await;
@@ -461,7 +461,7 @@ async fn test_list_basins_prefix_with_pagination() {
     for i in 0..10 {
         create_test_basin(
             &backend,
-            &format!("prefixed-{:02}", i),
+            &format!("prefixed-{i:02}"),
             BasinConfig::default(),
         )
         .await;

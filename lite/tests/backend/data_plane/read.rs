@@ -299,7 +299,7 @@ async fn test_read_timestamp_range() {
                 break batch.records.iter().cloned().collect::<Vec<_>>();
             }
             Some(Ok(ReadSessionOutput::Heartbeat(_))) => continue,
-            Some(Err(e)) => panic!("Read error: {:?}", e),
+            Some(Err(e)) => panic!("Read error: {e:?}"),
             None => panic!("Read session ended without delivering expected batch"),
         }
     };
@@ -394,7 +394,7 @@ async fn test_read_from_tail_times_out_without_new_data() {
 
     match first_output {
         Ok(ReadSessionOutput::Heartbeat(_)) => {}
-        other => panic!("Unexpected first output: {:?}", other),
+        other => panic!("Unexpected first output: {other:?}"),
     }
 
     let second_output = tokio::time::timeout(Duration::from_secs(1), session.next())

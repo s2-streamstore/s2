@@ -66,7 +66,7 @@ async fn test_concurrent_appends_to_same_stream() {
         let stream_name = stream_name.clone();
         let handle = tokio::spawn(async move {
             let input = AppendInput {
-                records: create_test_record_batch(vec![Bytes::from(format!("concurrent-{}", i))]),
+                records: create_test_record_batch(vec![Bytes::from(format!("concurrent-{i}"))]),
                 match_seq_num: None,
                 fencing_token: None,
             };
@@ -130,7 +130,7 @@ async fn test_read_while_appending() {
                 &backend_clone,
                 &basin_clone,
                 &stream_clone,
-                &[format!("append-{}", i).as_bytes()],
+                &[format!("append-{i}").as_bytes()],
             )
             .await;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -186,7 +186,7 @@ async fn test_concurrent_reconfigure_during_append() {
                 &backend_append,
                 &basin_append,
                 &stream_append,
-                &[format!("data-{}", i).as_bytes()],
+                &[format!("data-{i}").as_bytes()],
             )
             .await;
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -231,7 +231,7 @@ async fn test_concurrent_reads_same_stream() {
             &backend,
             &basin_name,
             &stream_name,
-            &[format!("record-{}", i).as_bytes()],
+            &[format!("record-{i}").as_bytes()],
         )
         .await;
     }

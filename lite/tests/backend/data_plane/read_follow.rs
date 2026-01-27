@@ -48,7 +48,7 @@ async fn test_follow_mode_wait_duration() {
         match result {
             Ok(ReadSessionOutput::Batch(_)) => batch_count += 1,
             Ok(ReadSessionOutput::Heartbeat(_)) => {}
-            Err(e) => panic!("Read error: {:?}", e),
+            Err(e) => panic!("Read error: {e:?}"),
         }
     }
 
@@ -101,7 +101,7 @@ async fn test_follow_mode_heartbeats() {
             Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {
                 heartbeat_count += 1;
             }
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
             Err(_) => continue,
         }
@@ -156,7 +156,7 @@ async fn test_follow_mode_receives_new_data() {
                 all_records.extend(batch.records.iter().cloned());
             }
             Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
             Err(_) => continue,
         }
@@ -206,7 +206,7 @@ async fn test_follow_mode_with_multiple_appends() {
     let append_handle = tokio::spawn(async move {
         for i in 0..5 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let payload = format!("follow-{}", i);
+            let payload = format!("follow-{i}");
             append_payloads(
                 &backend_clone,
                 &basin_clone,
@@ -227,7 +227,7 @@ async fn test_follow_mode_with_multiple_appends() {
                 all_records.extend(batch.records.iter().cloned());
             }
             Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
             Err(_) => continue,
         }
@@ -285,7 +285,7 @@ async fn test_follow_mode_broadcast_lag_falls_back_to_db_catchup() {
 
     let mut expected = Vec::with_capacity(message_count);
     for i in 0..message_count {
-        let payload = format!("msg-{}", i);
+        let payload = format!("msg-{i}");
         expected.push(payload.as_bytes().to_vec());
         append_payloads(&backend, &basin_name, &stream_name, &[payload.as_bytes()]).await;
     }
@@ -352,7 +352,7 @@ async fn test_transition_from_catchup_to_follow() {
                 all_records.extend(batch.records.iter().cloned());
             }
             Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
             Err(_) => continue,
         }
@@ -425,7 +425,7 @@ async fn test_follow_mode_with_count_limit() {
                 all_records.extend(batch.records.iter().cloned());
             }
             Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
             Err(_) => continue,
         }
@@ -521,7 +521,7 @@ async fn test_follow_mode_with_timestamp_until() {
                 all_records.extend(batch.records.iter().cloned());
             }
             Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
             Err(_) => continue,
         }

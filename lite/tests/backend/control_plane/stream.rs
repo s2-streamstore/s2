@@ -489,7 +489,7 @@ async fn test_list_streams_multiple() {
         create_test_stream(
             &backend,
             &basin_name,
-            &format!("list-{}", i),
+            &format!("list-{i}"),
             OptionalStreamConfig::default(),
         )
         .await;
@@ -663,7 +663,7 @@ async fn test_auto_create_race_condition_append() {
         let stream_name = stream_name.clone();
         let handle = tokio::spawn(async move {
             let input = AppendInput {
-                records: create_test_record_batch(vec![Bytes::from(format!("racer-{}", i))]),
+                records: create_test_record_batch(vec![Bytes::from(format!("racer-{i}"))]),
                 match_seq_num: None,
                 fencing_token: None,
             };
@@ -691,12 +691,12 @@ async fn test_auto_create_race_condition_append() {
     for handle in handles {
         match handle.await.unwrap() {
             Ok(_) => success_count += 1,
-            Err(e) => errors.push(format!("{:?}", e)),
+            Err(e) => errors.push(format!("{e:?}")),
         }
     }
 
     if success_count != 10 {
-        eprintln!("Success count: {}, errors: {:?}", success_count, errors);
+        eprintln!("Success count: {success_count}, errors: {errors:?}");
     }
     assert_eq!(success_count, 10);
 
@@ -771,12 +771,12 @@ async fn test_auto_create_race_condition_read() {
     for handle in handles {
         match handle.await.unwrap() {
             Ok(_) => success_count += 1,
-            Err(e) => errors.push(format!("{:?}", e)),
+            Err(e) => errors.push(format!("{e:?}")),
         }
     }
 
     if success_count != 10 {
-        eprintln!("Success count: {}, errors: {:?}", success_count, errors);
+        eprintln!("Success count: {success_count}, errors: {errors:?}");
     }
     assert_eq!(success_count, 10);
 
@@ -796,7 +796,7 @@ async fn test_list_streams_pagination() {
         create_test_stream(
             &backend,
             &basin_name,
-            &format!("stream-{:02}", i),
+            &format!("stream-{i:02}"),
             OptionalStreamConfig::default(),
         )
         .await;
