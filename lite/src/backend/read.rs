@@ -209,10 +209,10 @@ impl Backend {
                                             }
                                         }
                                     }
-                                    _ = new_heartbeat_sleep() => {
+                                    () = new_heartbeat_sleep() => {
                                         yield ReadSessionOutput::Heartbeat(state.tail);
                                     }
-                                    _ = wait_sleep(end.wait) => {
+                                    () = wait_sleep(end.wait) => {
                                         break 'session;
                                     }
                                 }

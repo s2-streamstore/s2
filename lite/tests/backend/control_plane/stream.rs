@@ -769,7 +769,7 @@ async fn test_auto_create_race_condition_read() {
     let mut errors = vec![];
     for handle in handles {
         match handle.await.unwrap() {
-            Ok(_) => success_count += 1,
+            Ok(()) => success_count += 1,
             Err(e) => errors.push(format!("{e:?}")),
         }
     }

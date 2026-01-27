@@ -313,7 +313,7 @@ impl Streamer {
                         },
                     }
                 }
-                _ = dormancy.as_mut() => {
+                () = dormancy.as_mut() => {
                     break;
                 }
             }
@@ -393,7 +393,7 @@ impl StreamerClient {
             res = self.append_inflight_bytes_sema.acquire_many(num_permits) => {
                 res.map_err(|_| StreamerMissingInActionError)
             }
-            _ = self.msg_tx.closed() => {
+            () = self.msg_tx.closed() => {
                 Err(StreamerMissingInActionError)
             }
         }?;
