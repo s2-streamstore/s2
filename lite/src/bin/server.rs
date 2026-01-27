@@ -326,7 +326,7 @@ impl object_store::CredentialProvider for S3CredentialProvider {
     async fn get_credential(&self) -> object_store::Result<Arc<object_store::aws::AwsCredential>> {
         let mut cached = self.cache.lock().await;
         if let Some(cached) = cached.as_ref().filter(|c| c.is_valid()) {
-            return Ok(cached.credential.clone());
+            return Ok(Arc::clone(&cached.credential));
         }
 
         use aws_credential_types::provider::ProvideCredentials as _;
@@ -355,7 +355,7 @@ impl object_store::CredentialProvider for S3CredentialProvider {
             token: creds.session_token().map(std::borrow::ToOwned::to_owned),
         });
         *cached = Some(CachedCredential {
-            credential: credential.clone(),
+            credential: Arc::clone(&credential),
             expiry: creds.expiry(),
         });
         Ok(credential)

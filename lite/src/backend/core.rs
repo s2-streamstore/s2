@@ -87,7 +87,7 @@ impl Backend {
             return Err(StreamDeletionPendingError { basin, stream }.into());
         }
 
-        let client_states = self.client_states.clone();
+        let client_states = Arc::clone(&self.client_states);
         Ok(super::streamer::Spawner {
             db: self.db.clone(),
             stream_id,
