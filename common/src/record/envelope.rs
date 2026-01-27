@@ -140,7 +140,7 @@ impl TryFrom<Bytes> for EnvelopeRecord {
             let value = buf.split_to(value_len);
 
             headers_total_bytes += name.len() + value.len();
-            headers.push(Header { name, value })
+            headers.push(Header { name, value });
         }
 
         Ok(Self {

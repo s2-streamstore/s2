@@ -99,7 +99,7 @@ impl Modify for SecurityAddon {
                         )))
                         .build(),
                 ),
-            )
+            );
         }
     }
 }

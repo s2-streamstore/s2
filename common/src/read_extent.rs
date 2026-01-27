@@ -215,6 +215,6 @@ mod test {
         assert_eq!(
             old_limit.remaining(consumed_count, consumed_bytes),
             remaining_limit
-        )
+        );
     }
 }
