@@ -362,12 +362,8 @@ pub async fn append(
                         .map_err(ServiceError::from)
                 });
 
-            let input_err_stream = futures::stream::once(err_rx).filter_map(|res| async move {
-                match res {
-                    Ok(err) => Some(Err(err.into())),
-                    Err(_) => None,
-                }
-            });
+            let input_err_stream = futures::stream::once(err_rx)
+                .filter_map(|res| async move { res.ok().map(|err| Err(err.into())) });
 
             let response_stream = s2s::FramedMessageStream::<_>::new(
                 response_compression,

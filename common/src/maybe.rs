@@ -78,6 +78,7 @@ impl<T> Maybe<Option<T>> {
     {
         match self {
             Self::Unspecified => Ok(Maybe::Unspecified),
+            #[allow(clippy::option_if_let_else)]
             Self::Specified(opt) => match opt {
                 Some(value) => f(value).map(|converted| Maybe::Specified(Some(converted))),
                 None => Ok(Maybe::Specified(None)),

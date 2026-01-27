@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[allow(clippy::option_if_let_else)]
 pub enum MaybeEmpty<T> {
     Empty,
     NonEmpty(T),

@@ -128,10 +128,7 @@ impl ReadLimit {
             }
         };
 
-        match remaining {
-            Some(limit) => EvaluatedReadLimit::Remaining(limit),
-            None => EvaluatedReadLimit::Exhausted,
-        }
+        remaining.map_or(EvaluatedReadLimit::Exhausted, EvaluatedReadLimit::Remaining)
     }
 }
 
@@ -144,10 +141,7 @@ pub enum ReadUntil {
 
 impl From<Option<Timestamp>> for ReadUntil {
     fn from(timestamp: Option<Timestamp>) -> Self {
-        match timestamp {
-            Some(ts) => Self::Timestamp(ts),
-            None => Self::Unbounded,
-        }
+        timestamp.map_or(Self::Unbounded, Self::Timestamp)
     }
 }
 

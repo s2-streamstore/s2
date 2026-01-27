@@ -26,10 +26,7 @@ impl<T: DeepSize> DeepSize for Vec<T> {
 
 impl<T: DeepSize> DeepSize for Option<T> {
     fn deep_size(&self) -> usize {
-        match self {
-            Some(v) => v.deep_size(),
-            None => 1,
-        }
+        self.as_ref().map_or(1, DeepSize::deep_size)
     }
 }
 
