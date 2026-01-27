@@ -196,17 +196,17 @@ where
 }
 
 #[cfg(test)]
-pub(crate) mod proptest_strategies {
+pub mod proptest_strategies {
     use std::str::FromStr;
 
     use proptest::prelude::*;
     use s2_common::types::{basin::BasinName, stream::StreamName};
 
-    pub(crate) fn basin_name_strategy() -> impl Strategy<Value = BasinName> {
+    pub fn basin_name_strategy() -> impl Strategy<Value = BasinName> {
         "[a-z][a-z0-9-]{6,46}[a-z0-9]".prop_map(|s| BasinName::from_str(&s).unwrap())
     }
 
-    pub(crate) fn stream_name_strategy() -> impl Strategy<Value = StreamName> {
+    pub fn stream_name_strategy() -> impl Strategy<Value = StreamName> {
         "[a-zA-Z0-9_-]{1,100}".prop_map(|s| StreamName::from_str(&s).unwrap())
     }
 }
