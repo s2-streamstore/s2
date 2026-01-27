@@ -47,7 +47,7 @@ pub enum RetentionPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
-pub struct InfiniteRetention {}
+pub struct InfiniteRetention;
 
 impl TryFrom<RetentionPolicy> for types::config::RetentionPolicy {
     type Error = types::ValidationError;
@@ -67,7 +67,7 @@ impl From<types::config::RetentionPolicy> for RetentionPolicy {
     fn from(value: types::config::RetentionPolicy) -> Self {
         match value {
             types::config::RetentionPolicy::Age(age) => Self::Age(age.as_secs()),
-            types::config::RetentionPolicy::Infinite() => Self::Infinite(InfiniteRetention {}),
+            types::config::RetentionPolicy::Infinite() => Self::Infinite(InfiniteRetention),
         }
     }
 }
@@ -522,7 +522,7 @@ mod tests {
     fn gen_retention_policy() -> impl Strategy<Value = RetentionPolicy> {
         prop_oneof![
             any::<u64>().prop_map(RetentionPolicy::Age),
-            Just(RetentionPolicy::Infinite(InfiniteRetention {})),
+            Just(RetentionPolicy::Infinite(InfiniteRetention)),
         ]
     }
 
