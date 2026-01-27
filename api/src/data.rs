@@ -101,7 +101,7 @@ pub mod extract {
     use axum::{
         extract::{
             FromRequest, OptionalFromRequest, Request,
-            rejection::{BytesRejection, JsonRejection},
+            rejection::{BytesRejection, JsonRejection, MissingJsonContentType},
         },
         response::{IntoResponse, Response},
     };
@@ -137,7 +137,7 @@ pub mod extract {
                 .as_ref()
                 .is_some_and(crate::mime::is_json)
             {
-                Err(JsonRejection::MissingJsonContentType(Default::default()))?;
+                Err(JsonRejection::MissingJsonContentType(MissingJsonContentType::default()))?;
             }
             let bytes = Bytes::from_request(req, state)
                 .await

@@ -161,7 +161,7 @@ impl Backend {
                     notify.notify_waiters();
                 });
                 ve.insert(StreamerClientState::Blocked {
-                    notify: Default::default(),
+                    notify: Arc::default(),
                 })
                 .value()
                 .clone()

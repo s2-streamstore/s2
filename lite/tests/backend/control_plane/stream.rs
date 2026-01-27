@@ -10,7 +10,7 @@ use s2_common::{
             BasinConfig, OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy,
             StorageClass, StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::{CreateMode, ListItemsRequestParts, RequestToken},
+        resources::{CreateMode, ListItemsRequestParts, ListLimit, RequestToken},
         stream::{
             AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
             StreamNameStartAfter,
@@ -893,7 +893,7 @@ async fn test_list_streams_prefix_filter() {
             ListItemsRequestParts {
                 prefix: "test-stream-metrics-".parse().unwrap(),
                 start_after: StreamNameStartAfter::default(),
-                limit: Default::default(),
+                limit: ListLimit::default(),
             }
             .try_into()
             .unwrap(),

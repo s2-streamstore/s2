@@ -6,7 +6,7 @@ use s2_common::{
             BasinConfig, BasinReconfiguration, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::{CreateMode, ListItemsRequestParts, RequestToken},
+        resources::{CreateMode, ListItemsRequestParts, ListLimit, RequestToken},
     },
 };
 use s2_lite::backend::error::{
@@ -437,7 +437,7 @@ async fn test_list_basins_prefix_filter() {
             ListItemsRequestParts {
                 prefix: "test-basin-prod-".parse().unwrap(),
                 start_after: BasinNameStartAfter::default(),
-                limit: Default::default(),
+                limit: ListLimit::default(),
             }
             .try_into()
             .unwrap(),

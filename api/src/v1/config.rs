@@ -421,7 +421,7 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
         Ok(Self {
             default_stream_config: match default_stream_config {
                 Some(config) => config.try_into()?,
-                None => Default::default(),
+                None => types::config::OptionalStreamConfig::default(),
             },
             create_stream_on_append,
             create_stream_on_read,
