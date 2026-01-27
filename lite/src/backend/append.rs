@@ -199,7 +199,7 @@ impl Ticket {
     fn accept(self, ack_range: Range<StreamPosition>) -> BlockedReplySender {
         let durability_dependency = ..ack_range.end.seq_num;
         if let Some(mut session) = self.session {
-            let session = session.deref_mut();
+            let session = &mut *session;
             assert!(!session.poisoned, "thanks to typestate");
             session.last_ack_end = durability_dependency;
         }
@@ -223,7 +223,7 @@ impl Ticket {
                 ..0
             };
         if let Some(mut session) = self.session {
-            let session = session.deref_mut();
+            let session = &mut *session;
             assert!(!session.poisoned, "thanks to typestate");
             session.poisoned = true;
             durability_dependency = ..durability_dependency.end.max(session.last_ack_end.end);
