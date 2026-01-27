@@ -352,7 +352,7 @@ impl object_store::CredentialProvider for S3CredentialProvider {
         let credential = Arc::new(object_store::aws::AwsCredential {
             key_id: creds.access_key_id().to_owned(),
             secret_key: creds.secret_access_key().to_owned(),
-            token: creds.session_token().map(|s| s.to_owned()),
+            token: creds.session_token().map(std::borrow::ToOwned::to_owned),
         });
         *cached = Some(CachedCredential {
             credential: credential.clone(),

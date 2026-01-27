@@ -448,7 +448,7 @@ mod test {
             let expected = decode_once(&encoded).unwrap();
 
             let chunks = chunk_bytes(&encoded, &chunk_pattern);
-            prop_assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), encoded.len());
+            prop_assert_eq!(chunks.iter().map(bytes::Bytes::len).sum::<usize>(), encoded.len());
 
             let mut decoder = FrameDecoder;
             let mut buf = BytesMut::new();
