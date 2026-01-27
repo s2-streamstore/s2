@@ -98,7 +98,7 @@ fn read_vint_u32_be(bytes: &[u8]) -> u32 {
     );
     let mut acc: u32 = 0;
     for &byte in bytes {
-        acc = (acc << 8) | byte as u32;
+        acc = (acc << 8) | u32::from(byte);
     }
     acc
 }

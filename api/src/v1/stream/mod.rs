@@ -201,7 +201,7 @@ impl From<ReadEnd> for types::stream::ReadEnd {
                 value.bytes,
             ),
             until: value.until.into(),
-            wait: value.wait.map(|w| Duration::from_secs(w as u64)),
+            wait: value.wait.map(|w| Duration::from_secs(u64::from(w))),
         }
     }
 }

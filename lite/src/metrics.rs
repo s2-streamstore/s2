@@ -49,12 +49,12 @@ pub fn observe_append_batch_size(count: usize, bytes: usize) {
             vec![
                 512.0,
                 1024.0,
-                (4 * 1024) as f64,
-                (16 * 1024) as f64,
-                (64 * 1024) as f64,
-                (256 * 1024) as f64,
-                (512 * 1024) as f64,
-                (1024 * 1024) as f64,
+                f64::from(4 * 1024),
+                f64::from(16 * 1024),
+                f64::from(64 * 1024),
+                f64::from(256 * 1024),
+                f64::from(512 * 1024),
+                f64::from(1024 * 1024),
             ]
         )
         .unwrap()
