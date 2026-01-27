@@ -646,6 +646,7 @@ async fn test_auto_create_check_tail() {
 }
 
 #[tokio::test]
+#[allow(clippy::print_stderr)]
 async fn test_auto_create_race_condition_append() {
     let backend = create_backend().await;
     let basin_config = BasinConfig {
@@ -713,6 +714,7 @@ async fn test_auto_create_race_condition_append() {
 }
 
 #[tokio::test]
+#[allow(clippy::print_stderr)]
 async fn test_auto_create_race_condition_read() {
     let backend = create_backend().await;
     let basin_config = BasinConfig {

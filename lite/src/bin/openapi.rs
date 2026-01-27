@@ -1,3 +1,5 @@
+#![allow(clippy::print_stdout)]
+
 use s2_api::{
     data::Format,
     v1::metrics::{AccountMetricSet, BasinMetricSet, StreamMetricSet},
