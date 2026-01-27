@@ -103,7 +103,7 @@ async fn test_follow_mode_heartbeats() {
             }
             Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 
@@ -155,10 +155,10 @@ async fn test_follow_mode_receives_new_data() {
             Ok(Some(Ok(ReadSessionOutput::Batch(batch)))) => {
                 all_records.extend(batch.records.iter().cloned());
             }
-            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
             Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 
@@ -226,10 +226,10 @@ async fn test_follow_mode_with_multiple_appends() {
             Ok(Some(Ok(ReadSessionOutput::Batch(batch)))) => {
                 all_records.extend(batch.records.iter().cloned());
             }
-            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
             Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 
@@ -351,10 +351,10 @@ async fn test_transition_from_catchup_to_follow() {
             Ok(Some(Ok(ReadSessionOutput::Batch(batch)))) => {
                 all_records.extend(batch.records.iter().cloned());
             }
-            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
             Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 
@@ -424,10 +424,10 @@ async fn test_follow_mode_with_count_limit() {
             Ok(Some(Ok(ReadSessionOutput::Batch(batch)))) => {
                 all_records.extend(batch.records.iter().cloned());
             }
-            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
             Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 
@@ -520,10 +520,10 @@ async fn test_follow_mode_with_timestamp_until() {
             Ok(Some(Ok(ReadSessionOutput::Batch(batch)))) => {
                 all_records.extend(batch.records.iter().cloned());
             }
-            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
             Ok(Some(Err(e))) => panic!("Read error: {e:?}"),
             Ok(None) => break,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 

@@ -298,7 +298,7 @@ async fn test_read_timestamp_range() {
             Some(Ok(ReadSessionOutput::Batch(batch))) => {
                 break batch.records.iter().cloned().collect::<Vec<_>>();
             }
-            Some(Ok(ReadSessionOutput::Heartbeat(_))) => continue,
+            Some(Ok(ReadSessionOutput::Heartbeat(_))) => {}
             Some(Err(e)) => panic!("Read error: {e:?}"),
             None => panic!("Read session ended without delivering expected batch"),
         }
