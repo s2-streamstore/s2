@@ -91,9 +91,11 @@ pub struct MagicByte {
 
 /// Read bytes to u32 in big-endian order.
 fn read_vint_u32_be(bytes: &[u8]) -> u32 {
-    if bytes.len() > size_of::<u32>() || bytes.is_empty() {
-        panic!("invalid variable int bytes = {} len", bytes.len())
-    }
+    assert!(
+        !(bytes.len() > size_of::<u32>() || bytes.is_empty()),
+        "invalid variable int bytes = {} len",
+        bytes.len()
+    );
     let mut acc: u32 = 0;
     for &byte in bytes {
         acc = (acc << 8) | byte as u32;
@@ -289,9 +291,10 @@ impl Metered<&Record> {
     fn magic_byte(&self) -> MagicByte {
         let metered_size = self.metered_size();
         let metered_size_varlen = 8 - (metered_size.leading_zeros() / 8) as u8;
-        if metered_size_varlen > 3 {
-            panic!("illegal metered size varlen {metered_size} for record")
-        }
+        assert!(
+            metered_size_varlen <= 3,
+            "illegal metered size varlen {metered_size} for record"
+        );
         let record_type = match self.inner {
             Record::Command(_) => RecordType::Command,
             Record::Envelope(_) => RecordType::Envelope,
