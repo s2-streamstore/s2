@@ -187,12 +187,11 @@ pub enum AppendConditionFailedError {
 
 impl AppendConditionFailedError {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
-        use AppendConditionFailedError::*;
         match self {
-            SeqNumMismatch {
+            Self::SeqNumMismatch {
                 assigned_seq_num, ..
             } => ..*assigned_seq_num,
-            FencingTokenMismatch { applied_point, .. } => *applied_point,
+            Self::FencingTokenMismatch { applied_point, .. } => *applied_point,
         }
     }
 }

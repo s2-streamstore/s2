@@ -123,29 +123,29 @@ impl From<Operation> for types::access::Operation {
 
 impl From<types::access::Operation> for Operation {
     fn from(value: types::access::Operation) -> Self {
-        use types::access::Operation::*;
+        use types::access::Operation as Op;
         match value {
-            ListBasins => Self::ListBasins,
-            CreateBasin => Self::CreateBasin,
-            DeleteBasin => Self::DeleteBasin,
-            ReconfigureBasin => Self::ReconfigureBasin,
-            GetBasinConfig => Self::GetBasinConfig,
-            IssueAccessToken => Self::IssueAccessToken,
-            RevokeAccessToken => Self::RevokeAccessToken,
-            ListAccessTokens => Self::ListAccessTokens,
-            ListStreams => Self::ListStreams,
-            CreateStream => Self::CreateStream,
-            DeleteStream => Self::DeleteStream,
-            GetStreamConfig => Self::GetStreamConfig,
-            ReconfigureStream => Self::ReconfigureStream,
-            CheckTail => Self::CheckTail,
-            Append => Self::Append,
-            Read => Self::Read,
-            Trim => Self::Trim,
-            Fence => Self::Fence,
-            AccountMetrics => Self::AccountMetrics,
-            BasinMetrics => Self::BasinMetrics,
-            StreamMetrics => Self::StreamMetrics,
+            Op::ListBasins => Self::ListBasins,
+            Op::CreateBasin => Self::CreateBasin,
+            Op::DeleteBasin => Self::DeleteBasin,
+            Op::ReconfigureBasin => Self::ReconfigureBasin,
+            Op::GetBasinConfig => Self::GetBasinConfig,
+            Op::IssueAccessToken => Self::IssueAccessToken,
+            Op::RevokeAccessToken => Self::RevokeAccessToken,
+            Op::ListAccessTokens => Self::ListAccessTokens,
+            Op::ListStreams => Self::ListStreams,
+            Op::CreateStream => Self::CreateStream,
+            Op::DeleteStream => Self::DeleteStream,
+            Op::GetStreamConfig => Self::GetStreamConfig,
+            Op::ReconfigureStream => Self::ReconfigureStream,
+            Op::CheckTail => Self::CheckTail,
+            Op::Append => Self::Append,
+            Op::Read => Self::Read,
+            Op::Trim => Self::Trim,
+            Op::Fence => Self::Fence,
+            Op::AccountMetrics => Self::AccountMetrics,
+            Op::BasinMetrics => Self::BasinMetrics,
+            Op::StreamMetrics => Self::StreamMetrics,
         }
     }
 }
