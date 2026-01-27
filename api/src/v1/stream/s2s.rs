@@ -111,7 +111,7 @@ impl CompressedData {
                 zstd::stream::copy_encode(data.as_slice(), &mut buf, 0)?;
             }
             CompressionAlgorithm::None => unreachable!("handled above"),
-        };
+        }
         let payload = Bytes::from(buf.into_boxed_slice());
         Ok(Self {
             compression,

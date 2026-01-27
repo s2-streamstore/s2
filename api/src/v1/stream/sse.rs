@@ -187,7 +187,7 @@ impl TryFrom<ReadEvent> for axum::response::sse::Event {
 pub struct DoneEventData;
 
 impl AsRef<str> for DoneEventData {
-    fn as_ref(&self) -> &str {
+    fn as_ref(&self) -> &'static str {
         "[DONE]"
     }
 }

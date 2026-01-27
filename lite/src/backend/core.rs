@@ -304,10 +304,7 @@ mod tests {
             seq_num: 1,
             timestamp: 123,
         };
-        let record_pos = StreamPosition {
-            seq_num: tail_pos.seq_num,
-            timestamp: tail_pos.timestamp,
-        };
+        let record_pos = tail_pos;
 
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap();
         let metered_record: Metered<Record> = record.into();

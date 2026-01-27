@@ -194,7 +194,7 @@ pub struct DeleteOnEmptyConfig {
 impl DeleteOnEmptyConfig {
     pub fn to_opt(config: types::config::OptionalDeleteOnEmptyConfig) -> Option<Self> {
         let min_age = config.min_age.unwrap_or_default();
-        (min_age > Duration::ZERO).then(|| DeleteOnEmptyConfig {
+        (min_age > Duration::ZERO).then_some(DeleteOnEmptyConfig {
             min_age_secs: min_age.as_secs(),
         })
     }
