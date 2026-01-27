@@ -146,9 +146,8 @@ impl Backend {
                             || limit.deny(records.len() + 1, records.metered_size() + record.metered_size()) {
                             if records.is_empty() {
                                 break 'session;
-                            } else {
-                                break;
                             }
+                            break;
                         }
 
                         if records.len() == caps::RECORD_BATCH_MAX.count

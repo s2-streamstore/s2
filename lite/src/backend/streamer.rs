@@ -290,9 +290,8 @@ impl Streamer {
                 if self.trim_point.applied_point.end == self.stable_pos.seq_num {
                     // Terminal trim is durable.
                     break;
-                } else {
-                    assert!(self.stable_pos.seq_num < self.trim_point.applied_point.end);
                 }
+                assert!(self.stable_pos.seq_num < self.trim_point.applied_point.end);
             }
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
