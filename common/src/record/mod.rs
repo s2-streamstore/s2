@@ -356,7 +356,7 @@ mod test {
 
     fn bytes_strategy(allow_empty: bool) -> impl Strategy<Value = Bytes> {
         prop_oneof![
-            prop::collection::vec(any::<u8>(), (if allow_empty { 0 } else { 1 })..10)
+            prop::collection::vec(any::<u8>(), usize::from(!allow_empty)..10)
                 .prop_map(Bytes::from),
             prop::collection::vec(any::<u8>(), 100..1000).prop_map(Bytes::from),
         ]
