@@ -1,3 +1,14 @@
+#![allow(
+    clippy::struct_field_names,
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::wildcard_enum_match_arm,
+    clippy::missing_const_for_fn,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else
+)]
+
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

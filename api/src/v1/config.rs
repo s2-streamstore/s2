@@ -446,7 +446,7 @@ impl From<types::config::BasinConfig> for BasinConfig {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct BasinReconfiguration {
     /// Basin configuration.

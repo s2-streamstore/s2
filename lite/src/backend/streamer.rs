@@ -156,7 +156,8 @@ impl Streamer {
                 expected: provided_token,
                 actual: self.fencing_token.state.clone(),
                 applied_point: self.fencing_token.applied_point,
-            }.into());
+            }
+            .into());
         }
         let next_assignable_pos = self.next_assignable_pos();
         let first_seq_num = next_assignable_pos.seq_num;
@@ -166,7 +167,8 @@ impl Streamer {
             return Err(AppendConditionFailedError::SeqNumMismatch {
                 assigned_seq_num: first_seq_num,
                 match_seq_num,
-            }.into());
+            }
+            .into());
         }
         sequenced_records(
             records,

@@ -1,4 +1,4 @@
-#![allow(clippy::print_stdout)]
+#![allow(clippy::print_stdout, clippy::needless_for_each)]
 
 use s2_api::{
     data::Format,

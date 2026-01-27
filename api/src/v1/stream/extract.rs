@@ -167,6 +167,6 @@ where
     match s2_common::http::extract::parse_header(headers) {
         Ok(value) => Ok(Some(value)),
         Err(HeaderRejection::MissingHeader(_)) => Ok(None),
-        Err(e) => return Err(e),
+        Err(e) => Err(e),
     }
 }
