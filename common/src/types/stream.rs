@@ -135,7 +135,7 @@ pub type StreamNamePrefix = StreamNameStr<PrefixProps>;
 
 impl Default for StreamNamePrefix {
     fn default() -> Self {
-        StreamNameStr(CompactString::default(), PhantomData)
+        Self(CompactString::default(), PhantomData)
     }
 }
 
@@ -149,7 +149,7 @@ pub type StreamNameStartAfter = StreamNameStr<StartAfterProps>;
 
 impl Default for StreamNameStartAfter {
     fn default() -> Self {
-        StreamNameStr(CompactString::default(), PhantomData)
+        Self(CompactString::default(), PhantomData)
     }
 }
 

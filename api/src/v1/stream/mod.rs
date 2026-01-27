@@ -240,7 +240,7 @@ pub enum AppendRequest {
 impl std::fmt::Debug for AppendRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AppendRequest::Unary {
+            Self::Unary {
                 input,
                 response_mime: response,
             } => f
@@ -248,7 +248,7 @@ impl std::fmt::Debug for AppendRequest {
                 .field("input", input)
                 .field("response", response)
                 .finish(),
-            AppendRequest::S2s { .. } => f.debug_struct("AppendRequest::S2s").finish(),
+            Self::S2s { .. } => f.debug_struct("AppendRequest::S2s").finish(),
         }
     }
 }

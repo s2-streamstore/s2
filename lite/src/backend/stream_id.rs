@@ -25,8 +25,8 @@ impl StreamId {
     }
 }
 
-impl From<[u8; StreamId::LEN]> for StreamId {
-    fn from(bytes: [u8; StreamId::LEN]) -> Self {
+impl From<[u8; Self::LEN]> for StreamId {
+    fn from(bytes: [u8; Self::LEN]) -> Self {
         Self(bytes.into())
     }
 }

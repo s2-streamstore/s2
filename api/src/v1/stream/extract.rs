@@ -33,10 +33,10 @@ pub enum AppendRequestRejection {
 impl IntoResponse for AppendRequestRejection {
     fn into_response(self) -> Response {
         match self {
-            AppendRequestRejection::HeaderRejection(e) => e.into_response(),
-            AppendRequestRejection::JsonRejection(e) => e.into_response(),
-            AppendRequestRejection::ProtoRejection(e) => e.into_response(),
-            AppendRequestRejection::Validation(e) => {
+            Self::HeaderRejection(e) => e.into_response(),
+            Self::JsonRejection(e) => e.into_response(),
+            Self::ProtoRejection(e) => e.into_response(),
+            Self::Validation(e) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response()
             }
         }

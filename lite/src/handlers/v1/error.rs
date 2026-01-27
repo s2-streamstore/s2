@@ -67,10 +67,10 @@ pub enum ServiceError {
 impl From<AppendRequestRejection> for ServiceError {
     fn from(value: AppendRequestRejection) -> Self {
         match value {
-            AppendRequestRejection::HeaderRejection(e) => ServiceError::from(e),
-            AppendRequestRejection::JsonRejection(e) => ServiceError::from(e),
-            AppendRequestRejection::ProtoRejection(e) => ServiceError::from(e),
-            AppendRequestRejection::Validation(e) => ServiceError::Validation(e),
+            AppendRequestRejection::HeaderRejection(e) => Self::from(e),
+            AppendRequestRejection::JsonRejection(e) => Self::from(e),
+            AppendRequestRejection::ProtoRejection(e) => Self::from(e),
+            AppendRequestRejection::Validation(e) => Self::Validation(e),
         }
     }
 }
@@ -78,12 +78,12 @@ impl From<AppendRequestRejection> for ServiceError {
 impl ServiceError {
     pub fn to_response(&self) -> ErrorResponse {
         match self {
-            ServiceError::HeaderRejection(e) => standard(ErrorCode::BadHeader, e.to_string()),
-            ServiceError::PathRejection(e) => standard(ErrorCode::BadPath, e.body_text()),
-            ServiceError::QueryRejection(e) => standard(ErrorCode::BadQuery, e.body_text()),
-            ServiceError::JsonRejection(e) => standard(ErrorCode::BadJson, e.body_text()),
-            ServiceError::ProtoRejection(e) => standard(ErrorCode::BadProto, e.to_string()),
-            ServiceError::AppendInputStream(e) => match e {
+            Self::HeaderRejection(e) => standard(ErrorCode::BadHeader, e.to_string()),
+            Self::PathRejection(e) => standard(ErrorCode::BadPath, e.body_text()),
+            Self::QueryRejection(e) => standard(ErrorCode::BadQuery, e.body_text()),
+            Self::JsonRejection(e) => standard(ErrorCode::BadJson, e.body_text()),
+            Self::ProtoRejection(e) => standard(ErrorCode::BadProto, e.to_string()),
+            Self::AppendInputStream(e) => match e {
                 AppendInputStreamError::FrameDecode(e) => {
                     standard(ErrorCode::BadFrame, e.to_string())
                 }
@@ -91,11 +91,11 @@ impl ServiceError {
                     standard(ErrorCode::Invalid, e.to_string())
                 }
             },
-            ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
-            ServiceError::ListBasins(e) => match e {
+            Self::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
+            Self::ListBasins(e) => match e {
                 ListBasinsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
             },
-            ServiceError::CreateBasin(e) => match e {
+            Self::CreateBasin(e) => match e {
                 CreateBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 CreateBasinError::BasinAlreadyExists(e) => {
                     standard(ErrorCode::ResourceAlreadyExists, e.to_string())
@@ -104,19 +104,19 @@ impl ServiceError {
                     standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
             },
-            ServiceError::GetBasinConfig(e) => match e {
+            Self::GetBasinConfig(e) => match e {
                 GetBasinConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 GetBasinConfigError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
             },
-            ServiceError::DeleteBasin(e) => match e {
+            Self::DeleteBasin(e) => match e {
                 DeleteBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 DeleteBasinError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
             },
-            ServiceError::ReconfigureBasin(e) => match e {
+            Self::ReconfigureBasin(e) => match e {
                 ReconfigureBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 ReconfigureBasinError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
@@ -128,10 +128,10 @@ impl ServiceError {
                     standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
             },
-            ServiceError::ListStreams(e) => match e {
+            Self::ListStreams(e) => match e {
                 ListStreamsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
             },
-            ServiceError::CreateStream(e) => match e {
+            Self::CreateStream(e) => match e {
                 CreateStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 CreateStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
@@ -149,13 +149,13 @@ impl ServiceError {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
             },
-            ServiceError::GetStreamConfig(e) => match e {
+            Self::GetStreamConfig(e) => match e {
                 GetStreamConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 GetStreamConfigError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
             },
-            ServiceError::DeleteStream(e) => match e {
+            Self::DeleteStream(e) => match e {
                 DeleteStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 DeleteStreamError::StreamerMissingInActionError(e) => {
                     standard(ErrorCode::Unavailable, e.to_string())
@@ -169,7 +169,7 @@ impl ServiceError {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
             },
-            ServiceError::ReconfigureStream(e) => match e {
+            Self::ReconfigureStream(e) => match e {
                 ReconfigureStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 ReconfigureStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
@@ -181,7 +181,7 @@ impl ServiceError {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
             },
-            ServiceError::CheckTail(e) => match e {
+            Self::CheckTail(e) => match e {
                 CheckTailError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 CheckTailError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
@@ -202,7 +202,7 @@ impl ServiceError {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
             },
-            ServiceError::Append(e) => match e {
+            Self::Append(e) => match e {
                 AppendError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
@@ -235,7 +235,7 @@ impl ServiceError {
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
-            ServiceError::Read(e) => match e {
+            Self::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 ReadError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
@@ -255,7 +255,7 @@ impl ServiceError {
                     tail: tail.0.into(),
                 }),
             },
-            ServiceError::NotImplemented => {
+            Self::NotImplemented => {
                 standard(ErrorCode::PermissionDenied, "Not implemented".to_owned())
             }
         }
@@ -271,7 +271,7 @@ impl IntoResponse for ServiceError {
 impl From<ServiceError> for s2s::TerminalMessage {
     fn from(value: ServiceError) -> Self {
         let (status, body) = value.to_response().to_parts();
-        s2s::TerminalMessage {
+        Self {
             status: status.as_u16(),
             body,
         }

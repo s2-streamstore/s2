@@ -7,9 +7,9 @@ pub struct CountOrBytes {
 }
 
 impl CountOrBytes {
-    pub const ZERO: CountOrBytes = CountOrBytes { count: 0, bytes: 0 };
+    pub const ZERO: Self = Self { count: 0, bytes: 0 };
 
-    pub const MAX: CountOrBytes = CountOrBytes {
+    pub const MAX: Self = Self {
         count: usize::MAX,
         bytes: usize::MAX,
     };
@@ -32,11 +32,11 @@ pub enum EvaluatedReadLimit {
 
 impl ReadLimit {
     pub fn is_unbounded(&self) -> bool {
-        matches!(self, ReadLimit::Unbounded)
+        matches!(self, Self::Unbounded)
     }
 
     pub fn is_bounded(&self) -> bool {
-        !matches!(self, ReadLimit::Unbounded)
+        !matches!(self, Self::Unbounded)
     }
 
     pub fn from_count_and_bytes(count: Option<usize>, bytes: Option<usize>) -> Self {
@@ -51,34 +51,34 @@ impl ReadLimit {
 
     pub fn count(&self) -> Option<usize> {
         match self {
-            ReadLimit::Unbounded => None,
-            ReadLimit::Count(count) => Some(*count),
-            ReadLimit::Bytes(_) => None,
-            ReadLimit::CountOrBytes(CountOrBytes { count, .. }) => Some(*count),
+            Self::Unbounded => None,
+            Self::Count(count) => Some(*count),
+            Self::Bytes(_) => None,
+            Self::CountOrBytes(CountOrBytes { count, .. }) => Some(*count),
         }
     }
 
     pub fn bytes(&self) -> Option<usize> {
         match self {
-            ReadLimit::Unbounded => None,
-            ReadLimit::Count(_) => None,
-            ReadLimit::Bytes(bytes) => Some(*bytes),
-            ReadLimit::CountOrBytes(CountOrBytes { bytes, .. }) => Some(*bytes),
+            Self::Unbounded => None,
+            Self::Count(_) => None,
+            Self::Bytes(bytes) => Some(*bytes),
+            Self::CountOrBytes(CountOrBytes { bytes, .. }) => Some(*bytes),
         }
     }
 
     pub fn into_allowance(self, max: CountOrBytes) -> CountOrBytes {
         match self {
-            ReadLimit::Unbounded => max,
-            ReadLimit::Count(count) => CountOrBytes {
+            Self::Unbounded => max,
+            Self::Count(count) => CountOrBytes {
                 count: count.min(max.count),
                 bytes: max.bytes,
             },
-            ReadLimit::Bytes(bytes) => CountOrBytes {
+            Self::Bytes(bytes) => CountOrBytes {
                 count: max.count,
                 bytes: bytes.min(max.bytes),
             },
-            ReadLimit::CountOrBytes(CountOrBytes { count, bytes }) => CountOrBytes {
+            Self::CountOrBytes(CountOrBytes { count, bytes }) => CountOrBytes {
                 count: count.min(max.count),
                 bytes: bytes.min(max.bytes),
             },
@@ -87,10 +87,10 @@ impl ReadLimit {
 
     pub fn allow(&self, additional_count: usize, additional_bytes: usize) -> bool {
         match self {
-            ReadLimit::Unbounded => true,
-            ReadLimit::Count(count) => additional_count <= *count,
-            ReadLimit::Bytes(bytes) => additional_bytes <= *bytes,
-            ReadLimit::CountOrBytes(CountOrBytes { count, bytes }) => {
+            Self::Unbounded => true,
+            Self::Count(count) => additional_count <= *count,
+            Self::Bytes(bytes) => additional_bytes <= *bytes,
+            Self::CountOrBytes(CountOrBytes { count, bytes }) => {
                 additional_count <= *count && additional_bytes <= *bytes
             }
         }
@@ -98,10 +98,10 @@ impl ReadLimit {
 
     pub fn deny(&self, additional_count: usize, additional_bytes: usize) -> bool {
         match self {
-            ReadLimit::Unbounded => false,
-            ReadLimit::Count(count) => additional_count > *count,
-            ReadLimit::Bytes(bytes) => additional_bytes > *bytes,
-            ReadLimit::CountOrBytes(CountOrBytes { count, bytes }) => {
+            Self::Unbounded => false,
+            Self::Count(count) => additional_count > *count,
+            Self::Bytes(bytes) => additional_bytes > *bytes,
+            Self::CountOrBytes(CountOrBytes { count, bytes }) => {
                 additional_count > *count || additional_bytes > *bytes
             }
         }
@@ -111,16 +111,16 @@ impl ReadLimit {
     /// the remaining limit, or none if the limit has been met.
     pub fn remaining(&self, consumed_count: usize, consumed_bytes: usize) -> EvaluatedReadLimit {
         let remaining = match self {
-            ReadLimit::Unbounded => Some(ReadLimit::Unbounded),
-            ReadLimit::Count(count) => {
-                (consumed_count < *count).then(|| ReadLimit::Count(count - consumed_count))
+            Self::Unbounded => Some(Self::Unbounded),
+            Self::Count(count) => {
+                (consumed_count < *count).then(|| Self::Count(count - consumed_count))
             }
-            ReadLimit::Bytes(bytes) => {
-                (consumed_bytes < *bytes).then(|| ReadLimit::Bytes(bytes - consumed_bytes))
+            Self::Bytes(bytes) => {
+                (consumed_bytes < *bytes).then(|| Self::Bytes(bytes - consumed_bytes))
             }
-            ReadLimit::CountOrBytes(CountOrBytes { count, bytes }) => {
+            Self::CountOrBytes(CountOrBytes { count, bytes }) => {
                 (consumed_count < *count && consumed_bytes < *bytes).then(|| {
-                    ReadLimit::CountOrBytes(CountOrBytes {
+                    Self::CountOrBytes(CountOrBytes {
                         count: count - consumed_count,
                         bytes: bytes - consumed_bytes,
                     })
@@ -145,8 +145,8 @@ pub enum ReadUntil {
 impl From<Option<Timestamp>> for ReadUntil {
     fn from(timestamp: Option<Timestamp>) -> Self {
         match timestamp {
-            Some(ts) => ReadUntil::Timestamp(ts),
-            None => ReadUntil::Unbounded,
+            Some(ts) => Self::Timestamp(ts),
+            None => Self::Unbounded,
         }
     }
 }
@@ -162,24 +162,24 @@ impl From<ReadUntil> for Option<Timestamp> {
 
 impl ReadUntil {
     pub fn is_unbounded(&self) -> bool {
-        matches!(self, ReadUntil::Unbounded)
+        matches!(self, Self::Unbounded)
     }
 
     pub fn is_timestamp(&self) -> bool {
-        matches!(self, ReadUntil::Timestamp(_))
+        matches!(self, Self::Timestamp(_))
     }
 
     pub fn allow(&self, timestamp: Timestamp) -> bool {
         match self {
-            ReadUntil::Unbounded => true,
-            ReadUntil::Timestamp(t) => timestamp < *t,
+            Self::Unbounded => true,
+            Self::Timestamp(t) => timestamp < *t,
         }
     }
 
     pub fn deny(&self, timestamp: Timestamp) -> bool {
         match self {
-            ReadUntil::Unbounded => false,
-            ReadUntil::Timestamp(t) => timestamp >= *t,
+            Self::Unbounded => false,
+            Self::Timestamp(t) => timestamp >= *t,
         }
     }
 }

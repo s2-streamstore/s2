@@ -77,8 +77,8 @@ impl<T> Maybe<Option<T>> {
         F: FnOnce(T) -> Result<U, E>,
     {
         match self {
-            Maybe::Unspecified => Ok(Maybe::Unspecified),
-            Maybe::Specified(opt) => match opt {
+            Self::Unspecified => Ok(Maybe::Unspecified),
+            Self::Specified(opt) => match opt {
                 Some(value) => f(value).map(|converted| Maybe::Specified(Some(converted))),
                 None => Ok(Maybe::Specified(None)),
             },
@@ -90,14 +90,14 @@ impl<T> Maybe<Option<T>> {
         T: Default,
     {
         match self {
-            Maybe::Unspecified | Maybe::Specified(None) => {
+            Self::Unspecified | Self::Specified(None) => {
                 *self = Self::Specified(Some(T::default()));
                 match self {
                     Self::Specified(Some(x)) => x,
                     _ => unreachable!(),
                 }
             }
-            Maybe::Specified(Some(x)) => x,
+            Self::Specified(Some(x)) => x,
         }
     }
 }

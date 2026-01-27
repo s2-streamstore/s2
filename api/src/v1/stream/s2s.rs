@@ -366,7 +366,7 @@ mod test {
 
     impl From<TestError> for TerminalMessage {
         fn from(val: TestError) -> Self {
-            TerminalMessage {
+            Self {
                 status: val.status,
                 body: val.body.to_owned(),
             }

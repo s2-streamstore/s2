@@ -9,9 +9,9 @@ pub enum JsonOrProto {
 impl JsonOrProto {
     pub fn from_mime(mime: &Mime) -> Option<Self> {
         if is_json(mime) {
-            Some(JsonOrProto::Json)
+            Some(Self::Json)
         } else if is_protobuf(mime) {
-            Some(JsonOrProto::Proto)
+            Some(Self::Proto)
         } else {
             None
         }

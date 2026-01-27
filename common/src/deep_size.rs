@@ -48,9 +48,9 @@ impl DeepSize for bytes::Bytes {
 impl<T: DeepSize> DeepSize for std::ops::Bound<T> {
     fn deep_size(&self) -> usize {
         match self {
-            std::ops::Bound::Included(x) => x.deep_size(),
-            std::ops::Bound::Excluded(x) => x.deep_size(),
-            std::ops::Bound::Unbounded => 1,
+            Self::Included(x) => x.deep_size(),
+            Self::Excluded(x) => x.deep_size(),
+            Self::Unbounded => 1,
         }
     }
 }

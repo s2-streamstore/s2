@@ -17,7 +17,7 @@ pub enum StorageError {
 
 impl From<slatedb::Error> for StorageError {
     fn from(error: slatedb::Error) -> Self {
-        StorageError::Database(Arc::new(error))
+        Self::Database(Arc::new(error))
     }
 }
 
@@ -159,13 +159,13 @@ pub enum AppendError {
 impl From<AppendErrorInternal> for AppendError {
     fn from(e: AppendErrorInternal) -> Self {
         match e {
-            AppendErrorInternal::Storage(e) => AppendError::Storage(e),
+            AppendErrorInternal::Storage(e) => Self::Storage(e),
             AppendErrorInternal::StreamerMissingInActionError(e) => {
-                AppendError::StreamerMissingInActionError(e)
+                Self::StreamerMissingInActionError(e)
             }
-            AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
-            AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
-            AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
+            AppendErrorInternal::RequestDroppedError(e) => Self::RequestDroppedError(e),
+            AppendErrorInternal::ConditionFailed(e) => Self::ConditionFailed(e),
+            AppendErrorInternal::TimestampMissing(e) => Self::TimestampMissing(e),
         }
     }
 }

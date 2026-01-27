@@ -113,7 +113,7 @@ impl TryFrom<Bytes> for Key {
                 basin_deletion_pending::deser_key(bytes).map(Key::BasinDeletionPending)
             }
             KeyType::StreamMeta => {
-                stream_meta::deser_key(bytes).map(|(basin, stream)| Key::StreamMeta(basin, stream))
+                stream_meta::deser_key(bytes).map(|(basin, stream)| Self::StreamMeta(basin, stream))
             }
             KeyType::StreamTailPosition => {
                 stream_tail_position::deser_key(bytes).map(Key::StreamTailPosition)
@@ -125,10 +125,10 @@ impl TryFrom<Bytes> for Key {
                 stream_trim_point::deser_key(bytes).map(Key::StreamTrimPoint)
             }
             KeyType::StreamRecordData => stream_record_data::deser_key(bytes)
-                .map(|(stream_id, pos)| Key::StreamRecordData(stream_id, pos)),
+                .map(|(stream_id, pos)| Self::StreamRecordData(stream_id, pos)),
             KeyType::StreamRecordTimestamp => {
                 stream_record_timestamp::deser_key(bytes).map(|(stream_id, timestamp, seq_num)| {
-                    Key::StreamRecordTimestamp(stream_id, timestamp, seq_num)
+                    Self::StreamRecordTimestamp(stream_id, timestamp, seq_num)
                 })
             }
         }

@@ -167,7 +167,7 @@ pub type BasinNamePrefix = BasinNameStr<PrefixProps>;
 
 impl Default for BasinNamePrefix {
     fn default() -> Self {
-        BasinNameStr(CompactString::default(), PhantomData)
+        Self(CompactString::default(), PhantomData)
     }
 }
 
@@ -181,7 +181,7 @@ pub type BasinNameStartAfter = BasinNameStr<StartAfterProps>;
 
 impl Default for BasinNameStartAfter {
     fn default() -> Self {
-        BasinNameStr(CompactString::default(), PhantomData)
+        Self(CompactString::default(), PhantomData)
     }
 }
 

@@ -58,7 +58,7 @@ impl<T> PartialEq for Metered<T>
 where
     T: PartialEq,
 {
-    fn eq(&self, other: &Metered<T>) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         self.size == other.size && self.inner == other.inner
     }
 }

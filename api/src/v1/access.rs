@@ -35,7 +35,7 @@ where
     {
         let s = String::deserialize(deserializer)?;
         if s.is_empty() {
-            Ok(MaybeEmpty::Empty)
+            Ok(Self::Empty)
         } else {
             T::deserialize(serde::de::value::StringDeserializer::new(s)).map(MaybeEmpty::NonEmpty)
         }
@@ -286,9 +286,9 @@ impl<E, P> ResourceSet<MaybeEmpty<E>, P> {
         match rs {
             types::access::ResourceSet::None => None,
             types::access::ResourceSet::Exact(e) => {
-                Some(ResourceSet::Exact(MaybeEmpty::NonEmpty(e)))
+                Some(Self::Exact(MaybeEmpty::NonEmpty(e)))
             }
-            types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p)),
+            types::access::ResourceSet::Prefix(p) => Some(Self::Prefix(p)),
         }
     }
 }

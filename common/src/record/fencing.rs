@@ -41,7 +41,7 @@ impl<'de> serde::Deserialize<'de> for FencingToken {
         D: serde::Deserializer<'de>,
     {
         let s = CompactString::deserialize(deserializer)?;
-        FencingToken::try_from(s).map_err(serde::de::Error::custom)
+        Self::try_from(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -58,7 +58,7 @@ impl TryFrom<CompactString> for FencingToken {
         if input.len() > MAX_FENCING_TOKEN_LENGTH {
             return Err(FencingTokenTooLongError(input.len()));
         }
-        Ok(FencingToken(input))
+        Ok(Self(input))
     }
 }
 

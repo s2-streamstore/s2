@@ -59,8 +59,8 @@ impl DeepSize for CommandRecord {
 impl CommandRecord {
     pub fn op(&self) -> CommandOp {
         match self {
-            CommandRecord::Fence(_) => CommandOp::Fence,
-            CommandRecord::Trim(_) => CommandOp::Trim,
+            Self::Fence(_) => CommandOp::Fence,
+            Self::Trim(_) => CommandOp::Trim,
         }
     }
 
@@ -109,18 +109,18 @@ impl TryFrom<&[u8]> for CommandRecord {
 impl Encodable for CommandRecord {
     fn encoded_size(&self) -> usize {
         1 + match self {
-            CommandRecord::Fence(token) => token.len(),
-            CommandRecord::Trim(trim_point) => size_of_val(trim_point),
+            Self::Fence(token) => token.len(),
+            Self::Trim(trim_point) => size_of_val(trim_point),
         }
     }
 
     fn encode_into(&self, buf: &mut impl BufMut) {
         buf.put_u8(self.op().ordinal());
         match self {
-            CommandRecord::Fence(token) => {
+            Self::Fence(token) => {
                 buf.put_slice(token.as_bytes());
             }
-            CommandRecord::Trim(trim_point) => {
+            Self::Trim(trim_point) => {
                 buf.put_u64(*trim_point);
             }
         }
@@ -141,13 +141,13 @@ impl From<CommandPayloadError> for InternalRecordError {
     fn from(e: CommandPayloadError) -> Self {
         match e {
             CommandPayloadError::InvalidUtf8(_) => {
-                InternalRecordError::InvalidValue("CommandPayload", "fencing token not valid utf8")
+                Self::InvalidValue("CommandPayload", "fencing token not valid utf8")
             }
             CommandPayloadError::FencingTokenTooLong(_) => {
-                InternalRecordError::InvalidValue("CommandPayload", "fencing token too long")
+                Self::InvalidValue("CommandPayload", "fencing token too long")
             }
             CommandPayloadError::TrimPointSize(_) => {
-                InternalRecordError::InvalidValue("CommandPayload", "trim point size")
+                Self::InvalidValue("CommandPayload", "trim point size")
             }
         }
     }

@@ -129,7 +129,7 @@ pub type AccessTokenIdPrefix = AccessTokenIdStr<PrefixProps>;
 
 impl Default for AccessTokenIdPrefix {
     fn default() -> Self {
-        AccessTokenIdStr(CompactString::default(), PhantomData)
+        Self(CompactString::default(), PhantomData)
     }
 }
 
@@ -143,7 +143,7 @@ pub type AccessTokenIdStartAfter = AccessTokenIdStr<StartAfterProps>;
 
 impl Default for AccessTokenIdStartAfter {
     fn default() -> Self {
-        AccessTokenIdStr(CompactString::default(), PhantomData)
+        Self(CompactString::default(), PhantomData)
     }
 }
 

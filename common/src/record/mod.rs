@@ -27,7 +27,7 @@ pub struct StreamPosition {
 }
 
 impl StreamPosition {
-    pub const MIN: StreamPosition = StreamPosition {
+    pub const MIN: Self = Self {
         seq_num: SeqNum::MIN,
         timestamp: Timestamp::MIN,
     };
@@ -116,8 +116,8 @@ pub fn try_metered_size(record_bytes: &[u8]) -> Result<u32, &'static str> {
 impl MeteredSize for Record {
     fn metered_size(&self) -> usize {
         8 + (match self {
-            Record::Command(command) => 2 + command.op().to_id().len() + command.payload().len(),
-            Record::Envelope(envelope) => {
+            Self::Command(command) => 2 + command.op().to_id().len() + command.payload().len(),
+            Self::Envelope(envelope) => {
                 (2 * envelope.headers().len())
                     + envelope.headers().deep_size()
                     + envelope.body().len()
@@ -146,7 +146,7 @@ impl TryFrom<u8> for MagicByte {
 
 impl From<MagicByte> for u8 {
     fn from(value: MagicByte) -> Self {
-        ((value.metered_size_varlen - 1) << 3) | value.record_type as u8
+        ((value.metered_size_varlen - 1) << 3) | value.record_type as Self
     }
 }
 
@@ -190,8 +190,8 @@ impl Record {
 
     pub fn into_parts(self) -> (Vec<Header>, Bytes) {
         match self {
-            Record::Envelope(e) => e.into_parts(),
-            Record::Command(c) => {
+            Self::Envelope(e) => e.into_parts(),
+            Self::Command(c) => {
                 let op = c.op();
                 let header = Header {
                     name: Bytes::new(),

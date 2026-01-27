@@ -73,8 +73,8 @@ enum StoreType {
 impl StoreType {
     fn default_flush_interval(&self) -> Duration {
         Duration::from_millis(match self {
-            StoreType::S3Bucket(_) => 50,
-            StoreType::LocalFileSystem(_) | StoreType::InMemory => 5,
+            Self::S3Bucket(_) => 50,
+            Self::LocalFileSystem(_) | Self::InMemory => 5,
         })
     }
 }

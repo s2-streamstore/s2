@@ -56,15 +56,15 @@ impl s2_common::http::ParseableHeader for Format {
 impl Format {
     pub fn encode(self, bytes: &[u8]) -> String {
         match self {
-            Format::Raw => String::from_utf8_lossy(bytes).into_owned(),
-            Format::Base64 => Base64::encode_string(bytes),
+            Self::Raw => String::from_utf8_lossy(bytes).into_owned(),
+            Self::Base64 => Base64::encode_string(bytes),
         }
     }
 
     pub fn decode(self, s: String) -> Result<Bytes, ValidationError> {
         Ok(match self {
-            Format::Raw => s.into_bytes().into(),
-            Format::Base64 => Base64::decode_vec(&s)
+            Self::Raw => s.into_bytes().into(),
+            Self::Base64 => Base64::decode_vec(&s)
                 .map_err(|_| ValidationError("invalid Base64 encoding".to_owned()))?
                 .into(),
         })
@@ -183,8 +183,8 @@ pub mod extract {
     impl IntoResponse for ProtoRejection {
         fn into_response(self) -> Response {
             match self {
-                ProtoRejection::BytesRejection(e) => e.into_response(),
-                ProtoRejection::Decode(e) => (
+                Self::BytesRejection(e) => e.into_response(),
+                Self::Decode(e) => (
                     http::StatusCode::BAD_REQUEST,
                     format!("Invalid protobuf body: {e}"),
                 )
@@ -202,7 +202,7 @@ pub mod extract {
 
         async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
             let bytes = Bytes::from_request(req, state).await?;
-            Ok(super::Proto(T::decode(bytes)?))
+            Ok(Self(T::decode(bytes)?))
         }
     }
 }

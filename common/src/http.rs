@@ -79,7 +79,7 @@ pub mod extract {
             _state: &S,
         ) -> Result<Option<Self>, Self::Rejection> {
             match parse_header(&parts.headers) {
-                Ok(value) => Ok(Some(Header(value))),
+                Ok(value) => Ok(Some(Self(value))),
                 Err(HeaderRejection::MissingHeader(_)) => Ok(None),
                 Err(e) => Err(e),
             }

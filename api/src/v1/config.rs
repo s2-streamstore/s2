@@ -119,7 +119,7 @@ pub struct TimestampingConfig {
 
 impl TimestampingConfig {
     pub fn to_opt(config: types::config::OptionalTimestampingConfig) -> Option<Self> {
-        let config = TimestampingConfig {
+        let config = Self {
             mode: config.mode.map(Into::into),
             uncapped: config.uncapped,
         };
@@ -194,7 +194,7 @@ pub struct DeleteOnEmptyConfig {
 impl DeleteOnEmptyConfig {
     pub fn to_opt(config: types::config::OptionalDeleteOnEmptyConfig) -> Option<Self> {
         let min_age = config.min_age.unwrap_or_default();
-        (min_age > Duration::ZERO).then_some(DeleteOnEmptyConfig {
+        (min_age > Duration::ZERO).then_some(Self {
             min_age_secs: min_age.as_secs(),
         })
     }
@@ -276,7 +276,7 @@ impl StreamConfig {
             delete_on_empty,
         } = config;
 
-        let config = StreamConfig {
+        let config = Self {
             storage_class: storage_class.map(Into::into),
             retention_policy: retention_policy.map(Into::into),
             timestamping: TimestampingConfig::to_opt(timestamping),

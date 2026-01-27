@@ -95,15 +95,15 @@ pub enum ErrorResponse {
 impl ErrorResponse {
     pub fn to_parts(&self) -> (http::StatusCode, String) {
         let (status, res) = match self {
-            ErrorResponse::AppendConditionFailed(payload) => (
+            Self::AppendConditionFailed(payload) => (
                 http::StatusCode::PRECONDITION_FAILED,
                 serde_json::to_string(&payload),
             ),
-            ErrorResponse::Unwritten(payload) => (
+            Self::Unwritten(payload) => (
                 http::StatusCode::RANGE_NOT_SATISFIABLE,
                 serde_json::to_string(&payload),
             ),
-            ErrorResponse::Standard(err) => (err.status, serde_json::to_string(&err.info)),
+            Self::Standard(err) => (err.status, serde_json::to_string(&err.info)),
         };
         (status, res.expect("basic json ser"))
     }

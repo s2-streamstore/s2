@@ -19,7 +19,7 @@ impl Bash {
         Self(hasher.finalize())
     }
 
-    pub fn as_bytes(&self) -> &[u8; Bash::LEN] {
+    pub fn as_bytes(&self) -> &[u8; Self::LEN] {
         self.0.as_bytes()
     }
 }
@@ -42,15 +42,15 @@ impl From<Bash> for [u8; Bash::LEN] {
     }
 }
 
-impl From<[u8; Bash::LEN]> for Bash {
-    fn from(bytes: [u8; Bash::LEN]) -> Self {
+impl From<[u8; Self::LEN]> for Bash {
+    fn from(bytes: [u8; Self::LEN]) -> Self {
         Self(blake3::Hash::from_bytes(bytes))
     }
 }
 
 impl From<Bash> for Bytes {
     fn from(bash: Bash) -> Self {
-        Bytes::copy_from_slice(bash.as_bytes())
+        Self::copy_from_slice(bash.as_bytes())
     }
 }
 

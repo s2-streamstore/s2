@@ -166,7 +166,7 @@ impl<'de> serde::Deserialize<'de> for RequestToken {
         D: serde::Deserializer<'de>,
     {
         let s = CompactString::deserialize(deserializer)?;
-        RequestToken::try_from(s).map_err(serde::de::Error::custom)
+        Self::try_from(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -183,7 +183,7 @@ impl TryFrom<CompactString> for RequestToken {
         if input.len() > MAX_REQUEST_TOKEN_LENGTH {
             return Err(RequestTokenTooLongError(input.len()));
         }
-        Ok(RequestToken(input))
+        Ok(Self(input))
     }
 }
 

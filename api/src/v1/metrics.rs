@@ -15,9 +15,9 @@ pub enum TimeseriesInterval {
 impl From<TimeseriesInterval> for types::metrics::TimeseriesInterval {
     fn from(value: TimeseriesInterval) -> Self {
         match value {
-            TimeseriesInterval::Minute => types::metrics::TimeseriesInterval::Minute,
-            TimeseriesInterval::Hour => types::metrics::TimeseriesInterval::Hour,
-            TimeseriesInterval::Day => types::metrics::TimeseriesInterval::Day,
+            TimeseriesInterval::Minute => Self::Minute,
+            TimeseriesInterval::Hour => Self::Hour,
+            TimeseriesInterval::Day => Self::Day,
         }
     }
 }
@@ -175,8 +175,8 @@ pub enum MetricUnit {
 impl From<types::metrics::MetricUnit> for MetricUnit {
     fn from(value: types::metrics::MetricUnit) -> Self {
         match value {
-            types::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
-            types::metrics::MetricUnit::Operations => MetricUnit::Operations,
+            types::metrics::MetricUnit::Bytes => Self::Bytes,
+            types::metrics::MetricUnit::Operations => Self::Operations,
         }
     }
 }
@@ -295,12 +295,12 @@ pub enum Metric {
 impl From<types::metrics::Metric> for Metric {
     fn from(value: types::metrics::Metric) -> Self {
         match value {
-            types::metrics::Metric::Scalar(scalar) => Metric::Scalar(scalar.into()),
+            types::metrics::Metric::Scalar(scalar) => Self::Scalar(scalar.into()),
             types::metrics::Metric::Accumulation(timeseries) => {
-                Metric::Accumulation(timeseries.into())
+                Self::Accumulation(timeseries.into())
             }
-            types::metrics::Metric::Gauge(timeseries) => Metric::Gauge(timeseries.into()),
-            types::metrics::Metric::Label(label) => Metric::Label(label.into()),
+            types::metrics::Metric::Gauge(timeseries) => Self::Gauge(timeseries.into()),
+            types::metrics::Metric::Label(label) => Self::Label(label.into()),
         }
     }
 }
