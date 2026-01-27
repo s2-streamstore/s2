@@ -219,7 +219,7 @@ impl Streamer {
                         Record::Command(CommandRecord::Trim(SeqNum::MAX))
                     );
                 }
-                for sr in sequenced_records.iter() {
+                for sr in &sequenced_records {
                     if let Record::Command(cmd) = &sr.record {
                         self.apply_command(sr.position.seq_num, cmd, append_type);
                     }

@@ -43,6 +43,7 @@ impl std::fmt::Display for LastEventId {
 impl FromStr for LastEventId {
     type Err = types::ValidationError;
 
+    #[allow(clippy::single_char_pattern)]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut iter = s.splitn(3, ",");
 
