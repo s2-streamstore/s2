@@ -403,7 +403,7 @@ mod test {
             headers in headers_strategy(),
             body in bytes_strategy(true),
         ) {
-            let record = Record::try_from_parts(headers.clone(), body.clone()).unwrap();
+            let record = Record::try_from_parts(headers, body).unwrap();
             let encoded_record = Metered::from(&record).to_bytes();
             assert_eq!(record.metered_size(), try_metered_size(encoded_record.as_ref()).unwrap() as usize);
         }

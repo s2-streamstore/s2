@@ -180,7 +180,7 @@ mod tests {
                 .unwrap(),
         );
         let stream_meta = super::StreamMeta {
-            config: config.clone(),
+            config: config,
             created_at,
             deleted_at,
             creation_idempotency_key: Some(Bash::new(&[

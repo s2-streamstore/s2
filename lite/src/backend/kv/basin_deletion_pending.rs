@@ -61,7 +61,7 @@ mod tests {
 
         #[test]
         fn roundtrip_basin_deletion_pending_value(stream in stream_name_strategy(),) {
-            let cursor = StreamNameStartAfter::from(stream.clone());
+            let cursor = StreamNameStartAfter::from(stream);
             let bytes = super::ser_value(&cursor);
             let decoded = super::deser_value(bytes).unwrap();
             prop_assert_eq!(cursor.as_ref(), decoded.as_ref());

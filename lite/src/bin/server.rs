@@ -247,7 +247,7 @@ async fn init_object_store(
                     if let Some(credentials_provider) = aws_config.credentials_provider() {
                         info!("using aws-config credentials provider");
                         builder = builder.with_credentials(Arc::new(S3CredentialProvider {
-                            aws: credentials_provider.clone(),
+                            aws: credentials_provider,
                             cache: tokio::sync::Mutex::new(None),
                         }));
                     }

@@ -84,13 +84,13 @@ mod tests {
             let header_name = Bytes::from(header_name);
             let header_value = Bytes::from(header_value);
             let headers = vec![Header {
-                name: header_name.clone(),
-                value: header_value.clone(),
+                name: header_name,
+                value: header_value,
             }];
             let body = Bytes::from(body);
             let expected_headers = headers.clone();
             let expected_body = body.clone();
-            let record = Record::try_from_parts(headers.clone(), body).unwrap();
+            let record = Record::try_from_parts(headers, body).unwrap();
             let metered_record: s2_common::record::Metered<Record> = record.into();
             let original_size = metered_record.metered_size();
 

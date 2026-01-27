@@ -228,7 +228,7 @@ mod tests {
         assert!(key3 >= page1.start && key3 < page1.end);
         assert!(key_outside < page1.start || key_outside >= page1.end);
 
-        let start_after = BasinNameStartAfter::from(basin1.clone());
+        let start_after = BasinNameStartAfter::from(basin1);
         let cursor_key = super::ser_key_start_after(&start_after);
         assert!(cursor_key > key1);
         assert!(cursor_key < key2);
@@ -259,7 +259,7 @@ mod tests {
                 .unwrap(),
         );
         let basin_meta = super::BasinMeta {
-            config: config.clone(),
+            config: config,
             created_at,
             deleted_at,
             creation_idempotency_key: Some(Bash::new(&[b"test-basin", b"request-token-123"])),
