@@ -137,7 +137,9 @@ pub mod extract {
                 .as_ref()
                 .is_some_and(crate::mime::is_json)
             {
-                Err(JsonRejection::MissingJsonContentType(MissingJsonContentType::default()))?;
+                Err(JsonRejection::MissingJsonContentType(
+                    MissingJsonContentType::default(),
+                ))?;
             }
             let bytes = Bytes::from_request(req, state)
                 .await

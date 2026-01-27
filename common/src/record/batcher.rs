@@ -191,7 +191,10 @@ mod tests {
     fn assert_batch(batch: &RecordBatch, expected: &[SequencedRecord], is_terminal: bool) {
         assert_eq!(batch.is_terminal, is_terminal);
         assert_eq!(batch.records.len(), expected.len());
-        let expected_size: usize = expected.iter().map(super::super::metering::MeteredSize::metered_size).sum();
+        let expected_size: usize = expected
+            .iter()
+            .map(super::super::metering::MeteredSize::metered_size)
+            .sum();
         assert_eq!(batch.records.metered_size(), expected_size);
         for (actual, expected) in batch.records.iter().zip(expected.iter()) {
             assert_eq!(actual, expected);
