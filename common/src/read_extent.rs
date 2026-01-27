@@ -194,10 +194,10 @@ mod test {
     #[case(
         ReadLimit::Count(100),
         10,
-        100000,
+        100_000,
         EvaluatedReadLimit::Remaining(ReadLimit::Count(90))
     )]
-    #[case(ReadLimit::Count(100), 100, 100000, EvaluatedReadLimit::Exhausted)]
+    #[case(ReadLimit::Count(100), 100, 100_000, EvaluatedReadLimit::Exhausted)]
     #[case(
         ReadLimit::Bytes(100),
         1000,

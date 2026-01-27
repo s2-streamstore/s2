@@ -169,14 +169,14 @@ mod tests {
             storage_class: Some(StorageClass::Express),
             ..Default::default()
         };
-        let created_at = OffsetDateTime::from_unix_timestamp(1234567890)
+        let created_at = OffsetDateTime::from_unix_timestamp(1_234_567_890)
             .unwrap()
-            .replace_nanosecond(123456789)
+            .replace_nanosecond(123_456_789)
             .unwrap();
         let deleted_at = Some(
-            OffsetDateTime::from_unix_timestamp(1234567890)
+            OffsetDateTime::from_unix_timestamp(1_234_567_890)
                 .unwrap()
-                .replace_nanosecond(123456789)
+                .replace_nanosecond(123_456_789)
                 .unwrap(),
         );
         let stream_meta = super::StreamMeta {

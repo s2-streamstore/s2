@@ -919,7 +919,7 @@ async fn test_read_until_with_bytes_limit_timestamp_wins() {
         clamp: false,
     };
     let end = ReadEnd {
-        limit: ReadLimit::Bytes(100000),
+        limit: ReadLimit::Bytes(100_000),
         until: ReadUntil::Timestamp(3500),
         wait: None,
     };

@@ -183,7 +183,7 @@ impl TryFrom<u8> for HeaderFlag {
             return Err("reserved bit set");
         }
         Ok(Self {
-            num_headers_length_bytes: (0b110000 & value) >> 4,
+            num_headers_length_bytes: (0b11_0000 & value) >> 4,
             name_length_bytes: NonZeroU8::new(((0b1100 & value) >> 2) + 1).unwrap(),
             value_length_bytes: NonZeroU8::new((0b11 & value) + 1).unwrap(),
         })
@@ -342,7 +342,7 @@ mod test {
                 name_length_bytes: NonZeroU8::new(1).unwrap(),
                 value_length_bytes: NonZeroU8::new(1).unwrap(),
             }),
-            0b00100000.try_into()
+            0b0010_0000.try_into()
         );
 
         let u8_repr: u8 = HeaderFlag {
@@ -351,7 +351,7 @@ mod test {
             value_length_bytes: NonZeroU8::new(1).unwrap(),
         }
         .into();
-        assert_eq!(u8_repr, 0b00100000);
+        assert_eq!(u8_repr, 0b0010_0000);
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod test {
                 name_length_bytes: NonZeroU8::new(1).unwrap(),
                 value_length_bytes: NonZeroU8::new(1).unwrap(),
             }),
-            0b00010000.try_into()
+            0b0001_0000.try_into()
         );
 
         let u8_repr: u8 = HeaderFlag {
@@ -371,7 +371,7 @@ mod test {
             value_length_bytes: NonZeroU8::new(1).unwrap(),
         }
         .into();
-        assert_eq!(u8_repr, 0b00010000);
+        assert_eq!(u8_repr, 0b0001_0000);
     }
 
     #[test]
