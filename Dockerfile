@@ -32,8 +32,7 @@ WORKDIR /app
 
 COPY --from=builder /build/target/release/s2 /app/s2
 
-# Default to lite subcommand for backward compatibility with s2-lite Docker image
-ENTRYPOINT ["./s2", "lite"]
+ENTRYPOINT ["./s2"]
 
 # Production runtime (default) - minimal distroless image
 FROM gcr.io/distroless/cc-debian13 AS runtime
@@ -42,4 +41,4 @@ WORKDIR /app
 
 COPY --from=builder /build/target/release/s2 /app/s2
 
-ENTRYPOINT ["./s2", "lite"]
+ENTRYPOINT ["./s2"]

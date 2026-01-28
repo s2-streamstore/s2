@@ -1,12 +1,9 @@
-name: cli-release-plz
+name: release-plz
 
 on:
   push:
     branches:
       - main
-    paths:
-      - 'cli/**'
-      - 'Cargo.lock'
 
 permissions:
   pull-requests: write
@@ -28,7 +25,5 @@ jobs:
         uses: release-plz/action@v0.5
         with:
           command: release-pr
-          manifest_path: cli/Cargo.toml
-          config: cli/release-plz.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
