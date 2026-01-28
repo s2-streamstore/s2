@@ -5,7 +5,7 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "S2 Lite server backed by object storage")]
+#[command(author, version, about = "S2 Lite")]
 struct Args {
     #[command(flatten)]
     lite: s2_lite::server::LiteArgs,
