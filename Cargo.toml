@@ -59,5 +59,5 @@ uuid = "1.20"
 zstd = "0.13"
 
 [patch.crates-io]
-slatedb = { git = "https://github.com/slatedb/slatedb", rev = "e9022295cd03c7b3273c9b6518c8daff91d677c5" }
+slatedb = { git = "https://github.com/slatedb/slatedb", rev = "9efc9f55a31d5634c5685ae1580971715c03bd37" }
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }

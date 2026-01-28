@@ -20,9 +20,9 @@ async fn metrics(State(_backend): State<Backend>) -> impl axum::response::IntoRe
 }
 
 async fn ping(State(backend): State<Backend>) -> Response {
-    match backend.db_ping().await {
+    match backend.db_status().await {
         Ok(()) => "pong".into_response(),
-        Err(err) => (StatusCode::SERVICE_UNAVAILABLE, format!("db error: {err}")).into_response(),
+        Err(err) => (StatusCode::SERVICE_UNAVAILABLE, format!("db status: {err}")).into_response(),
     }
 }
 

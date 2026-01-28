@@ -895,9 +895,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.54"
+version = "4.5.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6e6ff9dcd79cff5cd969a17a545d79e84ab086e444102a591e288a8aa3ce394"
+checksum = "3e34525d5bbbd55da2bb745d34b36121baac88d07619a9a09cfcf4a6c0832785"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -905,9 +905,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.54"
+version = "4.5.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa42cf4d2b7a41bc8f663a7cab4031ebafa1bf3875705bfaf8466dc60ab52c00"
+checksum = "59a20016a20a3da95bef50ec7238dbd09baeef4311dcdd38ec15aba69812fb61"
 dependencies = [
  "anstream",
  "anstyle",
@@ -917,9 +917,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.5.49"
+version = "4.5.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a0b5487afeab2deb2ff4e03a807ad1a03ac532ff5a2cee5d86884440c7f7671"
+checksum = "a92793da1a46a5f2a02a6f4c46c6496b28c43638adea8306fcb0caa1634f24e5"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3744,9 +3744,9 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "siphasher"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
+checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "slab"
@@ -3757,7 +3757,7 @@ checksum = "7a2ae44ef20feb57a68b23d846850f861394c2e02dc425a50098ae8c90267589"
 [[package]]
 name = "slatedb"
 version = "0.10.0"
-source = "git+https://github.com/slatedb/slatedb?rev=e9022295cd03c7b3273c9b6518c8daff91d677c5#e9022295cd03c7b3273c9b6518c8daff91d677c5"
+source = "git+https://github.com/slatedb/slatedb?rev=9efc9f55a31d5634c5685ae1580971715c03bd37#9efc9f55a31d5634c5685ae1580971715c03bd37"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3803,7 +3803,7 @@ dependencies = [
 [[package]]
 name = "slatedb-common"
 version = "0.10.0"
-source = "git+https://github.com/slatedb/slatedb?rev=e9022295cd03c7b3273c9b6518c8daff91d677c5#e9022295cd03c7b3273c9b6518c8daff91d677c5"
+source = "git+https://github.com/slatedb/slatedb?rev=9efc9f55a31d5634c5685ae1580971715c03bd37#9efc9f55a31d5634c5685ae1580971715c03bd37"
 dependencies = [
  "chrono",
  "tokio",
@@ -3812,7 +3812,7 @@ dependencies = [
 [[package]]
 name = "slatedb-txn-obj"
 version = "0.10.0"
-source = "git+https://github.com/slatedb/slatedb?rev=e9022295cd03c7b3273c9b6518c8daff91d677c5#e9022295cd03c7b3273c9b6518c8daff91d677c5"
+source = "git+https://github.com/slatedb/slatedb?rev=9efc9f55a31d5634c5685ae1580971715c03bd37#9efc9f55a31d5634c5685ae1580971715c03bd37"
 dependencies = [
  "async-trait",
  "bytes",
