@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["api", "common", "lite"]
+members = ["api", "common", "lite", "cli"]
 
 [workspace.package]
 version = "0.4.0"
@@ -21,15 +21,23 @@ blake3 = "1.8"
 bytes = "1.11"
 bytesize = "2.3"
 clap = "4.5"
+color-print = "0.3"
+colored = "3.1"
 compact_str = "0.9"
+config = "0.15"
 dashmap = "6.1"
+dirs = "6.0"
 enum-ordinalize = "4.3"
 enumset = "1.1"
 eyre = "0.6"
 flate2 = "1.1"
 futures = "0.3"
 http = "1.4"
+humantime = "2.3"
+indicatif = "0.18"
 itertools = "0.14"
+json_to_table = "0.12"
+miette = "7.6"
 mime = "0.3"
 mimalloc = "0.1"
 parking_lot = "0.12"
@@ -43,21 +51,29 @@ rkyv = "0.8"
 rstest = "0.26"
 s2-api = { version = "0.4.0", path = "api" }
 s2-common = { version = "0.4.0", path = "common" }
+s2-sdk = "0.23.1"
 serde = "1.0"
 serde_json = "1.0"
 slatedb = "0.10"
 strum = "0.27"
+tabled = "0.20"
 thiserror = "2.0"
 time = "0.3"
 tokio = "1.49"
+tokio-stream = "0.1"
 tokio-util = "0.7"
+toml = "0.9"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 utoipa = "5.4"
 uuid = "1.20"
+xxhash-rust = "0.8"
 zstd = "0.13"
 
 [patch.crates-io]
 slatedb = { git = "https://github.com/slatedb/slatedb", rev = "9efc9f55a31d5634c5685ae1580971715c03bd37" }
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
+
+[profile.release]
+lto = true

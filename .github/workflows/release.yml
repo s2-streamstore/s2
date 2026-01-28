@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: s2-streamstore/s2-lite
+  IMAGE_NAME: s2-streamstore/s2
 
 jobs:
   build-images:
@@ -50,7 +50,7 @@ jobs:
       - name: Build image
         run: |
           docker build \
-            -f lite/Dockerfile \
+            -f Dockerfile \
             --target runtime \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-${{ matrix.arch }} \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }} \

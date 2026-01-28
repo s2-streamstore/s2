@@ -1,0 +1,33 @@
+name: cli-release-plz
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cli/**'
+      - 'Cargo.lock'
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  release-plz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+          manifest_path: cli/Cargo.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

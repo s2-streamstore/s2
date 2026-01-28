@@ -1,0 +1,59 @@
+[package]
+name = "s2-cli"
+description = "CLI for S2"
+version = "0.25.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["s2", "durable", "streams", "client", "cli"]
+
+[[bin]]
+name = "s2"
+path = "src/main.rs"
+
+[dependencies]
+async-stream = { workspace = true }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+base64ct = { workspace = true, features = ["alloc"] }
+bytes = { workspace = true }
+bytesize = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+color-print = { workspace = true }
+colored = { workspace = true }
+config = { workspace = true }
+dirs = { workspace = true }
+eyre = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+humantime = { workspace = true }
+indicatif = { workspace = true }
+json_to_table = { workspace = true }
+miette = { workspace = true, features = ["fancy"] }
+mimalloc = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+s2-lite = { path = "../lite" }
+s2-sdk = { workspace = true, features = ["_hidden"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+slatedb = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+tabled = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["io-util"] }
+toml = { workspace = true }
+tower-http = { workspace = true, features = ["trace"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid = { workspace = true, features = ["v4"] }
+xxhash-rust = { workspace = true, features = ["xxh3"] }
+
+[dev-dependencies]
+assert_cmd = "2.1"
+predicates = "3.1"
+proptest = { workspace = true }
+rstest = { workspace = true }
+serial_test = "3.3"
+tempfile = "3.24"
