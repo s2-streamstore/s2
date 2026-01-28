@@ -31,6 +31,8 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_preprocessors = [
+  # Fix malformed breaking change format: "feat!(scope):" -> "feat(scope)!:"
+  { pattern = '^(\w+)!\((\w+)\):', replace = "${1}(${2})!:" },
   { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](<REPO>/issues/${2}))"},
 ]
 commit_parsers = [
