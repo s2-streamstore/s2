@@ -9,7 +9,7 @@ use super::Backend;
 use crate::backend::{error::StorageError, kv, stream_id::StreamId};
 
 impl Backend {
-    pub async fn db_status(&self) -> Result<(), slatedb::Error> {
+    pub fn db_status(&self) -> Result<(), slatedb::Error> {
         self.db.status()
     }
 
