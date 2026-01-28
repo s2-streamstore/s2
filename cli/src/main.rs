@@ -10,12 +10,10 @@ mod types;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::pin::Pin;
-use std::time::Duration;
+use std::{pin::Pin, time::Duration};
 
 use clap::Parser;
-use cli::ConfigCommand;
-use cli::{Cli, Command, ListBasinsArgs, ListStreamsArgs};
+use cli::{Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
 use colored::Colorize;
 use config::{
     ConfigKey, load_cli_config, load_config_file, sdk_config, set_config_value, unset_config_value,
@@ -36,8 +34,7 @@ use s2_sdk::{
 };
 use strum::VariantNames;
 use tabled::{Table, Tabled};
-use tokio::io::AsyncWriteExt;
-use tokio::select;
+use tokio::{io::AsyncWriteExt, select};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 use types::{AccessTokenInfo, BasinConfig, S2BasinAndMaybeStreamUri, StreamConfig};
 

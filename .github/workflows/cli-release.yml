@@ -27,6 +27,7 @@ jobs:
         with:
           command: release
           manifest_path: cli/Cargo.toml
+          config: cli/release-plz.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

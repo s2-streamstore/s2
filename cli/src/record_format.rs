@@ -1,14 +1,13 @@
-use std::io;
-use std::io::BufRead;
-use std::path::PathBuf;
-use std::pin::Pin;
+use std::{io, io::BufRead, path::PathBuf, pin::Pin};
 
 use clap::ValueEnum;
 use futures::Stream;
 use s2_sdk::types::{AppendRecord, SequencedRecord};
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWrite, BufWriter};
-use tokio::sync::mpsc;
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncBufReadExt, AsyncWrite, BufWriter},
+    sync::mpsc,
+};
 use tokio_stream::wrappers::{LinesStream, ReceiverStream};
 use tracing::trace;
 

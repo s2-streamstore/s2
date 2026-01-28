@@ -853,13 +853,13 @@ impl LatencyStats {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::S2UriParseError;
+    use rstest::rstest;
 
     use super::{
         OpGroupsParseError, PermittedOperationGroups, ReadWritePermissions,
         S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, S2Uri,
     };
-    use rstest::rstest;
+    use crate::error::S2UriParseError;
 
     #[rstest]
     #[case("", Ok(PermittedOperationGroups {

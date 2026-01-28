@@ -1,30 +1,34 @@
-use std::future::Future;
-use std::num::NonZeroU64;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    future::Future,
+    num::NonZeroU64,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use colored::Colorize;
 use futures::{Stream, StreamExt, stream::FuturesUnordered};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::{RngCore, SeedableRng};
-use s2_sdk::types::MeteredBytes as _;
 use s2_sdk::{
     S2Stream,
     producer::{IndexedAppendAck, ProducerConfig},
     types::{
-        AppendRecord, Header, RECORD_BATCH_MAX, ReadFrom, ReadInput, ReadStart, ReadStop, S2Error,
-        SequencedRecord,
+        AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput, ReadStart,
+        ReadStop, S2Error, SequencedRecord,
     },
 };
-use tokio::sync::mpsc;
-use tokio::time::Instant;
+use tokio::{sync::mpsc, time::Instant};
 use xxhash_rust::xxh3::Xxh3Default;
 
-use crate::error::{CliError, OpKind};
-use crate::types::LatencyStats;
+use crate::{
+    error::{CliError, OpKind},
+    types::LatencyStats,
+};
 
 const HASH_HEADER_NAME: &[u8] = b"hash";
 const HEADER_VALUE_LEN: usize = 8;

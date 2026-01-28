@@ -1,17 +1,21 @@
+use std::num::NonZeroU64;
+
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
     BasinNameStartAfter, FencingToken, StreamNamePrefix, StreamNameStartAfter,
 };
-use std::num::NonZeroU64;
 
-use crate::record_format::{
-    RecordFormat, RecordsIn, RecordsOut, parse_records_input_source, parse_records_output_source,
-};
-use crate::types::{
-    AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, Operation, PermittedOperationGroups,
-    S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig,
-    StreamMatcher,
+use crate::{
+    record_format::{
+        RecordFormat, RecordsIn, RecordsOut, parse_records_input_source,
+        parse_records_output_source,
+    },
+    types::{
+        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, Operation,
+        PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
+        StorageClass, StreamConfig, StreamMatcher,
+    },
 };
 
 const STYLES: styling::Styles = styling::Styles::styled()
@@ -37,7 +41,6 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Manage CLI configuration.
-    ///
     #[command(subcommand)]
     Config(ConfigCommand),
 
@@ -143,8 +146,9 @@ pub enum Command {
 
     /// Read records from a stream.
     ///
-    /// If a limit if specified, reading will stop when the limit is reached or there are no more records on the stream.
-    /// If a limit is not specified, the reader will keep tailing and wait for new records.
+    /// If a limit if specified, reading will stop when the limit is reached or there are no more
+    /// records on the stream. If a limit is not specified, the reader will keep tailing and
+    /// wait for new records.
     Read(ReadArgs),
 
     /// Tail a stream, showing the last N records.
@@ -199,7 +203,8 @@ pub struct LsArgs {
     #[arg(short = 's', long)]
     pub start_after: Option<String>,
 
-    /// Limit the number of items to return. Acts as page size (max 1000) when using --no-auto-paginate.
+    /// Limit the number of items to return. Acts as page size (max 1000) when using
+    /// --no-auto-paginate.
     #[arg(short = 'n', long)]
     pub limit: Option<usize>,
 
@@ -218,7 +223,8 @@ pub struct ListBasinsArgs {
     #[arg(short = 's', long)]
     pub start_after: Option<BasinNameStartAfter>,
 
-    /// Limit the number of basins to return. Acts as page size (max 1000) when using --no-auto-paginate.
+    /// Limit the number of basins to return. Acts as page size (max 1000) when using
+    /// --no-auto-paginate.
     #[arg(short = 'n', long)]
     pub limit: Option<usize>,
 
@@ -263,7 +269,8 @@ pub struct ListAccessTokensArgs {
     #[arg(short = 's', long)]
     pub start_after: Option<AccessTokenIdStartAfter>,
 
-    /// Limit the number of access tokens to return. Acts as page size (max 1000) when using --no-auto-paginate.
+    /// Limit the number of access tokens to return. Acts as page size (max 1000) when using
+    /// --no-auto-paginate.
     #[arg(short = 'n', long)]
     pub limit: Option<usize>,
 
@@ -278,7 +285,8 @@ pub struct IssueAccessTokenArgs {
     #[arg(long)]
     pub id: AccessTokenId,
 
-    /// Token validity duration (e.g., "30d", "1w", "24h"). Token expires after this duration from now.
+    /// Token validity duration (e.g., "30d", "1w", "24h"). Token expires after this duration from
+    /// now.
     #[arg(long, conflicts_with = "expires_at")]
     pub expires_in: Option<humantime::Duration>,
 
@@ -335,7 +343,8 @@ pub struct ListStreamsArgs {
     #[arg(short = 's', long)]
     pub start_after: Option<StreamNameStartAfter>,
 
-    /// Limit the number of streams to return. Acts as page size (max 1000) when using --no-auto-paginate.
+    /// Limit the number of streams to return. Acts as page size (max 1000) when using
+    /// --no-auto-paginate.
     #[arg(short = 'n', long)]
     pub limit: Option<usize>,
 

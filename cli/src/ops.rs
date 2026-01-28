@@ -1,5 +1,4 @@
-use std::pin::Pin;
-use std::time::Duration;
+use std::{pin::Pin, time::Duration};
 
 use futures::{Stream, StreamExt, TryStreamExt, stream, stream::FuturesUnordered};
 use s2_sdk::{
@@ -20,14 +19,16 @@ use s2_sdk::{
     },
 };
 
-use crate::cli::{
-    CreateBasinArgs, CreateStreamArgs, FenceArgs, GetAccountMetricsArgs, GetBasinMetricsArgs,
-    GetStreamMetricsArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
-    ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs,
-    TimeRangeArgs, TrimArgs,
+use crate::{
+    cli::{
+        CreateBasinArgs, CreateStreamArgs, FenceArgs, GetAccountMetricsArgs, GetBasinMetricsArgs,
+        GetStreamMetricsArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
+        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs,
+        TimeRangeArgs, TrimArgs,
+    },
+    error::{CliError, OpKind},
+    types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
 };
-use crate::error::{CliError, OpKind};
-use crate::types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig};
 
 pub async fn list_basins<'a>(
     s2: &'a S2,

@@ -104,3 +104,23 @@ jobs:
             "test_cmd": "cargo test --all-features -- --skip access_token"
           }
         ]
+
+  cli-integration-tests:
+    name: CLI Integration Tests
+    needs: [build-server, test, clippy]
+    uses: ./.github/workflows/sdk-tests.yml
+    with:
+      mode: local
+      server-binary: server
+      server-args: "--port 8080"
+      server-port: 8080
+      sdks: |
+        [
+          {
+            "name": "cli",
+            "repo": "${{ github.repository }}",
+            "ref": "${{ github.sha }}",
+            "lang": "rust",
+            "test_cmd": "cargo test -p s2-cli --test integration -j 1"
+          }
+        ]

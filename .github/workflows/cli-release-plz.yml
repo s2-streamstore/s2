@@ -29,5 +29,6 @@ jobs:
         with:
           command: release-pr
           manifest_path: cli/Cargo.toml
+          config: cli/release-plz.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
