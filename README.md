@@ -78,7 +78,7 @@ docker run -p 8080:80 \
 
 Let's make sure the server is ready:
 ```bash
-while ! curl -sf ${S2_ACCOUNT_ENDPOINT}/ping -o /dev/null; do echo Waiting...; sleep 2; done && echo Up!
+while ! curl -sf ${S2_ACCOUNT_ENDPOINT}/health -o /dev/null; do echo Waiting...; sleep 2; done && echo Up!
 ```
 
 [Install the CLI](https://github.com/s2-streamstore/s2-cli?tab=readme-ov-file#installation) or upgrade it if `s2 --version` is older than `0.25`
@@ -109,7 +109,7 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Monitoring
 
-`/ping` will `pong`, you can treat 200 as a success response for readiness and liveness checks
+`/health` will return 200 on success for readiness and liveness checks
 
 `/metrics` returns Prometheus text format
 
