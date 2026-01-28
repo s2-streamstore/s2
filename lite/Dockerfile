@@ -15,9 +15,9 @@ RUN --mount=type=bind,source=api,target=/build/api \
     cargo build --locked --release --package s2-lite --bin server
 
 # Copy the binary from the cache volume
-RUN --mount=type=cache,id=s2-rust,sharing=locked,target=/cache \
-    mkdir -p /build/target/release/ && \
-    cp /cache/release/server /build/target/release/server
+RUN --mount=type=cache,id=s2-rust,sharing=locked,target=/build/target \
+    mkdir -p /output && \
+    cp /build/target/release/server /output/server
 
 # Debug runtime - ubuntu with shell access
 # Build with: docker build --target debug .
@@ -29,7 +29,7 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY --from=builder /build/target/release/server /app/s2-lite
+COPY --from=builder /output/server /app/s2-lite
 
 ENTRYPOINT ["./s2-lite"]
 
@@ -39,6 +39,6 @@ FROM gcr.io/distroless/cc-debian13 AS runtime
 WORKDIR /app
 
 # Copy the binary from builder stage
-COPY --from=builder /build/target/release/server /app/s2-lite
+COPY --from=builder /output/server /app/s2-lite
 
 ENTRYPOINT ["./s2-lite"]

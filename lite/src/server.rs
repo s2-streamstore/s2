@@ -271,7 +271,7 @@ async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
     };
 
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let term = std::future::pending::<()>();
 
     tokio::select! {
         _ = ctrl_c => {
