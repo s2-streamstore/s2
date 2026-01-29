@@ -58,16 +58,6 @@ This project uses [release-plz](https://release-plz.dev/) for automated releases
    gh pr merge <PR_NUMBER> --squash
    ```
 
-7. **Monitor the release**
-   ```bash
-   gh run list --workflow=release.yml --limit=1
-   ```
-
-8. **If release fails**, check logs:
-   ```bash
-   gh run view <RUN_ID> --log | grep -E "(ERROR|failed|error\[)"
-   ```
-
 ## If no release PR exists
 
 ```bash
