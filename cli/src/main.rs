@@ -13,7 +13,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{pin::Pin, time::Duration};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
 use colored::Colorize;
 use config::{
@@ -68,8 +68,8 @@ async fn run() -> Result<(), CliError> {
 
     // Require a command when not in interactive mode
     let Some(command) = cli.command else {
-        eprintln!("No command specified. Use --help for usage or -i for interactive mode.");
-        std::process::exit(1);
+        Cli::command().print_help().ok();
+        std::process::exit(0);
     };
 
     tracing_subscriber::registry()
