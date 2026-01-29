@@ -1,0 +1,26 @@
+name: Test Cross Build
+
+on:
+  pull_request:
+    paths:
+      - 'Cross.toml'
+      - '.github/workflows/test-cross.yml'
+
+jobs:
+  test-cross:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          target: aarch64-unknown-linux-musl
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 846d469b
+      - name: Build
+        run: cross build --release --package s2-cli --target aarch64-unknown-linux-musl
+      - name: Verify binary
+        run: file target/aarch64-unknown-linux-musl/release/s2
