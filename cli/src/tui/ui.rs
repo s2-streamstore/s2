@@ -80,7 +80,7 @@ const CHART_ORANGE: Color = Color::Rgb(251, 146, 60);
 const STORAGE_EXPRESS: Color = ORANGE;
 const STORAGE_STANDARD: Color = Color::Rgb(147, 197, 253);
 
-const TIME_RECENT: Color = GREEN_LIGHT;
+const TIME_RECENT: Color =GREEN_LIGHT;
 const TIME_MODERATE: Color = YELLOW;
 const TIME_OLD: Color = GRAY_200;
 
@@ -201,10 +201,10 @@ fn render_toggle(on: bool, is_selected: bool) -> Vec<Span<'static>> {
         vec![
             Span::styled(
                 "",
-                Style::default().fg(if is_selected { GREEN } else { GRAY_800 }),
+                Style::default().fg(if is_selected { CYAN } else { GRAY_800 }),
             ),
-            Span::styled(" ON ", Style::default().fg(BG_DARK).bg(GREEN).bold()),
-            Span::styled("", Style::default().fg(GREEN)),
+            Span::styled(" ON ", Style::default().fg(BG_DARK).bg(CYAN).bold()),
+            Span::styled("", Style::default().fg(CYAN)),
         ]
     } else {
         vec![
@@ -224,7 +224,7 @@ fn render_pill(label: &str, is_row_selected: bool, is_active: bool) -> Span<'sta
     if is_active {
         Span::styled(
             format!(" {} ", label),
-            Style::default().fg(BG_DARK).bg(GREEN).bold(),
+            Style::default().fg(BG_DARK).bg(CYAN).bold(),
         )
     } else if is_row_selected {
         Span::styled(
@@ -244,7 +244,7 @@ fn render_field_row(
 ) -> (Span<'static>, Span<'static>) {
     let is_selected = field_idx == current_selected;
     let indicator = if is_selected {
-        Span::styled(SELECTED_INDICATOR, Style::default().fg(GREEN).bold())
+        Span::styled(SELECTED_INDICATOR, Style::default().fg(CYAN).bold())
     } else {
         Span::raw(UNSELECTED_INDICATOR)
     };
@@ -267,7 +267,7 @@ fn render_field_row_bold(
 ) -> (Span<'static>, Span<'static>) {
     let is_selected = field_idx == current_selected;
     let indicator = if is_selected {
-        Span::styled(SELECTED_INDICATOR, Style::default().fg(GREEN).bold())
+        Span::styled(SELECTED_INDICATOR, Style::default().fg(CYAN).bold())
     } else {
         Span::raw(UNSELECTED_INDICATOR)
     };
@@ -290,7 +290,7 @@ fn render_button(label: &str, is_selected: bool, is_enabled: bool, color: Color)
     };
 
     let indicator = if is_selected {
-        Span::styled(SELECTED_INDICATOR, Style::default().fg(GREEN).bold())
+        Span::styled(SELECTED_INDICATOR, Style::default().fg(CYAN).bold())
     } else {
         Span::raw(UNSELECTED_INDICATOR)
     };
@@ -329,7 +329,7 @@ fn render_text_input(
     } else {
         let mut spans = vec![Span::styled(value.to_string(), Style::default().fg(color))];
         if is_editing {
-            spans.push(Span::styled(CURSOR, Style::default().fg(GREEN)));
+            spans.push(Span::styled(CURSOR, Style::default().fg(CYAN)));
         }
         spans
     }
@@ -343,14 +343,14 @@ fn render_search_bar(
 ) -> (Block<'static>, Line<'static>) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if filter_active { GREEN } else { BORDER }))
+        .border_style(Style::default().fg(if filter_active { CYAN } else { BORDER }))
         .style(Style::default().bg(BG_PANEL));
 
     let line = if filter_active {
         Line::from(vec![
-            Span::styled(" [/] ", Style::default().fg(GREEN)),
+            Span::styled(" [/] ", Style::default().fg(CYAN)),
             Span::styled(filter.to_string(), Style::default().fg(TEXT_PRIMARY)),
-            Span::styled(CURSOR, Style::default().fg(GREEN)),
+            Span::styled(CURSOR, Style::default().fg(CYAN)),
         ])
     } else if filter.is_empty() {
         Line::from(vec![Span::styled(
@@ -500,7 +500,7 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
         let display = truncate_str(&state.access_token, 40, "...");
         vec![
             Span::styled("Token ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("› ", Style::default().fg(GREEN)),
+            Span::styled("› ", Style::default().fg(CYAN)),
             Span::styled(display, Style::default().fg(WHITE)),
             Span::styled(CURSOR, Style::default().fg(CYAN)),
         ]
@@ -552,7 +552,7 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         .border_style(Style::default().fg(BORDER))
         .style(Style::default().bg(BG_PANEL));
     let title_content = Paragraph::new(Line::from(vec![
-        Span::styled(" ⚙ ", Style::default().fg(GREEN)),
+        Span::styled(" ⚙ ", Style::default().fg(CYAN)),
         Span::styled("Settings", Style::default().fg(TEXT_PRIMARY).bold()),
     ]))
     .block(title_block);
@@ -658,7 +658,7 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         .map(|opt| {
             let is_selected = *opt == state.compression;
             let style = if is_selected {
-                Style::default().fg(BG_DARK).bg(GREEN).bold()
+                Style::default().fg(BG_DARK).bg(CYAN).bold()
             } else {
                 Style::default().fg(TEXT_MUTED).bg(BG_DARK)
             };
@@ -688,9 +688,9 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         compression_row,
     );
     let save_style = if state.selected == 4 {
-        Style::default().fg(BG_DARK).bg(GREEN).bold()
+        Style::default().fg(BG_DARK).bg(CYAN).bold()
     } else if state.has_changes {
-        Style::default().fg(GREEN)
+        Style::default().fg(CYAN)
     } else {
         Style::default().fg(TEXT_MUTED)
     };
@@ -749,7 +749,7 @@ fn draw_settings_field(
     );
 
     let border_style = if selected {
-        Style::default().fg(GREEN)
+        Style::default().fg(CYAN)
     } else {
         Style::default().fg(BORDER)
     };
@@ -833,19 +833,19 @@ fn aurora_color_at(x: f64, y: f64) -> Color {
 
 fn draw_tab_bar(f: &mut Frame, area: Rect, current_tab: Tab) {
     let basins_style = if current_tab == Tab::Basins {
-        Style::default().fg(GREEN).bold()
+        Style::default().fg(CYAN).bold()
     } else {
         Style::default().fg(TEXT_MUTED)
     };
 
     let tokens_style = if current_tab == Tab::AccessTokens {
-        Style::default().fg(GREEN).bold()
+        Style::default().fg(CYAN).bold()
     } else {
         Style::default().fg(TEXT_MUTED)
     };
 
     let settings_style = if current_tab == Tab::Settings {
-        Style::default().fg(GREEN).bold()
+        Style::default().fg(CYAN).bold()
     } else {
         Style::default().fg(TEXT_MUTED)
     };
@@ -893,7 +893,7 @@ fn draw_access_tokens(f: &mut Frame, area: Rect, state: &AccessTokensState) {
     let title_lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Access Tokens", Style::default().fg(GREEN).bold()),
+            Span::styled("  Access Tokens", Style::default().fg(CYAN).bold()),
             Span::styled(&count_text, Style::default().fg(GRAY_700)),
         ]),
     ];
@@ -1001,7 +1001,7 @@ fn draw_access_tokens(f: &mut Frame, area: Rect, state: &AccessTokensState) {
             let line = Line::from(vec![
                 Span::styled(
                     prefix,
-                    Style::default().fg(if is_selected { GREEN } else { TEXT_PRIMARY }),
+                    Style::default().fg(if is_selected { CYAN } else { TEXT_PRIMARY }),
                 ),
                 Span::styled(format!("{:<30}", token_id_display), name_style),
                 Span::styled(
@@ -1166,7 +1166,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
 
         let mut title_spans: Vec<Span> = vec![
             Span::styled(" [ ", Style::default().fg(BORDER)),
-            Span::styled(&title, Style::default().fg(GREEN).bold()),
+            Span::styled(&title, Style::default().fg(CYAN).bold()),
             Span::styled(" ]  ", Style::default().fg(BORDER)),
         ];
 
@@ -1175,7 +1175,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
                 title_spans.push(Span::styled(" | ", Style::default().fg(BORDER)));
             }
             let style = if *cat == state.selected_category {
-                Style::default().fg(BG_DARK).bg(GREEN).bold()
+                Style::default().fg(BG_DARK).bg(CYAN).bold()
             } else {
                 Style::default().fg(TEXT_MUTED)
             };
@@ -1189,7 +1189,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
 
         let title_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(GREEN))
+            .border_style(Style::default().fg(CYAN))
             .title_bottom(Line::from(Span::styled(
                 " ←/→ category  t time picker ",
                 Style::default().fg(TEXT_MUTED),
@@ -1212,7 +1212,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
 
         let mut title_spans: Vec<Span> = vec![
             Span::styled(" [ ", Style::default().fg(BORDER)),
-            Span::styled(&title, Style::default().fg(GREEN).bold()),
+            Span::styled(&title, Style::default().fg(CYAN).bold()),
             Span::styled(" ]  ", Style::default().fg(BORDER)),
         ];
 
@@ -1221,7 +1221,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
                 title_spans.push(Span::styled(" | ", Style::default().fg(BORDER)));
             }
             let style = if *cat == state.selected_category {
-                Style::default().fg(BG_DARK).bg(GREEN).bold()
+                Style::default().fg(BG_DARK).bg(CYAN).bold()
             } else {
                 Style::default().fg(TEXT_MUTED)
             };
@@ -1235,7 +1235,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
 
         let title_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(GREEN))
+            .border_style(Style::default().fg(CYAN))
             .title_bottom(Line::from(Span::styled(
                 " ←/→ category  t time picker ",
                 Style::default().fg(TEXT_MUTED),
@@ -1249,7 +1249,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
     } else {
         let title_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(GREEN))
+            .border_style(Style::default().fg(CYAN))
             .title_bottom(Line::from(Span::styled(
                 " t time picker ",
                 Style::default().fg(TEXT_MUTED),
@@ -1258,9 +1258,9 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
 
         let title_para = Paragraph::new(Line::from(vec![
             Span::styled(" [ ", Style::default().fg(BORDER)),
-            Span::styled(&title, Style::default().fg(GREEN).bold()),
+            Span::styled(&title, Style::default().fg(CYAN).bold()),
             Span::styled(" ]  ", Style::default().fg(BORDER)),
-            Span::styled(" Storage ", Style::default().fg(BG_DARK).bg(GREEN).bold()),
+            Span::styled(" Storage ", Style::default().fg(BG_DARK).bg(CYAN).bold()),
             Span::styled("  ", Style::default()),
             Span::styled(
                 format!("[{}]", state.time_range.as_str()),
@@ -1401,7 +1401,7 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
     let stats_inner = stats_block.inner(chunks[1]);
     f.render_widget(stats_block, chunks[1]);
     let (trend_arrow, trend_color) = if change > 1.0 {
-        ("↑", GREEN)
+        ("↑", CYAN)
     } else if change < -1.0 {
         ("↓", ERROR)
     } else {
@@ -1414,10 +1414,10 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
     };
 
     let stats_line = Line::from(vec![
-        Span::styled(" NOW ", Style::default().fg(BG_DARK).bg(GREEN).bold()),
+        Span::styled(" NOW ", Style::default().fg(BG_DARK).bg(CYAN).bold()),
         Span::styled(
             format!(" {} ", format_metric_value_f64(latest_val, metric_unit)),
-            Style::default().fg(GREEN).bold(),
+            Style::default().fg(CYAN).bold(),
         ),
         Span::styled(trend_arrow, Style::default().fg(trend_color).bold()),
         Span::styled(format!("{} ", trend_text), Style::default().fg(trend_color)),
@@ -1446,10 +1446,10 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
     f.render_widget(stats_para, stats_inner);
     let chart_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(GREEN))
+        .border_style(Style::default().fg(CYAN))
         .title(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(&metric_name, Style::default().fg(GREEN).bold()),
+            Span::styled(&metric_name, Style::default().fg(CYAN).bold()),
             Span::styled(" ", Style::default()),
         ]))
         .style(Style::default().bg(BG_DARK));
@@ -1538,15 +1538,15 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
 /// Convert intensity (0.0-1.0) to a green gradient color
 fn intensity_to_color(intensity: f64) -> Color {
     if intensity > 0.8 {
-        GREEN_BRIGHT
+       GREEN_BRIGHT
     } else if intensity > 0.6 {
-        GREEN_LIGHT
+       GREEN_LIGHT
     } else if intensity > 0.4 {
-        GREEN_LIGHTER
+       GREEN_LIGHTER
     } else if intensity > 0.2 {
-        GREEN_PALE
+       GREEN_PALE
     } else {
-        GREEN_PALEST
+       GREEN_PALEST
     }
 }
 
@@ -1617,7 +1617,7 @@ fn render_multi_metric(
     f.render_widget(stats_block, chunks[1]);
 
     let (trend_arrow, trend_color) = if change > 1.0 {
-        ("↑", GREEN)
+        ("↑", CYAN)
     } else if change < -1.0 {
         ("↓", ERROR)
     } else {
@@ -1630,10 +1630,10 @@ fn render_multi_metric(
     };
 
     let stats_line = Line::from(vec![
-        Span::styled(" NOW ", Style::default().fg(BG_DARK).bg(GREEN).bold()),
+        Span::styled(" NOW ", Style::default().fg(BG_DARK).bg(CYAN).bold()),
         Span::styled(
             format!(" {} ", format_count(latest_val as u64)),
-            Style::default().fg(GREEN).bold(),
+            Style::default().fg(CYAN).bold(),
         ),
         Span::styled(trend_arrow, Style::default().fg(trend_color).bold()),
         Span::styled(format!("{} ", trend_text), Style::default().fg(trend_color)),
@@ -1653,10 +1653,10 @@ fn render_multi_metric(
     f.render_widget(stats_para, stats_inner);
     let chart_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(GREEN))
+        .border_style(Style::default().fg(CYAN))
         .title(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("Total Operations", Style::default().fg(GREEN).bold()),
+            Span::styled("Total Operations", Style::default().fg(CYAN).bold()),
             Span::styled(" ", Style::default()),
         ]))
         .style(Style::default().bg(BG_DARK));
@@ -1760,10 +1760,10 @@ fn render_label_metric(
     f.render_widget(stats_block, chunks[1]);
 
     let stats_line = Line::from(vec![
-        Span::styled(" TOTAL ", Style::default().fg(BG_DARK).bg(GREEN).bold()),
+        Span::styled(" TOTAL ", Style::default().fg(BG_DARK).bg(CYAN).bold()),
         Span::styled(
             format!(" {} ", values.len()),
-            Style::default().fg(GREEN).bold(),
+            Style::default().fg(CYAN).bold(),
         ),
         Span::styled(
             format!(" {} in selected time range", metric_name.to_lowercase()),
@@ -1774,10 +1774,10 @@ fn render_label_metric(
     f.render_widget(stats_para, stats_inner);
     let list_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(GREEN))
+        .border_style(Style::default().fg(CYAN))
         .title(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(metric_name, Style::default().fg(GREEN).bold()),
+            Span::styled(metric_name, Style::default().fg(CYAN).bold()),
             Span::styled(" ", Style::default()),
         ]))
         .style(Style::default().bg(BG_DARK));
@@ -1801,7 +1801,7 @@ fn render_label_metric(
             .map(|(i, value)| {
                 Line::from(vec![
                     Span::styled(format!(" {:>3}. ", i + 1), Style::default().fg(TEXT_MUTED)),
-                    Span::styled(value, Style::default().fg(GREEN)),
+                    Span::styled(value, Style::default().fg(CYAN)),
                 ])
             })
             .collect();
@@ -2061,9 +2061,9 @@ fn draw_time_picker(f: &mut Frame, state: &MetricsViewState) {
                 std::mem::discriminant(option) == std::mem::discriminant(&state.time_range);
 
             let style = if is_selected {
-                Style::default().fg(BG_DARK).bg(GREEN).bold()
+                Style::default().fg(BG_DARK).bg(CYAN).bold()
             } else if is_current {
-                Style::default().fg(GREEN)
+                Style::default().fg(CYAN)
             } else {
                 Style::default().fg(TEXT_PRIMARY)
             };
@@ -2077,9 +2077,9 @@ fn draw_time_picker(f: &mut Frame, state: &MetricsViewState) {
     let is_custom_selected = state.time_picker_selected == custom_index;
     let is_custom_current = matches!(state.time_range, TimeRangeOption::Custom { .. });
     let custom_style = if is_custom_selected {
-        Style::default().fg(BG_DARK).bg(GREEN).bold()
+        Style::default().fg(BG_DARK).bg(CYAN).bold()
     } else if is_custom_current {
-        Style::default().fg(GREEN)
+        Style::default().fg(CYAN)
     } else {
         Style::default().fg(CYAN)
     };
@@ -2089,10 +2089,10 @@ fn draw_time_picker(f: &mut Frame, state: &MetricsViewState) {
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(GREEN))
+            .border_style(Style::default().fg(CYAN))
             .title(Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled("Time Range", Style::default().fg(GREEN).bold()),
+                Span::styled("Time Range", Style::default().fg(CYAN).bold()),
                 Span::styled(" ", Style::default()),
             ]))
             .title_bottom(Line::from(Span::styled(
@@ -2165,7 +2165,7 @@ fn draw_calendar_picker(f: &mut Frame, state: &MetricsViewState) {
         Span::styled(" [", Style::default().fg(TEXT_MUTED)),
         Span::styled(
             format!("{} {}", month_name, state.calendar_year),
-            Style::default().fg(GREEN).bold(),
+            Style::default().fg(CYAN).bold(),
         ),
         Span::styled("] ", Style::default().fg(TEXT_MUTED)),
     ]));
@@ -2220,11 +2220,11 @@ fn draw_calendar_picker(f: &mut Frame, state: &MetricsViewState) {
                 };
 
                 let style = if is_selected {
-                    Style::default().fg(BG_DARK).bg(GREEN).bold()
+                    Style::default().fg(BG_DARK).bg(CYAN).bold()
                 } else if is_start || is_end {
                     Style::default().fg(BG_DARK).bg(CYAN).bold()
                 } else if in_range {
-                    Style::default().fg(GREEN).bg(BG_PANEL)
+                    Style::default().fg(CYAN).bg(BG_PANEL)
                 } else {
                     Style::default().fg(TEXT_PRIMARY)
                 };
@@ -2260,10 +2260,10 @@ fn draw_calendar_picker(f: &mut Frame, state: &MetricsViewState) {
 
     let calendar_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(GREEN))
+        .border_style(Style::default().fg(CYAN))
         .title(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("Select Date Range", Style::default().fg(GREEN).bold()),
+            Span::styled("Select Date Range", Style::default().fg(CYAN).bold()),
             Span::styled(" ", Style::default()),
         ]))
         .title_bottom(Line::from(Span::styled(
@@ -2312,7 +2312,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
     let title_lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Basins", Style::default().fg(GREEN).bold()),
+            Span::styled("  Basins", Style::default().fg(CYAN).bold()),
             Span::styled(&count_text, Style::default().fg(GRAY_700)),
         ]),
     ];
@@ -2455,7 +2455,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     prefix,
-                    Style::default().fg(if is_selected { GREEN } else { TEXT_SECONDARY }),
+                    Style::default().fg(if is_selected { CYAN } else { TEXT_SECONDARY }),
                 ),
                 Span::styled(display_name, name_style),
             ])),
@@ -2515,7 +2515,7 @@ fn draw_streams(f: &mut Frame, area: Rect, state: &StreamsState) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  ← ", Style::default().fg(GRAY_700)),
-            Span::styled(&basin_name_str, Style::default().fg(GREEN).bold()),
+            Span::styled(&basin_name_str, Style::default().fg(CYAN).bold()),
             Span::styled(&count_text, Style::default().fg(GRAY_700)),
         ]),
     ];
@@ -2641,7 +2641,7 @@ fn draw_streams(f: &mut Frame, area: Rect, state: &StreamsState) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     prefix,
-                    Style::default().fg(if is_selected { GREEN } else { TEXT_SECONDARY }),
+                    Style::default().fg(if is_selected { CYAN } else { TEXT_SECONDARY }),
                 ),
                 Span::styled(display_name, name_style),
             ])),
@@ -2675,7 +2675,7 @@ fn draw_stream_detail(f: &mut Frame, area: Rect, state: &StreamDetailState) {
             Span::styled("  ← ", Style::default().fg(GRAY_600)),
             Span::styled(&basin_str, Style::default().fg(GRAY_300)),
             Span::styled(" / ", Style::default().fg(GRAY_700)),
-            Span::styled(&stream_str, Style::default().fg(GREEN).bold()),
+            Span::styled(&stream_str, Style::default().fg(CYAN).bold()),
         ]),
     ];
     let header = Paragraph::new(header_lines).block(
@@ -2887,13 +2887,13 @@ fn draw_stream_detail(f: &mut Frame, area: Rect, state: &StreamDetailState) {
             if is_selected {
                 // Selected action - highlighted card style
                 lines.push(Line::from(vec![
-                    Span::styled("  ▶ ", Style::default().fg(GREEN)),
-                    Span::styled(*icon, Style::default().fg(GREEN)),
+                    Span::styled("  ▶ ", Style::default().fg(CYAN)),
+                    Span::styled(*icon, Style::default().fg(CYAN)),
                     Span::styled(
                         format!(" {} ", name),
                         Style::default().fg(Color::White).bold(),
                     ),
-                    Span::styled(format!("[{}]", key), Style::default().fg(GREEN).bold()),
+                    Span::styled(format!("[{}]", key), Style::default().fg(CYAN).bold()),
                 ]));
                 lines.push(Line::from(vec![
                     Span::styled("      ", Style::default()),
@@ -3094,11 +3094,11 @@ fn draw_read_view(f: &mut Frame, area: Rect, state: &ReadViewState) {
             let header_indicator = if has_headers { "⌘" } else { " " };
 
             let line = Line::from(vec![
-                Span::styled(sel_indicator, Style::default().fg(GREEN)),
+                Span::styled(sel_indicator, Style::default().fg(CYAN)),
                 Span::styled(
                     format!("#{:<8}", record.seq_num),
                     Style::default()
-                        .fg(if is_selected { GREEN } else { TEXT_SECONDARY })
+                        .fg(if is_selected { CYAN } else { TEXT_SECONDARY })
                         .bold(),
                 ),
                 Span::styled(
@@ -3140,7 +3140,7 @@ fn draw_read_view(f: &mut Frame, area: Rect, state: &ReadViewState) {
             let header_line = Line::from(vec![
                 Span::styled(
                     format!(" #{}", record.seq_num),
-                    Style::default().fg(GREEN).bold(),
+                    Style::default().fg(CYAN).bold(),
                 ),
                 Span::styled(
                     format!("  {}ms", record.timestamp),
@@ -3278,7 +3278,7 @@ fn draw_timeline_scrubber(f: &mut Frame, area: Rect, state: &ReadViewState) {
         let ch = bar_chars[level];
 
         let color = if i == current_bucket {
-            GREEN
+           CYAN
         } else if count > 0 {
             CYAN
         } else {
@@ -3322,7 +3322,7 @@ fn draw_timeline_scrubber(f: &mut Frame, area: Rect, state: &ReadViewState) {
                     "#{}",
                     state.records.get(selected).map(|r| r.seq_num).unwrap_or(0)
                 ),
-                Style::default().fg(GREEN).bold(),
+                Style::default().fg(CYAN).bold(),
             ),
             Span::styled(
                 format!(" ({:.0}%) ", position_pct),
@@ -3363,7 +3363,7 @@ fn draw_headers_popup(f: &mut Frame, record: &s2_sdk::types::SequencedRecord) {
         Line::from(""),
         Line::from(vec![Span::styled(
             format!("  Record #{}", record.seq_num),
-            Style::default().fg(GREEN).bold(),
+            Style::default().fg(CYAN).bold(),
         )]),
         Line::from(""),
     ];
@@ -3425,7 +3425,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             Span::styled(" / ", Style::default().fg(GRAY_700)),
             Span::styled(&stream_str, Style::default().fg(GRAY_200)),
             Span::styled("  ", Style::default()),
-            Span::styled(" APPEND ", Style::default().fg(BG_DARK).bg(GREEN).bold()),
+            Span::styled(" APPEND ", Style::default().fg(BG_DARK).bg(CYAN).bold()),
         ]),
     ];
     let header = Paragraph::new(header_lines).block(
@@ -3457,7 +3457,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     let body_selected = state.selected == 0;
     let body_editing = body_selected && state.editing;
     lines.push(Line::from(vec![
-        Span::styled(selected_marker(body_selected), Style::default().fg(GREEN)),
+        Span::styled(selected_marker(body_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Body",
             Style::default().fg(if body_selected {
@@ -3476,7 +3476,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.body, cursor(body_editing))
             },
             Style::default().fg(if body_editing {
-                GREEN
+               CYAN
             } else if state.body.is_empty() {
                 TEXT_MUTED
             } else {
@@ -3491,7 +3491,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     lines.push(Line::from(vec![
         Span::styled(
             selected_marker(headers_selected),
-            Style::default().fg(GREEN),
+            Style::default().fg(CYAN),
         ),
         Span::styled(
             "Headers",
@@ -3523,7 +3523,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
 
     if headers_editing {
         lines.push(Line::from(vec![
-            Span::styled("  + ", Style::default().fg(GREEN)),
+            Span::styled("  + ", Style::default().fg(CYAN)),
             Span::styled(
                 format!(
                     "{}{}",
@@ -3531,7 +3531,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                     if state.editing_header_key { "▎" } else { "" }
                 ),
                 Style::default().fg(if state.editing_header_key {
-                    GREEN
+                   CYAN
                 } else {
                     YELLOW
                 }),
@@ -3544,7 +3544,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                     if !state.editing_header_key { "▎" } else { "" }
                 ),
                 Style::default().fg(if !state.editing_header_key {
-                    GREEN
+                   CYAN
                 } else {
                     TEXT_SECONDARY
                 }),
@@ -3565,7 +3565,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     let match_selected = state.selected == 2;
     let match_editing = match_selected && state.editing;
     lines.push(Line::from(vec![
-        Span::styled(selected_marker(match_selected), Style::default().fg(GREEN)),
+        Span::styled(selected_marker(match_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Match Seq#",
             Style::default().fg(if match_selected {
@@ -3582,7 +3582,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.match_seq_num, cursor(match_editing))
             },
             Style::default().fg(if match_editing {
-                GREEN
+               CYAN
             } else if state.match_seq_num.is_empty() {
                 TEXT_MUTED
             } else {
@@ -3604,7 +3604,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     let fence_selected = state.selected == 3;
     let fence_editing = fence_selected && state.editing;
     lines.push(Line::from(vec![
-        Span::styled(selected_marker(fence_selected), Style::default().fg(GREEN)),
+        Span::styled(selected_marker(fence_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Fencing Token",
             Style::default().fg(if fence_selected {
@@ -3621,7 +3621,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.fencing_token, cursor(fence_editing))
             },
             Style::default().fg(if fence_editing {
-                GREEN
+               CYAN
             } else if state.fencing_token.is_empty() {
                 TEXT_MUTED
             } else {
@@ -3652,7 +3652,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     let file_selected = state.selected == 4;
     let file_editing = file_selected && state.editing;
     lines.push(Line::from(vec![
-        Span::styled(selected_marker(file_selected), Style::default().fg(GREEN)),
+        Span::styled(selected_marker(file_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Input File",
             Style::default().fg(if file_selected {
@@ -3669,7 +3669,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.input_file, cursor(file_editing))
             },
             Style::default().fg(if file_editing {
-                GREEN
+               CYAN
             } else if state.input_file.is_empty() {
                 TEXT_MUTED
             } else {
@@ -3689,7 +3689,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
         ),
     ];
     lines.push(Line::from(vec![
-        Span::styled(selected_marker(format_selected), Style::default().fg(GREEN)),
+        Span::styled(selected_marker(format_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Format",
             Style::default().fg(if format_selected {
@@ -3735,9 +3735,9 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     let (btn_fg, btn_bg) = if state.appending {
         (BG_DARK, YELLOW)
     } else if send_selected && can_send {
-        (BG_DARK, GREEN)
+        (BG_DARK, CYAN)
     } else {
-        (if can_send { GREEN } else { TEXT_MUTED }, BG_PANEL)
+        (if can_send { CYAN } else { TEXT_MUTED }, BG_PANEL)
     };
     let btn_text = if state.appending {
         if state.file_append_progress.is_some() {
@@ -3751,7 +3751,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
         " ▶ SEND "
     };
     lines.push(Line::from(vec![
-        Span::styled(selected_marker(send_selected), Style::default().fg(GREEN)),
+        Span::styled(selected_marker(send_selected), Style::default().fg(CYAN)),
         Span::styled(btn_text, Style::default().fg(btn_fg).bg(btn_bg).bold()),
     ]));
 
@@ -3788,7 +3788,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
         for result in state.history.iter().skip(start) {
             let mut spans = vec![Span::styled(
                 format!("#{:<8}", result.seq_num),
-                Style::default().fg(GREEN),
+                Style::default().fg(CYAN),
             )];
             if result.header_count > 0 {
                 spans.push(Span::styled(
@@ -4027,7 +4027,7 @@ fn draw_help_overlay(f: &mut Frame, screen: &Screen) {
     // Helper to create a key binding line with description
     fn key(keys: &str, action: &str, desc: &str) -> Line<'static> {
         let mut spans = vec![
-            Span::styled(format!("{:>6} ", keys), Style::default().fg(GREEN).bold()),
+            Span::styled(format!("{:>6} ", keys), Style::default().fg(CYAN).bold()),
             Span::styled(
                 format!("{:<20}", action),
                 Style::default().fg(TEXT_SECONDARY),
@@ -4527,7 +4527,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let name_color = if name.is_empty() {
                 GRAY_600
             } else if name_valid {
-                GREEN
+               CYAN
             } else {
                 YELLOW
             };
@@ -4774,7 +4774,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 "CREATE BASIN",
                 *selected == 11,
                 can_create,
-                GREEN,
+               CYAN,
             ));
             if !can_create {
                 lines.push(Line::from(vec![
@@ -4858,7 +4858,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
 
             // Stream Name field
             let (ind, lbl) = render_field_row(0, "Name", *selected);
-            let name_color = if name.is_empty() { GRAY_600 } else { GREEN };
+            let name_color = if name.is_empty() { GRAY_600 } else { CYAN };
             let mut name_spans = vec![ind, lbl, Span::raw("  ")];
             name_spans.extend(render_text_input(
                 name,
@@ -5032,7 +5032,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 "CREATE STREAM",
                 *selected == 8,
                 can_create,
-                GREEN,
+               CYAN,
             ));
             if !can_create {
                 lines.push(Line::from(vec![
@@ -5150,7 +5150,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("   ", Style::default()),
-                    Span::styled(basin.to_string(), Style::default().fg(GREEN).bold()),
+                    Span::styled(basin.to_string(), Style::default().fg(CYAN).bold()),
                 ]),
                 Line::from(""),
                 render_section_header("Default stream configuration", 48),
@@ -5379,7 +5379,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 Span::styled("   ", Style::default()),
                 Span::styled(
                     format!("{}/{}", basin, stream),
-                    Style::default().fg(GREEN).bold(),
+                    Style::default().fg(CYAN).bold(),
                 ),
             ]));
 
@@ -5592,7 +5592,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 Span::styled("   Reading from: ", Style::default().fg(TEXT_MUTED)),
                 Span::styled(
                     format!("s2://{}/{}", basin, stream),
-                    Style::default().fg(GREEN).bold(),
+                    Style::default().fg(CYAN).bold(),
                 ),
             ]));
 
@@ -5607,7 +5607,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let mut seq_spans = vec![ind];
             seq_spans.push(Span::styled(
                 if is_seq { "● " } else { "○ " },
-                Style::default().fg(if is_seq { GREEN } else { GRAY_800 }),
+                Style::default().fg(if is_seq { CYAN } else { GRAY_800 }),
             ));
             seq_spans.push(lbl);
             seq_spans.push(Span::raw("  "));
@@ -5615,7 +5615,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 seq_num_value,
                 *selected == 0 && *editing,
                 "0",
-                if is_seq { GREEN } else { TEXT_MUTED },
+                if is_seq { CYAN } else { TEXT_MUTED },
             ));
             lines.push(Line::from(seq_spans));
 
@@ -5625,7 +5625,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let mut ts_spans = vec![ind];
             ts_spans.push(Span::styled(
                 if is_ts { "● " } else { "○ " },
-                Style::default().fg(if is_ts { GREEN } else { GRAY_800 }),
+                Style::default().fg(if is_ts { CYAN } else { GRAY_800 }),
             ));
             ts_spans.push(lbl);
             ts_spans.push(Span::raw("  "));
@@ -5633,7 +5633,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 timestamp_value,
                 *selected == 1 && *editing,
                 "0",
-                if is_ts { GREEN } else { TEXT_MUTED },
+                if is_ts { CYAN } else { TEXT_MUTED },
             ));
             ts_spans.push(Span::styled("  ms", Style::default().fg(TEXT_MUTED)));
             lines.push(Line::from(ts_spans));
@@ -5644,7 +5644,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let mut ago_spans = vec![ind];
             ago_spans.push(Span::styled(
                 if is_ago { "● " } else { "○ " },
-                Style::default().fg(if is_ago { GREEN } else { GRAY_800 }),
+                Style::default().fg(if is_ago { CYAN } else { GRAY_800 }),
             ));
             ago_spans.push(lbl);
             ago_spans.push(Span::raw("  "));
@@ -5652,7 +5652,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 ago_value,
                 *selected == 2 && *editing,
                 "5",
-                if is_ago { GREEN } else { TEXT_MUTED },
+                if is_ago { CYAN } else { TEXT_MUTED },
             ));
             ago_spans.push(Span::styled(
                 format!(" {}", unit_str),
@@ -5670,7 +5670,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let mut off_spans = vec![ind];
             off_spans.push(Span::styled(
                 if is_off { "● " } else { "○ " },
-                Style::default().fg(if is_off { GREEN } else { GRAY_800 }),
+                Style::default().fg(if is_off { CYAN } else { GRAY_800 }),
             ));
             off_spans.push(lbl);
             off_spans.push(Span::raw("  "));
@@ -5678,7 +5678,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 tail_offset_value,
                 *selected == 3 && *editing,
                 "10",
-                if is_off { GREEN } else { TEXT_MUTED },
+                if is_off { CYAN } else { TEXT_MUTED },
             ));
             off_spans.push(Span::styled("  back", Style::default().fg(TEXT_MUTED)));
             lines.push(Line::from(off_spans));
@@ -5787,7 +5787,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             lines.push(Line::from(""));
 
             // Row 10: Start button
-            lines.push(render_button("START READING", *selected == 10, true, GREEN));
+            lines.push(render_button("START READING", *selected == 10, true, CYAN));
 
             lines.push(Line::from(""));
 
@@ -5811,7 +5811,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                     Span::raw("   "),
                     Span::styled(
                         format!("s2://{}/{}", basin, stream),
-                        Style::default().fg(GREEN).bold(),
+                        Style::default().fg(CYAN).bold(),
                     ),
                 ]),
                 Line::from(""),
@@ -5824,7 +5824,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
 
             // Row 0: New token
             let (ind, lbl) = render_field_row_bold(0, "New Token", *selected);
-            let new_color = if new_token.is_empty() { WARNING } else { GREEN };
+            let new_color = if new_token.is_empty() { WARNING } else { CYAN };
             let mut new_spans = vec![ind, lbl, Span::raw("  ")];
             new_spans.extend(render_text_input(
                 new_token,
@@ -5878,7 +5878,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
 
             // Row 2: Submit button
             let can_submit = !new_token.is_empty();
-            lines.push(render_button("FENCE", *selected == 2, can_submit, GREEN));
+            lines.push(render_button("FENCE", *selected == 2, can_submit, CYAN));
 
             lines.push(Line::from(""));
 
@@ -5902,7 +5902,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                     Span::raw("   "),
                     Span::styled(
                         format!("s2://{}/{}", basin, stream),
-                        Style::default().fg(GREEN).bold(),
+                        Style::default().fg(CYAN).bold(),
                     ),
                 ]),
                 Line::from(""),
@@ -6033,7 +6033,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
 
             // Row 0: Token ID
             let (ind, lbl) = render_field_row_bold(0, "Token ID", *selected);
-            let id_color = if id.is_empty() { WARNING } else { GREEN };
+            let id_color = if id.is_empty() { WARNING } else { CYAN };
             let mut id_spans = vec![ind, lbl, Span::raw("  ")];
             id_spans.extend(render_text_input(
                 id,
@@ -6263,7 +6263,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                     Style::default().fg(WARNING).bold(),
                 )),
                 Line::from(""),
-                Line::from(Span::styled(token, Style::default().fg(GREEN))),
+                Line::from(Span::styled(token, Style::default().fg(CYAN))),
                 Line::from(""),
             ],
             "press any key to dismiss",
@@ -6295,7 +6295,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                             "No"
                         },
                         Style::default().fg(if token.auto_prefix_streams {
-                            GREEN
+                           CYAN
                         } else {
                             TEXT_MUTED
                         }),
@@ -6414,7 +6414,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             Style::default().fg(TEXT_PRIMARY).bold(),
         )))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(GREEN))
+        .border_style(Style::default().fg(CYAN))
         .style(Style::default().bg(BG_DARK))
         .padding(Padding::horizontal(2));
 
@@ -6568,7 +6568,7 @@ fn draw_bench_config(f: &mut Frame, area: Rect, state: &BenchViewState) {
         |f: &mut Frame, area: Rect, label: &str, value: &str, selected: bool, editing: bool| {
             let style = if selected {
                 Style::default()
-                    .fg(if editing { YELLOW } else { GREEN })
+                    .fg(if editing { YELLOW } else { CYAN })
                     .bold()
             } else {
                 Style::default().fg(TEXT_SECONDARY)
@@ -6646,9 +6646,9 @@ fn draw_bench_config(f: &mut Frame, area: Rect, state: &BenchViewState) {
 
     // Start button
     let start_style = if state.config_field == BenchConfigField::Start {
-        Style::default().fg(BG_DARK).bg(GREEN).bold()
+        Style::default().fg(BG_DARK).bg(CYAN).bold()
     } else {
-        Style::default().fg(GREEN)
+        Style::default().fg(CYAN)
     };
     let start = Paragraph::new(Line::from(Span::styled(" ▶ Start Benchmark ", start_style)))
         .alignment(Alignment::Center);
@@ -6709,7 +6709,7 @@ fn draw_bench_running(f: &mut Frame, area: Rect, state: &BenchViewState) {
             format!("{:>5.1}% ", progress_pct),
             Style::default().fg(TEXT_PRIMARY),
         ),
-        Span::styled("█".repeat(filled), Style::default().fg(GREEN)),
+        Span::styled("█".repeat(filled), Style::default().fg(CYAN)),
         Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
         Span::styled(time_display, Style::default().fg(TEXT_SECONDARY)),
     ]);
@@ -6731,7 +6731,7 @@ fn draw_bench_running(f: &mut Frame, area: Rect, state: &BenchViewState) {
         f,
         chunks[2],
         "Read",
-        GREEN,
+       CYAN,
         state.read_mibps,
         state.read_recps,
         state.read_bytes,
@@ -6904,9 +6904,9 @@ fn draw_throughput_sparklines(
     if !read_history.is_empty() {
         let read_data: Vec<u64> = read_history.iter().map(|v| (*v * 100.0) as u64).collect();
         let read_spark = ratatui::widgets::Sparkline::default()
-            .block(Block::default().title(Span::styled("Read", Style::default().fg(GREEN))))
+            .block(Block::default().title(Span::styled("Read", Style::default().fg(CYAN))))
             .data(&read_data)
-            .style(Style::default().fg(GREEN));
+            .style(Style::default().fg(CYAN));
         f.render_widget(read_spark, chunks[1]);
     }
 }
@@ -6940,7 +6940,7 @@ fn draw_latency_stats(
 
     // E2E latency
     if let Some(stats) = e2e_latency {
-        draw_latency_box(f, chunks[1], "E2E Latency", GREEN, stats);
+        draw_latency_box(f, chunks[1], "E2E Latency",CYAN, stats);
     }
 }
 
@@ -7043,10 +7043,10 @@ fn draw_tail_sparklines(
         let current = records_history.back().copied().unwrap_or(0.0);
         let block = Block::default()
             .title(Line::from(vec![
-                Span::styled(" ◆ ", Style::default().fg(GREEN)),
+                Span::styled(" ◆ ", Style::default().fg(CYAN)),
                 Span::styled(
                     format!("{:.0} rec/s ", current),
-                    Style::default().fg(GREEN).bold(),
+                    Style::default().fg(CYAN).bold(),
                 ),
             ]))
             .borders(Borders::ALL)
@@ -7057,7 +7057,7 @@ fn draw_tail_sparklines(
 
         let sparkline = ratatui::widgets::Sparkline::default()
             .data(&data)
-            .style(Style::default().fg(GREEN));
+            .style(Style::default().fg(CYAN));
         f.render_widget(sparkline, inner);
     }
 }
