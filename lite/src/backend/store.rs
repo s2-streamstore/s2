@@ -9,8 +9,11 @@ use super::Backend;
 use crate::backend::{error::StorageError, kv, stream_id::StreamId};
 
 impl Backend {
-    pub fn db_status(&self) -> Result<(), slatedb::Error> {
-        self.db.status()
+    // TODO: switch to `self.db.status()` once slatedb releases with
+    // https://github.com/slatedb/slatedb/pull/1234
+    pub async fn db_status(&self) -> Result<(), slatedb::Error> {
+        let _ = self.db.get(b"ping").await?;
+        Ok(())
     }
 
     pub(super) async fn db_get<K: AsRef<[u8]> + Send, V>(
