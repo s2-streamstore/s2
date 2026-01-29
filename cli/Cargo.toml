@@ -18,10 +18,12 @@ axum-server = { workspace = true, features = ["tls-rustls"] }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 color-print = { workspace = true }
 colored = { workspace = true }
 config = { workspace = true }
+crossterm = { workspace = true }
 dirs = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
@@ -32,6 +34,7 @@ json_to_table = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 mimalloc = { workspace = true }
 rand = { workspace = true }
+ratatui = { workspace = true }
 rcgen = { workspace = true }
 s2-lite = { workspace = true }
 s2-sdk = { workspace = true, features = ["_hidden"] }

@@ -5,6 +5,7 @@ mod error;
 mod lite;
 mod ops;
 mod record_format;
+mod tui;
 mod types;
 
 #[global_allocator]
@@ -46,7 +47,7 @@ async fn main() -> miette::Result<()> {
 }
 
 async fn run() -> Result<(), CliError> {
-    let commands = Cli::try_parse().unwrap_or_else(|e| {
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
         // Customize error message for metric commands to say "metric" instead of "subcommand"
         let msg = e.to_string();
         if msg.contains("requires a subcommand") && msg.contains("get-") && msg.contains("-metrics")
@@ -60,6 +61,17 @@ async fn run() -> Result<(), CliError> {
         e.exit()
     });
 
+    // Launch interactive TUI mode
+    if cli.interactive {
+        return tui::run().await;
+    }
+
+    // Require a command when not in interactive mode
+    let Some(command) = cli.command else {
+        eprintln!("No command specified. Use --help for usage or -i for interactive mode.");
+        std::process::exit(1);
+    };
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -71,7 +83,7 @@ async fn run() -> Result<(), CliError> {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    if let Command::Config(config_cmd) = &commands.command {
+    if let Command::Config(config_cmd) = &command {
         match config_cmd {
             ConfigCommand::List => {
                 let config = load_config_file()?;
@@ -109,7 +121,7 @@ async fn run() -> Result<(), CliError> {
         return Ok(());
     }
 
-    if let Command::Lite(args) = commands.command {
+    if let Command::Lite(args) = command {
         return lite::run(args).await;
     }
 
@@ -117,7 +129,7 @@ async fn run() -> Result<(), CliError> {
     let sdk_config = sdk_config(&cli_config)?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
 
-    match commands.command {
+    match command {
         Command::Config(..) | Command::Lite(..) => unreachable!(),
 
         Command::Ls(args) => {
