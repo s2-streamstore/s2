@@ -8,14 +8,13 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph},
 };
 
-use crate::types::{StorageClass, TimestampingMode};
-
 use super::app::{
     AccessTokensState, AgoUnit, App, AppendViewState, BasinsState, BenchViewState,
     CompressionOption, ExpiryOption, InputMode, MessageLevel, MetricCategory, MetricsType,
     MetricsViewState, PipState, ReadStartFrom, ReadViewState, RetentionPolicyOption, Screen,
     SettingsState, SetupState, StreamDetailState, StreamsState, Tab,
 };
+use crate::types::{StorageClass, TimestampingMode};
 
 const GREEN: Color = Color::Rgb(34, 197, 94);
 const YELLOW: Color = Color::Rgb(250, 204, 21);
@@ -4379,7 +4378,7 @@ fn get_selected_line_hint(mode: &InputMode) -> usize {
             9 => 40,  // On append
             10 => 44, // On read
             _ => 48,  // Button
-        }
+        },
         InputMode::CreateStream { selected, .. } => match selected {
             0 => 5,  // Name
             1 => 12, // Storage
@@ -4442,7 +4441,7 @@ fn get_selected_line_hint(mode: &InputMode) -> usize {
             14 => 44, // Stream write
             15 => 48, // Auto prefix
             _ => 52,  // Button
-        }
+        },
         InputMode::Fence { selected, .. } => *selected * 4 + 5,
         InputMode::Trim { selected, .. } => *selected * 4 + 5,
         InputMode::ConfirmDeleteBasin { .. }

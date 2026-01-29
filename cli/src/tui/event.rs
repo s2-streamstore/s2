@@ -4,8 +4,10 @@ use s2_sdk::types::{
     AccessTokenInfo, BasinInfo, Metric, SequencedRecord, StreamInfo, StreamPosition,
 };
 
-use crate::error::CliError;
-use crate::types::{LatencyStats, StorageClass, StreamConfig, TimestampingMode};
+use crate::{
+    error::CliError,
+    types::{LatencyStats, StorageClass, StreamConfig, TimestampingMode},
+};
 
 /// Basin config info for reconfiguration
 #[derive(Debug, Clone)]

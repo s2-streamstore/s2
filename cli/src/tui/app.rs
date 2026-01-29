@@ -1,11 +1,14 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-use chrono::{Datelike, NaiveDate};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use base64ct::Encoding;
+use chrono::{Datelike, NaiveDate};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{Terminal, prelude::Backend};
@@ -15,24 +18,25 @@ use s2_sdk::types::{
 };
 use tokio::sync::mpsc;
 
-use crate::cli::{
-    CreateStreamArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs, ListStreamsArgs,
-    ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs,
+use super::{
+    event::{BasinConfigInfo, BenchFinalStats, BenchPhase, BenchSample, Event, StreamConfigInfo},
+    ui,
 };
-use crate::config::{self, Compression, ConfigKey};
-use crate::error::CliError;
-use crate::ops;
-use crate::record_format::{RecordFormat, RecordsOut};
-use crate::types::{
-    BasinConfig, DeleteOnEmptyConfig, Operation, RetentionPolicy, S2BasinAndMaybeStreamUri,
-    S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig, TimestampingConfig,
-    TimestampingMode,
+use crate::{
+    cli::{
+        CreateStreamArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
+        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs,
+    },
+    config::{self, Compression, ConfigKey},
+    error::CliError,
+    ops,
+    record_format::{RecordFormat, RecordsOut},
+    types::{
+        BasinConfig, DeleteOnEmptyConfig, Operation, RetentionPolicy, S2BasinAndMaybeStreamUri,
+        S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig, TimestampingConfig,
+        TimestampingMode,
+    },
 };
-
-use super::event::{
-    BasinConfigInfo, BenchFinalStats, BenchPhase, BenchSample, Event, StreamConfigInfo,
-};
-use super::ui;
 
 /// Maximum records to keep in read view buffer
 const MAX_RECORDS_BUFFER: usize = 1000;
@@ -1379,7 +1383,8 @@ impl App {
                     match result {
                         Ok(record) => {
                             if !state.paused {
-                                // Deduplicate by seq_num - skip if we already have this or a later record
+                                // Deduplicate by seq_num - skip if we already have this or a later
+                                // record
                                 let dominated = state
                                     .records
                                     .back()
@@ -5054,7 +5059,8 @@ impl App {
                         AppendRecord::new(line.as_bytes().to_vec()).map_err(|e| e.to_string())
                     }
                     InputFormat::Json | InputFormat::JsonBase64 => {
-                        // Parse JSON: {"body": "...", "headers": [["key", "value"], ...], "timestamp": ...}
+                        // Parse JSON: {"body": "...", "headers": [["key", "value"], ...],
+                        // "timestamp": ...}
                         #[derive(serde::Deserialize)]
                         struct JsonRecord {
                             #[serde(default)]
@@ -6909,12 +6915,12 @@ impl App {
         self.bench_stop_signal = Some(user_stop.clone());
 
         tokio::spawn(async move {
+            use std::{num::NonZeroU64, time::Duration};
+
             use s2_sdk::types::{
                 CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput, RetentionPolicy,
                 StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig, TimestampingMode,
             };
-            use std::num::NonZeroU64;
-            use std::time::Duration;
             let stream_name: StreamName = format!("_bench_{}", uuid::Uuid::new_v4())
                 .parse()
                 .expect("valid stream name");
@@ -6982,12 +6988,15 @@ async fn run_bench_with_events(
     user_stop: Arc<AtomicBool>,
     tx: mpsc::UnboundedSender<Event>,
 ) -> Result<BenchFinalStats, CliError> {
-    use crate::bench::*;
-    use crate::types::LatencyStats;
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
+    };
+
     use futures::StreamExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
     use tokio::time::Instant;
+
+    use crate::{bench::*, types::LatencyStats};
 
     const WRITE_DONE_SENTINEL: u64 = u64::MAX;
 

@@ -4,15 +4,17 @@ mod ui;
 
 use std::io;
 
+use app::App;
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, prelude::CrosstermBackend};
 
-use crate::config::{load_cli_config, sdk_config};
-use crate::error::CliError;
-use app::App;
+use crate::{
+    config::{load_cli_config, sdk_config},
+    error::CliError,
+};
 
 pub async fn run() -> Result<(), CliError> {
     // Load config and try to create SDK client
