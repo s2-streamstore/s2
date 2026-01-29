@@ -2078,8 +2078,6 @@ fn draw_time_picker(f: &mut Frame, state: &MetricsViewState) {
     let is_custom_current = matches!(state.time_range, TimeRangeOption::Custom { .. });
     let custom_style = if is_custom_selected {
         Style::default().fg(BG_DARK).bg(CYAN).bold()
-    } else if is_custom_current {
-        Style::default().fg(CYAN)
     } else {
         Style::default().fg(CYAN)
     };
@@ -2219,9 +2217,7 @@ fn draw_calendar_picker(f: &mut Frame, state: &MetricsViewState) {
                     _ => false,
                 };
 
-                let style = if is_selected {
-                    Style::default().fg(BG_DARK).bg(CYAN).bold()
-                } else if is_start || is_end {
+                let style = if is_selected || is_start || is_end {
                     Style::default().fg(BG_DARK).bg(CYAN).bold()
                 } else if in_range {
                     Style::default().fg(CYAN).bg(BG_PANEL)
@@ -3296,9 +3292,7 @@ fn draw_timeline_scrubber(f: &mut Frame, area: Rect, state: &ReadViewState) {
         let level = level.min(7);
         let ch = bar_chars[level];
 
-        let color = if i == current_bucket {
-            CYAN
-        } else if count > 0 {
+        let color = if i == current_bucket || count > 0 {
             CYAN
         } else {
             BORDER
