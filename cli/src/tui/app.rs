@@ -1785,7 +1785,7 @@ impl App {
                         }
                         Err(e) => {
                             self.message = Some(StatusMessage {
-                                text: format!("Append failed: {e}"),
+                                text: format!("Failed to append: {e}"),
                                 level: MessageLevel::Error,
                             });
                         }
@@ -1827,7 +1827,7 @@ impl App {
                         }
                         Err(e) => {
                             self.message = Some(StatusMessage {
-                                text: format!("File append failed: {e}"),
+                                text: format!("Failed to append from file: {e}"),
                                 level: MessageLevel::Error,
                             });
                         }
