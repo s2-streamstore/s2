@@ -229,12 +229,12 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.value }}
+          tag_name: s2-cli-v${{ steps.version.outputs.value }}
           files: |
             **/*.zip
 
   update_homebrew:
-    needs: build_binaries
+    needs: upload_release_artifacts
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
