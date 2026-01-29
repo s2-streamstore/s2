@@ -61,12 +61,10 @@ async fn run() -> Result<(), CliError> {
         e.exit()
     });
 
-    // Launch interactive TUI mode
     if cli.interactive {
         return tui::run().await;
     }
 
-    // Require a command when not in interactive mode
     let Some(command) = cli.command else {
         Cli::command().print_help().ok();
         std::process::exit(0);
