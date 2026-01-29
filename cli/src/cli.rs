@@ -35,7 +35,11 @@ const GENERAL_USAGE: &str = color_print::cstr!(
 #[command(name = "s2", version, override_usage = GENERAL_USAGE, styles = STYLES)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+
+    /// Launch interactive TUI mode.
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
 }
 
 #[derive(Subcommand, Debug)]

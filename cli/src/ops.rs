@@ -563,7 +563,11 @@ pub async fn tail(
     let uri = args.uri.clone();
     let stream = s2.basin(uri.basin).stream(uri.stream);
 
-    let start = ReadStart::new().with_from(ReadFrom::TailOffset(args.lines));
+    // Use clamp_to_tail to handle empty streams gracefully - if we ask for
+    // TailOffset(10) but there are fewer records, clamp to the actual start
+    let start = ReadStart::new()
+        .with_from(ReadFrom::TailOffset(args.lines))
+        .with_clamp_to_tail(true);
     let stop = if args.follow {
         ReadStop::new()
     } else {

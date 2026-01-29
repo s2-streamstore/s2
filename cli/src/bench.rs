@@ -38,20 +38,20 @@ const WRITE_DONE_SENTINEL: u64 = u64::MAX;
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
 
-struct BenchWriteSample {
-    bytes: u64,
-    records: u64,
-    elapsed: Duration,
-    ack_latencies: Vec<Duration>,
-    chain_hash: Option<u64>,
+pub struct BenchWriteSample {
+    pub bytes: u64,
+    pub records: u64,
+    pub elapsed: Duration,
+    pub ack_latencies: Vec<Duration>,
+    pub chain_hash: Option<u64>,
 }
 
-struct BenchReadSample {
-    bytes: u64,
-    records: u64,
-    elapsed: Duration,
-    e2e_latencies: Vec<Duration>,
-    chain_hash: Option<u64>,
+pub struct BenchReadSample {
+    pub bytes: u64,
+    pub records: u64,
+    pub elapsed: Duration,
+    pub e2e_latencies: Vec<Duration>,
+    pub chain_hash: Option<u64>,
 }
 
 trait BenchSample {
@@ -140,7 +140,7 @@ fn chain_hash(prev_hash: u64, body: &[u8]) -> u64 {
     hasher.digest()
 }
 
-fn bench_write(
+pub fn bench_write(
     stream: S2Stream,
     record_size: usize,
     target_mibps: NonZeroU64,
@@ -262,7 +262,7 @@ fn bench_write(
     }
 }
 
-fn bench_read(
+pub fn bench_read(
     stream: S2Stream,
     record_size: usize,
     write_done_records: Arc<AtomicU64>,
@@ -277,7 +277,7 @@ fn bench_read(
     )
 }
 
-fn bench_read_catchup(
+pub fn bench_read_catchup(
     stream: S2Stream,
     record_size: usize,
     bench_start: Instant,
@@ -660,18 +660,27 @@ pub async fn run(
     let mut catchup_chain_hash: Option<u64> = None;
     let catchup_stream = bench_read_catchup(stream.clone(), record_size, bench_start);
     let mut catchup_stream = std::pin::pin!(catchup_stream);
-    while let Some(result) = catchup_stream.next().await {
-        match result {
-            Ok(sample) => {
+    let catchup_timeout = Duration::from_secs(300);
+    let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
+    loop {
+        match tokio::time::timeout_at(catchup_deadline, catchup_stream.next()).await {
+            Ok(Some(Ok(sample))) => {
                 update_bench_bar(&catchup_bar, &sample);
                 if let Some(hash) = sample.chain_hash {
                     catchup_chain_hash = Some(hash);
                 }
                 catchup_sample = Some(sample);
             }
-            Err(e) => {
+            Ok(Some(Err(e))) => {
                 catchup_bar.finish_and_clear();
                 return Err(e);
+            }
+            Ok(None) => break,
+            Err(_) => {
+                catchup_bar.finish_and_clear();
+                return Err(CliError::BenchVerification(
+                    "catchup read timed out after 5 minutes".to_string(),
+                ));
             }
         }
     }
@@ -694,14 +703,22 @@ pub async fn run(
         );
     }
 
-    if let (Some(write_sample), Some(catchup_sample)) =
-        (write_sample.as_ref(), catchup_sample.as_ref())
-        && write_sample.records != catchup_sample.records
-    {
-        return Err(CliError::BenchVerification(format!(
-            "catchup read record count mismatch: expected {}, got {}",
-            write_sample.records, catchup_sample.records
-        )));
+    match (write_sample.as_ref(), catchup_sample.as_ref()) {
+        (Some(write_sample), Some(catchup_sample))
+            if write_sample.records != catchup_sample.records =>
+        {
+            return Err(CliError::BenchVerification(format!(
+                "catchup read record count mismatch: expected {}, got {}",
+                write_sample.records, catchup_sample.records
+            )));
+        }
+        (Some(write_sample), None) if write_sample.records > 0 => {
+            return Err(CliError::BenchVerification(format!(
+                "catchup read returned no records but write produced {}",
+                write_sample.records
+            )));
+        }
+        _ => {}
     }
 
     if let (Some(expected), Some(actual)) = (write_chain_hash, catchup_chain_hash)

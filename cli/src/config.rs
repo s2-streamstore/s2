@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CliConfigError, CliError};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, strum::Display, strum::EnumString)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display, strum::EnumString,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum Compression {
