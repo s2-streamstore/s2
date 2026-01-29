@@ -13,7 +13,7 @@ use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModi
 use futures::StreamExt;
 use ratatui::{Terminal, prelude::Backend};
 use s2_sdk::types::{
-    AccessTokenId, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName, StreamInfo,
+    AccessTokenId, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName, BasinState, StreamInfo,
     StreamMetricSet, StreamName, StreamPosition, TimeRange,
 };
 use tokio::sync::mpsc;
@@ -3362,9 +3362,16 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(basin) = filtered.get(state.selected) {
-                    self.input_mode = InputMode::ConfirmDeleteBasin {
-                        basin: basin.name.clone(),
-                    };
+                    if basin.state == BasinState::Deleting {
+                        self.message = Some(StatusMessage {
+                            text: "Basin is already being deleted".to_string(),
+                            level: MessageLevel::Info,
+                        });
+                    } else {
+                        self.input_mode = InputMode::ConfirmDeleteBasin {
+                            basin: basin.name.clone(),
+                        };
+                    }
                 }
             }
             KeyCode::Char('e') => {
@@ -3532,10 +3539,17 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(stream) = filtered.get(state.selected) {
-                    self.input_mode = InputMode::ConfirmDeleteStream {
-                        basin: state.basin_name.clone(),
-                        stream: stream.name.clone(),
-                    };
+                    if stream.deleted_at.is_some() {
+                        self.message = Some(StatusMessage {
+                            text: "Stream is already being deleted".to_string(),
+                            level: MessageLevel::Info,
+                        });
+                    } else {
+                        self.input_mode = InputMode::ConfirmDeleteStream {
+                            basin: state.basin_name.clone(),
+                            stream: stream.name.clone(),
+                        };
+                    }
                 }
             }
             KeyCode::Char('e') => {

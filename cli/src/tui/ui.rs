@@ -80,7 +80,7 @@ const CHART_ORANGE: Color = Color::Rgb(251, 146, 60);
 const STORAGE_EXPRESS: Color = ORANGE;
 const STORAGE_STANDARD: Color = Color::Rgb(147, 197, 253);
 
-const TIME_RECENT: Color =GREEN_LIGHT;
+const TIME_RECENT: Color = GREEN_LIGHT;
 const TIME_MODERATE: Color = YELLOW;
 const TIME_OLD: Color = GRAY_200;
 
@@ -1538,15 +1538,15 @@ fn draw_metrics_view(f: &mut Frame, area: Rect, state: &MetricsViewState) {
 /// Convert intensity (0.0-1.0) to a green gradient color
 fn intensity_to_color(intensity: f64) -> Color {
     if intensity > 0.8 {
-       GREEN_BRIGHT
+        GREEN_BRIGHT
     } else if intensity > 0.6 {
-       GREEN_LIGHT
+        GREEN_LIGHT
     } else if intensity > 0.4 {
-       GREEN_LIGHTER
+        GREEN_LIGHTER
     } else if intensity > 0.2 {
-       GREEN_PALE
+        GREEN_PALE
     } else {
-       GREEN_PALEST
+        GREEN_PALEST
     }
 }
 
@@ -2533,11 +2533,16 @@ fn draw_streams(f: &mut Frame, area: Rect, state: &StreamsState) {
     let header_area = chunks[2];
     let total_width = header_area.width as usize;
     let created_col = 24;
-    let name_col = total_width.saturating_sub(created_col + 4);
+    let status_col = 12;
+    let name_col = total_width.saturating_sub(created_col + status_col + 4);
 
     let header = Line::from(vec![
         Span::styled(
             format!("  {:<width$}", "Name", width = name_col),
+            Style::default().fg(TEXT_MUTED),
+        ),
+        Span::styled(
+            format!("{:<width$}", "Status", width = status_col),
             Style::default().fg(TEXT_MUTED),
         ),
         Span::styled("Created", Style::default().fg(TEXT_MUTED)),
@@ -2648,7 +2653,21 @@ fn draw_streams(f: &mut Frame, area: Rect, state: &StreamsState) {
             Rect::new(row_area.x, y, name_col as u16, 1),
         );
 
-        let created_x = row_area.x + name_col as u16;
+        let status_x = row_area.x + name_col as u16;
+        let (status_text, status_bg) = if stream.deleted_at.is_some() {
+            ("Deleting", BADGE_DANGER)
+        } else {
+            ("Active", BADGE_ACTIVE)
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {} ", status_text),
+                Style::default().fg(WHITE).bg(status_bg),
+            )),
+            Rect::new(status_x, y, status_col as u16, 1),
+        );
+
+        let created_x = status_x + status_col as u16;
         f.render_widget(
             Paragraph::new(Span::styled(created, Style::default().fg(TEXT_MUTED))),
             Rect::new(created_x, y, created_col as u16, 1),
@@ -3278,7 +3297,7 @@ fn draw_timeline_scrubber(f: &mut Frame, area: Rect, state: &ReadViewState) {
         let ch = bar_chars[level];
 
         let color = if i == current_bucket {
-           CYAN
+            CYAN
         } else if count > 0 {
             CYAN
         } else {
@@ -3476,7 +3495,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.body, cursor(body_editing))
             },
             Style::default().fg(if body_editing {
-               CYAN
+                CYAN
             } else if state.body.is_empty() {
                 TEXT_MUTED
             } else {
@@ -3489,10 +3508,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     let headers_selected = state.selected == 1;
     let headers_editing = headers_selected && state.editing;
     lines.push(Line::from(vec![
-        Span::styled(
-            selected_marker(headers_selected),
-            Style::default().fg(CYAN),
-        ),
+        Span::styled(selected_marker(headers_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Headers",
             Style::default().fg(if headers_selected {
@@ -3531,7 +3547,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                     if state.editing_header_key { "▎" } else { "" }
                 ),
                 Style::default().fg(if state.editing_header_key {
-                   CYAN
+                    CYAN
                 } else {
                     YELLOW
                 }),
@@ -3544,7 +3560,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                     if !state.editing_header_key { "▎" } else { "" }
                 ),
                 Style::default().fg(if !state.editing_header_key {
-                   CYAN
+                    CYAN
                 } else {
                     TEXT_SECONDARY
                 }),
@@ -3582,7 +3598,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.match_seq_num, cursor(match_editing))
             },
             Style::default().fg(if match_editing {
-               CYAN
+                CYAN
             } else if state.match_seq_num.is_empty() {
                 TEXT_MUTED
             } else {
@@ -3621,7 +3637,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.fencing_token, cursor(fence_editing))
             },
             Style::default().fg(if fence_editing {
-               CYAN
+                CYAN
             } else if state.fencing_token.is_empty() {
                 TEXT_MUTED
             } else {
@@ -3669,7 +3685,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 format!("{}{}", &state.input_file, cursor(file_editing))
             },
             Style::default().fg(if file_editing {
-               CYAN
+                CYAN
             } else if state.input_file.is_empty() {
                 TEXT_MUTED
             } else {
@@ -4527,7 +4543,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let name_color = if name.is_empty() {
                 GRAY_600
             } else if name_valid {
-               CYAN
+                CYAN
             } else {
                 YELLOW
             };
@@ -4774,7 +4790,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 "CREATE BASIN",
                 *selected == 11,
                 can_create,
-               CYAN,
+                CYAN,
             ));
             if !can_create {
                 lines.push(Line::from(vec![
@@ -5032,7 +5048,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 "CREATE STREAM",
                 *selected == 8,
                 can_create,
-               CYAN,
+                CYAN,
             ));
             if !can_create {
                 lines.push(Line::from(vec![
@@ -6295,7 +6311,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                             "No"
                         },
                         Style::default().fg(if token.auto_prefix_streams {
-                           CYAN
+                            CYAN
                         } else {
                             TEXT_MUTED
                         }),
@@ -6731,7 +6747,7 @@ fn draw_bench_running(f: &mut Frame, area: Rect, state: &BenchViewState) {
         f,
         chunks[2],
         "Read",
-       CYAN,
+        CYAN,
         state.read_mibps,
         state.read_recps,
         state.read_bytes,
@@ -6940,7 +6956,7 @@ fn draw_latency_stats(
 
     // E2E latency
     if let Some(stats) = e2e_latency {
-        draw_latency_box(f, chunks[1], "E2E Latency",CYAN, stats);
+        draw_latency_box(f, chunks[1], "E2E Latency", CYAN, stats);
     }
 }
 
