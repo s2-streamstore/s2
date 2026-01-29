@@ -24,13 +24,34 @@
 
 [s2.dev](https://s2.dev) is a serverless datastore for real-time, streaming data.
 
+This repository contains:
+- **[s2-cli](cli/)** - The official S2 command-line interface
+- **[s2-lite](lite/)** - An open source, self-hostable server implementation of the [S2 API](https://s2.dev/docs/api)
+
+## Installation
+
+### Homebrew (macOS/Linux)
+```bash
+brew install s2-streamstore/s2/s2
+```
+
+### Cargo
+```bash
+cargo install s2-cli
+```
+
+### Docker
+```bash
+docker pull ghcr.io/s2-streamstore/s2
+```
+
 ## s2-lite
 
-`s2-lite` is an open source, self-hostable server implementation of the [S2 API](https://s2.dev/docs/api).
+`s2-lite` is available as the `s2 lite` subcommand. It's a self-hostable server implementation of the S2 API.
 
 It uses [SlateDB](https://slatedb.io) as its storage engine, which relies entirely on object storage for durability.
 
-It is easy to run `s2-lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
+It is easy to run `s2 lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
 
 You can also simply not specify a `--bucket`, which makes it operate entirely in-memory. This is great for integration tests involving S2.
 
@@ -46,7 +67,11 @@ You can also simply not specify a `--bucket`, which makes it operate entirely in
 
 Here's how you can run in-memory without any external dependency:
 ```bash
-docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
+# Using Docker
+docker run -p 8080:80 ghcr.io/s2-streamstore/s2 lite
+
+# Or directly with the CLI
+s2 lite --port 8080
 ```
 
 <details>
@@ -56,7 +81,7 @@ docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
 docker run -p 8080:80 \
   -e AWS_PROFILE=${AWS_PROFILE} \
   -v ~/.aws:/root/.aws:ro \
-  ghcr.io/s2-streamstore/s2-lite \
+  ghcr.io/s2-streamstore/s2 lite \
   --bucket ${S3_BUCKET} \
   --path s2lite
 ```
@@ -70,7 +95,7 @@ docker run -p 8080:80 \
   -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
   -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \
   -e AWS_ENDPOINT_URL_S3=${AWS_ENDPOINT_URL_S3} \
-  ghcr.io/s2-streamstore/s2-lite \
+  ghcr.io/s2-streamstore/s2 lite \
   --bucket ${S3_BUCKET} \
   --path s2lite
 ```
@@ -78,10 +103,10 @@ docker run -p 8080:80 \
 
 Let's make sure the server is ready:
 ```bash
-while ! curl -sf ${S2_ACCOUNT_ENDPOINT}/ping -o /dev/null; do echo Waiting...; sleep 2; done && echo Up!
+while ! curl -sf ${S2_ACCOUNT_ENDPOINT}/health -o /dev/null; do echo Waiting...; sleep 2; done && echo Up!
 ```
 
-[Install the CLI](https://github.com/s2-streamstore/s2-cli?tab=readme-ov-file#installation) or upgrade it if `s2 --version` is older than `0.25`
+Install the CLI (see [Installation](#installation) above) or upgrade if `s2 --version` is older than `0.26`
 
 Let's create a [basin](https://s2.dev/docs/concepts) with auto-creation of streams enabled:
 ```bash
@@ -109,7 +134,7 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Monitoring
 
-`/ping` will `pong`, you can treat 200 as a success response for readiness and liveness checks
+`/health` will return 200 on success for readiness and liveness checks
 
 `/metrics` returns Prometheus text format
 
@@ -146,7 +171,7 @@ SL8_FLUSH_INTERVAL=10ms
 
 ### Compatibility
 
-- [CLI](https://github.com/s2-streamstore/s2-cli) ✅ v0.25+
+- [CLI](cli/) ✅ v0.26+
 - [TypeScript SDK](https://github.com/s2-streamstore/s2-sdk-typescript) ✅ v0.22+
 - [Go SDK](https://github.com/s2-streamstore/s2-sdk-go) ✅ v0.11+
 - [Rust SDK](https://github.com/s2-streamstore/s2-sdk-rust) ✅ v0.22+
