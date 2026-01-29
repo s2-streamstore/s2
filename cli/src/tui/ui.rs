@@ -6390,7 +6390,23 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
         }
     };
 
-    let area = centered_rect(60, 85, f.area());
+    // Use smaller area for simple confirmation dialogs
+    let is_simple_dialog = matches!(
+        mode,
+        InputMode::ConfirmDeleteBasin { .. }
+            | InputMode::ConfirmDeleteStream { .. }
+            | InputMode::ConfirmRevokeToken { .. }
+    );
+    let area = if is_simple_dialog {
+        // Content-based sizing: content lines + borders (2) + hint (1) + padding (2)
+        let height = (content.len() as u16 + 5).min(f.area().height);
+        let width = 50.min(f.area().width);
+        let x = f.area().x + f.area().width.saturating_sub(width) / 2;
+        let y = f.area().y + f.area().height.saturating_sub(height) / 2;
+        Rect::new(x, y, width, height)
+    } else {
+        centered_rect(60, 85, f.area())
+    };
 
     let block = Block::default()
         .title(Line::from(Span::styled(
