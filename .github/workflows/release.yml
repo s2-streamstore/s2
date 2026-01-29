@@ -226,11 +226,11 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: s2-cli-v${{ steps.version.outputs.value }}
-          files: |
-            **/*.zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="s2-cli-v${{ steps.version.outputs.value }}"
+          gh release upload "$TAG" */s2-*.zip --clobber || gh release create "$TAG" */s2-*.zip --title "$TAG" --notes ""
 
   update_homebrew:
     needs: upload_release_artifacts
