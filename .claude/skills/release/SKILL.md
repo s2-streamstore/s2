@@ -47,14 +47,25 @@ This project uses [release-plz](https://release-plz.dev/) for automated releases
      ```
    - Or manually note the missing items for the user
 
-5. **If changelog is correct**: Merge the PR
+5. **Dry run before merging**
    ```bash
-   gh pr merge <PR_NUMBER> --merge
+   cargo publish -p s2-cli --dry-run
+   cargo publish -p s2-lite --dry-run
    ```
 
-6. **Monitor the release**
+6. **If changelog is correct**: Merge the PR
+   ```bash
+   gh pr merge <PR_NUMBER> --squash
+   ```
+
+7. **Monitor the release**
    ```bash
    gh run list --workflow=release.yml --limit=1
+   ```
+
+8. **If release fails**, check logs:
+   ```bash
+   gh run view <RUN_ID> --log | grep -E "(ERROR|failed|error\[)"
    ```
 
 ## If no release PR exists
