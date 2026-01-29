@@ -5064,17 +5064,20 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
         }
 
         InputMode::ConfirmDeleteBasin { basin } => (
-            " Delete Basin ",
+            " ⚠ Delete Basin ",
             vec![
                 Line::from(""),
+                Line::from(vec![Span::styled(
+                    "Are you sure you want to delete ",
+                    Style::default().fg(TEXT_SECONDARY),
+                )]),
                 Line::from(vec![
-                    Span::styled("Delete basin ", Style::default().fg(TEXT_SECONDARY)),
-                    Span::styled(basin.to_string(), Style::default().fg(ERROR).bold()),
+                    Span::styled(basin.to_string(), Style::default().fg(WHITE).bold()),
                     Span::styled("?", Style::default().fg(TEXT_SECONDARY)),
                 ]),
                 Line::from(""),
                 Line::from(vec![Span::styled(
-                    "This will delete all streams in this basin.",
+                    "All streams in this basin will be deleted.",
                     Style::default().fg(TEXT_MUTED),
                 )]),
                 Line::from(vec![Span::styled(
@@ -5086,18 +5089,21 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
         ),
 
         InputMode::ConfirmDeleteStream { basin, stream } => (
-            " Delete Stream ",
+            " ⚠ Delete Stream ",
             vec![
                 Line::from(""),
+                Line::from(vec![Span::styled(
+                    "Are you sure you want to delete ",
+                    Style::default().fg(TEXT_SECONDARY),
+                )]),
+                Line::from(vec![Span::styled(
+                    stream.to_string(),
+                    Style::default().fg(WHITE).bold(),
+                )]),
                 Line::from(vec![
-                    Span::styled("Delete stream ", Style::default().fg(TEXT_SECONDARY)),
-                    Span::styled(stream.to_string(), Style::default().fg(ERROR).bold()),
-                    Span::styled("?", Style::default().fg(TEXT_SECONDARY)),
-                ]),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("from basin ", Style::default().fg(TEXT_MUTED)),
+                    Span::styled("from ", Style::default().fg(TEXT_MUTED)),
                     Span::styled(basin.to_string(), Style::default().fg(TEXT_SECONDARY)),
+                    Span::styled("?", Style::default().fg(TEXT_MUTED)),
                 ]),
                 Line::from(""),
                 Line::from(vec![Span::styled(
@@ -6401,12 +6407,11 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
     };
 
     // Use smaller area for simple confirmation dialogs
-    let is_simple_dialog = matches!(
+    let is_delete_dialog = matches!(
         mode,
-        InputMode::ConfirmDeleteBasin { .. }
-            | InputMode::ConfirmDeleteStream { .. }
-            | InputMode::ConfirmRevokeToken { .. }
+        InputMode::ConfirmDeleteBasin { .. } | InputMode::ConfirmDeleteStream { .. }
     );
+    let is_simple_dialog = is_delete_dialog || matches!(mode, InputMode::ConfirmRevokeToken { .. });
     let area = if is_simple_dialog {
         // Content-based sizing: content lines + borders (2) + hint (1) + padding (2)
         let height = (content.len() as u16 + 5).min(f.area().height);
@@ -6418,13 +6423,16 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
         centered_rect(60, 85, f.area())
     };
 
+    let (border_color, title_style) = if is_delete_dialog {
+        (ERROR, Style::default().fg(ERROR).bold())
+    } else {
+        (CYAN, Style::default().fg(TEXT_PRIMARY).bold())
+    };
+
     let block = Block::default()
-        .title(Line::from(Span::styled(
-            title,
-            Style::default().fg(TEXT_PRIMARY).bold(),
-        )))
+        .title(Line::from(Span::styled(title, title_style)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(CYAN))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(BG_DARK))
         .padding(Padding::horizontal(2));
 
