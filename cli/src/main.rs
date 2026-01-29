@@ -70,6 +70,17 @@ async fn run() -> Result<(), CliError> {
         std::process::exit(0);
     };
 
+    if let Command::Lite(args) = command {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+        return lite::run(args).await;
+    }
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -117,10 +128,6 @@ async fn run() -> Result<(), CliError> {
             }
         }
         return Ok(());
-    }
-
-    if let Command::Lite(args) = command {
-        return lite::run(args).await;
     }
 
     let cli_config = load_cli_config()?;
