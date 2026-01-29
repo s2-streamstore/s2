@@ -17,7 +17,7 @@ pub fn router() -> axum::Router<Backend> {
 }
 
 async fn health(State(backend): State<Backend>) -> Response {
-    match backend.db_status() {
+    match backend.db_status().await {
         Ok(()) => "OK".into_response(),
         Err(err) => (StatusCode::SERVICE_UNAVAILABLE, format!("{err:?}")).into_response(),
     }
