@@ -3,7 +3,7 @@ resolver = "2"
 members = ["api", "common", "lite", "cli"]
 
 [workspace.package]
-version = "0.26.3"
+version = "0.26.4"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/s2-streamstore/s2"
@@ -49,9 +49,9 @@ rand = "0.9"
 rcgen = "0.14"
 rkyv = "0.8"
 rstest = "0.26"
-s2-api = { version = "0.26.3", path = "api" }
-s2-common = { version = "0.26.3", path = "common" }
-s2-lite = { version = "0.26.3", path = "lite" }
+s2-api = { version = "0.26.4", path = "api" }
+s2-common = { version = "0.26.4", path = "common" }
+s2-lite = { version = "0.26.4", path = "lite" }
 s2-sdk = "0.23.1"
 serde = "1.0"
 serde_json = "1.0"
