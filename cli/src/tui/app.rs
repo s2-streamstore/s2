@@ -1817,7 +1817,6 @@ impl App {
                     state.file_append_progress = None;
                     match result {
                         Ok((total, first_seq, last_seq)) => {
-                            state.input_file.clear();
                             self.message = Some(StatusMessage {
                                 text: format!(
                                     "Appended {} records (seq {}..{})",
@@ -4849,6 +4848,7 @@ impl App {
                         } else {
                             Some(state.fencing_token.clone())
                         };
+                        state.input_file.clear();
                         state.appending = true;
                         state.file_append_progress = Some((0, 0));
                         self.append_from_file(
