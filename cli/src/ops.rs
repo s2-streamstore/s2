@@ -30,10 +30,13 @@ use crate::{
     types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
 };
 
-pub async fn list_basins<'a>(
-    s2: &'a S2,
+/// List basins, returning items and whether there are more.
+/// If `no_auto_paginate` is true, returns a single page.
+/// If false, fetches all pages and returns (all_items, false).
+pub async fn list_basins(
+    s2: &S2,
     args: ListBasinsArgs,
-) -> Result<Pin<Box<dyn Stream<Item = Result<BasinInfo, CliError>> + Send + 'a>>, CliError> {
+) -> Result<(Vec<BasinInfo>, bool), CliError> {
     let ListBasinsArgs {
         prefix,
         start_after,
@@ -58,9 +61,9 @@ pub async fn list_basins<'a>(
             .await
             .map_err(|e| CliError::op(OpKind::ListBasins, e))?;
 
-        Ok(Box::pin(stream::iter(page.values.into_iter().map(Ok))))
+        Ok((page.values, page.has_more))
     } else {
-        let mut input = ListAllBasinsInput::new().with_include_deleted(true);
+        let mut input = ListAllBasinsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -68,12 +71,14 @@ pub async fn list_basins<'a>(
             input = input.with_start_after(s);
         }
 
-        let stream = s2
+        let items: Vec<_> = s2
             .list_all_basins(input)
             .take(limit.unwrap_or(usize::MAX))
-            .map_err(|e| CliError::op(OpKind::ListBasins, e));
+            .try_collect()
+            .await
+            .map_err(|e| CliError::op(OpKind::ListBasins, e))?;
 
-        Ok(Box::pin(stream))
+        Ok((items, false))
     }
 }
 
@@ -120,10 +125,11 @@ pub async fn reconfigure_basin(
     Ok(config.into())
 }
 
-pub async fn list_access_tokens<'a>(
-    s2: &'a S2,
+/// List access tokens, returning items and whether there are more.
+pub async fn list_access_tokens(
+    s2: &S2,
     args: ListAccessTokensArgs,
-) -> Result<Pin<Box<dyn Stream<Item = Result<AccessTokenInfo, CliError>> + Send + 'a>>, CliError> {
+) -> Result<(Vec<AccessTokenInfo>, bool), CliError> {
     let ListAccessTokensArgs {
         prefix,
         start_after,
@@ -148,7 +154,7 @@ pub async fn list_access_tokens<'a>(
             .await
             .map_err(|e| CliError::op(OpKind::ListAccessTokens, e))?;
 
-        Ok(Box::pin(stream::iter(page.values.into_iter().map(Ok))))
+        Ok((page.values, page.has_more))
     } else {
         let mut input = ListAllAccessTokensInput::new();
         if let Some(p) = prefix {
@@ -158,12 +164,14 @@ pub async fn list_access_tokens<'a>(
             input = input.with_start_after(s);
         }
 
-        let stream = s2
+        let items: Vec<_> = s2
             .list_all_access_tokens(input)
             .take(limit.unwrap_or(usize::MAX))
-            .map_err(|e| CliError::op(OpKind::ListAccessTokens, e));
+            .try_collect()
+            .await
+            .map_err(|e| CliError::op(OpKind::ListAccessTokens, e))?;
 
-        Ok(Box::pin(stream))
+        Ok((items, false))
     }
 }
 
@@ -295,10 +303,11 @@ pub async fn get_stream_metrics(
         .map_err(|e| CliError::op(OpKind::GetStreamMetrics, e))
 }
 
-pub async fn list_streams<'a>(
-    s2: &'a S2,
+/// List streams, returning items and whether there are more.
+pub async fn list_streams(
+    s2: &S2,
     args: ListStreamsArgs,
-) -> Result<Pin<Box<dyn Stream<Item = Result<StreamInfo, CliError>> + Send + 'a>>, CliError> {
+) -> Result<(Vec<StreamInfo>, bool), CliError> {
     let prefix = args.uri.stream.or(args.prefix);
     let basin = s2.basin(args.uri.basin);
 
@@ -319,9 +328,9 @@ pub async fn list_streams<'a>(
             .await
             .map_err(|e| CliError::op(OpKind::ListStreams, e))?;
 
-        Ok(Box::pin(stream::iter(page.values.into_iter().map(Ok))))
+        Ok((page.values, page.has_more))
     } else {
-        let mut input = ListAllStreamsInput::new().with_include_deleted(true);
+        let mut input = ListAllStreamsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -329,12 +338,14 @@ pub async fn list_streams<'a>(
             input = input.with_start_after(s);
         }
 
-        let stream = basin
+        let items: Vec<_> = basin
             .list_all_streams(input)
             .take(args.limit.unwrap_or(usize::MAX))
-            .map_err(|e| CliError::op(OpKind::ListStreams, e));
+            .try_collect()
+            .await
+            .map_err(|e| CliError::op(OpKind::ListStreams, e))?;
 
-        Ok(Box::pin(stream))
+        Ok((items, false))
     }
 }
 

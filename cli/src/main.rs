@@ -20,7 +20,7 @@ use config::{
     ConfigKey, load_cli_config, load_config_file, sdk_config, set_config_value, unset_config_value,
 };
 use error::{CliError, OpKind};
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use json_to_table::json_to_table;
 use record_format::{
     JsonBase64Formatter, JsonFormatter, RecordFormat, RecordParser, RecordWriter, TextFormatter,
@@ -173,8 +173,8 @@ async fn run() -> Result<(), CliError> {
                     no_auto_paginate: args.no_auto_paginate,
                 };
 
-                let mut streams = ops::list_streams(&s2, list_streams_args).await?;
-                while let Some(stream_info) = streams.try_next().await? {
+                let (streams, _) = ops::list_streams(&s2, list_streams_args).await?;
+                for stream_info in streams {
                     println!(
                         "s2://{}/{} {}",
                         basin,
@@ -201,8 +201,8 @@ async fn run() -> Result<(), CliError> {
                     no_auto_paginate: args.no_auto_paginate,
                 };
 
-                let mut basins = ops::list_basins(&s2, list_basins_args).await?;
-                while let Some(basin_info) = basins.try_next().await? {
+                let (basins, _) = ops::list_basins(&s2, list_basins_args).await?;
+                for basin_info in basins {
                     println!(
                         "{} {}",
                         basin_info.name,
@@ -213,8 +213,8 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::ListBasins(args) => {
-            let mut basins = ops::list_basins(&s2, args).await?;
-            while let Some(basin_info) = basins.try_next().await? {
+            let (basins, _) = ops::list_basins(&s2, args).await?;
+            for basin_info in basins {
                 println!(
                     "{} {}",
                     basin_info.name,
@@ -252,8 +252,8 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::ListAccessTokens(args) => {
-            let mut tokens = ops::list_access_tokens(&s2, args).await?;
-            while let Some(token_info) = tokens.try_next().await? {
+            let (tokens, _) = ops::list_access_tokens(&s2, args).await?;
+            for token_info in tokens {
                 let info = AccessTokenInfo::from(token_info);
                 println!("{}", json_to_table(&serde_json::to_value(&info)?));
             }
@@ -289,8 +289,8 @@ async fn run() -> Result<(), CliError> {
 
         Command::ListStreams(args) => {
             let basin_name = args.uri.basin.clone();
-            let mut streams = ops::list_streams(&s2, args).await?;
-            while let Some(stream_info) = streams.try_next().await? {
+            let (streams, _) = ops::list_streams(&s2, args).await?;
+            for stream_info in streams {
                 println!("s2://{}/{}", basin_name, stream_info.name);
             }
         }

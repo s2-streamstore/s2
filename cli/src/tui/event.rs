@@ -34,11 +34,17 @@ pub struct StreamConfigInfo {
 /// Events that can occur in the TUI
 #[derive(Debug)]
 pub enum Event {
-    /// Basins have been loaded from the API
-    BasinsLoaded(Result<Vec<BasinInfo>, CliError>),
+    /// Basins have been loaded from the API (items, has_more)
+    BasinsLoaded(Result<(Vec<BasinInfo>, bool), CliError>),
 
-    /// Streams have been loaded from the API
-    StreamsLoaded(Result<Vec<StreamInfo>, CliError>),
+    /// More basins loaded (appended to existing list)
+    MoreBasinsLoaded(Result<(Vec<BasinInfo>, bool), CliError>),
+
+    /// Streams have been loaded from the API (items, has_more)
+    StreamsLoaded(Result<(Vec<StreamInfo>, bool), CliError>),
+
+    /// More streams loaded (appended to existing list)
+    MoreStreamsLoaded(Result<(Vec<StreamInfo>, bool), CliError>),
 
     /// Stream configuration loaded
     StreamConfigLoaded(Result<StreamConfig, CliError>),
