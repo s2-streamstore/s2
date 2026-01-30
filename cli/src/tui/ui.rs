@@ -469,7 +469,7 @@ fn draw_splash(f: &mut Frame, area: Rect) {
     let content_height = lines.len() as u16;
     let y = area.y + area.height.saturating_sub(content_height) / 2;
 
-    let centered_area = Rect::new(area.x, y, area.width, content_height);
+    let centered_area = Rect::new(area.x, y, area.width, content_height.min(area.height));
     let logo_widget = Paragraph::new(lines).alignment(Alignment::Center);
     f.render_widget(logo_widget, centered_area);
 }
@@ -519,8 +519,11 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
         )));
     } else {
         lines.push(Line::from(vec![
-            Span::styled("Get token: ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("s2.dev/dashboard/access-tokens", Style::default().fg(CYAN)),
+            Span::styled("Sign up: ", Style::default().fg(TEXT_MUTED)),
+            Span::styled(
+                "https://s2.dev/sign-up",
+                Style::default().fg(CYAN).underlined(),
+            ),
         ]));
     }
     lines.push(Line::from(""));
@@ -531,7 +534,7 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
 
     let content_height = lines.len() as u16;
     let y = area.y + area.height.saturating_sub(content_height) / 2;
-    let centered_area = Rect::new(area.x, y, area.width, content_height);
+    let centered_area = Rect::new(area.x, y, area.width, content_height.min(area.height));
 
     let content = Paragraph::new(lines).alignment(Alignment::Center);
     f.render_widget(content, centered_area);
