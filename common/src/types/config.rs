@@ -17,6 +17,7 @@ use crate::maybe::Maybe;
     PartialEq,
     Eq,
     Ordinalize,
+    Hash,
 )]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[repr(u8)]
