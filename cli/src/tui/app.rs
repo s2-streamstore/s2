@@ -7151,8 +7151,8 @@ async fn run_bench_with_events(
     const WRITE_DONE_SENTINEL: u64 = u64::MAX;
 
     let bench_start = Instant::now();
-    // Use the user_stop signal to control the benchmark - this allows the UI to stop it
-    let stop = user_stop;
+    // Separate flags: user_stop is for user cancellation, write_stop is for duration expiry
+    let write_stop = Arc::new(AtomicBool::new(false));
     let write_done_records = Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL));
 
     // We need to re-implement the bench logic here to send events
@@ -7167,7 +7167,7 @@ async fn run_bench_with_events(
         stream.clone(),
         record_size,
         target_mibps,
-        stop.clone(),
+        write_stop.clone(),
         write_done_records.clone(),
         bench_start,
     );
@@ -7217,9 +7217,14 @@ async fn run_bench_with_events(
         if write_done && read_done {
             break;
         }
+        // Check if user cancelled
+        if user_stop.load(Ordering::Relaxed) {
+            write_stop.store(true, Ordering::Relaxed);
+            break;
+        }
         tokio::select! {
-            _ = tokio::time::sleep_until(deadline), if !stop.load(Ordering::Relaxed) => {
-                stop.store(true, Ordering::Relaxed);
+            _ = tokio::time::sleep_until(deadline), if !write_stop.load(Ordering::Relaxed) => {
+                write_stop.store(true, Ordering::Relaxed);
                 let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::Write));
             }
             event = brx.recv() => {
@@ -7237,7 +7242,7 @@ async fn run_bench_with_events(
                         }));
                     }
                     Some(BenchEvent::Write(Err(e))) => {
-                        stop.store(true, Ordering::Relaxed);
+                        write_stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
                         return Err(e);
@@ -7258,7 +7263,7 @@ async fn run_bench_with_events(
                         }));
                     }
                     Some(BenchEvent::Read(Err(e))) => {
-                        stop.store(true, Ordering::Relaxed);
+                        write_stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
                         return Err(e);
@@ -7280,7 +7285,7 @@ async fn run_bench_with_events(
     let _ = read_handle.await;
 
     // Check if user stopped before starting catchup
-    if stop.load(Ordering::Relaxed) {
+    if user_stop.load(Ordering::Relaxed) {
         return Ok(BenchFinalStats {
             ack_latency: if all_ack_latencies.is_empty() {
                 None
@@ -7295,11 +7300,9 @@ async fn run_bench_with_events(
         });
     }
 
-    // Catchup phase - wait with periodic stop checks
-    let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::CatchupWait));
     let catchup_wait_start = Instant::now();
     while catchup_wait_start.elapsed() < catchup_delay {
-        if stop.load(Ordering::Relaxed) {
+        if user_stop.load(Ordering::Relaxed) {
             return Ok(BenchFinalStats {
                 ack_latency: if all_ack_latencies.is_empty() {
                     None
@@ -7316,12 +7319,14 @@ async fn run_bench_with_events(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::CatchupWait));
+
     let catchup_stream = bench_read_catchup(stream.clone(), record_size, bench_start);
     let mut catchup_stream = std::pin::pin!(catchup_stream);
     let catchup_timeout = Duration::from_secs(300);
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if user_stop.load(Ordering::Relaxed) {
             break;
         }
         match tokio::time::timeout_at(catchup_deadline, catchup_stream.next()).await {
