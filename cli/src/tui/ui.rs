@@ -469,7 +469,7 @@ fn draw_splash(f: &mut Frame, area: Rect) {
     let content_height = lines.len() as u16;
     let y = area.y + area.height.saturating_sub(content_height) / 2;
 
-    let centered_area = Rect::new(area.x, y, area.width, content_height);
+    let centered_area = Rect::new(area.x, y, area.width, content_height.min(area.height));
     let logo_widget = Paragraph::new(lines).alignment(Alignment::Center);
     f.render_widget(logo_widget, centered_area);
 }
@@ -531,7 +531,7 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
 
     let content_height = lines.len() as u16;
     let y = area.y + area.height.saturating_sub(content_height) / 2;
-    let centered_area = Rect::new(area.x, y, area.width, content_height);
+    let centered_area = Rect::new(area.x, y, area.width, content_height.min(area.height));
 
     let content = Paragraph::new(lines).alignment(Alignment::Center);
     f.render_widget(content, centered_area);
