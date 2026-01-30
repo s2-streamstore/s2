@@ -3813,12 +3813,22 @@ impl App {
             };
             match ops::list_basins(&s2, args).await {
                 Ok(stream) => {
-                    let basins: Vec<_> = stream
-                        .take(100)
-                        .filter_map(|r| async { r.ok() })
-                        .collect()
-                        .await;
-                    let _ = tx.send(Event::BasinsLoaded(Ok(basins)));
+                    let results: Vec<_> = stream.take(100).collect().await;
+                    let mut basins = Vec::new();
+                    let mut first_error = None;
+                    for r in results {
+                        match r {
+                            Ok(b) => basins.push(b),
+                            Err(e) if first_error.is_none() => first_error = Some(e),
+                            Err(_) => {}
+                        }
+                    }
+                    // If we got no basins but had an error, report the error
+                    if basins.is_empty() && first_error.is_some() {
+                        let _ = tx.send(Event::BasinsLoaded(Err(first_error.unwrap())));
+                    } else {
+                        let _ = tx.send(Event::BasinsLoaded(Ok(basins)));
+                    }
                 }
                 Err(e) => {
                     let _ = tx.send(Event::BasinsLoaded(Err(e)));
@@ -3847,12 +3857,22 @@ impl App {
             };
             match ops::list_streams(&s2, args).await {
                 Ok(stream) => {
-                    let streams: Vec<_> = stream
-                        .take(100)
-                        .filter_map(|r| async { r.ok() })
-                        .collect()
-                        .await;
-                    let _ = tx.send(Event::StreamsLoaded(Ok(streams)));
+                    let results: Vec<_> = stream.take(100).collect().await;
+                    let mut streams = Vec::new();
+                    let mut first_error = None;
+                    for r in results {
+                        match r {
+                            Ok(s) => streams.push(s),
+                            Err(e) if first_error.is_none() => first_error = Some(e),
+                            Err(_) => {}
+                        }
+                    }
+                    // If we got no streams but had an error, report the error
+                    if streams.is_empty() && first_error.is_some() {
+                        let _ = tx.send(Event::StreamsLoaded(Err(first_error.unwrap())));
+                    } else {
+                        let _ = tx.send(Event::StreamsLoaded(Ok(streams)));
+                    }
                 }
                 Err(e) => {
                     let _ = tx.send(Event::StreamsLoaded(Err(e)));
