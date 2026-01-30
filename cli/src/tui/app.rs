@@ -3378,7 +3378,11 @@ impl App {
                     state.selected = filtered_len - 1;
                 }
                 // Also trigger load more if at end
-                if no_filter && has_more && !loading_more && let Some(last) = last_basin {
+                if no_filter
+                    && has_more
+                    && !loading_more
+                    && let Some(last) = last_basin
+                {
                     state.loading_more = true;
                     self.load_more_basins(last, tx);
                 }
@@ -3609,7 +3613,11 @@ impl App {
                 if filtered_len > 0 {
                     state.selected = filtered_len - 1;
                 }
-                if no_filter && has_more && !loading_more && let Some(last) = last_stream {
+                if no_filter
+                    && has_more
+                    && !loading_more
+                    && let Some(last) = last_stream
+                {
                     state.loading_more = true;
                     self.load_more_streams(basin_name, last, tx);
                 }
