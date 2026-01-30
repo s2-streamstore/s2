@@ -10,7 +10,6 @@ use std::{
 use base64ct::Encoding;
 use chrono::{Datelike, NaiveDate};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
-use futures::StreamExt;
 use ratatui::{Terminal, prelude::Backend};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName, BasinState, StreamInfo,
@@ -100,6 +99,8 @@ pub struct BasinsState {
     pub loading: bool,
     pub filter: String,
     pub filter_active: bool,
+    pub has_more: bool,
+    pub loading_more: bool,
 }
 
 /// State for the streams list screen
@@ -111,6 +112,8 @@ pub struct StreamsState {
     pub loading: bool,
     pub filter: String,
     pub filter_active: bool,
+    pub has_more: bool,
+    pub loading_more: bool,
 }
 
 /// State for the stream detail screen
@@ -1213,7 +1216,7 @@ impl App {
         if self.s2.is_some() {
             self.load_basins(tx.clone());
         }
-        let mut pending_basins: Option<Result<Vec<BasinInfo>, CliError>> = None;
+        let mut pending_basins: Option<Result<(Vec<BasinInfo>, bool), CliError>> = None;
 
         loop {
             terminal
@@ -1226,8 +1229,9 @@ impl App {
                 };
                 if let Some(result) = pending_basins.take() {
                     match result {
-                        Ok(basins) => {
+                        Ok((basins, has_more)) => {
                             basins_state.basins = basins;
+                            basins_state.has_more = has_more;
                             basins_state.loading = false;
                         }
                         Err(e) => {
@@ -1256,8 +1260,9 @@ impl App {
                     };
                     if let Some(result) = pending_basins.take() {
                         match result {
-                            Ok(basins) => {
+                            Ok((basins, has_more)) => {
                                 basins_state.basins = basins;
+                                basins_state.has_more = has_more;
                                 basins_state.loading = false;
                             }
                             Err(e) => {
@@ -1306,7 +1311,8 @@ impl App {
                 if let Screen::Basins(state) = &mut self.screen {
                     state.loading = false;
                     match result {
-                        Ok(basins) => {
+                        Ok((basins, has_more)) => {
+                            state.has_more = has_more;
                             state.basins = basins;
                             self.message = Some(StatusMessage {
                                 text: format!("Loaded {} basins", state.basins.len()),
@@ -1323,11 +1329,30 @@ impl App {
                 }
             }
 
+            Event::MoreBasinsLoaded(result) => {
+                if let Screen::Basins(state) = &mut self.screen {
+                    state.loading_more = false;
+                    match result {
+                        Ok((basins, has_more)) => {
+                            state.has_more = has_more;
+                            state.basins.extend(basins);
+                        }
+                        Err(e) => {
+                            self.message = Some(StatusMessage {
+                                text: format!("Failed to load more: {e}"),
+                                level: MessageLevel::Error,
+                            });
+                        }
+                    }
+                }
+            }
+
             Event::StreamsLoaded(result) => {
                 if let Screen::Streams(state) = &mut self.screen {
                     state.loading = false;
                     match result {
-                        Ok(streams) => {
+                        Ok((streams, has_more)) => {
+                            state.has_more = has_more;
                             state.streams = streams;
                             self.message = Some(StatusMessage {
                                 text: format!("Loaded {} streams", state.streams.len()),
@@ -1337,6 +1362,24 @@ impl App {
                         Err(e) => {
                             self.message = Some(StatusMessage {
                                 text: format!("Failed to load streams: {e}"),
+                                level: MessageLevel::Error,
+                            });
+                        }
+                    }
+                }
+            }
+
+            Event::MoreStreamsLoaded(result) => {
+                if let Screen::Streams(state) = &mut self.screen {
+                    state.loading_more = false;
+                    match result {
+                        Ok((streams, has_more)) => {
+                            state.has_more = has_more;
+                            state.streams.extend(streams);
+                        }
+                        Err(e) => {
+                            self.message = Some(StatusMessage {
+                                text: format!("Failed to load more: {e}"),
                                 level: MessageLevel::Error,
                             });
                         }
@@ -3293,13 +3336,17 @@ impl App {
             return;
         }
 
-        // Get filtered list length for bounds checking
-        let filtered: Vec<_> = state
+        // Get filtered list info for bounds checking
+        let filtered_len = state
             .basins
             .iter()
             .filter(|b| state.filter.is_empty() || b.name.to_string().contains(&state.filter))
-            .collect();
-        let filtered_len = filtered.len();
+            .count();
+        let has_more = state.has_more;
+        let loading_more = state.loading_more;
+        let no_filter = state.filter.is_empty();
+        let total_len = state.basins.len();
+        let last_basin = state.basins.last().map(|b| b.name.clone());
 
         match key.code {
             KeyCode::Char('/') => {
@@ -3313,6 +3360,14 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 if filtered_len > 0 && state.selected < filtered_len - 1 {
                     state.selected += 1;
+                } else if no_filter
+                    && has_more
+                    && !loading_more
+                    && state.selected == total_len.saturating_sub(1)
+                    && let Some(last) = last_basin
+                {
+                    state.loading_more = true;
+                    self.load_more_basins(last, tx);
                 }
             }
             KeyCode::Char('g') => {
@@ -3322,8 +3377,24 @@ impl App {
                 if filtered_len > 0 {
                     state.selected = filtered_len - 1;
                 }
+                // Also trigger load more if at end
+                if no_filter
+                    && has_more
+                    && !loading_more
+                    && let Some(last) = last_basin
+                {
+                    state.loading_more = true;
+                    self.load_more_basins(last, tx);
+                }
             }
             KeyCode::Enter => {
+                let filtered: Vec<_> = state
+                    .basins
+                    .iter()
+                    .filter(|b| {
+                        state.filter.is_empty() || b.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(basin) = filtered.get(state.selected) {
                     let basin_name = basin.name.clone();
                     self.screen = Screen::Streams(StreamsState {
@@ -3333,6 +3404,8 @@ impl App {
                         loading: true,
                         filter: String::new(),
                         filter_active: false,
+                        has_more: false,
+                        loading_more: false,
                     });
                     self.load_streams(basin_name, tx);
                 }
@@ -3361,6 +3434,13 @@ impl App {
                 };
             }
             KeyCode::Char('d') => {
+                let filtered: Vec<_> = state
+                    .basins
+                    .iter()
+                    .filter(|b| {
+                        state.filter.is_empty() || b.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(basin) = filtered.get(state.selected) {
                     if basin.state == BasinState::Deleting {
                         self.message = Some(StatusMessage {
@@ -3375,6 +3455,13 @@ impl App {
                 }
             }
             KeyCode::Char('e') => {
+                let filtered: Vec<_> = state
+                    .basins
+                    .iter()
+                    .filter(|b| {
+                        state.filter.is_empty() || b.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(basin) = filtered.get(state.selected) {
                     let basin_name = basin.name.clone();
                     self.input_mode = InputMode::ReconfigureBasin {
@@ -3396,6 +3483,13 @@ impl App {
             }
             KeyCode::Char('M') => {
                 // Basin Metrics for selected basin
+                let filtered: Vec<_> = state
+                    .basins
+                    .iter()
+                    .filter(|b| {
+                        state.filter.is_empty() || b.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(basin) = filtered.get(state.selected) {
                     let basin_name = basin.name.clone();
                     self.open_basin_metrics(basin_name, tx);
@@ -3407,6 +3501,13 @@ impl App {
             }
             KeyCode::Char('B') => {
                 // Benchmark on selected basin
+                let filtered: Vec<_> = state
+                    .basins
+                    .iter()
+                    .filter(|b| {
+                        state.filter.is_empty() || b.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(basin) = filtered.get(state.selected) {
                     let basin_name = basin.name.clone();
                     self.screen = Screen::BenchView(BenchViewState::new(basin_name));
@@ -3451,13 +3552,18 @@ impl App {
             return;
         }
 
-        // Get filtered list length for bounds checking
-        let filtered: Vec<_> = state
+        // Get filtered list info for bounds checking
+        let filtered_len = state
             .streams
             .iter()
             .filter(|s| state.filter.is_empty() || s.name.to_string().contains(&state.filter))
-            .collect();
-        let filtered_len = filtered.len();
+            .count();
+        let has_more = state.has_more;
+        let loading_more = state.loading_more;
+        let no_filter = state.filter.is_empty();
+        let total_len = state.streams.len();
+        let last_stream = state.streams.last().map(|s| s.name.clone());
+        let basin_name = state.basin_name.clone();
 
         match key.code {
             KeyCode::Char('/') => {
@@ -3490,6 +3596,14 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 if filtered_len > 0 && state.selected < filtered_len - 1 {
                     state.selected += 1;
+                } else if no_filter
+                    && has_more
+                    && !loading_more
+                    && state.selected == total_len.saturating_sub(1)
+                    && let Some(last) = last_stream
+                {
+                    state.loading_more = true;
+                    self.load_more_streams(basin_name, last, tx);
                 }
             }
             KeyCode::Char('g') => {
@@ -3499,8 +3613,23 @@ impl App {
                 if filtered_len > 0 {
                     state.selected = filtered_len - 1;
                 }
+                if no_filter
+                    && has_more
+                    && !loading_more
+                    && let Some(last) = last_stream
+                {
+                    state.loading_more = true;
+                    self.load_more_streams(basin_name, last, tx);
+                }
             }
             KeyCode::Enter => {
+                let filtered: Vec<_> = state
+                    .streams
+                    .iter()
+                    .filter(|s| {
+                        state.filter.is_empty() || s.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(stream) = filtered.get(state.selected) {
                     let stream_name = stream.name.clone();
                     let basin_name = state.basin_name.clone();
@@ -3538,6 +3667,13 @@ impl App {
                 };
             }
             KeyCode::Char('d') => {
+                let filtered: Vec<_> = state
+                    .streams
+                    .iter()
+                    .filter(|s| {
+                        state.filter.is_empty() || s.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(stream) = filtered.get(state.selected) {
                     if stream.deleted_at.is_some() {
                         self.message = Some(StatusMessage {
@@ -3553,6 +3689,13 @@ impl App {
                 }
             }
             KeyCode::Char('e') => {
+                let filtered: Vec<_> = state
+                    .streams
+                    .iter()
+                    .filter(|s| {
+                        state.filter.is_empty() || s.name.to_string().contains(&state.filter)
+                    })
+                    .collect();
                 if let Some(stream) = filtered.get(state.selected) {
                     let basin_name = state.basin_name.clone();
                     let stream_name = stream.name.clone();
@@ -3598,6 +3741,8 @@ impl App {
                     loading: true,
                     filter: String::new(),
                     filter_active: false,
+                    has_more: false,
+                    loading_more: false,
                 });
                 self.load_streams(basin_name, tx);
             }
@@ -3798,7 +3943,20 @@ impl App {
     }
 
     fn load_basins(&self, tx: mpsc::UnboundedSender<Event>) {
-        let Some(s2) = self.s2.clone() else {
+        Self::load_basins_page(self.s2.clone(), None, tx, false);
+    }
+
+    fn load_more_basins(&self, start_after: BasinName, tx: mpsc::UnboundedSender<Event>) {
+        Self::load_basins_page(self.s2.clone(), Some(start_after), tx, true);
+    }
+
+    fn load_basins_page(
+        s2: Option<s2_sdk::S2>,
+        start_after: Option<BasinName>,
+        tx: mpsc::UnboundedSender<Event>,
+        is_more: bool,
+    ) {
+        let Some(s2) = s2 else {
             let _ = tx.send(Event::BasinsLoaded(Err(CliError::Config(
                 crate::error::CliConfigError::MissingAccessToken,
             ))));
@@ -3807,28 +3965,51 @@ impl App {
         tokio::spawn(async move {
             let args = ListBasinsArgs {
                 prefix: None,
-                start_after: None,
+                start_after: start_after.map(|n| n.to_string().parse().unwrap()),
                 limit: Some(100),
-                no_auto_paginate: false,
+                no_auto_paginate: true,
             };
-            match ops::list_basins(&s2, args).await {
-                Ok(stream) => {
-                    let basins: Vec<_> = stream
-                        .take(100)
-                        .filter_map(|r| async { r.ok() })
-                        .collect()
-                        .await;
-                    let _ = tx.send(Event::BasinsLoaded(Ok(basins)));
+            let event = match ops::list_basins(&s2, args).await {
+                Ok((basins, has_more)) => {
+                    if is_more {
+                        Event::MoreBasinsLoaded(Ok((basins, has_more)))
+                    } else {
+                        Event::BasinsLoaded(Ok((basins, has_more)))
+                    }
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::BasinsLoaded(Err(e)));
+                    if is_more {
+                        Event::MoreBasinsLoaded(Err(e))
+                    } else {
+                        Event::BasinsLoaded(Err(e))
+                    }
                 }
-            }
+            };
+            let _ = tx.send(event);
         });
     }
 
     fn load_streams(&self, basin_name: BasinName, tx: mpsc::UnboundedSender<Event>) {
-        let Some(s2) = self.s2.clone() else {
+        Self::load_streams_page(self.s2.clone(), basin_name, None, tx, false);
+    }
+
+    fn load_more_streams(
+        &self,
+        basin_name: BasinName,
+        start_after: StreamName,
+        tx: mpsc::UnboundedSender<Event>,
+    ) {
+        Self::load_streams_page(self.s2.clone(), basin_name, Some(start_after), tx, true);
+    }
+
+    fn load_streams_page(
+        s2: Option<s2_sdk::S2>,
+        basin_name: BasinName,
+        start_after: Option<StreamName>,
+        tx: mpsc::UnboundedSender<Event>,
+        is_more: bool,
+    ) {
+        let Some(s2) = s2 else {
             let _ = tx.send(Event::StreamsLoaded(Err(CliError::Config(
                 crate::error::CliConfigError::MissingAccessToken,
             ))));
@@ -3841,23 +4022,27 @@ impl App {
                     stream: None,
                 },
                 prefix: None,
-                start_after: None,
+                start_after: start_after.map(|n| n.to_string().parse().unwrap()),
                 limit: Some(100),
-                no_auto_paginate: false,
+                no_auto_paginate: true,
             };
-            match ops::list_streams(&s2, args).await {
-                Ok(stream) => {
-                    let streams: Vec<_> = stream
-                        .take(100)
-                        .filter_map(|r| async { r.ok() })
-                        .collect()
-                        .await;
-                    let _ = tx.send(Event::StreamsLoaded(Ok(streams)));
+            let event = match ops::list_streams(&s2, args).await {
+                Ok((streams, has_more)) => {
+                    if is_more {
+                        Event::MoreStreamsLoaded(Ok((streams, has_more)))
+                    } else {
+                        Event::StreamsLoaded(Ok((streams, has_more)))
+                    }
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::StreamsLoaded(Err(e)));
+                    if is_more {
+                        Event::MoreStreamsLoaded(Err(e))
+                    } else {
+                        Event::StreamsLoaded(Err(e))
+                    }
                 }
-            }
+            };
+            let _ = tx.send(event);
         });
     }
 
@@ -3941,15 +4126,10 @@ impl App {
                         prefix: None,
                         start_after: None,
                         limit: Some(100),
-                        no_auto_paginate: false,
+                        no_auto_paginate: true,
                     };
-                    if let Ok(stream) = ops::list_basins(&s2, args).await {
-                        let basins: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
-                        let _ = tx_refresh.send(Event::BasinsLoaded(Ok(basins)));
+                    if let Ok((basins, has_more)) = ops::list_basins(&s2, args).await {
+                        let _ = tx_refresh.send(Event::BasinsLoaded(Ok((basins, has_more))));
                     }
                 }
                 Err(e) => {
@@ -3972,15 +4152,10 @@ impl App {
                         prefix: None,
                         start_after: None,
                         limit: Some(100),
-                        no_auto_paginate: false,
+                        no_auto_paginate: true,
                     };
-                    if let Ok(stream) = ops::list_basins(&s2, args).await {
-                        let basins: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
-                        let _ = tx_refresh.send(Event::BasinsLoaded(Ok(basins)));
+                    if let Ok((basins, has_more)) = ops::list_basins(&s2, args).await {
+                        let _ = tx_refresh.send(Event::BasinsLoaded(Ok((basins, has_more))));
                     }
                 }
                 Err(e) => {
@@ -4030,15 +4205,10 @@ impl App {
                         prefix: None,
                         start_after: None,
                         limit: Some(100),
-                        no_auto_paginate: false,
+                        no_auto_paginate: true,
                     };
-                    if let Ok(stream) = ops::list_streams(&s2, args).await {
-                        let streams: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
-                        let _ = tx_refresh.send(Event::StreamsLoaded(Ok(streams)));
+                    if let Ok((streams, has_more)) = ops::list_streams(&s2, args).await {
+                        let _ = tx_refresh.send(Event::StreamsLoaded(Ok((streams, has_more))));
                     }
                 }
                 Err(e) => {
@@ -4075,15 +4245,10 @@ impl App {
                         prefix: None,
                         start_after: None,
                         limit: Some(100),
-                        no_auto_paginate: false,
+                        no_auto_paginate: true,
                     };
-                    if let Ok(stream) = ops::list_streams(&s2, args).await {
-                        let streams: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
-                        let _ = tx_refresh.send(Event::StreamsLoaded(Ok(streams)));
+                    if let Ok((streams, has_more)) = ops::list_streams(&s2, args).await {
+                        let _ = tx_refresh.send(Event::StreamsLoaded(Ok((streams, has_more))));
                     }
                 }
                 Err(e) => {
@@ -4606,15 +4771,10 @@ impl App {
                         prefix: None,
                         start_after: None,
                         limit: Some(100),
-                        no_auto_paginate: false,
+                        no_auto_paginate: true,
                     };
-                    if let Ok(stream) = ops::list_basins(&s2, args).await {
-                        let basins: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
-                        let _ = tx_refresh.send(Event::BasinsLoaded(Ok(basins)));
+                    if let Ok((basins, has_more)) = ops::list_basins(&s2, args).await {
+                        let _ = tx_refresh.send(Event::BasinsLoaded(Ok((basins, has_more))));
                     }
                 }
                 Err(e) => {
@@ -4683,15 +4843,10 @@ impl App {
                         prefix: None,
                         start_after: None,
                         limit: Some(100),
-                        no_auto_paginate: false,
+                        no_auto_paginate: true,
                     };
-                    if let Ok(stream) = ops::list_streams(&s2, args).await {
-                        let streams: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
-                        let _ = tx_refresh.send(Event::StreamsLoaded(Ok(streams)));
+                    if let Ok((streams, has_more)) = ops::list_streams(&s2, args).await {
+                        let _ = tx_refresh.send(Event::StreamsLoaded(Ok((streams, has_more))));
                     }
                 }
                 Err(e) => {
@@ -5709,19 +5864,11 @@ impl App {
                 limit: Some(100),
                 no_auto_paginate: false,
             };
-            match ops::list_access_tokens(&s2, args).await {
-                Ok(stream) => {
-                    let tokens: Vec<_> = stream
-                        .take(100)
-                        .filter_map(|r| async { r.ok() })
-                        .collect()
-                        .await;
-                    let _ = tx.send(Event::AccessTokensLoaded(Ok(tokens)));
-                }
-                Err(e) => {
-                    let _ = tx.send(Event::AccessTokensLoaded(Err(e)));
-                }
-            }
+            let event = match ops::list_access_tokens(&s2, args).await {
+                Ok((tokens, _)) => Event::AccessTokensLoaded(Ok(tokens)),
+                Err(e) => Event::AccessTokensLoaded(Err(e)),
+            };
+            let _ = tx.send(event);
         });
     }
 
@@ -5872,12 +6019,7 @@ impl App {
                         limit: Some(100),
                         no_auto_paginate: false,
                     };
-                    if let Ok(stream) = ops::list_access_tokens(&s2, list_args).await {
-                        let tokens: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
+                    if let Ok((tokens, _)) = ops::list_access_tokens(&s2, list_args).await {
                         let _ = tx_refresh.send(Event::AccessTokensLoaded(Ok(tokens)));
                     }
                 }
@@ -5914,12 +6056,7 @@ impl App {
                         limit: Some(100),
                         no_auto_paginate: false,
                     };
-                    if let Ok(stream) = ops::list_access_tokens(&s2, list_args).await {
-                        let tokens: Vec<_> = stream
-                            .take(100)
-                            .filter_map(|r| async { r.ok() })
-                            .collect()
-                            .await;
+                    if let Ok((tokens, _)) = ops::list_access_tokens(&s2, list_args).await {
                         let _ = tx_refresh.send(Event::AccessTokensLoaded(Ok(tokens)));
                     }
                 }
@@ -6174,11 +6311,8 @@ impl App {
                     MetricsType::Account => {
                         // Go back to basins list
                         self.screen = Screen::Basins(BasinsState {
-                            basins: Vec::new(),
-                            selected: 0,
                             loading: true,
-                            filter: String::new(),
-                            filter_active: false,
+                            ..Default::default()
                         });
                         self.load_basins(tx);
                     }
@@ -6191,6 +6325,8 @@ impl App {
                             loading: true,
                             filter: String::new(),
                             filter_active: false,
+                            has_more: false,
+                            loading_more: false,
                         });
                         self.load_streams(basin_name, tx);
                     }
@@ -7015,8 +7151,8 @@ async fn run_bench_with_events(
     const WRITE_DONE_SENTINEL: u64 = u64::MAX;
 
     let bench_start = Instant::now();
-    // Use the user_stop signal to control the benchmark - this allows the UI to stop it
-    let stop = user_stop;
+    // Separate flags: user_stop is for user cancellation, write_stop is for duration expiry
+    let write_stop = Arc::new(AtomicBool::new(false));
     let write_done_records = Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL));
 
     // We need to re-implement the bench logic here to send events
@@ -7031,7 +7167,7 @@ async fn run_bench_with_events(
         stream.clone(),
         record_size,
         target_mibps,
-        stop.clone(),
+        write_stop.clone(),
         write_done_records.clone(),
         bench_start,
     );
@@ -7081,9 +7217,14 @@ async fn run_bench_with_events(
         if write_done && read_done {
             break;
         }
+        // Check if user cancelled
+        if user_stop.load(Ordering::Relaxed) {
+            write_stop.store(true, Ordering::Relaxed);
+            break;
+        }
         tokio::select! {
-            _ = tokio::time::sleep_until(deadline), if !stop.load(Ordering::Relaxed) => {
-                stop.store(true, Ordering::Relaxed);
+            _ = tokio::time::sleep_until(deadline), if !write_stop.load(Ordering::Relaxed) => {
+                write_stop.store(true, Ordering::Relaxed);
                 let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::Write));
             }
             event = brx.recv() => {
@@ -7101,7 +7242,7 @@ async fn run_bench_with_events(
                         }));
                     }
                     Some(BenchEvent::Write(Err(e))) => {
-                        stop.store(true, Ordering::Relaxed);
+                        write_stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
                         return Err(e);
@@ -7122,7 +7263,7 @@ async fn run_bench_with_events(
                         }));
                     }
                     Some(BenchEvent::Read(Err(e))) => {
-                        stop.store(true, Ordering::Relaxed);
+                        write_stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
                         return Err(e);
@@ -7144,7 +7285,7 @@ async fn run_bench_with_events(
     let _ = read_handle.await;
 
     // Check if user stopped before starting catchup
-    if stop.load(Ordering::Relaxed) {
+    if user_stop.load(Ordering::Relaxed) {
         return Ok(BenchFinalStats {
             ack_latency: if all_ack_latencies.is_empty() {
                 None
@@ -7159,11 +7300,9 @@ async fn run_bench_with_events(
         });
     }
 
-    // Catchup phase - wait with periodic stop checks
-    let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::CatchupWait));
     let catchup_wait_start = Instant::now();
     while catchup_wait_start.elapsed() < catchup_delay {
-        if stop.load(Ordering::Relaxed) {
+        if user_stop.load(Ordering::Relaxed) {
             return Ok(BenchFinalStats {
                 ack_latency: if all_ack_latencies.is_empty() {
                     None
@@ -7180,12 +7319,14 @@ async fn run_bench_with_events(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::CatchupWait));
+
     let catchup_stream = bench_read_catchup(stream.clone(), record_size, bench_start);
     let mut catchup_stream = std::pin::pin!(catchup_stream);
     let catchup_timeout = Duration::from_secs(300);
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if user_stop.load(Ordering::Relaxed) {
             break;
         }
         match tokio::time::timeout_at(catchup_deadline, catchup_stream.next()).await {
