@@ -519,8 +519,11 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
         )));
     } else {
         lines.push(Line::from(vec![
-            Span::styled("Get token: ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("s2.dev/dashboard/access-tokens", Style::default().fg(CYAN)),
+            Span::styled("Sign up: ", Style::default().fg(TEXT_MUTED)),
+            Span::styled(
+                "https://s2.dev/sign-up",
+                Style::default().fg(CYAN).underlined(),
+            ),
         ]));
     }
     lines.push(Line::from(""));
