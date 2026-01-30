@@ -119,7 +119,7 @@ jobs:
           server/${{ inputs.server-binary }} ${{ inputs.server-args }} > /tmp/server.log 2>&1 &
           echo $! > /tmp/server.pid
           for i in {1..30}; do
-            if curl -sf http://localhost:${{ inputs.server-port }}/health; then
+            if curl -sf http://localhost:${{ inputs.server-port }}/health || curl -sf http://localhost:${{ inputs.server-port }}/ping; then
               echo "Server is ready"
               exit 0
             fi
