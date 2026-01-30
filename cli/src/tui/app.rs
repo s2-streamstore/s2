@@ -3364,11 +3364,10 @@ impl App {
                     && has_more
                     && !loading_more
                     && state.selected == total_len.saturating_sub(1)
+                    && let Some(last) = last_basin
                 {
-                    if let Some(last) = last_basin {
-                        state.loading_more = true;
-                        self.load_more_basins(last, tx);
-                    }
+                    state.loading_more = true;
+                    self.load_more_basins(last, tx);
                 }
             }
             KeyCode::Char('g') => {
@@ -3379,11 +3378,9 @@ impl App {
                     state.selected = filtered_len - 1;
                 }
                 // Also trigger load more if at end
-                if no_filter && has_more && !loading_more {
-                    if let Some(last) = last_basin {
-                        state.loading_more = true;
-                        self.load_more_basins(last, tx);
-                    }
+                if no_filter && has_more && !loading_more && let Some(last) = last_basin {
+                    state.loading_more = true;
+                    self.load_more_basins(last, tx);
                 }
             }
             KeyCode::Enter => {
@@ -3599,11 +3596,10 @@ impl App {
                     && has_more
                     && !loading_more
                     && state.selected == total_len.saturating_sub(1)
+                    && let Some(last) = last_stream
                 {
-                    if let Some(last) = last_stream {
-                        state.loading_more = true;
-                        self.load_more_streams(basin_name, last, tx);
-                    }
+                    state.loading_more = true;
+                    self.load_more_streams(basin_name, last, tx);
                 }
             }
             KeyCode::Char('g') => {
@@ -3613,11 +3609,9 @@ impl App {
                 if filtered_len > 0 {
                     state.selected = filtered_len - 1;
                 }
-                if no_filter && has_more && !loading_more {
-                    if let Some(last) = last_stream {
-                        state.loading_more = true;
-                        self.load_more_streams(basin_name, last, tx);
-                    }
+                if no_filter && has_more && !loading_more && let Some(last) = last_stream {
+                    state.loading_more = true;
+                    self.load_more_streams(basin_name, last, tx);
                 }
             }
             KeyCode::Enter => {
