@@ -37,8 +37,14 @@ brew install s2-streamstore/s2/s2
 
 ### Cargo
 ```bash
-cargo install s2-cli
+cargo install --locked s2-cli
 ```
+
+### Release Binaries (macOS/Linux)
+```bash
+curl -fsSL s2.dev/install.sh | bash
+```
+Or specify a version with `VERSION=x.y.z` before the command. See all [releases](https://github.com/s2-streamstore/s2/releases).
 
 ### Docker
 ```bash
