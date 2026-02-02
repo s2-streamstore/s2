@@ -52,7 +52,7 @@ rstest = "0.26"
 s2-api = { version = "0.26.8", path = "api" }
 s2-common = { version = "0.26.8", path = "common" }
 s2-lite = { version = "0.26.8", path = "lite" }
-s2-sdk = "0.23.1"
+s2-sdk = "0.23.5"
 serde = "1.0"
 serde_json = "1.0"
 slatedb = "0.10"

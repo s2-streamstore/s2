@@ -4232,32 +4232,6 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 
 [[package]]
 name = "s2-api"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4e9e456136d5c99ebaa8c9004bf093b067c0df99aa0deff34db98ad370169b7"
-dependencies = [
- "base64ct",
- "bytes",
- "compact_str 0.9.0",
- "enum-ordinalize",
- "flate2",
- "futures",
- "http 1.4.0",
- "itertools 0.14.0",
- "mime",
- "prost",
- "s2-common 0.4.0",
- "serde",
- "serde_json",
- "strum 0.27.2",
- "thiserror 2.0.18",
- "time",
- "tokio-util",
- "zstd",
-]
-
-[[package]]
-name = "s2-api"
 version = "0.26.8"
 dependencies = [
  "axum",
@@ -4282,6 +4256,32 @@ dependencies = [
  "time",
  "tokio-util",
  "utoipa",
+ "zstd",
+]
+
+[[package]]
+name = "s2-api"
+version = "0.26.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d1ecf9992c02078c48a410f8d8fd4f878d4a154c44aad7c2a12a1e220cce2ec"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str 0.9.0",
+ "enum-ordinalize",
+ "flate2",
+ "futures",
+ "http 1.4.0",
+ "itertools 0.14.0",
+ "mime",
+ "prost",
+ "s2-common 0.26.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "strum 0.27.2",
+ "thiserror 2.0.18",
+ "time",
+ "tokio-util",
  "zstd",
 ]
 
@@ -4338,24 +4338,6 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b0a6ccf4a8acf03b96e1fbdeafe2110259b173246fa2248f31b891480b4f74f"
-dependencies = [
- "blake3",
- "bytes",
- "compact_str 0.9.0",
- "enum-ordinalize",
- "enumset",
- "http 1.4.0",
- "serde",
- "strum 0.27.2",
- "thiserror 2.0.18",
- "time",
-]
-
-[[package]]
-name = "s2-common"
 version = "0.26.8"
 dependencies = [
  "axum",
@@ -4375,6 +4357,24 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "utoipa",
+]
+
+[[package]]
+name = "s2-common"
+version = "0.26.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fa0c516101fafe39579380d6ef340fa37a94eef7b234a6ebac024d996c16474"
+dependencies = [
+ "blake3",
+ "bytes",
+ "compact_str 0.9.0",
+ "enum-ordinalize",
+ "enumset",
+ "http 1.4.0",
+ "serde",
+ "strum 0.27.2",
+ "thiserror 2.0.18",
+ "time",
 ]
 
 [[package]]
@@ -4423,9 +4423,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.23.3"
+version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a68658eecf14ef5263bbc0379ce60703e3bfc0cb572a2cc51bd82749eec611e2"
+checksum = "f153b75ab3780a5274dbee8e3e8b5ea5602bee98105999626399b78ec574d860"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -4436,8 +4436,8 @@ dependencies = [
  "prost",
  "rand 0.9.2",
  "reqwest 0.13.1",
- "s2-api 0.4.0",
- "s2-common 0.4.0",
+ "s2-api 0.26.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "s2-common 0.26.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "secrecy",
  "serde",
  "serde_json",
@@ -5208,9 +5208,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-muxt"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "169b86e0a06e918940754817944b3c688be429026289b1af45ee2ce62d933c8c"
+checksum = "f79eac432d68f5cc5ca99654adddb6ffc9501618bc267303d18a1f768ea01e7c"
 dependencies = [
  "pin-project",
  "tokio",
