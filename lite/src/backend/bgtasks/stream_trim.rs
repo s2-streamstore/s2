@@ -10,6 +10,7 @@ use slatedb::{
     WriteBatch,
     config::{DurabilityLevel, ScanOptions, WriteOptions},
 };
+use tracing::instrument;
 
 use crate::backend::{Backend, error::StorageError, kv, stream_id::StreamId};
 
@@ -73,6 +74,7 @@ impl Backend {
         Ok(())
     }
 
+    #[instrument(ret, err, skip(self))]
     async fn delete_records(
         &self,
         stream_id: StreamId,
@@ -127,6 +129,7 @@ impl Backend {
         Ok(())
     }
 
+    #[instrument(ret, err, skip(self))]
     async fn finalize_trim(
         &self,
         stream_id: StreamId,

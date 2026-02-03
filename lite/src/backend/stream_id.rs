@@ -4,12 +4,18 @@ use s2_common::{
 };
 
 /// Unique identifier for a stream scoped by its basin.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamId(Bash);
 
 impl std::fmt::Display for StreamId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for StreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StreamId({})", self.0)
     }
 }
 
