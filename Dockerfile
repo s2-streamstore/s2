@@ -34,8 +34,8 @@ COPY --from=builder /output/s2 /app/s2
 
 ENTRYPOINT ["./s2"]
 
-# Production runtime (default) - minimal distroless image
-FROM gcr.io/distroless/cc-debian13 AS runtime
+# Production runtime (default) - minimal distroless image running as non-root (UID 65532)
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
 WORKDIR /app
 
