@@ -20,6 +20,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
+        ValidationError,
     },
 };
 
@@ -34,6 +35,17 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::streams::records::CHECK_TAIL, get(check_tail))
         .route(super::paths::streams::records::READ, get(read))
         .route(super::paths::streams::records::APPEND, post(append))
+}
+
+fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceError> {
+    if let ReadFrom::Timestamp(ts) = start.from
+        && end.until.deny(ts)
+    {
+        return Err(ServiceError::Validation(ValidationError(
+            "start `timestamp` exceeds or equal to `until`".to_owned(),
+        )));
+    }
+    Ok(())
 }
 
 #[derive(FromRequest)]
@@ -139,6 +151,7 @@ pub async fn read(
             let mut end: ReadEnd = end.into();
             end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
             end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
+            validate_read_until(start, end)?;
             let session = backend.read(basin, stream, start, end).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
@@ -168,7 +181,9 @@ pub async fn read(
                 end.count = end.count.map(|c| c.saturating_sub(count));
                 end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
             }
-            let session = backend.read(basin, stream, start, end.into()).await?;
+            let end: ReadEnd = end.into();
+            validate_read_until(start, end)?;
+            let session = backend.read(basin, stream, start, end).await?;
             let events = async_stream::stream! {
                 let mut processed = CountOrBytes::ZERO;
                 tokio::pin!(session);
@@ -209,8 +224,11 @@ pub async fn read(
         v1t::stream::ReadRequest::S2s {
             response_compression,
         } => {
+            let start: ReadStart = start.try_into()?;
+            let end: ReadEnd = end.into();
+            validate_read_until(start, end)?;
             let s2s_stream = backend
-                .read(basin, stream, start.try_into()?, end.into())
+                .read(basin, stream, start, end)
                 .await?
                 .map_ok(|msg| match msg {
                     ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
