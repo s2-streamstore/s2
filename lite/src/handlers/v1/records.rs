@@ -48,6 +48,38 @@ fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceErro
     Ok(())
 }
 
+fn apply_last_event_id(
+    mut start: ReadStart,
+    mut end: v1t::stream::ReadEnd,
+    last_event_id: Option<v1t::stream::sse::LastEventId>,
+) -> (ReadStart, v1t::stream::ReadEnd) {
+    if let Some(v1t::stream::sse::LastEventId {
+        seq_num,
+        count,
+        bytes,
+    }) = last_event_id
+    {
+        start.from = ReadFrom::SeqNum(seq_num + 1);
+        end.count = end.count.map(|c| c.saturating_sub(count));
+        end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
+    }
+    (start, end)
+}
+
+fn prepare_read(
+    start: ReadStart,
+    end: v1t::stream::ReadEnd,
+    clamp_unary: bool,
+) -> Result<(ReadStart, ReadEnd), ServiceError> {
+    let mut end: ReadEnd = end.into();
+    if clamp_unary {
+        end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
+        end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
+    }
+    validate_read_until(start, end)?;
+    Ok((start, end))
+}
+
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct CheckTailArgs {
@@ -142,16 +174,13 @@ pub async fn read(
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
+    let start: ReadStart = start.try_into()?;
     match request {
         v1t::stream::ReadRequest::Unary {
             format,
             response_mime,
         } => {
-            let start: ReadStart = start.try_into()?;
-            let mut end: ReadEnd = end.into();
-            end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
-            end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
-            validate_read_until(start, end)?;
+            let (start, end) = prepare_read(start, end, true)?;
             let session = backend.read(basin, stream, start, end).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
@@ -169,20 +198,8 @@ pub async fn read(
             format,
             last_event_id,
         } => {
-            let mut start: ReadStart = start.try_into()?;
-            let mut end = end;
-            if let Some(v1t::stream::sse::LastEventId {
-                seq_num,
-                count,
-                bytes,
-            }) = last_event_id
-            {
-                start.from = ReadFrom::SeqNum(seq_num + 1);
-                end.count = end.count.map(|c| c.saturating_sub(count));
-                end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
-            }
-            let end: ReadEnd = end.into();
-            validate_read_until(start, end)?;
+            let (start, end) = apply_last_event_id(start, end, last_event_id);
+            let (start, end) = prepare_read(start, end, false)?;
             let session = backend.read(basin, stream, start, end).await?;
             let events = async_stream::stream! {
                 let mut processed = CountOrBytes::ZERO;
@@ -224,9 +241,7 @@ pub async fn read(
         v1t::stream::ReadRequest::S2s {
             response_compression,
         } => {
-            let start: ReadStart = start.try_into()?;
-            let end: ReadEnd = end.into();
-            validate_read_until(start, end)?;
+            let (start, end) = prepare_read(start, end, false)?;
             let s2s_stream =
                 backend
                     .read(basin, stream, start, end)
