@@ -66,13 +66,18 @@ fn apply_last_event_id(
     (start, end)
 }
 
+enum ReadMode {
+    Unary,
+    Streaming,
+}
+
 fn prepare_read(
     start: ReadStart,
     end: v1t::stream::ReadEnd,
-    apply_unary_limits: bool,
+    mode: ReadMode,
 ) -> Result<(ReadStart, ReadEnd), ServiceError> {
     let mut end: ReadEnd = end.into();
-    if apply_unary_limits {
+    if matches!(mode, ReadMode::Unary) {
         end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
         end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
     }
@@ -180,7 +185,7 @@ pub async fn read(
             format,
             response_mime,
         } => {
-            let (start, end) = prepare_read(start, end, true)?;
+            let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend.read(basin, stream, start, end).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
@@ -199,7 +204,7 @@ pub async fn read(
             last_event_id,
         } => {
             let (start, end) = apply_last_event_id(start, end, last_event_id);
-            let (start, end) = prepare_read(start, end, false)?;
+            let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
             let events = async_stream::stream! {
                 let mut processed = CountOrBytes::ZERO;
@@ -241,7 +246,7 @@ pub async fn read(
         v1t::stream::ReadRequest::S2s {
             response_compression,
         } => {
-            let (start, end) = prepare_read(start, end, false)?;
+            let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let s2s_stream =
                 backend
                     .read(basin, stream, start, end)
