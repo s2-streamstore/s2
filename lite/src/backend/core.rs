@@ -13,7 +13,7 @@ use s2_common::{
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
-use tokio::time::Instant;
+use tokio::{sync::broadcast, time::Instant};
 
 use super::{
     error::{
@@ -25,25 +25,35 @@ use super::{
     stream_id::StreamId,
     streamer::{StreamerClient, StreamerClientState},
 };
-
-pub const FOLLOWER_MAX_LAG: usize = 25;
+use crate::backend::bgtasks::BgtaskTrigger;
 
 #[derive(Clone)]
 pub struct Backend {
     pub(super) db: slatedb::Db,
     client_states: Arc<DashMap<StreamId, StreamerClientState>>,
     append_inflight_max: ByteSize,
+    bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
 impl Backend {
     const FAILED_INIT_MEMORY: Duration = Duration::from_secs(1);
 
     pub fn new(db: slatedb::Db, append_inflight_max: ByteSize) -> Self {
+        let (bgtask_trigger_tx, _) = broadcast::channel(16);
         Self {
             db,
             client_states: Arc::new(DashMap::new()),
             append_inflight_max,
+            bgtask_trigger_tx,
         }
+    }
+
+    pub(super) fn bgtask_trigger(&self, trigger: BgtaskTrigger) {
+        let _ = self.bgtask_trigger_tx.send(trigger);
+    }
+
+    pub(super) fn bgtask_trigger_subscribe(&self) -> broadcast::Receiver<BgtaskTrigger> {
+        self.bgtask_trigger_tx.subscribe()
     }
 
     async fn start_streamer(
@@ -96,6 +106,7 @@ impl Backend {
             fencing_token,
             trim_point,
             append_inflight_max: self.append_inflight_max,
+            bgtask_trigger_tx: self.bgtask_trigger_tx.clone(),
         }
         .spawn(move || {
             client_states.remove(&stream_id);

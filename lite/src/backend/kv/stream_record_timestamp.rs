@@ -1,23 +1,23 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
-use s2_common::record::{SeqNum, Timestamp};
+use s2_common::record::StreamPosition;
 
 use super::{DeserializationError, KeyType, check_exact_size};
 use crate::backend::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN + 8 + 8;
 
-pub fn ser_key(stream_id: StreamId, timestamp: Timestamp, seq_num: SeqNum) -> Bytes {
+pub fn ser_key(stream_id: StreamId, pos: StreamPosition) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
     buf.put_u8(KeyType::StreamRecordTimestamp.ordinal());
     buf.put_slice(stream_id.as_bytes());
-    buf.put_u64(timestamp);
-    buf.put_u64(seq_num);
+    buf.put_u64(pos.timestamp);
+    buf.put_u64(pos.seq_num);
     debug_assert_eq!(buf.len(), KEY_LEN, "serialized length mismatch");
     buf.freeze()
 }
 
-pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, Timestamp, SeqNum), DeserializationError> {
+pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, StreamPosition), DeserializationError> {
     check_exact_size(&bytes, KEY_LEN)?;
     let ordinal = bytes.get_u8();
     if ordinal != KeyType::StreamRecordTimestamp.ordinal() {
@@ -27,7 +27,10 @@ pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, Timestamp, SeqNum), Dese
     bytes.copy_to_slice(&mut stream_id_bytes);
     let timestamp = bytes.get_u64();
     let seq_num = bytes.get_u64();
-    Ok((stream_id_bytes.into(), timestamp, seq_num))
+    Ok((
+        stream_id_bytes.into(),
+        StreamPosition { seq_num, timestamp },
+    ))
 }
 
 pub fn ser_value() -> Bytes {
@@ -42,7 +45,7 @@ pub fn deser_value(bytes: Bytes) -> Result<(), DeserializationError> {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use s2_common::record::{SeqNum, Timestamp};
+    use s2_common::record::{SeqNum, StreamPosition, Timestamp};
 
     use crate::backend::stream_id::StreamId;
 
@@ -60,12 +63,12 @@ mod tests {
             seq_num in any::<SeqNum>(),
         ) {
             let stream_id = StreamId::from(stream_id_bytes);
-            let key_bytes = super::ser_key(stream_id, timestamp, seq_num);
-            let (decoded_stream_id, decoded_timestamp, decoded_seq_num) =
+            let key_bytes = super::ser_key(stream_id, StreamPosition { seq_num, timestamp });
+            let (decoded_stream_id, decoded_pos) =
                 super::deser_key(key_bytes).unwrap();
             prop_assert_eq!(stream_id, decoded_stream_id);
-            prop_assert_eq!(timestamp, decoded_timestamp);
-            prop_assert_eq!(seq_num, decoded_seq_num);
+            prop_assert_eq!(timestamp, decoded_pos.timestamp);
+            prop_assert_eq!(seq_num, decoded_pos.seq_num);
         }
     }
 }

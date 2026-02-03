@@ -13,7 +13,7 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
+use super::{Backend, CreatedOrReconfigured, bgtasks::BgtaskTrigger, store::db_txn_get};
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, CreateBasinError,
@@ -38,7 +38,7 @@ impl Backend {
             return Ok(Page::new_empty());
         }
 
-        const SCAN_OPTS: ScanOptions = ScanOptions {
+        static SCAN_OPTS: ScanOptions = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             dirty: false,
             read_ahead_bytes: 1,
@@ -208,6 +208,7 @@ impl Backend {
                 await_durable: true,
             };
             txn.commit_with_options(&WRITE_OPTS).await?;
+            self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
         }
         Ok(())
     }

@@ -38,7 +38,6 @@ pub fn ser_value(cursor: &StreamNameStartAfter) -> Bytes {
     buf.freeze()
 }
 
-#[allow(unused)] // TODO: will be used as cursor by basin deletion bgtask
 pub fn deser_value(bytes: Bytes) -> Result<StreamNameStartAfter, DeserializationError> {
     let cursor_str = std::str::from_utf8(&bytes).map_err(|e| invalid_value_err("cursor", e))?;
     StreamNameStartAfter::from_str(cursor_str).map_err(|e| invalid_value_err("cursor", e))

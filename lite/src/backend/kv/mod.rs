@@ -1,16 +1,19 @@
 pub mod basin_deletion_pending;
 pub mod basin_meta;
 pub mod stream_fencing_token;
+pub mod stream_id_mapping;
 pub mod stream_meta;
 pub mod stream_record_data;
 pub mod stream_record_timestamp;
 pub mod stream_tail_position;
 pub mod stream_trim_point;
 
+use std::ops::Range;
+
 use bytes::{Buf, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
 use s2_common::{
-    record::{SeqNum, StreamPosition, Timestamp},
+    record::StreamPosition,
     types::{basin::BasinName, stream::StreamName},
 };
 use thiserror::Error;
@@ -38,6 +41,7 @@ pub enum DeserializationError {
 pub enum KeyType {
     BasinMeta = 1,
     StreamMeta = 2,
+    StreamIdMapping = 9,
     StreamTailPosition = 3,
     StreamFencingToken = 4,
     StreamTrimPoint = 5,
@@ -56,6 +60,10 @@ pub enum Key {
     /// Key: BasinName \0 StreamName
     /// Value: StreamMeta
     StreamMeta(BasinName, StreamName),
+    /// (SIM) per-stream, immutable
+    /// Key: StreamID
+    /// Value: BasinName \0 StreamName
+    StreamIdMapping(StreamId),
     /// (SP) per-stream, updatable
     /// Key: StreamID
     /// Value: SeqNum Timestamp
@@ -76,7 +84,7 @@ pub enum Key {
     /// (SRT) per-record, immutable
     /// Key: StreamID Timestamp SeqNum
     /// Value: empty
-    StreamRecordTimestamp(StreamId, Timestamp, SeqNum),
+    StreamRecordTimestamp(StreamId, StreamPosition),
     /// (BDP) per-basin, deletable, only present while basin deletion pending
     /// Key: BasinName
     /// Value: StreamNameStartAfter (cursor for resumable deletion)
@@ -93,9 +101,10 @@ impl From<Key> for Bytes {
             Key::StreamFencingToken(stream_id) => stream_fencing_token::ser_key(stream_id),
             Key::StreamTrimPoint(stream_id) => stream_trim_point::ser_key(stream_id),
             Key::StreamRecordData(stream_id, pos) => stream_record_data::ser_key(stream_id, pos),
-            Key::StreamRecordTimestamp(stream_id, timestamp, seq_num) => {
-                stream_record_timestamp::ser_key(stream_id, timestamp, seq_num)
+            Key::StreamRecordTimestamp(stream_id, pos) => {
+                stream_record_timestamp::ser_key(stream_id, pos)
             }
+            Key::StreamIdMapping(stream_id) => stream_id_mapping::ser_key(stream_id),
         }
     }
 }
@@ -115,6 +124,9 @@ impl TryFrom<Bytes> for Key {
             KeyType::StreamMeta => {
                 stream_meta::deser_key(bytes).map(|(basin, stream)| Key::StreamMeta(basin, stream))
             }
+            KeyType::StreamIdMapping => {
+                stream_id_mapping::deser_key(bytes).map(Key::StreamIdMapping)
+            }
             KeyType::StreamTailPosition => {
                 stream_tail_position::deser_key(bytes).map(Key::StreamTailPosition)
             }
@@ -126,11 +138,8 @@ impl TryFrom<Bytes> for Key {
             }
             KeyType::StreamRecordData => stream_record_data::deser_key(bytes)
                 .map(|(stream_id, pos)| Key::StreamRecordData(stream_id, pos)),
-            KeyType::StreamRecordTimestamp => {
-                stream_record_timestamp::deser_key(bytes).map(|(stream_id, timestamp, seq_num)| {
-                    Key::StreamRecordTimestamp(stream_id, timestamp, seq_num)
-                })
-            }
+            KeyType::StreamRecordTimestamp => stream_record_timestamp::deser_key(bytes)
+                .map(|(stream_id, pos)| Key::StreamRecordTimestamp(stream_id, pos)),
         }
     }
 }
@@ -153,6 +162,15 @@ fn check_min_size(bytes: &Bytes, min: usize) -> Result<(), DeserializationError>
         });
     }
     Ok(())
+}
+
+pub fn key_type_range(key_type: KeyType) -> Range<Bytes> {
+    let ordinal = key_type.ordinal();
+    let start = Bytes::from(vec![ordinal]);
+    let end = Bytes::from(vec![
+        ordinal.checked_add(1).expect("key type ordinal overflow"),
+    ]);
+    start..end
 }
 
 fn increment_bytes(mut buf: BytesMut) -> Option<Bytes> {

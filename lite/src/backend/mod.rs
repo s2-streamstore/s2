@@ -1,6 +1,7 @@
 pub mod error;
 
 mod basins;
+pub mod bgtasks;
 mod core;
 mod read;
 mod store;
@@ -11,7 +12,9 @@ mod append;
 mod kv;
 mod stream_id;
 
-pub use core::{Backend, FOLLOWER_MAX_LAG};
+pub use core::Backend;
+
+pub const FOLLOWER_MAX_LAG: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreatedOrReconfigured<T> {

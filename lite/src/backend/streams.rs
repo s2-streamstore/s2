@@ -21,6 +21,7 @@ use crate::backend::{
         StreamDeletionPendingError, StreamNotFoundError, StreamerError,
     },
     kv,
+    stream_id::StreamId,
 };
 
 impl Backend {
@@ -40,7 +41,7 @@ impl Backend {
             return Ok(Page::new_empty());
         }
 
-        const SCAN_OPTS: ScanOptions = ScanOptions {
+        static SCAN_OPTS: ScanOptions = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             dirty: false,
             read_ahead_bytes: 1,
@@ -143,6 +144,12 @@ impl Backend {
         };
 
         txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
+        if existing_created_at.is_none() {
+            txn.put(
+                kv::stream_id_mapping::ser_key(StreamId::new(&basin, &stream)),
+                kv::stream_id_mapping::ser_value(&basin, &stream),
+            )?;
+        }
 
         static WRITE_OPTS: WriteOptions = WriteOptions {
             await_durable: true,

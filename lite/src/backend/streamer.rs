@@ -30,6 +30,7 @@ use tokio::{
 use crate::{
     backend::{
         append,
+        bgtasks::BgtaskTrigger,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
             DeleteStreamError, RequestDroppedError, StreamerError, StreamerMissingInActionError,
@@ -50,6 +51,7 @@ pub(super) struct Spawner {
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
     pub append_inflight_max: ByteSize,
+    pub bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
 impl Spawner {
@@ -62,6 +64,7 @@ impl Spawner {
             fencing_token,
             trim_point,
             append_inflight_max,
+            bgtask_trigger_tx,
         } = self;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
@@ -87,6 +90,7 @@ impl Spawner {
             pending_appends: append::PendingAppends::new(),
             stable_pos: tail_pos,
             follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
+            bgtask_trigger_tx,
         };
 
         tokio::spawn(async move {
@@ -132,6 +136,7 @@ struct Streamer {
     pending_appends: append::PendingAppends,
     stable_pos: StreamPosition,
     follow_tx: broadcast::Sender<Vec<Metered<SequencedRecord>>>,
+    bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
 impl Streamer {
@@ -302,10 +307,16 @@ impl Streamer {
                 Some(res) = self.append_futs.next() => {
                     match res {
                         Ok(records) => {
+                            let has_trim = records.iter().any(|record| {
+                                matches!(record.record, Record::Command(CommandRecord::Trim(_)))
+                            });
                             let last_pos = records.last().expect("non-empty").position;
                             let stable_pos = StreamPosition { seq_num: last_pos.seq_num + 1, timestamp: last_pos.timestamp };
                             self.pending_appends.on_stable(stable_pos);
                             self.stable_pos = stable_pos;
+                            if has_trim {
+                                let _ = self.bgtask_trigger_tx.send(BgtaskTrigger::StreamTrim);
+                            }
                             let _ = self.follow_tx.send(records);
                         },
                         Err(db_err) => {
@@ -581,7 +592,7 @@ async fn db_write_records(
             &ttl_put_opts,
         );
         wb.put_with_options(
-            kv::stream_record_timestamp::ser_key(stream_id, position.timestamp, position.seq_num),
+            kv::stream_record_timestamp::ser_key(stream_id, position),
             kv::stream_record_timestamp::ser_value(),
             &ttl_put_opts,
         );

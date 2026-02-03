@@ -329,6 +329,14 @@ impl From<slatedb::Error> for DeleteStreamError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
+pub enum BasinDeletionError {
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error(transparent)]
+    DeleteStream(#[from] DeleteStreamError),
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ListBasinsError {
     #[error(transparent)]
     Storage(#[from] StorageError),

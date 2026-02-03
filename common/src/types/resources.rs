@@ -28,7 +28,7 @@ impl<T> Page<T> {
 pub struct ListLimit(NonZeroUsize);
 
 impl ListLimit {
-    const MAX: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
+    pub const MAX: ListLimit = Self(NonZeroUsize::new(1000).unwrap());
 
     pub fn get(&self) -> NonZeroUsize {
         self.0
@@ -41,13 +41,15 @@ impl ListLimit {
 
 impl Default for ListLimit {
     fn default() -> Self {
-        Self(Self::MAX)
+        Self::MAX
     }
 }
 
 impl From<usize> for ListLimit {
     fn from(value: usize) -> Self {
-        Self(NonZeroUsize::new(value).unwrap_or(Self::MAX).min(Self::MAX))
+        NonZeroUsize::new(value)
+            .and_then(|n| (n <= Self::MAX.0).then_some(Self(n)))
+            .unwrap_or_default()
     }
 }
 

@@ -40,8 +40,20 @@ impl Backend {
         stream_id: StreamId,
         timestamp: Timestamp,
     ) -> Result<Option<StreamPosition>, StorageError> {
-        let start_key = kv::stream_record_timestamp::ser_key(stream_id, timestamp, SeqNum::MIN);
-        let end_key = kv::stream_record_timestamp::ser_key(stream_id, Timestamp::MAX, SeqNum::MAX);
+        let start_key = kv::stream_record_timestamp::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: SeqNum::MIN,
+                timestamp,
+            },
+        );
+        let end_key = kv::stream_record_timestamp::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: SeqNum::MAX,
+                timestamp: Timestamp::MAX,
+            },
+        );
         static SCAN_OPTS: ScanOptions = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             dirty: false,
@@ -55,14 +67,13 @@ impl Backend {
             .await?;
         Ok(match it.next().await? {
             Some(kv) => {
-                let (deser_stream_id, deser_timestamp, deser_seq_num) =
-                    kv::stream_record_timestamp::deser_key(kv.key)?;
+                let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
                 assert_eq!(deser_stream_id, stream_id);
-                assert!(deser_timestamp >= timestamp);
+                assert!(pos.timestamp >= timestamp);
                 kv::stream_record_timestamp::deser_value(kv.value)?;
                 Some(StreamPosition {
-                    seq_num: deser_seq_num,
-                    timestamp: deser_timestamp,
+                    seq_num: pos.seq_num,
+                    timestamp: pos.timestamp,
                 })
             }
             None => None,
@@ -109,7 +120,13 @@ mod tests {
         backend
             .db
             .put(
-                kv::stream_record_timestamp::ser_key(stream_a, 1000, 0),
+                kv::stream_record_timestamp::ser_key(
+                    stream_a,
+                    StreamPosition {
+                        seq_num: 0,
+                        timestamp: 1000,
+                    },
+                ),
                 kv::stream_record_timestamp::ser_value(),
             )
             .await
@@ -117,7 +134,13 @@ mod tests {
         backend
             .db
             .put(
-                kv::stream_record_timestamp::ser_key(stream_b, 2000, 0),
+                kv::stream_record_timestamp::ser_key(
+                    stream_b,
+                    StreamPosition {
+                        seq_num: 0,
+                        timestamp: 2000,
+                    },
+                ),
                 kv::stream_record_timestamp::ser_value(),
             )
             .await
