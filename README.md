@@ -86,7 +86,7 @@ s2 lite --port 8080
 ```bash
 docker run -p 8080:80 \
   -e AWS_PROFILE=${AWS_PROFILE} \
-  -v ~/.aws:/root/.aws:ro \
+  -v ~/.aws:/home/nonroot/.aws:ro \
   ghcr.io/s2-streamstore/s2 lite \
   --bucket ${S3_BUCKET} \
   --path s2lite
