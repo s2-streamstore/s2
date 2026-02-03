@@ -8,7 +8,7 @@ use slatedb::{
     WriteBatch,
     config::{DurabilityLevel, ScanOptions, WriteOptions},
 };
-use tracing::info;
+use tracing::instrument;
 
 use crate::backend::{
     Backend,
@@ -93,22 +93,20 @@ impl Backend {
             if info.deleted_at.is_some() {
                 continue;
             }
-            info!(%stream, "deleting stream");
             self.delete_stream(basin.clone(), stream.clone()).await?;
         }
 
         if page.has_more {
-            let next_cursor = last_stream.expect("non-empty stream page");
-            info!(%basin, cursor = %next_cursor, "basin deletion cursor advanced");
-            self.set_basin_deletion_cursor(&basin, &next_cursor).await?;
+            self.set_basin_deletion_cursor(&basin, &last_stream.expect("non-empty stream page"))
+                .await?;
             Ok(true)
         } else {
             self.complete_basin_deletion(&basin).await?;
-            info!(%basin, "completed");
             Ok(false)
         }
     }
 
+    #[instrument(ret, err, skip(self))]
     async fn set_basin_deletion_cursor(
         &self,
         basin: &BasinName,
@@ -126,6 +124,7 @@ impl Backend {
         Ok(())
     }
 
+    #[instrument(ret, err, skip(self))]
     async fn complete_basin_deletion(&self, basin: &BasinName) -> Result<(), StorageError> {
         let mut batch = WriteBatch::new();
         batch.delete(kv::basin_meta::ser_key(basin));

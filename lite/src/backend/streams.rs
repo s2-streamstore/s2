@@ -12,6 +12,7 @@ use slatedb::{
     config::{DurabilityLevel, ScanOptions, WriteOptions},
 };
 use time::OffsetDateTime;
+use tracing::instrument;
 
 use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
 use crate::backend::{
@@ -227,6 +228,7 @@ impl Backend {
         Ok(meta.config)
     }
 
+    #[instrument(ret, err, skip(self))]
     pub async fn delete_stream(
         &self,
         basin: BasinName,
