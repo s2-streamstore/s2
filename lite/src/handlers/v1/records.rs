@@ -69,10 +69,10 @@ fn apply_last_event_id(
 fn prepare_read(
     start: ReadStart,
     end: v1t::stream::ReadEnd,
-    clamp_unary: bool,
+    apply_unary_limits: bool,
 ) -> Result<(ReadStart, ReadEnd), ServiceError> {
     let mut end: ReadEnd = end.into();
-    if clamp_unary {
+    if apply_unary_limits {
         end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
         end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
     }
