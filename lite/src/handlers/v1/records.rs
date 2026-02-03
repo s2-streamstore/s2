@@ -18,9 +18,9 @@ use s2_common::{
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
     types::{
+        ValidationError,
         basin::BasinName,
         stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
-        ValidationError,
     },
 };
 
@@ -227,16 +227,19 @@ pub async fn read(
             let start: ReadStart = start.try_into()?;
             let end: ReadEnd = end.into();
             validate_read_until(start, end)?;
-            let s2s_stream = backend
-                .read(basin, stream, start, end)
-                .await?
-                .map_ok(|msg| match msg {
-                    ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
-                        records: vec![],
-                        tail: Some(tail.into()),
-                    },
-                    ReadSessionOutput::Batch(batch) => v1t::stream::proto::ReadBatch::from(batch),
-                });
+            let s2s_stream =
+                backend
+                    .read(basin, stream, start, end)
+                    .await?
+                    .map_ok(|msg| match msg {
+                        ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
+                            records: vec![],
+                            tail: Some(tail.into()),
+                        },
+                        ReadSessionOutput::Batch(batch) => {
+                            v1t::stream::proto::ReadBatch::from(batch)
+                        }
+                    });
             let response_stream = s2s::FramedMessageStream::<_>::new(
                 response_compression,
                 Box::pin(s2s_stream.map_err(ServiceError::from)),
