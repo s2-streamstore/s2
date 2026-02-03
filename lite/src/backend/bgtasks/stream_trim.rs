@@ -15,6 +15,7 @@ use crate::backend::{Backend, error::StorageError, kv, stream_id::StreamId};
 
 const PENDING_LIST_LIMIT: usize = 128;
 const CONCURRENCY: usize = 4;
+const DELETE_BATCH_SIZE: usize = 10_000;
 
 impl Backend {
     pub(crate) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
@@ -108,7 +109,7 @@ impl Backend {
             batch.delete(kv.key);
             batch.delete(kv::stream_record_data::ser_key(stream_id, pos));
             batch_size += 1;
-            if batch_size >= 10_000 {
+            if batch_size >= DELETE_BATCH_SIZE {
                 static WRITE_OPTS: WriteOptions = WriteOptions {
                     await_durable: true,
                 };
@@ -173,6 +174,7 @@ mod tests {
         record::{FencingToken, Metered, Record, SeqNum, StreamPosition},
         types::{basin::BasinName, config::OptionalStreamConfig, stream::StreamName},
     };
+    use slatedb::{WriteBatch, config::WriteOptions};
     use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
@@ -416,5 +418,315 @@ mod tests {
             .expect("trim point should remain");
         let decoded = kv::stream_trim_point::deser_value(current).unwrap();
         assert_eq!(decoded, ..10);
+    }
+
+    #[tokio::test]
+    async fn stream_trim_paginates_pending_list() {
+        let backend = test_backend().await;
+        let total = super::PENDING_LIST_LIMIT + 1;
+
+        let mut batch = WriteBatch::new();
+        for idx in 0..total {
+            let mut stream_id_bytes = [0u8; StreamId::LEN];
+            stream_id_bytes[0] = idx as u8;
+            let stream_id: StreamId = stream_id_bytes.into();
+            batch.put(
+                kv::stream_trim_point::ser_key(stream_id),
+                kv::stream_trim_point::ser_value(..SeqNum::MIN),
+            );
+        }
+        static WRITE_OPTS: WriteOptions = WriteOptions {
+            await_durable: true,
+        };
+        backend
+            .db
+            .write_with_options(batch, &WRITE_OPTS)
+            .await
+            .unwrap();
+
+        let has_more = backend.clone().tick_stream_trim().await.unwrap();
+        assert!(has_more);
+
+        let has_more = backend.clone().tick_stream_trim().await.unwrap();
+        assert!(!has_more);
+
+        for idx in 0..total {
+            let mut stream_id_bytes = [0u8; StreamId::LEN];
+            stream_id_bytes[0] = idx as u8;
+            let stream_id: StreamId = stream_id_bytes.into();
+            let remaining = backend
+                .db
+                .get(kv::stream_trim_point::ser_key(stream_id))
+                .await
+                .unwrap();
+            assert!(remaining.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_trim_end_min_keeps_records() {
+        let backend = test_backend().await;
+        let stream_id: StreamId = [7u8; StreamId::LEN].into();
+        let metered = test_record();
+        let pos = StreamPosition {
+            seq_num: SeqNum::MIN,
+            timestamp: 5000,
+        };
+
+        backend
+            .db
+            .put(
+                kv::stream_record_data::ser_key(stream_id, pos),
+                kv::stream_record_data::ser_value(metered.as_ref()),
+            )
+            .await
+            .unwrap();
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(stream_id, pos),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .await
+            .unwrap();
+        backend
+            .db
+            .put(
+                kv::stream_trim_point::ser_key(stream_id),
+                kv::stream_trim_point::ser_value(..SeqNum::MIN),
+            )
+            .await
+            .unwrap();
+
+        backend.clone().tick_stream_trim().await.unwrap();
+
+        let data = backend
+            .db
+            .get(kv::stream_record_data::ser_key(stream_id, pos))
+            .await
+            .unwrap();
+        let timestamp = backend
+            .db
+            .get(kv::stream_record_timestamp::ser_key(stream_id, pos))
+            .await
+            .unwrap();
+        assert!(data.is_some());
+        assert!(timestamp.is_some());
+
+        let trim_point = backend
+            .db
+            .get(kv::stream_trim_point::ser_key(stream_id))
+            .await
+            .unwrap();
+        assert!(trim_point.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_trim_does_not_touch_other_streams() {
+        let backend = test_backend().await;
+        let stream_id_a: StreamId = [1u8; StreamId::LEN].into();
+        let stream_id_b: StreamId = [2u8; StreamId::LEN].into();
+        let metered = test_record();
+
+        for seq in 0..4 {
+            let pos_a = StreamPosition {
+                seq_num: seq,
+                timestamp: 1000 + seq,
+            };
+            backend
+                .db
+                .put(
+                    kv::stream_record_data::ser_key(stream_id_a, pos_a),
+                    kv::stream_record_data::ser_value(metered.as_ref()),
+                )
+                .await
+                .unwrap();
+            backend
+                .db
+                .put(
+                    kv::stream_record_timestamp::ser_key(stream_id_a, pos_a),
+                    kv::stream_record_timestamp::ser_value(),
+                )
+                .await
+                .unwrap();
+
+            let pos_b = StreamPosition {
+                seq_num: seq,
+                timestamp: 2000 + seq,
+            };
+            backend
+                .db
+                .put(
+                    kv::stream_record_data::ser_key(stream_id_b, pos_b),
+                    kv::stream_record_data::ser_value(metered.as_ref()),
+                )
+                .await
+                .unwrap();
+            backend
+                .db
+                .put(
+                    kv::stream_record_timestamp::ser_key(stream_id_b, pos_b),
+                    kv::stream_record_timestamp::ser_value(),
+                )
+                .await
+                .unwrap();
+        }
+
+        backend
+            .db
+            .put(
+                kv::stream_trim_point::ser_key(stream_id_a),
+                kv::stream_trim_point::ser_value(..2),
+            )
+            .await
+            .unwrap();
+
+        backend.clone().tick_stream_trim().await.unwrap();
+
+        for seq in 0..4 {
+            let pos_a = StreamPosition {
+                seq_num: seq,
+                timestamp: 1000 + seq,
+            };
+            let data_a = backend
+                .db
+                .get(kv::stream_record_data::ser_key(stream_id_a, pos_a))
+                .await
+                .unwrap();
+            let timestamp_a = backend
+                .db
+                .get(kv::stream_record_timestamp::ser_key(stream_id_a, pos_a))
+                .await
+                .unwrap();
+            if seq < 2 {
+                assert!(data_a.is_none());
+                assert!(timestamp_a.is_none());
+            } else {
+                assert!(data_a.is_some());
+                assert!(timestamp_a.is_some());
+            }
+
+            let pos_b = StreamPosition {
+                seq_num: seq,
+                timestamp: 2000 + seq,
+            };
+            let data_b = backend
+                .db
+                .get(kv::stream_record_data::ser_key(stream_id_b, pos_b))
+                .await
+                .unwrap();
+            let timestamp_b = backend
+                .db
+                .get(kv::stream_record_timestamp::ser_key(stream_id_b, pos_b))
+                .await
+                .unwrap();
+            assert!(data_b.is_some());
+            assert!(timestamp_b.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_trim_large_batch_flushes() {
+        let backend = test_backend().await;
+        let stream_id: StreamId = [3u8; StreamId::LEN].into();
+        let metered = test_record();
+        let total: SeqNum = (super::DELETE_BATCH_SIZE as SeqNum) + 5;
+
+        let mut batch = WriteBatch::new();
+        for seq in 0..total {
+            let pos = StreamPosition {
+                seq_num: seq,
+                timestamp: 4000 + seq,
+            };
+            batch.put(
+                kv::stream_record_data::ser_key(stream_id, pos),
+                kv::stream_record_data::ser_value(metered.as_ref()),
+            );
+            batch.put(
+                kv::stream_record_timestamp::ser_key(stream_id, pos),
+                kv::stream_record_timestamp::ser_value(),
+            );
+        }
+
+        batch.put(
+            kv::stream_trim_point::ser_key(stream_id),
+            kv::stream_trim_point::ser_value(..total),
+        );
+        static WRITE_OPTS: WriteOptions = WriteOptions {
+            await_durable: true,
+        };
+        backend
+            .db
+            .write_with_options(batch, &WRITE_OPTS)
+            .await
+            .unwrap();
+
+        backend.clone().tick_stream_trim().await.unwrap();
+
+        let samples: [SeqNum; 3] = [0, 9_999, total - 1];
+        for seq in samples {
+            let pos = StreamPosition {
+                seq_num: seq,
+                timestamp: 4000 + seq,
+            };
+            let data = backend
+                .db
+                .get(kv::stream_record_data::ser_key(stream_id, pos))
+                .await
+                .unwrap();
+            let timestamp = backend
+                .db
+                .get(kv::stream_record_timestamp::ser_key(stream_id, pos))
+                .await
+                .unwrap();
+            assert!(data.is_none());
+            assert!(timestamp.is_none());
+        }
+
+        let trim_point = backend
+            .db
+            .get(kv::stream_trim_point::ser_key(stream_id))
+            .await
+            .unwrap();
+        assert!(trim_point.is_none());
+    }
+
+    #[tokio::test]
+    async fn finalize_trim_no_trim_point_noop() {
+        let backend = test_backend().await;
+        let stream_id: StreamId = [4u8; StreamId::LEN].into();
+
+        backend.finalize_trim(stream_id, ..5).await.unwrap();
+
+        let trim_point = backend
+            .db
+            .get(kv::stream_trim_point::ser_key(stream_id))
+            .await
+            .unwrap();
+        assert!(trim_point.is_none());
+    }
+
+    #[tokio::test]
+    async fn finalize_trim_clears_matching_trim_point() {
+        let backend = test_backend().await;
+        let stream_id: StreamId = [5u8; StreamId::LEN].into();
+
+        backend
+            .db
+            .put(
+                kv::stream_trim_point::ser_key(stream_id),
+                kv::stream_trim_point::ser_value(..5),
+            )
+            .await
+            .unwrap();
+
+        backend.finalize_trim(stream_id, ..5).await.unwrap();
+
+        let trim_point = backend
+            .db
+            .get(kv::stream_trim_point::ser_key(stream_id))
+            .await
+            .unwrap();
+        assert!(trim_point.is_none());
     }
 }
