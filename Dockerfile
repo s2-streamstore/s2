@@ -37,6 +37,9 @@ ENTRYPOINT ["./s2"]
 # Production runtime (default) - minimal distroless image running as non-root (UID 65532)
 FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
+LABEL org.opencontainers.image.source="https://github.com/s2-streamstore/s2"
+LABEL org.opencontainers.image.documentation="https://github.com/s2-streamstore/s2/releases"
+
 WORKDIR /app
 
 COPY --from=builder /output/s2 /app/s2
