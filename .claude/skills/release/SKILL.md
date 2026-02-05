@@ -1,15 +1,19 @@
 ---
 name: release
-description: Release a new version of the project
+description: Release new versions of changed packages
 ---
 
 # /release
 
-Release a new version of the project.
+Release new versions of changed packages.
 
 ## How releases work
 
 This project uses [release-plz](https://release-plz.dev/) for automated releases. Version is determined by conventional commits (`fix:` → patch, `feat:` → minor, `feat!:` → major).
+
+Each package has its own version and changelog. release-plz opens a PR only for packages with changes since their last release. `s2-cli` and `s2-lite` are in the same `version_group` (released together). `s2-api` and `s2-common` are library packages for internal use (published to crates.io but no GitHub releases).
+
+Tags are per-package: `s2-cli-v{version}`, `s2-lite-v{version}`, `s2-api-v{version}`, `s2-common-v{version}`.
 
 ## Usage
 
@@ -24,19 +28,25 @@ This project uses [release-plz](https://release-plz.dev/) for automated releases
    gh pr list --label release --state open
    ```
 
-2. **Get commits since last release**
-   ```bash
-   git fetch --tags
-   git log $(git describe --tags --abbrev=0)..HEAD --oneline
-   ```
-
-3. **Verify changelog reflects all commits**
-   - Fetch the PR diff to see the changelog updates:
+2. **Identify which packages are being released**
+   - Check which `Cargo.toml` files are modified in the PR:
      ```bash
-     gh pr diff <PR_NUMBER> -- CHANGELOG.md
+     gh pr diff <PR_NUMBER> --name-only
      ```
-   - Compare with the commit list from step 2
-   - Flag any missing commits that should be in the changelog
+   - Look for version bumps in `cli/Cargo.toml`, `lite/Cargo.toml`, `api/Cargo.toml`, `common/Cargo.toml`
+
+3. **For each package being released, verify its changelog**
+   - Get the PR diff and review the changelog sections:
+     ```bash
+     gh pr diff <PR_NUMBER>
+     ```
+   - Get commits since that package's last tag:
+     ```bash
+     git fetch --tags
+     # Example for s2-cli (substitute the package name as needed):
+     git log $(git tag -l 's2-cli-v*' --sort=-v:refname | head -1)..origin/main --oneline
+     ```
+   - Compare the changelog entries with the commit list
    - Conventional commits (`feat:`, `fix:`, `docs:`, etc.) should be included
    - Commits prefixed with `chore:` may be excluded (expected)
 
@@ -47,10 +57,10 @@ This project uses [release-plz](https://release-plz.dev/) for automated releases
      ```
    - Or manually note the missing items for the user
 
-5. **Dry run before merging**
+5. **Dry run before merging** (only for packages being released)
    ```bash
-   cargo publish -p s2-cli --dry-run
-   cargo publish -p s2-lite --dry-run
+   # Run only for packages with version bumps in the PR, e.g.:
+   cargo publish -p <package-name> --dry-run
    ```
 
 6. **If changelog is correct**: Merge the PR
@@ -67,5 +77,7 @@ Wait for the PR to be created, then verify and merge.
 
 ## Notes
 
-- Check workflow status: `gh run list --workflow=release.yml`
-- To override version: edit `Cargo.toml` in the PR before merging
+- Check workflow status: `gh run list --workflow=release-plz.yml`
+- After merge, `release-crates.yml` publishes to crates.io and creates per-package git tags
+- Tags like `s2-cli-v*` or `s2-lite-v*` trigger `release-cli.yml` (builds binaries, Docker images, updates Homebrew)
+- To override version: edit the relevant package's `Cargo.toml` in the PR before merging
