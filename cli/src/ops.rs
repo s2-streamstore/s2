@@ -109,11 +109,7 @@ pub async fn reconfigure_basin(
     args: ReconfigureBasinArgs,
 ) -> Result<BasinConfig, CliError> {
     let mut reconfig = BasinReconfiguration::new();
-    if args.default_stream_config.storage_class.is_some()
-        || args.default_stream_config.retention_policy.is_some()
-        || args.default_stream_config.timestamping.is_some()
-        || args.default_stream_config.delete_on_empty.is_some()
-    {
+    if !args.default_stream_config.is_empty() {
         reconfig = reconfig.with_default_stream_config(args.default_stream_config.into());
     }
     if let Some(val) = args.create_stream_on_append {
