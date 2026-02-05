@@ -37,7 +37,7 @@ rand = { workspace = true }
 ratatui = "0.29"
 rcgen = { workspace = true }
 s2-lite = { workspace = true }
-s2-sdk = { workspace = true, features = ["_hidden"] }
+s2-sdk = { version = "0.23", features = ["_hidden"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 slatedb = { workspace = true }

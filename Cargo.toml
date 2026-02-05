@@ -51,7 +51,6 @@ rstest = "0.26"
 s2-api = { path = "api" }
 s2-common = { path = "common" }
 s2-lite = { path = "lite" }
-s2-sdk = "0.23"
 serde = "1.0"
 serde_json = "1.0"
 slatedb = "0.10"
