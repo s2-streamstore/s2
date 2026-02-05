@@ -51,11 +51,21 @@ Tags are per-package: `s2-cli-v{version}`, `s2-lite-v{version}`, `s2-api-v{versi
    - Commits prefixed with `chore:` may be excluded (expected)
 
 4. **If discrepancies found**
-   - The release-plz action may not have run, trigger it:
+   - First, check if `release-crates` is still running from a prior release. `release-plz` triggers on pushes to main, while `release-crates` triggers when a PR with the `release` label is merged. If a previous release PR was just merged, `release-crates` may still be running and hasn't created tags yet. If `release-plz` runs before those tags exist, the PR will have stale changelogs with duplicate entries from the previous release.
+     ```bash
+     gh run list --workflow=release-crates.yml --limit 1
+     ```
+   - If a run is in progress, wait for it to complete so tags are up to date:
+     ```bash
+     gh run watch <RUN_ID> --exit-status
+     ```
+   - Then re-trigger release-plz and wait:
      ```bash
      gh workflow run release-plz.yml
+     gh run list --workflow=release-plz.yml --limit 1
+     gh run watch <RUN_ID> --exit-status
      ```
-   - Or manually note the missing items for the user
+   - Re-verify the changelog from step 3 before proceeding.
 
 5. **Dry run before merging** (only for packages being released)
    ```bash
