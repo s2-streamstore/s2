@@ -4291,7 +4291,7 @@ dependencies = [
 
 [[package]]
 name = "s2-cli"
-version = "0.27.3"
+version = "0.27.4"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -4384,7 +4384,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.27.3"
+version = "0.27.4"
 dependencies = [
  "async-stream",
  "async-trait",
