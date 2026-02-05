@@ -489,10 +489,14 @@ async fn run() -> Result<(), CliError> {
                         match record {
                             Some(Ok(record)) => {
                                 write_record(&record, &mut writer, args.format).await?;
-                                writer
-                                    .write_all(b"\n")
-                                    .await
-                                    .map_err(|e| CliError::RecordWrite(e.to_string()))?;
+                                let skip_newline = matches!(args.format, RecordFormat::Text)
+                                    && record.is_command_record();
+                                if !skip_newline {
+                                    writer
+                                        .write_all(b"\n")
+                                        .await
+                                        .map_err(|e| CliError::RecordWrite(e.to_string()))?;
+                                }
                                 writer
                                     .flush()
                                     .await
