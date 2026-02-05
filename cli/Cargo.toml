@@ -36,6 +36,7 @@ mimalloc = { workspace = true }
 rand = { workspace = true }
 ratatui = "0.29"
 rcgen = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-lite = { workspace = true }
 s2-sdk = { version = "0.23", features = ["_hidden"] }
 serde = { workspace = true, features = ["derive"] }

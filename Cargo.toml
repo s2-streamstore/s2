@@ -47,6 +47,7 @@ prost-build = "0.14"
 rand = "0.9"
 rcgen = "0.14"
 rkyv = "0.8"
+rustls = "0.23"
 rstest = "0.26"
 s2-api = { path = "api", version = "0.27" }
 s2-common = { path = "common", version = "0.27" }

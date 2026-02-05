@@ -43,6 +43,7 @@ prometheus = { workspace = true, features = ["process"] }
 prost = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true, features = ["axum"] }
 s2-common = { workspace = true, features = ["clap"] }
 serde = { workspace = true, features = ["derive"] }
