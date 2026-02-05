@@ -51,7 +51,7 @@ Tags are per-package: `s2-cli-v{version}`, `s2-lite-v{version}`, `s2-api-v{versi
    - Commits prefixed with `chore:` may be excluded (expected)
 
 4. **If discrepancies found**
-   - First, check if `release-crates` is still running from a prior release. Both `release-plz` and `release-crates` trigger on pushes to main; if `release-plz` ran before `release-crates` created tags, the PR will have stale changelogs with duplicate entries from the previous release.
+   - First, check if `release-crates` is still running from a prior release. `release-plz` triggers on pushes to main, while `release-crates` triggers when a PR with the `release` label is merged. If a previous release PR was just merged, `release-crates` may still be running and hasn't created tags yet. If `release-plz` runs before those tags exist, the PR will have stale changelogs with duplicate entries from the previous release.
      ```bash
      gh run list --workflow=release-crates.yml --limit 1
      ```
