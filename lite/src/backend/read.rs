@@ -4,7 +4,7 @@ use futures::Stream;
 use s2_common::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize as _, SeqNum, SequencedRecord, StreamPosition},
+    record::{Metered, MeteredSize as _, SeqNum, SequencedRecord, StreamPosition, Timestamp},
     types::{
         basin::BasinName,
         stream::{ReadBatch, ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
@@ -15,7 +15,9 @@ use tokio::sync::broadcast;
 
 use super::Backend;
 use crate::backend::{
-    error::{CheckTailError, ReadError, StreamerMissingInActionError, UnwrittenError},
+    error::{
+        CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
+    },
     kv,
     stream_id::StreamId,
 };
@@ -230,6 +232,51 @@ impl Backend {
         };
         Ok(session)
     }
+
+    pub(super) async fn resolve_timestamp(
+        &self,
+        stream_id: StreamId,
+        timestamp: Timestamp,
+    ) -> Result<Option<StreamPosition>, StorageError> {
+        let start_key = kv::stream_record_timestamp::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: SeqNum::MIN,
+                timestamp,
+            },
+        );
+        let end_key = kv::stream_record_timestamp::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: SeqNum::MAX,
+                timestamp: Timestamp::MAX,
+            },
+        );
+        static SCAN_OPTS: ScanOptions = ScanOptions {
+            durability_filter: DurabilityLevel::Remote,
+            dirty: false,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
+            max_fetch_tasks: 1,
+        };
+        let mut it = self
+            .db
+            .scan_with_options(start_key..end_key, &SCAN_OPTS)
+            .await?;
+        Ok(match it.next().await? {
+            Some(kv) => {
+                let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
+                assert_eq!(deser_stream_id, stream_id);
+                assert!(pos.timestamp >= timestamp);
+                kv::stream_record_timestamp::deser_value(kv.value)?;
+                Some(StreamPosition {
+                    seq_num: pos.seq_num,
+                    timestamp: pos.timestamp,
+                })
+            }
+            None => None,
+        })
+    }
 }
 
 struct ReadSessionState {
@@ -287,5 +334,68 @@ async fn wait_sleep(wait: Option<Duration>) {
         None => {
             std::future::pending::<()>().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytesize::ByteSize;
+    use slatedb::{Db, object_store::memory::InMemory};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn resolve_timestamp_bounded_to_stream() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let stream_a: StreamId = [0u8; 32].into();
+        let stream_b: StreamId = [1u8; 32].into();
+
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(
+                    stream_a,
+                    StreamPosition {
+                        seq_num: 0,
+                        timestamp: 1000,
+                    },
+                ),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .await
+            .unwrap();
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(
+                    stream_b,
+                    StreamPosition {
+                        seq_num: 0,
+                        timestamp: 2000,
+                    },
+                ),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .await
+            .unwrap();
+
+        // Should find record in stream_a
+        let result = backend.resolve_timestamp(stream_a, 500).await.unwrap();
+        assert_eq!(
+            result,
+            Some(StreamPosition {
+                seq_num: 0,
+                timestamp: 1000
+            })
+        );
+
+        // Should return None, not find stream_b's record
+        let result = backend.resolve_timestamp(stream_a, 1500).await.unwrap();
+        assert_eq!(result, None);
     }
 }

@@ -4,7 +4,7 @@ use bytesize::ByteSize;
 use dashmap::DashMap;
 use enum_ordinalize::Ordinalize;
 use s2_common::{
-    record::{SeqNum, StreamPosition},
+    record::{NonZeroSeqNum, SeqNum, StreamPosition},
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
@@ -86,14 +86,13 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let tail_pos = tail_pos.unwrap_or(StreamPosition::MIN);
+        let tail_pos = tail_pos.map(|(pos, _)| pos).unwrap_or(StreamPosition::MIN);
         self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
             .await?;
 
         let fencing_token = fencing_token.unwrap_or_default();
-        let trim_point = trim_point.unwrap_or(..SeqNum::MIN);
 
-        if trim_point.end == SeqNum::MAX {
+        if trim_point == Some(..NonZeroSeqNum::MAX) {
             return Err(StreamDeletionPendingError { basin, stream }.into());
         }
 
@@ -104,7 +103,7 @@ impl Backend {
             config: meta.config,
             tail_pos,
             fencing_token,
-            trim_point,
+            trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
             append_inflight_max: self.append_inflight_max,
             bgtask_trigger_tx: self.bgtask_trigger_tx.clone(),
         }
@@ -330,7 +329,10 @@ mod tests {
         );
         wb.put(
             kv::stream_tail_position::ser_key(stream_id),
-            kv::stream_tail_position::ser_value(tail_pos),
+            kv::stream_tail_position::ser_value(
+                tail_pos,
+                kv::timestamp::TimestampSecs::from_secs(1),
+            ),
         );
         wb.put(
             kv::stream_record_data::ser_key(stream_id, record_pos),

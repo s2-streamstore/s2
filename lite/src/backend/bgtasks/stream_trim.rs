@@ -3,7 +3,7 @@ use std::ops::RangeTo;
 use enum_ordinalize::Ordinalize;
 use futures::{StreamExt, stream};
 use s2_common::{
-    record::{SeqNum, StreamPosition, Timestamp},
+    record::{NonZeroSeqNum, SeqNum, StreamPosition, Timestamp},
     types::resources::Page,
 };
 use slatedb::{
@@ -12,14 +12,14 @@ use slatedb::{
 };
 use tracing::instrument;
 
-use crate::backend::{Backend, error::StorageError, kv, stream_id::StreamId};
+use crate::backend::{Backend, error::StorageError, kv, store::db_txn_get, stream_id::StreamId};
 
 const PENDING_LIST_LIMIT: usize = 128;
 const CONCURRENCY: usize = 4;
 const DELETE_BATCH_SIZE: usize = 10_000;
 
 impl Backend {
-    pub(crate) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
+    pub(super) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
         let page = self.list_stream_trim_pending().await?;
         if page.values.is_empty() {
             return Ok(page.has_more);
@@ -38,7 +38,7 @@ impl Backend {
 
     async fn list_stream_trim_pending(
         &self,
-    ) -> Result<Page<(StreamId, RangeTo<SeqNum>)>, StorageError> {
+    ) -> Result<Page<(StreamId, RangeTo<NonZeroSeqNum>)>, StorageError> {
         static SCAN_OPTS: ScanOptions = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             dirty: false,
@@ -65,10 +65,11 @@ impl Backend {
     async fn process_trim(
         &self,
         stream_id: StreamId,
-        trim_point: RangeTo<SeqNum>,
+        trim_point: RangeTo<NonZeroSeqNum>,
     ) -> Result<(), StorageError> {
-        if trim_point.end > SeqNum::MIN {
-            self.delete_records(stream_id, trim_point).await?;
+        let has_remaining_records = self.delete_records(stream_id, trim_point).await?;
+        if trim_point.end < NonZeroSeqNum::MAX && !has_remaining_records {
+            self.arm_doe_maybe(stream_id).await?;
         }
         self.finalize_trim(stream_id, trim_point).await?;
         Ok(())
@@ -78,8 +79,8 @@ impl Backend {
     async fn delete_records(
         &self,
         stream_id: StreamId,
-        trim_point: RangeTo<SeqNum>,
-    ) -> Result<(), StorageError> {
+        trim_point: RangeTo<NonZeroSeqNum>,
+    ) -> Result<bool, StorageError> {
         let start_key = kv::stream_record_timestamp::ser_key(
             stream_id,
             StreamPosition {
@@ -97,6 +98,7 @@ impl Backend {
         let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
+        let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
             if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp.ordinal()) {
                 break;
@@ -105,7 +107,8 @@ impl Backend {
             if deser_stream_id != stream_id {
                 break;
             }
-            if pos.seq_num >= trim_point.end {
+            if pos.seq_num >= trim_point.end.get() {
+                has_remaining_records = true;
                 break;
             }
             batch.delete(kv.key);
@@ -126,20 +129,28 @@ impl Backend {
             };
             self.db.write_with_options(batch, &WRITE_OPTS).await?;
         }
-        Ok(())
+        Ok(has_remaining_records)
     }
 
     #[instrument(ret, err, skip(self))]
     async fn finalize_trim(
         &self,
         stream_id: StreamId,
-        trim_point: RangeTo<SeqNum>,
+        trim_point: RangeTo<NonZeroSeqNum>,
     ) -> Result<(), StorageError> {
         let trim_point_key = kv::stream_trim_point::ser_key(stream_id);
-        if trim_point.end < SeqNum::MAX {
-            let Some(current_trim_point) = self
-                .db_get(trim_point_key.clone(), kv::stream_trim_point::deser_value)
-                .await?
+        let txn = self
+            .db
+            .begin(slatedb::IsolationLevel::SerializableSnapshot)
+            .await?;
+        let is_full_delete = trim_point == ..NonZeroSeqNum::MAX;
+        if !is_full_delete {
+            let Some(current_trim_point) = db_txn_get(
+                &txn,
+                trim_point_key.clone(),
+                kv::stream_trim_point::deser_value,
+            )
+            .await?
             else {
                 return Ok(());
             };
@@ -147,34 +158,33 @@ impl Backend {
                 return Ok(());
             }
         }
-        let mut batch = WriteBatch::new();
-        batch.delete(trim_point_key);
-        if trim_point.end == SeqNum::MAX {
+        txn.delete(trim_point_key)?;
+        if is_full_delete {
             let id_mapping_key = kv::stream_id_mapping::ser_key(stream_id);
-            let (basin, stream) = self
-                .db_get(&id_mapping_key, kv::stream_id_mapping::deser_value)
-                .await?
-                .expect("invariant violation: missing stream ID mapping");
-            batch.delete(kv::stream_meta::ser_key(&basin, &stream));
-            batch.delete(id_mapping_key);
-            batch.delete(kv::stream_tail_position::ser_key(stream_id));
-            batch.delete(kv::stream_fencing_token::ser_key(stream_id));
+            let (basin, stream) =
+                db_txn_get(&txn, &id_mapping_key, kv::stream_id_mapping::deser_value)
+                    .await?
+                    .expect("invariant violation: missing stream ID mapping");
+            txn.delete(kv::stream_meta::ser_key(&basin, &stream))?;
+            txn.delete(id_mapping_key)?;
+            txn.delete(kv::stream_tail_position::ser_key(stream_id))?;
+            txn.delete(kv::stream_fencing_token::ser_key(stream_id))?;
         }
         static WRITE_OPTS: WriteOptions = WriteOptions {
             await_durable: true,
         };
-        self.db.write_with_options(batch, &WRITE_OPTS).await?;
+        txn.commit_with_options(&WRITE_OPTS).await?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{ops::RangeTo, str::FromStr};
 
     use bytes::Bytes;
     use s2_common::{
-        record::{FencingToken, Metered, Record, SeqNum, StreamPosition},
+        record::{FencingToken, Metered, NonZeroSeqNum, Record, SeqNum, StreamPosition},
         types::{basin::BasinName, config::OptionalStreamConfig, stream::StreamName},
     };
     use slatedb::{WriteBatch, config::WriteOptions};
@@ -186,6 +196,10 @@ mod tests {
     fn test_record() -> Metered<Record> {
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"trim-test")).unwrap();
         record.into()
+    }
+
+    fn trim_point(seq_num: SeqNum) -> RangeTo<NonZeroSeqNum> {
+        ..NonZeroSeqNum::new(seq_num).expect("trim point must be non-zero")
     }
 
     #[tokio::test]
@@ -221,7 +235,7 @@ mod tests {
             .db
             .put(
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::ser_value(..3),
+                kv::stream_trim_point::ser_value(trim_point(3)),
             )
             .await
             .unwrap();
@@ -295,10 +309,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition {
-                    seq_num: 10,
-                    timestamp: 1234,
-                }),
+                kv::stream_tail_position::ser_value(
+                    StreamPosition {
+                        seq_num: 10,
+                        timestamp: 1234,
+                    },
+                    kv::timestamp::TimestampSecs::from_secs(10),
+                ),
             )
             .await
             .unwrap();
@@ -339,7 +356,7 @@ mod tests {
             .db
             .put(
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::ser_value(..SeqNum::MAX),
+                kv::stream_trim_point::ser_value(trim_point(SeqNum::MAX)),
             )
             .await
             .unwrap();
@@ -406,12 +423,15 @@ mod tests {
             .db
             .put(
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::ser_value(..10),
+                kv::stream_trim_point::ser_value(trim_point(10)),
             )
             .await
             .unwrap();
 
-        backend.finalize_trim(stream_id, ..5).await.unwrap();
+        backend
+            .finalize_trim(stream_id, trim_point(5))
+            .await
+            .unwrap();
 
         let current = backend
             .db
@@ -420,7 +440,7 @@ mod tests {
             .unwrap()
             .expect("trim point should remain");
         let decoded = kv::stream_trim_point::deser_value(current).unwrap();
-        assert_eq!(decoded, ..10);
+        assert_eq!(decoded, trim_point(10));
     }
 
     #[tokio::test]
@@ -435,7 +455,7 @@ mod tests {
             let stream_id: StreamId = stream_id_bytes.into();
             batch.put(
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::ser_value(..SeqNum::MIN),
+                kv::stream_trim_point::ser_value(trim_point(1)),
             );
         }
         static WRITE_OPTS: WriteOptions = WriteOptions {
@@ -467,7 +487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_trim_end_min_keeps_records() {
+    async fn stream_trim_end_one_deletes_first_record() {
         let backend = test_backend().await;
         let stream_id: StreamId = [7u8; StreamId::LEN].into();
         let metered = test_record();
@@ -496,7 +516,7 @@ mod tests {
             .db
             .put(
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::ser_value(..SeqNum::MIN),
+                kv::stream_trim_point::ser_value(trim_point(1)),
             )
             .await
             .unwrap();
@@ -513,8 +533,8 @@ mod tests {
             .get(kv::stream_record_timestamp::ser_key(stream_id, pos))
             .await
             .unwrap();
-        assert!(data.is_some());
-        assert!(timestamp.is_some());
+        assert!(data.is_none());
+        assert!(timestamp.is_none());
 
         let trim_point = backend
             .db
@@ -579,7 +599,7 @@ mod tests {
             .db
             .put(
                 kv::stream_trim_point::ser_key(stream_id_a),
-                kv::stream_trim_point::ser_value(..2),
+                kv::stream_trim_point::ser_value(trim_point(2)),
             )
             .await
             .unwrap();
@@ -653,7 +673,7 @@ mod tests {
 
         batch.put(
             kv::stream_trim_point::ser_key(stream_id),
-            kv::stream_trim_point::ser_value(..total),
+            kv::stream_trim_point::ser_value(trim_point(total)),
         );
         static WRITE_OPTS: WriteOptions = WriteOptions {
             await_durable: true,
@@ -699,7 +719,10 @@ mod tests {
         let backend = test_backend().await;
         let stream_id: StreamId = [4u8; StreamId::LEN].into();
 
-        backend.finalize_trim(stream_id, ..5).await.unwrap();
+        backend
+            .finalize_trim(stream_id, trim_point(5))
+            .await
+            .unwrap();
 
         let trim_point = backend
             .db
@@ -718,12 +741,15 @@ mod tests {
             .db
             .put(
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::ser_value(..5),
+                kv::stream_trim_point::ser_value(trim_point(5)),
             )
             .await
             .unwrap();
 
-        backend.finalize_trim(stream_id, ..5).await.unwrap();
+        backend
+            .finalize_trim(stream_id, trim_point(5))
+            .await
+            .unwrap();
 
         let trim_point = backend
             .db

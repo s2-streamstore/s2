@@ -20,7 +20,7 @@ const PENDING_LIST_LIMIT: usize = 32;
 const CONCURRENCY: usize = 4;
 
 impl Backend {
-    pub(crate) async fn tick_basin_deletion(self) -> Result<bool, BasinDeletionError> {
+    pub(super) async fn tick_basin_deletion(self) -> Result<bool, BasinDeletionError> {
         let page = self.list_basin_deletion_pending().await?;
         if page.values.is_empty() {
             return Ok(page.has_more);

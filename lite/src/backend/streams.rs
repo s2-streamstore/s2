@@ -1,5 +1,6 @@
 use s2_common::{
     bash::Bash,
+    record::StreamPosition,
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
@@ -18,8 +19,8 @@ use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
 use crate::backend::{
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
-        GetStreamConfigError, ListStreamsError, ReconfigureStreamError, StreamAlreadyExistsError,
-        StreamDeletionPendingError, StreamNotFoundError, StreamerError,
+        GetStreamConfigError, ListStreamsError, ReconfigureStreamError, StorageError,
+        StreamAlreadyExistsError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
     },
     kv,
     stream_id::StreamId,
@@ -105,6 +106,7 @@ impl Backend {
         };
 
         let mut existing_created_at = None;
+        let mut prior_doe_min_age = None;
 
         if let Some(existing_meta) =
             db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?
@@ -114,6 +116,11 @@ impl Backend {
                     StreamDeletionPendingError { basin, stream },
                 ));
             }
+            prior_doe_min_age = existing_meta
+                .config
+                .delete_on_empty
+                .min_age
+                .filter(|age| !age.is_zero());
             match mode {
                 CreateMode::CreateOnly(_) => {
                     return if creation_idempotency_key.is_some()
@@ -145,10 +152,41 @@ impl Backend {
         };
 
         txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
+        let stream_id = StreamId::new(&basin, &stream);
         if existing_created_at.is_none() {
             txn.put(
-                kv::stream_id_mapping::ser_key(StreamId::new(&basin, &stream)),
+                kv::stream_id_mapping::ser_key(stream_id),
                 kv::stream_id_mapping::ser_value(&basin, &stream),
+            )?;
+            let created_secs = created_at.unix_timestamp();
+            let created_secs = if created_secs <= 0 {
+                0
+            } else if created_secs >= i64::from(u32::MAX) {
+                u32::MAX
+            } else {
+                created_secs as u32
+            };
+            txn.put(
+                kv::stream_tail_position::ser_key(stream_id),
+                kv::stream_tail_position::ser_value(
+                    StreamPosition::MIN,
+                    kv::timestamp::TimestampSecs::from_secs(created_secs),
+                ),
+            )?;
+        }
+        if let Some(min_age) = meta
+            .config
+            .delete_on_empty
+            .min_age
+            .filter(|age| !age.is_zero())
+            && prior_doe_min_age != Some(min_age)
+        {
+            txn.put(
+                kv::stream_doe_deadline::ser_key(
+                    kv::timestamp::TimestampSecs::after(min_age),
+                    stream_id,
+                ),
+                kv::stream_doe_deadline::ser_value(min_age),
             )?;
         }
 
@@ -174,6 +212,17 @@ impl Backend {
         } else {
             CreatedOrReconfigured::Created(info)
         })
+    }
+
+    pub(super) async fn stream_id_mapping(
+        &self,
+        stream_id: StreamId,
+    ) -> Result<Option<(BasinName, StreamName)>, StorageError> {
+        self.db_get(
+            kv::stream_id_mapping::ser_key(stream_id),
+            kv::stream_id_mapping::deser_value,
+        )
+        .await
     }
 
     pub async fn get_stream_config(
@@ -212,9 +261,32 @@ impl Backend {
             return Err(StreamDeletionPendingError { basin, stream }.into());
         }
 
+        let prior_doe_min_age = meta
+            .config
+            .delete_on_empty
+            .min_age
+            .filter(|age| !age.is_zero());
+
         meta.config = meta.config.reconfigure(reconfig);
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
+
+        let stream_id = StreamId::new(&basin, &stream);
+        if let Some(min_age) = meta
+            .config
+            .delete_on_empty
+            .min_age
+            .filter(|age| !age.is_zero())
+            && prior_doe_min_age != Some(min_age)
+        {
+            txn.put(
+                kv::stream_doe_deadline::ser_key(
+                    kv::timestamp::TimestampSecs::after(min_age),
+                    stream_id,
+                ),
+                kv::stream_doe_deadline::ser_value(min_age),
+            )?;
+        }
 
         static WRITE_OPTS: WriteOptions = WriteOptions {
             await_durable: true,

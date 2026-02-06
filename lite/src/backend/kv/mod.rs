@@ -1,5 +1,6 @@
 pub mod basin_deletion_pending;
 pub mod basin_meta;
+pub mod stream_doe_deadline;
 pub mod stream_fencing_token;
 pub mod stream_id_mapping;
 pub mod stream_meta;
@@ -7,6 +8,7 @@ pub mod stream_record_data;
 pub mod stream_record_timestamp;
 pub mod stream_tail_position;
 pub mod stream_trim_point;
+pub mod timestamp;
 
 use std::ops::Range;
 
@@ -36,10 +38,12 @@ pub enum DeserializationError {
     JsonDeserialization(String),
 }
 
+// IDs persisted so must be kept stable.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ordinalize)]
 pub enum KeyType {
     BasinMeta = 1,
+    BasinDeletionPending = 8,
     StreamMeta = 2,
     StreamIdMapping = 9,
     StreamTailPosition = 3,
@@ -47,7 +51,7 @@ pub enum KeyType {
     StreamTrimPoint = 5,
     StreamRecordData = 6,
     StreamRecordTimestamp = 7,
-    BasinDeletionPending = 8,
+    StreamDeleteOnEmptyDeadline = 10,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,10 @@ pub enum Key {
     /// Key: BasinName
     /// Value: BasinMeta
     BasinMeta(BasinName),
+    /// (BDP) per-basin, deletable, only present while basin deletion pending
+    /// Key: BasinName
+    /// Value: StreamNameStartAfter (cursor for resumable deletion)
+    BasinDeletionPending(BasinName),
     /// (SM) per-stream, updatable
     /// Key: BasinName \0 StreamName
     /// Value: StreamMeta
@@ -66,16 +74,15 @@ pub enum Key {
     StreamIdMapping(StreamId),
     /// (SP) per-stream, updatable
     /// Key: StreamID
-    /// Value: SeqNum Timestamp
-    // TODO: unnecessary once sl8 supports reverse order scan (https://github.com/slatedb/slatedb/issues/438)
+    /// Value: SeqNum Timestamp WriteTimestampSecs
     StreamTailPosition(StreamId),
     /// (SFT) per-stream, updatable, optional, default empty
     /// Key: StreamID
     /// Value: FencingToken
     StreamFencingToken(StreamId),
-    /// (STP) per-stream, updatable, optional, default 0, only present while trim pending
+    /// (STP) per-stream, updatable, optional; missing implies 0; only present while trim pending
     /// Key: StreamID
-    /// Value: SeqNum
+    /// Value: NonZeroSeqNum
     StreamTrimPoint(StreamId),
     /// (SRD) per-record, immutable
     /// Key: StreamID StreamPosition
@@ -85,10 +92,10 @@ pub enum Key {
     /// Key: StreamID Timestamp SeqNum
     /// Value: empty
     StreamRecordTimestamp(StreamId, StreamPosition),
-    /// (BDP) per-basin, deletable, only present while basin deletion pending
-    /// Key: BasinName
-    /// Value: StreamNameStartAfter (cursor for resumable deletion)
-    BasinDeletionPending(BasinName),
+    /// (SDOED) per-deadline-per-stream, deletable, present while pending
+    /// Key: TimestampSecs StreamID
+    /// Value: MinAge seconds (u64)
+    StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId),
 }
 
 impl From<Key> for Bytes {
@@ -97,6 +104,7 @@ impl From<Key> for Bytes {
             Key::BasinMeta(basin) => basin_meta::ser_key(&basin),
             Key::BasinDeletionPending(basin) => basin_deletion_pending::ser_key(&basin),
             Key::StreamMeta(basin, stream) => stream_meta::ser_key(&basin, &stream),
+            Key::StreamIdMapping(stream_id) => stream_id_mapping::ser_key(stream_id),
             Key::StreamTailPosition(stream_id) => stream_tail_position::ser_key(stream_id),
             Key::StreamFencingToken(stream_id) => stream_fencing_token::ser_key(stream_id),
             Key::StreamTrimPoint(stream_id) => stream_trim_point::ser_key(stream_id),
@@ -104,7 +112,9 @@ impl From<Key> for Bytes {
             Key::StreamRecordTimestamp(stream_id, pos) => {
                 stream_record_timestamp::ser_key(stream_id, pos)
             }
-            Key::StreamIdMapping(stream_id) => stream_id_mapping::ser_key(stream_id),
+            Key::StreamDeleteOnEmptyDeadline(deadline, stream_id) => {
+                stream_doe_deadline::ser_key(deadline, stream_id)
+            }
         }
     }
 }
@@ -140,6 +150,8 @@ impl TryFrom<Bytes> for Key {
                 .map(|(stream_id, pos)| Key::StreamRecordData(stream_id, pos)),
             KeyType::StreamRecordTimestamp => stream_record_timestamp::deser_key(bytes)
                 .map(|(stream_id, pos)| Key::StreamRecordTimestamp(stream_id, pos)),
+            KeyType::StreamDeleteOnEmptyDeadline => stream_doe_deadline::deser_key(bytes)
+                .map(|(deadline, stream_id)| Key::StreamDeleteOnEmptyDeadline(deadline, stream_id)),
         }
     }
 }
@@ -214,17 +226,17 @@ where
 }
 
 #[cfg(test)]
-pub(crate) mod proptest_strategies {
+mod proptest_strategies {
     use std::str::FromStr;
 
     use proptest::prelude::*;
     use s2_common::types::{basin::BasinName, stream::StreamName};
 
-    pub(crate) fn basin_name_strategy() -> impl Strategy<Value = BasinName> {
+    pub(super) fn basin_name_strategy() -> impl Strategy<Value = BasinName> {
         "[a-z][a-z0-9-]{6,46}[a-z0-9]".prop_map(|s| BasinName::from_str(&s).unwrap())
     }
 
-    pub(crate) fn stream_name_strategy() -> impl Strategy<Value = StreamName> {
+    pub(super) fn stream_name_strategy() -> impl Strategy<Value = StreamName> {
         "[a-zA-Z0-9_-]{1,100}".prop_map(|s| StreamName::from_str(&s).unwrap())
     }
 }
