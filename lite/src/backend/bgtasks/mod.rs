@@ -89,8 +89,14 @@ fn spawn_bgtask<Tick, Fut, E>(
 }
 
 fn jittered_delay(interval: Duration) -> Duration {
+    if interval.is_zero() {
+        return interval;
+    }
     let max_jitter = interval / 10;
     let max_ms = max_jitter.as_millis() as i64;
+    if max_ms == 0 {
+        return interval;
+    }
     let jitter_ms = rand::random_range(-max_ms..=max_ms);
     if jitter_ms >= 0 {
         interval + Duration::from_millis(jitter_ms as u64)
