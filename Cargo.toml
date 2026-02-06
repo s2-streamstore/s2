@@ -52,7 +52,7 @@ rustls = "0.23"
 rstest = "0.26"
 s2-api = { path = "api", version = "0.27" }
 s2-common = { path = "common", version = "0.27" }
-s2-lite = { path = "lite", version = "0.27" }
+s2-lite = { path = "lite", version = "0.28" }
 serde = "1.0"
 serde_json = "1.0"
 slatedb = "0.10"
