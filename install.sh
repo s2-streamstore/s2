@@ -45,7 +45,7 @@ needs_musl() {
         return 0
     fi
     # Check glibc version
-    GLIBC_VERSION=$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || echo "0.0")
+    GLIBC_VERSION=$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\\.[0-9]+$' || echo "0.0")
     GLIBC_MAJOR=$(echo "${GLIBC_VERSION}" | cut -d. -f1)
     GLIBC_MINOR=$(echo "${GLIBC_VERSION}" | cut -d. -f2)
     # Need musl if glibc < 2.38
@@ -84,6 +84,13 @@ then
     then
         TARGET="s2-aarch64-apple-darwin.zip"
     fi
+elif echo "${OS}" | grep -qE '^(MINGW|MSYS|CYGWIN)'
+then
+    echo_red "Platform not supported by install.sh."
+    echo_em "${OS} on ${ARCH}"
+    echo_white "Windows users: download a Windows zip from the GitHub releases
+or install via Cargo (cargo install --locked s2-cli)."
+    exit 1
 fi
 
 if [ -z "${TARGET}" ]
@@ -91,17 +98,23 @@ then
     echo_red "Platform not supported."
     echo_em "${OS} on ${ARCH}"
     echo_white "It looks like this platform is not supported. We're sorry about that.
-Visit https://github.com/s2-streamstore/s2-cli to file an issue, and build 
+Visit https://github.com/s2-streamstore/s2 to file an issue, and build
 from source."
     exit 1
 fi
 
+REPO="${S2_REPO:-s2-streamstore/s2}"
 DOWNLOAD_URI="latest/download"
-S2_VERSION="Latest"
+S2_VERSION="latest"
 if [ -n "${VERSION}" ]
 then
-    S2_VERSION="v${VERSION}"
-    DOWNLOAD_URI="download/${VERSION}"
+    case "${VERSION}" in
+        s2-cli-v*) TAG="${VERSION}" ;;
+        v*) TAG="s2-cli-${VERSION}" ;;
+        *) TAG="s2-cli-v${VERSION}" ;;
+    esac
+    S2_VERSION="${TAG}"
+    DOWNLOAD_URI="download/${TAG}"
 fi
 
 BIN_PATH="${HOME}/.s2/bin"
@@ -109,9 +122,9 @@ test -d "${BIN_PATH}" || mkdir -p "${BIN_PATH}"
 
 DOWNLOAD_PATH=`mktemp`
 PWD=`pwd`
-URL="https://github.com/s2-streamstore/s2-cli/releases/${DOWNLOAD_URI}/${TARGET}"
+URL="https://github.com/${REPO}/releases/${DOWNLOAD_URI}/${TARGET}"
 
-echo_blue "⏳ Installing S2 CLI"
+echo_blue "Installing S2 CLI"
 echo_em "S2 Version: ${S2_VERSION}"
 
 curl --progress-bar -fSL "${URL}" -o "${DOWNLOAD_PATH}" \
@@ -121,11 +134,20 @@ curl --progress-bar -fSL "${URL}" -o "${DOWNLOAD_PATH}" \
 
 rm -f "${DOWNLOAD_PATH}"
 
-echo_blue "🌐 Successfully Downloaded"
+echo_blue "Successfully downloaded"
 
-# Add the bin to $PATH if it doesn't exist.
+EXISTING_S2_PATH=$(command -v s2 2>/dev/null || true)
+NEEDS_PATH_UPDATE=
+if [ -n "${EXISTING_S2_PATH}" ] && [ "${EXISTING_S2_PATH}" != "${BIN_PATH}/s2" ]
+then
+    NEEDS_PATH_UPDATE=1
+    echo_yellow "WARNING: Found existing s2 at ${EXISTING_S2_PATH}"
+    echo_em "New binary is at ${BIN_PATH}/s2"
+fi
+
+# Add the bin to $PATH if it doesn't exist or isn't taking precedence.
 # Thanks to Pulumi install script for the inspiration.
-if ! command -v s2 >/dev/null; then
+if [ -z "${EXISTING_S2_PATH}" ] || [ -n "${NEEDS_PATH_UPDATE}" ]; then
     SHELL_NAME=$(basename "${SHELL}")
     PROFILE_FILE=""
 
@@ -153,19 +175,22 @@ if ! command -v s2 >/dev/null; then
     fi
 
     if [ -n "${PROFILE_FILE}" ]; then
-        LINE_TO_ADD="export PATH=\$PATH:${BIN_PATH}"
-        if ! grep -q "# add S2 to the PATH" "${PROFILE_FILE}"; then
-            echo_white "➕ Adding ${BIN_PATH} to \$PATH in ${PROFILE_FILE}"
+        LINE_TO_ADD="export PATH=${BIN_PATH}:\\$PATH"
+        if ! grep -q "${BIN_PATH}" "${PROFILE_FILE}"; then
+            echo_white "Adding ${BIN_PATH} to \\$PATH in ${PROFILE_FILE}"
             printf "\\n# add S2 to the PATH\\n%s\\n" "${LINE_TO_ADD}" >> "${PROFILE_FILE}"
+        else
+            echo_yellow "WARNING: ${BIN_PATH} is already in your PATH."
+            [ -n "${EXISTING_S2_PATH}" ] && echo_em "Ensure ${BIN_PATH} appears before ${EXISTING_S2_PATH}"
         fi
 
-        echo_yellow "⚠️ Please restart your shell or add ${BIN_PATH} to your \$PATH"
+        echo_yellow "WARNING: Please restart your shell or add ${BIN_PATH} to your \\$PATH"
     else
-        echo_yellow "⚠️ Please add ${BIN_PATH} to your \$PATH"
+        echo_yellow "WARNING: Please add ${BIN_PATH} to your \\$PATH"
     fi
 fi
 
-echo_green "✅ S2 CLI installed as"
+echo_green "S2 CLI installed as"
 echo_em "${BIN_PATH}/s2"
-echo_green "⚡️ Get started with S2:"
+echo_green "Get started with S2:"
 echo_em "https://s2.dev/docs/quickstart"
