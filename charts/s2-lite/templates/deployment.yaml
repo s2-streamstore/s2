@@ -117,6 +117,9 @@ spec:
       {{- else if and .Values.localStorage.enabled .Values.localStorage.emptyDir.enabled }}
       - name: data
         emptyDir: {}
+      {{- else if .Values.localStorage.enabled }}
+      - name: data
+        emptyDir: {}
       {{- end }}
       {{- with .Values.volumes }}
         {{- toYaml . | nindent 6 }}

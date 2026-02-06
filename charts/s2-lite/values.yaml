@@ -125,7 +125,7 @@ objectStorage:
   endpoint: ""
 
 # Local disk storage (uses --local-root flag)
-# Requires a PersistentVolume or emptyDir or hostPath
+# If enabled without specifying PVC or emptyDir, defaults to emptyDir
 localStorage:
   enabled: false
   # Mount path inside container
