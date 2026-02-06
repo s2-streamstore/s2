@@ -13,8 +13,6 @@ pub mod streams;
 const MAX_UNARY_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub fn router() -> axum::Router<Backend> {
-    // TODO: timeout layer that respects long-poll read wait
-
     let compress_when = {
         use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
         SizeAbove::new(1024)
