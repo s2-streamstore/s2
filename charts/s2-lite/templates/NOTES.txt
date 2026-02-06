@@ -1,0 +1,48 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+  $ helm get all {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+
+s2-lite is now running with the following configuration:
+
+  - Replicas: {{ .Values.replicaCount }}
+  - Image: {{ include "s2-lite.image" . }}
+{{- if and .Values.objectStorage.enabled .Values.objectStorage.bucket }}
+  - Storage: S3-compatible ({{ .Values.objectStorage.bucket }})
+  {{- if .Values.objectStorage.endpoint }}
+  - Endpoint: {{ .Values.objectStorage.endpoint }}
+  {{- end }}
+{{- else }}
+  - Storage: In-memory (for development/testing only)
+{{- end }}
+
+Get the application URL by running these commands:
+{{- if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "s2-lite.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+  You can watch the status by running:
+    kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "s2-lite.fullname" . }}
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "s2-lite.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$SERVICE_IP:{{ .Values.service.port }}
+{{- else if contains "ClusterIP" .Values.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "{{ include "s2-lite.selectorLabels" . | replace "\n" "," }}" -o jsonpath="{.items[0].metadata.name}")
+  export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+  echo "Visit http://127.0.0.1:8080 to use your application"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
+{{- end }}
+
+Health check:
+  kubectl --namespace {{ .Release.Namespace }} exec -it $POD_NAME -- wget -q -O- http://localhost:{{ .Values.service.targetPort }}/health
+
+Metrics endpoint:
+  kubectl --namespace {{ .Release.Namespace }} exec -it $POD_NAME -- wget -q -O- http://localhost:{{ .Values.service.targetPort }}/metrics
+
+For more information, visit https://s2.dev/docs
