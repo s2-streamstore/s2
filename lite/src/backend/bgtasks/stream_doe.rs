@@ -73,8 +73,9 @@ impl Backend {
         &self,
         now: TimestampSecs,
     ) -> Result<Page<(StreamId, PendingStreamDoe)>, StorageError> {
+        // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
         static SCAN_OPTS: ScanOptions = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::Memory,
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
