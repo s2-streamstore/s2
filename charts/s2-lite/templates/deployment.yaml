@@ -74,7 +74,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
         livenessProbe:
-          {{- if .Values.tls.enabled }}
+          {{- if and .Values.tls.enabled .Values.livenessProbe.httpGet }}
           httpGet:
             path: {{ .Values.livenessProbe.httpGet.path }}
             port: http
@@ -87,7 +87,7 @@ spec:
           {{- toYaml .Values.livenessProbe | nindent 10 }}
           {{- end }}
         readinessProbe:
-          {{- if .Values.tls.enabled }}
+          {{- if and .Values.tls.enabled .Values.readinessProbe.httpGet }}
           httpGet:
             path: {{ .Values.readinessProbe.httpGet.path }}
             port: http
