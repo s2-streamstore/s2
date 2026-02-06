@@ -126,7 +126,7 @@ jobs:
             "ref": "main",
             "lang": "go",
             "go-version": "1.24",
-            "test_cmd": "go test -v -count=1 -skip 'WithScope|AccessToken|Metrics' ./s2/..."
+            "test_cmd": "go test -v -count=1 -skip 'WithScope|AccessToken|Metrics|Client_InvalidToken' ./s2/..."
           },
           {
             "name": "typescript",
@@ -134,7 +134,7 @@ jobs:
             "ref": "main",
             "lang": "bun",
             "bun-version": "latest",
-            "test_cmd": "bun run vitest --run --exclude '**/account-basin*'"
+            "test_cmd": "S2_LITE=1 bun run vitest --run --exclude '**/account-basin*' --exclude '**/accessTokens*' --exclude '**/metrics*'"
           },
           {
             "name": "rust",

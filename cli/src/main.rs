@@ -39,8 +39,15 @@ use tokio::{io::AsyncWriteExt, select};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 use types::{AccessTokenInfo, BasinConfig, S2BasinAndMaybeStreamUri, StreamConfig};
 
+fn install_rustls_crypto_provider() {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install aws-lc-rs as default rustls crypto provider");
+}
+
 #[tokio::main]
 async fn main() -> miette::Result<()> {
+    install_rustls_crypto_provider();
     miette::set_panic_hook();
     run().await?;
     Ok(())
@@ -489,10 +496,14 @@ async fn run() -> Result<(), CliError> {
                         match record {
                             Some(Ok(record)) => {
                                 write_record(&record, &mut writer, args.format).await?;
-                                writer
-                                    .write_all(b"\n")
-                                    .await
-                                    .map_err(|e| CliError::RecordWrite(e.to_string()))?;
+                                let skip_newline = matches!(args.format, RecordFormat::Text)
+                                    && record.is_command_record();
+                                if !skip_newline {
+                                    writer
+                                        .write_all(b"\n")
+                                        .await
+                                        .map_err(|e| CliError::RecordWrite(e.to_string()))?;
+                                }
                                 writer
                                     .flush()
                                     .await

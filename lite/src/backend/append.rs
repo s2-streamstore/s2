@@ -39,7 +39,11 @@ impl Backend {
         stream: StreamName,
         inputs: impl Stream<Item = AppendInput>,
     ) -> Result<impl Stream<Item = Result<AppendAck, AppendError>>, AppendError> {
-        let client = self.streamer_client(&basin, &stream).await?;
+        let client = self
+            .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
+                config.create_stream_on_append
+            })
+            .await?;
         let session = SessionHandle::new();
         Ok(async_stream::stream! {
             tokio::pin!(inputs);

@@ -108,8 +108,10 @@ pub async fn reconfigure_basin(
     s2: &S2,
     args: ReconfigureBasinArgs,
 ) -> Result<BasinConfig, CliError> {
-    let mut reconfig =
-        BasinReconfiguration::new().with_default_stream_config(args.default_stream_config.into());
+    let mut reconfig = BasinReconfiguration::new();
+    if !args.default_stream_config.is_empty() {
+        reconfig = reconfig.with_default_stream_config(args.default_stream_config.into());
+    }
     if let Some(val) = args.create_stream_on_append {
         reconfig = reconfig.with_create_stream_on_append(val);
     }

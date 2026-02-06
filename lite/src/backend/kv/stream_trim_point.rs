@@ -2,9 +2,9 @@ use std::ops::RangeTo;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
-use s2_common::record::SeqNum;
+use s2_common::record::NonZeroSeqNum;
 
-use super::{DeserializationError, KeyType, check_exact_size};
+use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
 use crate::backend::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
@@ -29,22 +29,24 @@ pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
     Ok(stream_id_bytes.into())
 }
 
-pub fn ser_value(trim_point: RangeTo<SeqNum>) -> Bytes {
+pub fn ser_value(trim_point: RangeTo<NonZeroSeqNum>) -> Bytes {
     let mut buf = BytesMut::with_capacity(VALUE_LEN);
-    buf.put_u64(trim_point.end);
+    buf.put_u64(trim_point.end.get());
     debug_assert_eq!(buf.len(), VALUE_LEN, "serialized length mismatch");
     buf.freeze()
 }
 
-pub fn deser_value(mut bytes: Bytes) -> Result<RangeTo<SeqNum>, DeserializationError> {
+pub fn deser_value(mut bytes: Bytes) -> Result<RangeTo<NonZeroSeqNum>, DeserializationError> {
     check_exact_size(&bytes, VALUE_LEN)?;
-    Ok(..bytes.get_u64())
+    let seq_num = NonZeroSeqNum::new(bytes.get_u64())
+        .ok_or_else(|| invalid_value_err("trim_point", "must be non-zero"))?;
+    Ok(..seq_num)
 }
 
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use s2_common::record::SeqNum;
+    use s2_common::record::NonZeroSeqNum;
 
     use crate::backend::stream_id::StreamId;
 
@@ -58,7 +60,7 @@ mod tests {
         }
 
         #[test]
-        fn roundtrip_stream_trim_point_value(seq_num in any::<SeqNum>()) {
+        fn roundtrip_stream_trim_point_value(seq_num in any::<NonZeroSeqNum>()) {
             let bytes = super::ser_value(..seq_num);
             let decoded = super::deser_value(bytes).unwrap();
             prop_assert_eq!(..seq_num, decoded);

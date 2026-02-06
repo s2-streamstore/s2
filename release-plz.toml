@@ -4,3 +4,19 @@ git_tag_enable = true
 git_tag_name = "{{ package }}-v{{ version }}"
 git_release_enable = true
 pr_labels = ["release"]
+
+[[package]]
+name = "s2-api"
+git_release_enable = false
+
+[[package]]
+name = "s2-common"
+git_release_enable = false
+
+[[package]]
+name = "s2-cli"
+version_group = "s2"
+
+[[package]]
+name = "s2-lite"
+version_group = "s2"

@@ -8,8 +8,8 @@ use bytesize::ByteSize;
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
 use s2_common::{
     record::{
-        CommandRecord, FencingToken, Metered, MeteredSize, Record, SeqNum, SequencedRecord,
-        StreamPosition, Timestamp,
+        CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
+        SequencedRecord, StreamPosition, Timestamp,
     },
     types::{
         config::{
@@ -42,6 +42,14 @@ use crate::{
 };
 
 const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
+// Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
+const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
+
+#[derive(Clone, Copy, Debug)]
+struct DeleteOnEmptyDeadline {
+    deadline: kv::timestamp::TimestampSecs,
+    min_age: Duration,
+}
 
 pub(super) struct Spawner {
     pub db: slatedb::Db,
@@ -86,6 +94,7 @@ impl Spawner {
                 state: trim_point,
                 applied_point: ..tail_pos.seq_num,
             },
+            last_doe_deadline_at: None,
             append_futs: FuturesOrdered::new(),
             pending_appends: append::PendingAppends::new(),
             stable_pos: tail_pos,
@@ -131,6 +140,7 @@ struct Streamer {
     config: OptionalStreamConfig,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
+    last_doe_deadline_at: Option<Instant>,
     append_futs:
         FuturesOrdered<BoxFuture<'static, Result<Vec<Metered<SequencedRecord>>, slatedb::Error>>>,
     pending_appends: append::PendingAppends,
@@ -217,6 +227,8 @@ impl Streamer {
         };
         match self.sequence_records(input) {
             Ok(sequenced_records) => {
+                let retention = self.config.retention_policy.unwrap_or_default();
+                let doe_deadline = self.maybe_doe_deadline(retention.age());
                 if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
@@ -236,7 +248,8 @@ impl Streamer {
                     db_write_records(
                         self.db.clone(),
                         self.stream_id,
-                        self.config.retention_policy.unwrap_or_default(),
+                        retention,
+                        doe_deadline,
                         sequenced_records,
                         self.fencing_token
                             .is_applied_in(&seq_num_range)
@@ -252,6 +265,33 @@ impl Streamer {
             Err(e) => {
                 self.pending_appends.reject(ticket, e, self.stable_pos);
             }
+        }
+    }
+
+    fn maybe_doe_deadline(
+        &mut self,
+        retention_age: Option<Duration>,
+    ) -> Option<DeleteOnEmptyDeadline> {
+        let retention_age = retention_age?;
+        let min_age = self
+            .config
+            .delete_on_empty
+            .min_age
+            .filter(|d| !d.is_zero())?;
+        let now = Instant::now();
+        if self
+            .last_doe_deadline_at
+            .is_none_or(|t| now.duration_since(t) >= DOE_DEADLINE_REFRESH_PERIOD)
+        {
+            self.last_doe_deadline_at = Some(now);
+            let deadline = kv::timestamp::TimestampSecs::after(
+                retention_age
+                    .saturating_add(min_age)
+                    .saturating_add(DOE_DEADLINE_REFRESH_PERIOD),
+            );
+            Some(DeleteOnEmptyDeadline { deadline, min_age })
+        } else {
+            None
         }
     }
 
@@ -575,6 +615,7 @@ async fn db_write_records(
     db: slatedb::Db,
     stream_id: StreamId,
     retention: RetentionPolicy,
+    doe_deadline: Option<DeleteOnEmptyDeadline>,
     records: Vec<Metered<SequencedRecord>>,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
@@ -603,15 +644,22 @@ async fn db_write_records(
             kv::stream_fencing_token::ser_value(&fencing_token),
         );
     }
-    if let Some(trim_point) = trim_point {
+    if let Some(trim_point) = trim_point.and_then(|tp| NonZeroSeqNum::new(tp.end)) {
         wb.put(
             kv::stream_trim_point::ser_key(stream_id),
-            kv::stream_trim_point::ser_value(trim_point),
+            kv::stream_trim_point::ser_value(..trim_point),
         );
     }
+    if let Some(doe_deadline) = doe_deadline {
+        wb.put(
+            kv::stream_doe_deadline::ser_key(doe_deadline.deadline, stream_id),
+            kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
+        );
+    }
+    let write_timestamp_secs = kv::timestamp::TimestampSecs::now();
     wb.put(
         kv::stream_tail_position::ser_key(stream_id),
-        kv::stream_tail_position::ser_value(next_pos(&records)),
+        kv::stream_tail_position::ser_value(next_pos(&records), write_timestamp_secs),
     );
     static WRITE_OPTS: WriteOptions = WriteOptions {
         await_durable: true,

@@ -1,31 +1,41 @@
-use std::{error::Error, future::Future, time::Duration};
+use std::{error::Error, future::Future, pin::Pin, time::Duration};
 
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time::Instant};
 use tracing::warn;
 
 use crate::backend::Backend;
 
 mod basin_deletion;
+mod stream_doe;
 mod stream_trim;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BgtaskTrigger {
     BasinDeletion,
+    StreamDeleteOnEmpty,
     StreamTrim,
 }
 
 pub fn spawn(backend: &Backend) {
     spawn_bgtask(
         "stream-trim",
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         &[BgtaskTrigger::StreamTrim],
         backend.bgtask_trigger_subscribe(),
         move |backend| backend.clone().tick_stream_trim(),
         backend.clone(),
     );
     spawn_bgtask(
+        "stream-delete-on-empty",
+        Duration::from_secs(60),
+        &[BgtaskTrigger::StreamDeleteOnEmpty],
+        backend.bgtask_trigger_subscribe(),
+        move |backend| backend.clone().tick_stream_doe(),
+        backend.clone(),
+    );
+    spawn_bgtask(
         "basin-deletion",
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         &[BgtaskTrigger::BasinDeletion],
         backend.bgtask_trigger_subscribe(),
         move |backend| backend.clone().tick_basin_deletion(),
@@ -46,18 +56,25 @@ fn spawn_bgtask<Tick, Fut, E>(
     E: Error + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let sleep = tokio::time::sleep(jittered_delay(interval));
+        tokio::pin!(sleep);
+        let reset_sleep = |sleep: &mut Pin<&mut tokio::time::Sleep>| {
+            sleep
+                .as_mut()
+                .reset(Instant::now() + jittered_delay(interval));
+        };
         loop {
             tokio::select! {
-                _ = ticker.tick() => {
+                _ = &mut sleep => {
                     run_tick(name, &tick, &backend).await;
+                    reset_sleep(&mut sleep);
                 }
                 res = trigger_rx.recv() => {
                     match res {
                         Ok(trigger)  => {
                             if triggers.contains(&trigger) {
                                 run_tick(name, &tick, &backend).await;
+                                reset_sleep(&mut sleep);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -69,6 +86,23 @@ fn spawn_bgtask<Tick, Fut, E>(
             }
         }
     });
+}
+
+fn jittered_delay(interval: Duration) -> Duration {
+    if interval.is_zero() {
+        return interval;
+    }
+    let max_jitter = interval / 10;
+    let max_ms = max_jitter.as_millis() as i64;
+    if max_ms == 0 {
+        return interval;
+    }
+    let jitter_ms = rand::random_range(-max_ms..=max_ms);
+    if jitter_ms >= 0 {
+        interval + Duration::from_millis(jitter_ms as u64)
+    } else {
+        interval - Duration::from_millis((-jitter_ms) as u64)
+    }
 }
 
 async fn run_tick<Tick, Fut, E>(task: &'static str, tick: &Tick, backend: &Backend)

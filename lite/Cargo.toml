@@ -1,9 +1,9 @@
 [package]
 name = "s2-lite"
+version = "0.28.0"
 description = "Lightweight server implementation of S2, the durable streams API, backed by object storage"
 edition.workspace = true
 license.workspace = true
-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords = ["s2", "durable", "streams", "object", "storage"]
@@ -37,12 +37,14 @@ eyre = { workspace = true }
 mimalloc = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+indexmap = { workspace = true }
 itertools = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }
 prometheus = { workspace = true, features = ["process"] }
 prost = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true, features = ["axum"] }
 s2-common = { workspace = true, features = ["clap"] }
 serde = { workspace = true, features = ["derive"] }

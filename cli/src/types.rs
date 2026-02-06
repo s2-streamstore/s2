@@ -154,6 +154,21 @@ pub struct StreamConfig {
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
 }
 
+impl StreamConfig {
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            storage_class,
+            retention_policy,
+            timestamping,
+            delete_on_empty,
+        } = self;
+        storage_class.is_none()
+            && retention_policy.is_none()
+            && timestamping.is_none()
+            && delete_on_empty.is_none()
+    }
+}
+
 #[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {

@@ -4,7 +4,7 @@ use futures::Stream;
 use s2_common::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize as _, SeqNum, SequencedRecord, StreamPosition},
+    record::{Metered, MeteredSize as _, SeqNum, SequencedRecord, StreamPosition, Timestamp},
     types::{
         basin::BasinName,
         stream::{ReadBatch, ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
@@ -15,7 +15,9 @@ use tokio::sync::broadcast;
 
 use super::Backend;
 use crate::backend::{
-    error::{CheckTailError, ReadError, StreamerMissingInActionError, UnwrittenError},
+    error::{
+        CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
+    },
     kv,
     stream_id::StreamId,
 };
@@ -173,6 +175,8 @@ impl Backend {
                             records,
                             tail: None,
                         });
+                    } else {
+                        state.start_seq_num = state.tail.seq_num;
                     }
                 } else {
                     assert_eq!(state.start_seq_num, state.tail.seq_num);
@@ -229,6 +233,51 @@ impl Backend {
             }
         };
         Ok(session)
+    }
+
+    pub(super) async fn resolve_timestamp(
+        &self,
+        stream_id: StreamId,
+        timestamp: Timestamp,
+    ) -> Result<Option<StreamPosition>, StorageError> {
+        let start_key = kv::stream_record_timestamp::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: SeqNum::MIN,
+                timestamp,
+            },
+        );
+        let end_key = kv::stream_record_timestamp::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: SeqNum::MAX,
+                timestamp: Timestamp::MAX,
+            },
+        );
+        static SCAN_OPTS: ScanOptions = ScanOptions {
+            durability_filter: DurabilityLevel::Remote,
+            dirty: false,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
+            max_fetch_tasks: 1,
+        };
+        let mut it = self
+            .db
+            .scan_with_options(start_key..end_key, &SCAN_OPTS)
+            .await?;
+        Ok(match it.next().await? {
+            Some(kv) => {
+                let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
+                assert_eq!(deser_stream_id, stream_id);
+                assert!(pos.timestamp >= timestamp);
+                kv::stream_record_timestamp::deser_value(kv.value)?;
+                Some(StreamPosition {
+                    seq_num: pos.seq_num,
+                    timestamp: pos.timestamp,
+                })
+            }
+            None => None,
+        })
     }
 }
 
@@ -287,5 +336,157 @@ async fn wait_sleep(wait: Option<Duration>) {
         None => {
             std::future::pending::<()>().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytesize::ByteSize;
+    use s2_common::{
+        read_extent::{ReadLimit, ReadUntil},
+        types::{
+            basin::BasinName,
+            config::OptionalStreamConfig,
+            resources::CreateMode,
+            stream::{
+                AppendInput, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom, ReadStart,
+            },
+        },
+    };
+    use slatedb::{Db, WriteBatch, config::WriteOptions, object_store::memory::InMemory};
+
+    use super::*;
+    use crate::backend::{kv, stream_id::StreamId};
+
+    #[tokio::test]
+    async fn resolve_timestamp_bounded_to_stream() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let stream_a: StreamId = [0u8; 32].into();
+        let stream_b: StreamId = [1u8; 32].into();
+
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(
+                    stream_a,
+                    StreamPosition {
+                        seq_num: 0,
+                        timestamp: 1000,
+                    },
+                ),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .await
+            .unwrap();
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(
+                    stream_b,
+                    StreamPosition {
+                        seq_num: 0,
+                        timestamp: 2000,
+                    },
+                ),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .await
+            .unwrap();
+
+        // Should find record in stream_a
+        let result = backend.resolve_timestamp(stream_a, 500).await.unwrap();
+        assert_eq!(
+            result,
+            Some(StreamPosition {
+                seq_num: 0,
+                timestamp: 1000
+            })
+        );
+
+        // Should return None, not find stream_b's record
+        let result = backend.resolve_timestamp(stream_a, 1500).await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn read_completes_when_all_records_deleted() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(
+                basin.clone(),
+                Default::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let record =
+            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap();
+        let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
+        let parts = AppendRecordParts {
+            timestamp: None,
+            record: metered,
+        };
+        let append_record: s2_common::types::stream::AppendRecord = parts.try_into().unwrap();
+        let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
+        let input = AppendInput {
+            records: batch,
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        let ack = backend
+            .append(basin.clone(), stream.clone(), input)
+            .await
+            .unwrap();
+        assert!(ack.end.seq_num > 0);
+
+        let stream_id = StreamId::new(&basin, &stream);
+        let mut batch = WriteBatch::new();
+        batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
+        static WRITE_OPTS: WriteOptions = WriteOptions {
+            await_durable: true,
+        };
+        backend
+            .db
+            .write_with_options(batch, &WRITE_OPTS)
+            .await
+            .unwrap();
+
+        let start = ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        };
+        let end = ReadEnd {
+            limit: ReadLimit::Count(10),
+            until: ReadUntil::Unbounded,
+            wait: None,
+        };
+        let session = backend.read(basin, stream, start, end).await.unwrap();
+        let records: Vec<_> = tokio::time::timeout(
+            Duration::from_secs(2),
+            futures::StreamExt::collect::<Vec<_>>(session),
+        )
+        .await
+        .expect("read should not spin forever");
+        assert!(records.into_iter().all(|r| r.is_ok()));
     }
 }
