@@ -53,23 +53,18 @@ docker pull ghcr.io/s2-streamstore/s2
 
 ## s2-lite
 
-`s2-lite` is available as the `s2 lite` subcommand. It's a self-hostable server implementation of the S2 API.
+`s2-lite` is embedded as the `s2 lite` subcommand of the CLI. It's a self-hostable server implementation of the S2 API.
 
 It uses [SlateDB](https://slatedb.io) as its storage engine, which relies entirely on object storage for durability.
 
 It is easy to run `s2 lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
 
-You can also simply not specify a `--bucket`, which makes it operate entirely in-memory. This is great for integration tests involving S2.
+You can also simply not specify a `--bucket`, which makes it operate entirely in-memory (or use `--local-root` to persist to local disk instead).
+
+> [!TIP]
+> In-memory `s2-lite` is a very effective S2 emulator for integration tests.
 
 ### Quickstart
-
-> [!NOTE]
-> Point the [S2 CLI](https://s2.dev/docs/quickstart) or [SDKs](https://s2.dev/docs/sdk) at your lite instance like this:
-> ```bash
-> export S2_ACCOUNT_ENDPOINT="http://localhost:8080"
-> export S2_BASIN_ENDPOINT="http://localhost:8080"
-> export S2_ACCESS_TOKEN="redundant"
-> ```
 
 Here's how you can run in-memory without any external dependency:
 ```bash
@@ -106,6 +101,14 @@ docker run -p 8080:80 \
   --path s2lite
 ```
 </details>
+
+> [!NOTE]
+> Point the [S2 CLI](https://s2.dev/docs/quickstart) or [SDKs](https://s2.dev/docs/sdk) at your lite instance like this:
+> ```bash
+> export S2_ACCOUNT_ENDPOINT="http://localhost:8080"
+> export S2_BASIN_ENDPOINT="http://localhost:8080"
+> export S2_ACCESS_TOKEN="ignored"
+> ```
 
 Let's make sure the server is ready:
 ```bash
@@ -164,16 +167,11 @@ SL8_FLUSH_INTERVAL=10ms
 - HTTP serving is implemented using [axum](https://github.com/tokio-rs/axum)
 - Each stream corresponds to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current `tail` position, serializes appends, and broadcasts acknowledged records to followers
 - Appends are pipelined to improve performance against high-latency object storage
-  - **Temporary** [disabled by default](https://github.com/s2-streamstore/s2/issues/48), you can try it with `S2LITE_PIPELINE=true`
 - [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data modeling in SlateDB
 
-### Caveats
-
-- Deletion is not fully plumbed up yet
-  - basins https://github.com/s2-streamstore/s2/issues/53
-  - streams https://github.com/s2-streamstore/s2/issues/52
-  - records https://github.com/s2-streamstore/s2/issues/51
-- Pipelining needs to be made safe and default https://github.com/s2-streamstore/s2/issues/48
+> [!TIP]
+> Pipelining is temporarily [disabled by default](https://github.com/s2-streamstore/s2/issues/48), and it will be enabled once it is completely safe. 
+> For now, you can use `S2LITE_PIPELINE=true` to get a sense of what performance will look like.
 
 ### Compatibility
 
@@ -186,17 +184,18 @@ SL8_FLUSH_INTERVAL=10ms
 
 ### API Coverage
 
-> [!TIP]
-> Complete [specs](https://github.com/s2-streamstore/s2-specs/tree/main/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
-
-**Fully supported**
-- `/basins`
-- `/streams`
-- `/streams/{stream}/records`
+Complete [specs](https://github.com/s2-streamstore/s2-specs/tree/main/s2/v1) are available:
+- [OpenAPI](https://s2.dev/docs/api) for the REST-ful core
+- [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions
+- [S2S](https://s2.dev/docs/api/records/overview#s2s-spec), which is the streaming session protocol
 
 > [!IMPORTANT]
 > Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. The SDKs take care of this automatically.
 
-**Not supported**
-- `/access-tokens` https://github.com/s2-streamstore/s2/issues/28
-- `/metrics`
+| Endpoint | Support |
+| --- | --- |
+| `/basins` | Supported |
+| `/streams` | Supported |
+| `/streams/{stream}/records` | Supported |
+| `/access-tokens` | Not supported https://github.com/s2-streamstore/s2/issues/28 |
+| `/metrics` | Not supported |
