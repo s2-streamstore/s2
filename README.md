@@ -46,9 +46,6 @@ curl -fsSL https://raw.githubusercontent.com/s2-streamstore/s2/main/install.sh |
 ```
 Or specify a version with `VERSION=x.y.z` before the command. See all [releases](https://github.com/s2-streamstore/s2/releases).
 
-### Windows
-Download the `s2-*-pc-windows-msvc.zip` from the [releases](https://github.com/s2-streamstore/s2/releases) page and add `s2.exe` to your PATH, or use the Cargo install above.
-
 ### Docker
 ```bash
 docker pull ghcr.io/s2-streamstore/s2
