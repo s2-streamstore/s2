@@ -421,7 +421,11 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(basin.clone(), Default::default(), CreateMode::CreateOnly(None))
+            .create_basin(
+                basin.clone(),
+                Default::default(),
+                CreateMode::CreateOnly(None),
+            )
             .await
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
@@ -435,8 +439,8 @@ mod tests {
             .await
             .unwrap();
 
-        let record = s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("x"))
-            .unwrap();
+        let record =
+            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap();
         let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
         let parts = AppendRecordParts {
             timestamp: None,
