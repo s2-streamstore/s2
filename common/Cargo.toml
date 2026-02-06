@@ -1,6 +1,6 @@
 [package]
 name = "s2-common"
-version = "0.27.3"
+version = "0.27.4"
 description = "Common stuff for client and servers for S2, the durable streams API"
 edition.workspace = true
 license.workspace = true

@@ -4278,7 +4278,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rstest",
- "s2-common 0.27.3",
+ "s2-common 0.27.4",
  "serde",
  "serde_json",
  "strum 0.27.2",
@@ -4291,7 +4291,7 @@ dependencies = [
 
 [[package]]
 name = "s2-cli"
-version = "0.28.1"
+version = "0.28.2"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -4361,7 +4361,7 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.27.3"
+version = "0.27.4"
 dependencies = [
  "axum",
  "blake3",
@@ -4384,7 +4384,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.28.1"
+version = "0.28.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4413,7 +4413,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "s2-api 0.27.3",
- "s2-common 0.27.3",
+ "s2-common 0.27.4",
  "serde",
  "serde_json",
  "slatedb",

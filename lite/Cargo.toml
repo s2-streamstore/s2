@@ -1,6 +1,6 @@
 [package]
 name = "s2-lite"
-version = "0.28.1"
+version = "0.28.2"
 description = "Lightweight server implementation of S2, the durable streams API, backed by object storage"
 edition.workspace = true
 license.workspace = true
