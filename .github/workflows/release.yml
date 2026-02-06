@@ -36,6 +36,38 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
 
+  update_helm_chart:
+    needs: release_plz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        uses: SebRollen/toml-action@v1.2.0
+        with:
+          file: Cargo.toml
+          field: workspace.package.version
+
+      - name: Update Helm chart appVersion
+        run: |
+          sed -i 's/^appVersion: ".*"$/appVersion: "${{ steps.version.outputs.value }}"/' charts/s2-lite/Chart.yaml
+
+      - name: Commit and push
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git add charts/s2-lite/Chart.yaml
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update s2-lite Helm chart appVersion to ${{ steps.version.outputs.value }}"
+            git push
+          fi
+
   build_binaries:
     needs: release_plz
     name: ${{ matrix.target }}
