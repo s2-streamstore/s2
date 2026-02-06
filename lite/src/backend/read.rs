@@ -344,9 +344,21 @@ mod tests {
     use std::sync::Arc;
 
     use bytesize::ByteSize;
-    use slatedb::{Db, object_store::memory::InMemory};
+    use s2_common::{
+        read_extent::{ReadLimit, ReadUntil},
+        types::{
+            basin::BasinName,
+            config::OptionalStreamConfig,
+            resources::CreateMode,
+            stream::{
+                AppendInput, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom, ReadStart,
+            },
+        },
+    };
+    use slatedb::{Db, WriteBatch, config::WriteOptions, object_store::memory::InMemory};
 
     use super::*;
+    use crate::backend::{kv, stream_id::StreamId};
 
     #[tokio::test]
     async fn resolve_timestamp_bounded_to_stream() {
@@ -399,5 +411,78 @@ mod tests {
         // Should return None, not find stream_b's record
         let result = backend.resolve_timestamp(stream_a, 1500).await.unwrap();
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn read_completes_when_all_records_deleted() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(basin.clone(), Default::default(), CreateMode::CreateOnly(None))
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let record = s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("x"))
+            .unwrap();
+        let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
+        let parts = AppendRecordParts {
+            timestamp: None,
+            record: metered,
+        };
+        let append_record: s2_common::types::stream::AppendRecord = parts.try_into().unwrap();
+        let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
+        let input = AppendInput {
+            records: batch,
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        let ack = backend
+            .append(basin.clone(), stream.clone(), input)
+            .await
+            .unwrap();
+        assert!(ack.end.seq_num > 0);
+
+        let stream_id = StreamId::new(&basin, &stream);
+        let mut batch = WriteBatch::new();
+        batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
+        static WRITE_OPTS: WriteOptions = WriteOptions {
+            await_durable: true,
+        };
+        backend
+            .db
+            .write_with_options(batch, &WRITE_OPTS)
+            .await
+            .unwrap();
+
+        let start = ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        };
+        let end = ReadEnd {
+            limit: ReadLimit::Count(10),
+            until: ReadUntil::Unbounded,
+            wait: None,
+        };
+        let session = backend.read(basin, stream, start, end).await.unwrap();
+        let records: Vec<_> = tokio::time::timeout(
+            Duration::from_secs(2),
+            futures::StreamExt::collect::<Vec<_>>(session),
+        )
+        .await
+        .expect("read should not spin forever");
+        assert!(records.into_iter().all(|r| r.is_ok()));
     }
 }
