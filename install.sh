@@ -40,12 +40,16 @@ ARCH=$(uname -m)
 
 # Check if we need musl (glibc < 2.38 or musl-based system like Alpine)
 needs_musl() {
+    if ! command -v ldd >/dev/null 2>&1; then
+        return 1
+    fi
     # Check if it's a musl-based system (e.g., Alpine)
     if ldd --version 2>&1 | grep -q musl; then
         return 0
     fi
     # Check glibc version
-    GLIBC_VERSION=$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\\.[0-9]+$' || echo "0.0")
+    GLIBC_VERSION=$(ldd --version 2>/dev/null | sed -n '1s/.* \\([0-9][0-9]*\\.[0-9][0-9]*\\)$/\\1/p')
+    [ -n "${GLIBC_VERSION}" ] || GLIBC_VERSION="0.0"
     GLIBC_MAJOR=$(echo "${GLIBC_VERSION}" | cut -d. -f1)
     GLIBC_MINOR=$(echo "${GLIBC_VERSION}" | cut -d. -f2)
     # Need musl if glibc < 2.38
