@@ -52,8 +52,18 @@ jobs:
           file: Cargo.toml
           field: workspace.package.version
 
-      - name: Update Helm chart appVersion
+      - name: Update Helm chart version and appVersion
         run: |
+          # Get current chart version
+          CURRENT_VERSION=$(grep '^version:' charts/s2-lite/Chart.yaml | awk '{print $2}')
+          echo "Current chart version: $CURRENT_VERSION"
+
+          # Increment patch version (e.g., 0.1.0 -> 0.1.1)
+          NEW_VERSION=$(echo $CURRENT_VERSION | awk -F. '{$NF = $NF + 1; print}' OFS=.)
+          echo "New chart version: $NEW_VERSION"
+
+          # Update both version and appVersion in Chart.yaml
+          sed -i "s/^version: .*/version: $NEW_VERSION/" charts/s2-lite/Chart.yaml
           sed -i 's/^appVersion: ".*"$/appVersion: "${{ steps.version.outputs.value }}"/' charts/s2-lite/Chart.yaml
 
       - name: Commit and push
@@ -64,7 +74,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update s2-lite Helm chart appVersion to ${{ steps.version.outputs.value }}"
+            git commit -m "Bump s2-lite chart to appVersion ${{ steps.version.outputs.value }}"
             git push
           fi
 
