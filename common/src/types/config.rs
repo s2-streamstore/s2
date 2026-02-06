@@ -1,3 +1,35 @@
+//! Stream and basin configuration types.
+//!
+//! Each config area (stream, timestamping, delete-on-empty) has three type tiers:
+//!
+//! - Resolved (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`):
+//!   All fields are concrete values. Produced by merging optional configs with
+//!   defaults using `merge()`.
+//!
+//! - Optional (`OptionalStreamConfig`, `OptionalTimestampingConfig`,
+//!   `OptionalDeleteOnEmptyConfig`): The internal representation, stored in
+//!   metadata. Fields are `Option<T>` where `None` means "not set at this layer,
+//!   fall back to defaults."
+//!
+//! - Reconfiguration (`StreamReconfiguration`, `TimestampingReconfiguration`,
+//!   `DeleteOnEmptyReconfiguration`): Partial updates with PATCH semantics. Fields
+//!   are `Maybe<Option<T>>` with three states: `Unspecified` (don't change),
+//!   `Specified(None)` (clear to default), `Specified(Some(v))` (set to value).
+//!   Applied using `reconfigure()`.
+//!
+//! Reconfiguration of nested fields (e.g. `timestamping`, `delete_on_empty`,
+//! `default_stream_config`) is applied recursively: `Specified(Some(inner_reconfig))`
+//! applies the inner reconfiguration to the existing value, while `Specified(None)`
+//! clears it to the default.
+//!
+//! `merge()` resolves optional configs into resolved configs with precedence:
+//! stream-level → basin-level → system default (via `Option::or` chaining).
+//!
+//! The `From<Optional*> for *Reconfiguration` conversions treat every field as
+//! `Specified` (including `None` → `Specified(None)`). These
+//! conversions represent "set the config to exactly this state", not "update only
+//! the fields that are set."
+
 use std::time::Duration;
 
 use enum_ordinalize::Ordinalize;
