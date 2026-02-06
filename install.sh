@@ -175,7 +175,7 @@ if [ -z "${EXISTING_S2_PATH}" ] || [ -n "${NEEDS_PATH_UPDATE}" ]; then
     fi
 
     if [ -n "${PROFILE_FILE}" ]; then
-        LINE_TO_ADD="export PATH=${BIN_PATH}:\\$PATH"
+        LINE_TO_ADD="export PATH=\"${BIN_PATH}:\\$PATH\""
         if ! grep -q "${BIN_PATH}" "${PROFILE_FILE}"; then
             echo_white "Adding ${BIN_PATH} to \\$PATH in ${PROFILE_FILE}"
             printf "\\n# add S2 to the PATH\\n%s\\n" "${LINE_TO_ADD}" >> "${PROFILE_FILE}"
