@@ -175,6 +175,8 @@ impl Backend {
                             records,
                             tail: None,
                         });
+                    } else {
+                        state.start_seq_num = state.tail.seq_num;
                     }
                 } else {
                     assert_eq!(state.start_seq_num, state.tail.seq_num);
