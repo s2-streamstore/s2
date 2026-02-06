@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 /// An [`Option`] is deserialized as [`None`] if either the value is not specified or the value is
 /// `null`. [`Maybe`] allows us to distinguish between the two.
 ///
-/// `Unspecified` is produced only by deserialization of an absent field (via `#[serde(default)]`)
-/// or by `Default::default()`. The `From<T>` impl always produces `Specified(value)`,
-/// so construction via `.into()` can never yield `Unspecified`.
+/// The [`Deserialize`] impl always produces `Specified` via the blanket `From<T>` impl.
+/// `Unspecified` is only produced by `Default::default()`, which serde invokes for
+/// absent fields annotated with `#[serde(default)]`.
 ///
 /// # Examples
 ///
