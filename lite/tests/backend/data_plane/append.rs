@@ -6,8 +6,11 @@ use s2_common::{
     read_extent::{ReadLimit, ReadUntil},
     record::FencingToken,
     types::{
-        config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, AppendRecord, AppendRecordBatch, ReadEnd, ReadFrom, ReadStart},
+        config::{BasinConfig, OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
+        stream::{
+            AppendInput, AppendRecord, AppendRecordBatch, ListStreamsRequest, ReadEnd, ReadFrom,
+            ReadStart,
+        },
     },
 };
 use s2_lite::backend::error::{AppendConditionFailedError, AppendError};
@@ -291,6 +294,52 @@ async fn test_append_session_basic() {
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 3);
+}
+
+#[tokio::test]
+async fn test_append_session_auto_create_stream() {
+    let backend = create_backend().await;
+    let basin_config = BasinConfig {
+        create_stream_on_append: true,
+        ..Default::default()
+    };
+    let basin_name = create_test_basin(&backend, "append-session-auto-create", basin_config).await;
+    let stream_name = test_stream_name("auto");
+
+    let stream_list = backend
+        .list_streams(basin_name.clone(), ListStreamsRequest::default())
+        .await
+        .expect("Failed to list streams");
+    assert_eq!(stream_list.values.len(), 0);
+
+    let inputs = futures::stream::iter(vec![AppendInput {
+        records: create_test_record_batch(vec![Bytes::from_static(b"auto created")]),
+        match_seq_num: None,
+        fencing_token: None,
+    }]);
+
+    let session = backend
+        .clone()
+        .append_session(basin_name.clone(), stream_name.clone(), inputs)
+        .await
+        .expect("Failed to create append session");
+    tokio::pin!(session);
+
+    let ack = session
+        .next()
+        .await
+        .expect("Should have ack")
+        .expect("Append should succeed");
+    assert_eq!(ack.start.seq_num, 0);
+    assert_eq!(ack.end.seq_num, 1);
+    assert!(session.next().await.is_none());
+
+    let stream_list = backend
+        .list_streams(basin_name, ListStreamsRequest::default())
+        .await
+        .expect("Failed to list streams");
+    assert_eq!(stream_list.values.len(), 1);
+    assert_eq!(stream_list.values[0].name, stream_name);
 }
 
 #[tokio::test]
