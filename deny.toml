@@ -2,8 +2,6 @@
 all-features = true
 
 [advisories]
-db-path = "~/.cargo/advisory-db"
-db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = [
     # Transitive deps via slatedb/foyer — not actionable.
     "RUSTSEC-2024-0436", # paste unmaintained
