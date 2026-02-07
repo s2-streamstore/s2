@@ -361,7 +361,7 @@ fn bench_read_inner(
                                     }
                                 };
 
-                                if header_hash == prev_hash {
+                                if record.seq_num > 0 && header_hash == prev_hash {
                                     yield Err(CliError::BenchVerification(format!(
                                         "duplicate record hash at seq_num {}",
                                         record.seq_num
