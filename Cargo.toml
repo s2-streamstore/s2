@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["api", "common", "lite", "cli"]
+members = ["api", "cli", "common", "lite"]
 
 [workspace.package]
 edition = "2024"
@@ -33,13 +33,13 @@ flate2 = "1.1"
 futures = "0.3"
 http = "1.4"
 humantime = "2.3"
+indexmap = "2.13"
 indicatif = "0.18"
 itertools = "0.14"
-indexmap = "2.13"
 json_to_table = "0.12"
 miette = "7.6"
-mime = "0.3"
 mimalloc = "0.1"
+mime = "0.3"
 parking_lot = "0.12"
 prometheus = "0.14"
 proptest = "1.10"
@@ -48,8 +48,8 @@ prost-build = "0.14"
 rand = "0.9"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 rkyv = "0.8"
-rustls = "0.23"
 rstest = "0.26"
+rustls = "0.23"
 s2-api = { path = "api", version = "0.27" }
 s2-common = { path = "common", version = "0.27" }
 s2-lite = { path = "lite", version = "0.28" }

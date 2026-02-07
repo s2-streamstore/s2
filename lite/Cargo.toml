@@ -34,11 +34,11 @@ compact_str = { workspace = true }
 dashmap = { workspace = true }
 enum-ordinalize = { workspace = true }
 eyre = { workspace = true }
-mimalloc = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
+mimalloc = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }
 prometheus = { workspace = true, features = ["process"] }
 prost = { workspace = true }
