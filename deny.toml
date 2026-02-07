@@ -1,0 +1,43 @@
+[graph]
+all-features = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    # Transitive deps via slatedb/foyer — not actionable.
+    "RUSTSEC-2024-0436", # paste unmaintained
+    "RUSTSEC-2025-0141", # bincode unmaintained
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    { crate = "openssl", use-instead = "rustls-tls" },
+    { crate = "openssl-sys", use-instead = "rustls-tls" },
+    # TODO { crate = "ring", use-instead = "aws-lc-rs" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/slatedb/slatedb",
+    "https://github.com/infiniteregrets/utoipa",
+]

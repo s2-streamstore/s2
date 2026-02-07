@@ -7,12 +7,20 @@ sync:
     git submodule update --init --recursive
 
 # Build the s2 CLI binary (includes lite subcommand)
-build: sync
-    cargo build --locked --release -p s2-cli
+build *args: sync
+    cargo build --locked --release -p s2-cli {{args}}
 
 # Run clippy linter
-clippy: sync
-    cargo clippy --workspace --all-features --all-targets -- -D warnings --allow deprecated
+clippy *args: sync
+    cargo clippy --workspace --all-features --all-targets {{args}} -- -D warnings --allow deprecated
+
+# Ensure cargo-deny is installed
+_ensure-deny:
+    @cargo deny --version > /dev/null 2>&1 || cargo install cargo-deny
+
+# Run cargo-deny checks
+deny *args: _ensure-deny
+    cargo deny check {{args}}
 
 # Ensure nightly toolchain is installed
 _ensure-nightly:
@@ -27,8 +35,8 @@ _ensure-nextest:
     @cargo nextest --version > /dev/null 2>&1 || cargo install cargo-nextest
 
 # Run tests with nextest (excludes CLI integration tests that need a server)
-test: sync _ensure-nextest
-    cargo nextest run --workspace --all-features -E 'not (package(s2-cli) & binary(integration))'
+test *args: sync _ensure-nextest
+    cargo nextest run --workspace --all-features -E 'not (package(s2-cli) & binary(integration))' {{args}}
 
 # Run CLI integration tests (requires s2 lite server running)
 test-cli-integration: sync _ensure-nextest
@@ -43,6 +51,6 @@ check-locked:
 clean:
     cargo clean
 
-# Run s2 lite server (in-memory)
-serve:
-    cargo run --release -p s2-cli -- lite
+# Run s2-lite
+lite *args:
+    cargo run --release -p s2-cli -- lite {{args}}

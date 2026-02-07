@@ -31,6 +31,15 @@ jobs:
       - name: Verify Cargo.lock is up-to-date
         run: cargo metadata --locked --format-version 1 >/dev/null
 
+  deny:
+    name: Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

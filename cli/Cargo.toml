@@ -23,7 +23,7 @@ clap = { workspace = true, features = ["derive"] }
 color-print = { workspace = true }
 colored = { workspace = true }
 config = { workspace = true }
-crossterm = "0.28"
+crossterm = "0.29"
 dirs = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
@@ -34,7 +34,7 @@ json_to_table = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 mimalloc = { workspace = true }
 rand = { workspace = true }
-ratatui = "0.29"
+ratatui = "0.30"
 rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-lite = { workspace = true }

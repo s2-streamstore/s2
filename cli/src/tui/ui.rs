@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph},
 };
