@@ -1,6 +1,6 @@
 [package]
 name = "s2-cli"
-version = "0.28.2"
+version = "0.28.3"
 description = "CLI for S2"
 edition.workspace = true
 license.workspace = true
@@ -38,7 +38,7 @@ ratatui = "0.30"
 rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-lite = { workspace = true }
-s2-sdk = { version = "0.23", features = ["_hidden"] }
+s2-sdk = { version = "0.23.8", features = ["_hidden"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 slatedb = { workspace = true }
