@@ -65,17 +65,34 @@ helm install my-s2-lite s2/s2-lite \
 
 Data persists across pod restarts using PersistentVolumes.
 
-### TLS with self-signed certificates
+### TLS Configuration
 
+**Self-signed certificate (for dev/testing):**
 ```bash
 helm install my-s2-lite s2/s2-lite \
-  --set tls.enabled=true
+  --set tls.enabled=true \
+  --set tls.selfSigned=true
 
 # Configure CLI to trust self-signed certs
 s2 config set ssl_no_verify true
 ```
 
-Useful for development and testing. For production, use an Ingress with proper TLS termination.
+**Provided certificate (from Kubernetes secret):**
+```bash
+# Create TLS secret
+kubectl create secret tls s2-lite-tls --cert=tls.crt --key=tls.key
+
+# Install with provided certificate
+helm install my-s2-lite s2/s2-lite \
+  --set tls.enabled=true \
+  --set tls.cert=/etc/tls/tls.crt \
+  --set tls.key=/etc/tls/tls.key \
+  --set volumeMounts[0].name=tls-certs \
+  --set volumeMounts[0].mountPath=/etc/tls \
+  --set volumeMounts[0].readOnly=true \
+  --set volumes[0].name=tls-certs \
+  --set volumes[0].secret.secretName=s2-lite-tls
+```
 
 ## Configuration
 
@@ -91,9 +108,13 @@ Common configurations:
 | `service.type` | Service type | `ClusterIP` |
 | `service.port` | Service port | `80` |
 | `service.targetPort` | Container port | `8080` |
-| `tls.enabled` | Enable self-signed TLS | `false` |
+| `tls.enabled` | Enable TLS | `false` |
+| `tls.selfSigned` | Use auto-generated self-signed certificate | `false` |
+| `tls.cert` | Path to TLS certificate (when using provided cert) | `""` |
+| `tls.key` | Path to TLS key (when using provided cert) | `""` |
 | `objectStorage.enabled` | Enable S3-compatible storage | `false` |
 | `objectStorage.bucket` | S3 bucket name | `""` |
+| `objectStorage.path` | Path prefix within bucket | `""` |
 | `localStorage.enabled` | Enable local disk storage | `false` |
 | `serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
 

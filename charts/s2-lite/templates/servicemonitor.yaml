@@ -17,4 +17,13 @@ spec:
     path: /metrics
     interval: {{ .Values.metrics.serviceMonitor.interval }}
     scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+    {{- if .Values.tls.enabled }}
+    scheme: https
+    tlsConfig:
+      {{- if .Values.metrics.serviceMonitor.tlsConfig }}
+      {{- toYaml .Values.metrics.serviceMonitor.tlsConfig | nindent 6 }}
+      {{- else }}
+      insecureSkipVerify: true
+      {{- end }}
+    {{- end }}
 {{- end }}

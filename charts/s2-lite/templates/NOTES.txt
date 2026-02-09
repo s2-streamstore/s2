@@ -13,15 +13,25 @@ s2-lite is now running with the following configuration:
   - Image: {{ include "s2-lite.image" . }}
 {{- if and .Values.objectStorage.enabled .Values.objectStorage.bucket }}
   - Storage: S3-compatible ({{ .Values.objectStorage.bucket }})
+  {{- if .Values.objectStorage.path }}
+  - Path: {{ .Values.objectStorage.path }}
+  {{- end }}
   {{- if .Values.objectStorage.endpoint }}
   - Endpoint: {{ .Values.objectStorage.endpoint }}
   {{- end }}
+{{- else if .Values.localStorage.enabled }}
+  - Storage: Local disk ({{ .Values.localStorage.path }})
+  {{- if .Values.localStorage.persistentVolumeClaim.enabled }}
+  - PVC: {{ .Values.localStorage.persistentVolumeClaim.size }}
+  {{- else }}
+  - Volume: emptyDir (data lost on pod restart)
+  {{- end }}
 {{- else }}
-  - Storage: In-memory (for development/testing only)
+  - Storage: In-memory (data lost on pod restart)
 {{- end }}
 
 Get the application URL by running these commands:
-  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "{{ include "s2-lite.selectorLabels" . | replace "\n" "," }}" -o jsonpath="{.items[0].metadata.name}")
+  export POD_NAME={{ include "s2-lite.fullname" . }}-0
 {{- if contains "NodePort" .Values.service.type }}
   export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "s2-lite.fullname" . }})
   export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
@@ -39,10 +49,19 @@ Get the application URL by running these commands:
   kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
 {{- end }}
 
-Health check:
-  kubectl --namespace {{ .Release.Namespace }} exec -it $POD_NAME -- wget -q -O- http://localhost:{{ .Values.service.targetPort }}/health
+Health check (via port-forward):
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME {{ .Values.service.targetPort }}:{{ .Values.service.targetPort }} &
+{{- if .Values.tls.enabled }}
+  curl -k https://localhost:{{ .Values.service.targetPort }}/health
+{{- else }}
+  curl http://localhost:{{ .Values.service.targetPort }}/health
+{{- end }}
 
 Metrics endpoint:
-  kubectl --namespace {{ .Release.Namespace }} exec -it $POD_NAME -- wget -q -O- http://localhost:{{ .Values.service.targetPort }}/metrics
+{{- if .Values.tls.enabled }}
+  curl -k https://localhost:{{ .Values.service.targetPort }}/metrics
+{{- else }}
+  curl http://localhost:{{ .Values.service.targetPort }}/metrics
+{{- end }}
 
 For more information, visit https://s2.dev/docs

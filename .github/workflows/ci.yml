@@ -88,20 +88,32 @@ jobs:
         run: helm template test-release charts/s2-lite --set localStorage.enabled=true --set localStorage.persistentVolumeClaim.enabled=true --dry-run > /dev/null
 
       - name: Test with localStorage emptyDir
-        run: helm template test-release charts/s2-lite --set localStorage.enabled=true --set localStorage.emptyDir.enabled=true --dry-run > /dev/null
+        run: helm template test-release charts/s2-lite --set localStorage.enabled=true --dry-run > /dev/null
 
       - name: Test with S3 object storage
         run: helm template test-release charts/s2-lite --set objectStorage.enabled=true --set objectStorage.bucket=test-bucket --dry-run > /dev/null
 
-      - name: Test with all features enabled
+      - name: Test with S3 and TLS
         run: |
           helm template test-release charts/s2-lite \
             --set tls.enabled=true \
+            --set tls.selfSigned=true \
             --set objectStorage.enabled=true \
             --set objectStorage.bucket=test-bucket \
             --set objectStorage.endpoint=https://s3.amazonaws.com \
-            --set serviceMonitor.enabled=true \
+            --set metrics.serviceMonitor.enabled=true \
             --dry-run > /dev/null
+
+      - name: Test conflicting storage fails
+        run: |
+          if helm template test-release charts/s2-lite \
+            --set objectStorage.enabled=true \
+            --set objectStorage.bucket=test-bucket \
+            --set localStorage.enabled=true \
+            --dry-run 2>&1; then
+            echo "Expected failure but got success"
+            exit 1
+          fi
 
   build-server:
     name: Build s2-lite

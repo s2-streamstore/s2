@@ -111,6 +111,8 @@ objectStorage:
   enabled: false
   # S3 bucket name
   bucket: ""
+  # Path prefix within the bucket (optional)
+  path: ""
   # S3-compatible endpoint URL (leave empty for AWS S3)
   # Examples:
   #   MinIO: "http://minio:9000"
@@ -119,23 +121,18 @@ objectStorage:
   endpoint: ""
 
 # Local disk storage (uses --local-root flag)
-# If enabled without specifying PVC or emptyDir, defaults to emptyDir
+# If enabled without PVC, defaults to emptyDir (data lost on pod restart)
 localStorage:
   enabled: false
   # Mount path inside container
   path: /data
-  # PersistentVolumeClaim configuration
+  # PersistentVolumeClaim configuration (uses StatefulSet volumeClaimTemplates)
   persistentVolumeClaim:
     enabled: false
-    # Existing PVC name (if empty, creates new PVC)
-    existingClaim: ""
     storageClass: ""
     size: 10Gi
     accessModes:
       - ReadWriteOnce
-  # Or use emptyDir (data lost on pod restart)
-  emptyDir:
-    enabled: false
   # InitContainer to fix permissions (useful for hostPath volumes)
   # Runs as root to chown the data directory to the non-root user (UID 65532)
   initContainer:
@@ -153,6 +150,15 @@ metrics:
     scrapeTimeout: 10s
     # Additional labels for the ServiceMonitor
     labels: {}
+    # TLS configuration for scraping metrics when tls.enabled=true
+    # By default uses insecureSkipVerify (suitable for tls.selfSigned=true)
+    # When using provided certificates, reference the same TLS secret:
+    #   tlsConfig:
+    #     ca:
+    #       secret:
+    #         name: s2-lite-tls  # same secret used for tls.cert/tls.key
+    #         key: tls.crt       # or ca.crt if CA-signed
+    tlsConfig: {}
 
 # ------------------------------------------------------------------------------
 # Health Checks
