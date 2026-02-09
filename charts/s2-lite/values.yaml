@@ -61,16 +61,6 @@ service:
   type: ClusterIP  # Use LoadBalancer for external access
   port: 80
   targetPort: 8080  # Non-privileged port (container runs as non-root)
-  # Cloud-specific LoadBalancer annotations (when type: LoadBalancer)
-  # AWS EKS example:
-  #   service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-  #   service.beta.kubernetes.io/aws-load-balancer-internal: "true"
-  #   service.beta.kubernetes.io/aws-load-balancer-name: "my-nlb"
-  #   service.beta.kubernetes.io/aws-load-balancer-subnets: "subnet-xxx,subnet-yyy"
-  # GCP GKE example:
-  #   networking.gke.io/load-balancer-type: "Internal"
-  # Azure AKS example:
-  #   service.beta.kubernetes.io/azure-load-balancer-internal: "true"
   # External-DNS example (automatic DNS record creation):
   #   external-dns.alpha.kubernetes.io/hostname: "s2-lite.example.com"
   annotations: {}
@@ -79,10 +69,14 @@ service:
 # TLS Configuration
 # ------------------------------------------------------------------------------
 
-# Enable self-signed TLS (for dev/testing)
-# For production, use LoadBalancer or Ingress TLS termination instead
 tls:
   enabled: false
+  # Provide certificate and key paths (--tls-cert and --tls-key)
+  # Mount certificates using volumes/volumeMounts (see examples at bottom of file)
+  cert: ""  # e.g., /etc/tls/tls.crt
+  key: ""   # e.g., /etc/tls/tls.key
+  # Or set selfSigned to true to use auto-generated self-signed certificate (--tls-self)
+  selfSigned: false
 
 # ------------------------------------------------------------------------------
 # Ingress Configuration (cloud-agnostic HTTP access)

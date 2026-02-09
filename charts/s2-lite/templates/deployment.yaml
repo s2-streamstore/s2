@@ -51,7 +51,14 @@ spec:
           - --port
           - {{ .Values.service.targetPort | quote }}
           {{- if .Values.tls.enabled }}
+            {{- if .Values.tls.selfSigned }}
           - --tls-self
+            {{- else if and .Values.tls.cert .Values.tls.key }}
+          - --tls-cert
+          - {{ .Values.tls.cert }}
+          - --tls-key
+          - {{ .Values.tls.key }}
+            {{- end }}
           {{- end }}
           {{- if and .Values.objectStorage.enabled .Values.objectStorage.bucket }}
           - --bucket

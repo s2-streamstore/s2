@@ -143,7 +143,7 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Kubernetes Deployment
 
-Deploy s2-lite to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite/README.md) for installation instructions and configuration options.
+Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite/README.md) for installation instructions and configuration options.
 
 ### Monitoring
 
