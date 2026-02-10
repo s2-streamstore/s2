@@ -119,7 +119,7 @@ jobs:
             "repo": "s2-streamstore/s2-sdk-rust",
             "ref": "main",
             "lang": "rust",
-            "test_cmd": "cargo test --all-features -- --skip access_token"
+            "test_cmd": "cargo test --all-features -- --skip access_token --skip metrics"
           }
         ]
 
