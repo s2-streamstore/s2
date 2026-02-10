@@ -237,6 +237,9 @@ impl Backend {
             )
             .await?
             .ok_or_else(|| StreamNotFoundError { basin, stream })?;
+        if meta.deleted_at.is_some() {
+            return Err(StreamDeletionPendingError { basin, stream }.into());
+        }
         Ok(meta.config)
     }
 

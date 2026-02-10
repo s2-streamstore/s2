@@ -154,6 +154,9 @@ impl ServiceError {
                 GetStreamConfigError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
+                GetStreamConfigError::StreamDeletionPending(e) => {
+                    standard(ErrorCode::StreamDeletionPending, e.to_string())
+                }
             },
             ServiceError::DeleteStream(e) => match e {
                 DeleteStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),

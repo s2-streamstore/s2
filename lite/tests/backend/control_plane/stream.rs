@@ -450,6 +450,31 @@ async fn test_delete_stream_blocks_data_operations() {
 }
 
 #[tokio::test]
+async fn test_get_stream_config_for_deleting_stream_returns_pending() {
+    let backend = create_backend().await;
+    let basin_name =
+        create_test_basin(&backend, "stream-delete-config", BasinConfig::default()).await;
+    let stream_name = create_test_stream(
+        &backend,
+        &basin_name,
+        "stream-delete-config",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    backend
+        .delete_stream(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to delete stream");
+
+    let result = backend.get_stream_config(basin_name, stream_name).await;
+    assert!(matches!(
+        result,
+        Err(GetStreamConfigError::StreamDeletionPending(_))
+    ));
+}
+
+#[tokio::test]
 async fn test_delete_stream_nonexistent_returns_not_found() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(

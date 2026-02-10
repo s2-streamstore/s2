@@ -308,6 +308,8 @@ pub enum GetStreamConfigError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
+    #[error(transparent)]
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
