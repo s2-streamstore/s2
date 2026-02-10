@@ -236,7 +236,10 @@ impl Backend {
                 kv::stream_meta::deser_value,
             )
             .await?
-            .ok_or_else(|| StreamNotFoundError { basin, stream })?;
+            .ok_or_else(|| StreamNotFoundError {
+                basin: basin.clone(),
+                stream: stream.clone(),
+            })?;
         if meta.deleted_at.is_some() {
             return Err(StreamDeletionPendingError { basin, stream }.into());
         }
