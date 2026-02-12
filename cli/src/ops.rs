@@ -1,6 +1,6 @@
 use std::{pin::Pin, time::Duration};
 
-use futures::{Stream, StreamExt, TryStreamExt, stream, stream::FuturesUnordered};
+use futures::{Stream, StreamExt, TryStreamExt, stream, stream::FuturesOrdered};
 use s2_sdk::{
     self as sdk, S2, S2Stream,
     batching::BatchingConfig,
@@ -498,7 +498,7 @@ where
 
     async_stream::stream! {
         let mut records = records;
-        let mut pending_acks = FuturesUnordered::new();
+        let mut pending_acks = FuturesOrdered::new();
         let mut input_done = false;
         let mut stashed_record: Option<AppendRecord> = None;
         let mut stashed_bytes: u32 = 0;
@@ -509,7 +509,7 @@ where
                     match permit {
                         Ok(permit) => {
                             let record = stashed_record.take().unwrap();
-                            pending_acks.push(permit.submit(record));
+                            pending_acks.push_back(permit.submit(record));
                         }
                         Err(e) => {
                             yield Err(CliError::op(OpKind::Append, e));
