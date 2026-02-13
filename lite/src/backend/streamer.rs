@@ -130,7 +130,7 @@ struct CommandState<T> {
 
 impl<T> CommandState<T> {
     fn is_applied_in(&self, seq_num_range: &Range<SeqNum>) -> bool {
-        seq_num_range.start <= self.applied_point.end && self.applied_point.end <= seq_num_range.end
+        seq_num_range.start < self.applied_point.end && self.applied_point.end <= seq_num_range.end
     }
 }
 
@@ -894,5 +894,17 @@ mod tests {
         assert_eq!(result[0].position.seq_num, 42);
         assert_eq!(result[1].position.seq_num, 43);
         assert_eq!(result[2].position.seq_num, 44);
+    }
+
+    #[test]
+    fn command_state_is_applied_in_excludes_range_start() {
+        let state = CommandState {
+            applied_point: ..5,
+            state: (),
+        };
+
+        assert!(!state.is_applied_in(&(5..10)));
+        assert!(state.is_applied_in(&(4..10)));
+        assert!(state.is_applied_in(&(0..5)));
     }
 }
