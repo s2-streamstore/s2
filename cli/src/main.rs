@@ -1,3 +1,5 @@
+//! S2 command-line interface.
+
 mod bench;
 mod cli;
 mod config;
