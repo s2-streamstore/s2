@@ -1,6 +1,9 @@
 use std::{
     ops::{Range, RangeTo},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -45,6 +48,16 @@ const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 // Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
 const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct StreamerId(u64);
+
+impl StreamerId {
+    fn next() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DeleteOnEmptyDeadline {
     deadline: kv::timestamp::TimestampSecs,
@@ -63,7 +76,7 @@ pub(super) struct Spawner {
 }
 
 impl Spawner {
-    pub fn spawn(self, on_exit: impl FnOnce() + Send + 'static) -> StreamerClient {
+    pub fn spawn(self, on_exit: impl FnOnce(StreamerId) + Send + 'static) -> StreamerClient {
         let Self {
             db,
             stream_id,
@@ -102,12 +115,15 @@ impl Spawner {
             bgtask_trigger_tx,
         };
 
+        let id = StreamerId::next();
+
         tokio::spawn(async move {
             streamer.run(msg_rx).await;
-            on_exit();
+            on_exit(id);
         });
 
         StreamerClient {
+            id,
             stream_id,
             msg_tx,
             append_inflight_bytes_sema,
@@ -396,6 +412,7 @@ enum Message {
 
 #[derive(Debug, Clone)]
 pub(super) struct StreamerClient {
+    id: StreamerId,
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
     append_inflight_bytes_sema: Arc<Semaphore>,
@@ -403,6 +420,10 @@ pub(super) struct StreamerClient {
 }
 
 impl StreamerClient {
+    pub fn id(&self) -> StreamerId {
+        self.id
+    }
+
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
     }

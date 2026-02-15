@@ -13,7 +13,10 @@ use s2_common::{
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
-use tokio::{sync::broadcast, time::Instant};
+use tokio::{
+    sync::{Notify, broadcast},
+    time::Instant,
+};
 
 use super::{
     error::{
@@ -107,8 +110,10 @@ impl Backend {
             append_inflight_max: self.append_inflight_max,
             bgtask_trigger_tx: self.bgtask_trigger_tx.clone(),
         }
-        .spawn(move || {
-            client_states.remove(&stream_id);
+        .spawn(move |client_id| {
+            client_states.remove_if(&stream_id, |_, state| {
+                matches!(state, StreamerClientState::Ready { client } if client.id() == client_id)
+            });
         }))
     }
 
@@ -156,6 +161,11 @@ impl Backend {
                 let stream_id = *(ve.key());
                 let basin = basin.clone();
                 let stream = stream.clone();
+                let notify = Arc::new(Notify::new());
+                let notify_waiters = {
+                    let notify = notify.clone();
+                    move || notify.notify_waiters()
+                };
                 tokio::spawn(async move {
                     let state = match this.start_streamer(basin, stream).await {
                         Ok(client) => StreamerClientState::Ready { client },
@@ -164,17 +174,12 @@ impl Backend {
                             timestamp: Instant::now(),
                         },
                     };
-                    let replaced_state = this.client_states.insert(stream_id, state);
-                    let Some(StreamerClientState::Blocked { notify }) = replaced_state else {
-                        panic!("expected Blocked client but replaced: {replaced_state:?}");
-                    };
-                    notify.notify_waiters();
+                    this.client_states.insert(stream_id, state);
+                    notify_waiters();
                 });
-                ve.insert(StreamerClientState::Blocked {
-                    notify: Default::default(),
-                })
-                .value()
-                .clone()
+                ve.insert(StreamerClientState::Blocked { notify })
+                    .value()
+                    .clone()
             }
         }
     }
