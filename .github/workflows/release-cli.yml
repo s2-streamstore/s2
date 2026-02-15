@@ -204,6 +204,8 @@ jobs:
           field: package.version
       - name: Download artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: '*-*-*'
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -225,6 +227,8 @@ jobs:
           field: package.version
       - name: Download artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: '*-*-*'
       - name: Calculate checksums
         run: |
           LINUX_INTEL_SHA256=$(shasum -a 256 x86_64-unknown-linux-gnu/s2-x86_64-unknown-linux-gnu.zip | awk '{print $1}')
