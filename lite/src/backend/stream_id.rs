@@ -24,7 +24,7 @@ impl StreamId {
     const SEPARATOR: u8 = 0;
 
     pub fn new(basin: &BasinName, stream: &StreamName) -> Self {
-        Self(Bash::from_bytes_delimited(
+        Self(Bash::delimited(
             &[basin.as_bytes(), stream.as_bytes()],
             Self::SEPARATOR,
         ))

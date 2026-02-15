@@ -11,7 +11,7 @@ impl Bash {
 
     /// Hashes components separated by a delimiter byte.
     /// Callers must ensure components do not contain the delimiter.
-    pub fn from_bytes_delimited(components: &[&[u8]], delimiter: u8) -> Self {
+    pub fn delimited(components: &[&[u8]], delimiter: u8) -> Self {
         let mut hasher = blake3::Hasher::new();
         for component in components {
             hasher.update(component);
@@ -21,7 +21,7 @@ impl Bash {
     }
 
     /// Hashes components with length prefixes to avoid separator ambiguity.
-    pub fn from_bytes_len_prefixed(components: &[&[u8]]) -> Self {
+    pub fn length_prefixed(components: &[&[u8]]) -> Self {
         let mut hasher = blake3::Hasher::new();
         for component in components {
             hasher.update(&(component.len() as u64).to_le_bytes());
@@ -91,8 +91,8 @@ mod tests {
 
     #[test]
     fn bash_len_prefixed_components_are_unambiguous() {
-        let bash1 = Bash::from_bytes_len_prefixed(&[b"a\0", b"b"]);
-        let bash2 = Bash::from_bytes_len_prefixed(&[b"a", b"\0b"]);
+        let bash1 = Bash::length_prefixed(&[b"a\0", b"b"]);
+        let bash2 = Bash::length_prefixed(&[b"a", b"\0b"]);
 
         assert_ne!(bash1, bash2);
     }

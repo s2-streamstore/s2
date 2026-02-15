@@ -183,7 +183,7 @@ mod tests {
             config: config.clone(),
             created_at,
             deleted_at,
-            creation_idempotency_key: Some(Bash::from_bytes_len_prefixed(&[
+            creation_idempotency_key: Some(Bash::length_prefixed(&[
                 b"test-basin",
                 b"test-stream",
                 b"request-token-456",
@@ -207,7 +207,7 @@ mod tests {
             config: None,
             created_at: OffsetDateTime::from_unix_timestamp(2_345_678).unwrap(),
             deleted_at: None,
-            creation_idempotency_key: Some(Bash::from_bytes_len_prefixed(&[
+            creation_idempotency_key: Some(Bash::length_prefixed(&[
                 b"my-basin",
                 b"my-stream",
                 b"req-abc",
