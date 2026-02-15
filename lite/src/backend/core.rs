@@ -162,7 +162,10 @@ impl Backend {
                 let basin = basin.clone();
                 let stream = stream.clone();
                 let notify = Arc::new(Notify::new());
-                let notify_waiters = notify.clone();
+                let notify_waiters = {
+                    let notify = notify.clone();
+                    move || notify.notify_waiters()
+                };
                 tokio::spawn(async move {
                     let state = match this.start_streamer(basin, stream).await {
                         Ok(client) => StreamerClientState::Ready { client },
@@ -172,7 +175,7 @@ impl Backend {
                         },
                     };
                     this.client_states.insert(stream_id, state);
-                    notify_waiters.notify_waiters();
+                    notify_waiters();
                 });
                 ve.insert(StreamerClientState::Blocked { notify })
                     .value()
