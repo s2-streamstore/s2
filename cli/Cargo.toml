@@ -38,7 +38,7 @@ ratatui = "0.30"
 rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-lite = { workspace = true }
-s2-sdk = { version = "0.23.8", features = ["_hidden"] }
+s2-sdk = { version = "0.24.0", features = ["_hidden"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 slatedb = { workspace = true }
@@ -60,4 +60,4 @@ predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }
 serial_test = "3.3"
-tempfile = "3.24"
+tempfile = "3.25"
