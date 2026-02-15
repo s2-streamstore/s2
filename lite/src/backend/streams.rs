@@ -350,7 +350,7 @@ impl Backend {
 }
 
 fn creation_idempotency_key(req_token: &RequestToken, config: &OptionalStreamConfig) -> Bash {
-    Bash::new(&[
+    Bash::length_prefixed(&[
         req_token.as_bytes(),
         &s2_api::v1::config::StreamConfig::to_opt(config.clone())
             .as_ref()

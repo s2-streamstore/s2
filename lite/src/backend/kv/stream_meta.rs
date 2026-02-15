@@ -183,7 +183,7 @@ mod tests {
             config: config.clone(),
             created_at,
             deleted_at,
-            creation_idempotency_key: Some(Bash::new(&[
+            creation_idempotency_key: Some(Bash::length_prefixed(&[
                 b"test-basin",
                 b"test-stream",
                 b"request-token-456",
@@ -207,7 +207,11 @@ mod tests {
             config: None,
             created_at: OffsetDateTime::from_unix_timestamp(2_345_678).unwrap(),
             deleted_at: None,
-            creation_idempotency_key: Some(Bash::new(&[b"my-basin", b"my-stream", b"req-abc"])),
+            creation_idempotency_key: Some(Bash::length_prefixed(&[
+                b"my-basin",
+                b"my-stream",
+                b"req-abc",
+            ])),
         };
         let bytes = Bytes::from(serde_json::to_vec(&serde_value).unwrap());
         let decoded = super::deser_value(bytes).unwrap();
