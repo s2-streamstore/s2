@@ -21,9 +21,13 @@ impl std::fmt::Debug for StreamId {
 
 impl StreamId {
     pub const LEN: usize = 32;
+    const SEPARATOR: u8 = 0;
 
     pub fn new(basin: &BasinName, stream: &StreamName) -> Self {
-        Self(Bash::new(&[basin.as_bytes(), stream.as_bytes()]))
+        Self(Bash::from_bytes_delimited(
+            &[basin.as_bytes(), stream.as_bytes()],
+            Self::SEPARATOR,
+        ))
     }
 
     pub fn as_bytes(&self) -> &[u8; Self::LEN] {

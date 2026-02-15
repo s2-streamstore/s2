@@ -215,7 +215,7 @@ impl Backend {
 }
 
 fn creation_idempotency_key(req_token: &RequestToken, config: &BasinConfig) -> Bash {
-    Bash::new(&[
+    Bash::from_bytes_len_prefixed(&[
         req_token.as_bytes(),
         &serde_json::to_vec(&s2_api::v1::config::BasinConfig::from(config.clone()))
             .expect("serializable"),
