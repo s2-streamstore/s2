@@ -4503,6 +4503,32 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 [[package]]
 name = "s2-api"
 version = "0.27.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9e65783ec1845ca765e7e4c459eaa43d8f7048166c8b558eb6ccdac58351ba2"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str",
+ "enum-ordinalize",
+ "flate2",
+ "futures",
+ "http 1.4.0",
+ "itertools",
+ "mime",
+ "prost",
+ "s2-common 0.28.0",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.18",
+ "time",
+ "tokio-util",
+ "zstd",
+]
+
+[[package]]
+name = "s2-api"
+version = "0.27.6"
 dependencies = [
  "axum",
  "base64ct",
@@ -4518,7 +4544,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rstest",
- "s2-common 0.28.0",
+ "s2-common 0.28.1",
  "serde",
  "serde_json",
  "strum",
@@ -4530,34 +4556,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "s2-api"
-version = "0.27.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9e65783ec1845ca765e7e4c459eaa43d8f7048166c8b558eb6ccdac58351ba2"
-dependencies = [
- "base64ct",
- "bytes",
- "compact_str",
- "enum-ordinalize",
- "flate2",
- "futures",
- "http 1.4.0",
- "itertools",
- "mime",
- "prost",
- "s2-common 0.28.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
- "serde_json",
- "strum",
- "thiserror 2.0.18",
- "time",
- "tokio-util",
- "zstd",
-]
-
-[[package]]
 name = "s2-cli"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -4610,6 +4610,24 @@ dependencies = [
 [[package]]
 name = "s2-common"
 version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7111323b68a8fd1d3f09666c50dc765a3b21a3f2f344c359816a7c14f978d2e9"
+dependencies = [
+ "blake3",
+ "bytes",
+ "compact_str",
+ "enum-ordinalize",
+ "enumset",
+ "http 1.4.0",
+ "serde",
+ "strum",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
+name = "s2-common"
+version = "0.28.1"
 dependencies = [
  "axum",
  "blake3",
@@ -4631,26 +4649,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "s2-common"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7111323b68a8fd1d3f09666c50dc765a3b21a3f2f344c359816a7c14f978d2e9"
-dependencies = [
- "blake3",
- "bytes",
- "compact_str",
- "enum-ordinalize",
- "enumset",
- "http 1.4.0",
- "serde",
- "strum",
- "thiserror 2.0.18",
- "time",
-]
-
-[[package]]
 name = "s2-lite"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4678,8 +4678,8 @@ dependencies = [
  "rand 0.10.0",
  "rcgen",
  "rustls",
- "s2-api 0.27.5",
- "s2-common 0.28.0",
+ "s2-api 0.27.6",
+ "s2-common 0.28.1",
  "serde",
  "serde_json",
  "slatedb",
@@ -4713,8 +4713,8 @@ dependencies = [
  "prost",
  "rand 0.10.0",
  "rustls",
- "s2-api 0.27.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "s2-common 0.28.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "s2-api 0.27.5",
+ "s2-common 0.28.0",
  "secrecy",
  "serde",
  "serde_json",
