@@ -204,25 +204,26 @@ impl Backend {
                                                 if allowed_count < count {
                                                     break 'session;
                                                 }
+                                                Ok(())
                                             }
                                             Err(broadcast::error::RecvError::Lagged(_)) => {
                                                 // Catch up using DB
                                                 continue 'session;
                                             }
                                             Err(broadcast::error::RecvError::Closed) => {
-                                                break;
+                                                Err(StreamerMissingInActionError)
                                             }
                                         }
                                     }
                                     _ = new_heartbeat_sleep() => {
                                         yield ReadSessionOutput::Heartbeat(state.tail);
+                                        Ok(())
                                     }
                                     _ = wait_sleep(end.wait) => {
                                         break 'session;
                                     }
-                                }
+                                }?;
                             }
-                            Err(StreamerMissingInActionError)?;
                         }
                         Err(tail) => {
                             assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");

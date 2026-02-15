@@ -446,6 +446,69 @@ async fn test_follow_mode_with_count_limit() {
 }
 
 #[tokio::test]
+async fn test_follow_mode_with_exact_count_limit() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-exact-count-limit",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Count(2),
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::from_secs(2)),
+    };
+
+    let session = backend
+        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .await
+        .expect("Failed to create read session");
+    let mut session = Box::pin(session);
+
+    let backend_clone = backend.clone();
+    let basin_clone = basin_name.clone();
+    let stream_clone = stream_name.clone();
+
+    let append_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        append_payloads(
+            &backend_clone,
+            &basin_clone,
+            &stream_clone,
+            &[b"follow-1", b"follow-2"],
+        )
+        .await;
+    });
+
+    let mut all_records = Vec::new();
+    let timeout = Duration::from_secs(3);
+    let start_time = tokio::time::Instant::now();
+
+    while start_time.elapsed() < timeout {
+        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
+            Ok(Some(Ok(ReadSessionOutput::Batch(batch)))) => {
+                all_records.extend(batch.records.iter().cloned());
+            }
+            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    append_handle.await.unwrap();
+
+    assert_eq!(all_records.len(), 2);
+    let bodies = envelope_bodies(&all_records);
+    assert_eq!(bodies, vec![b"follow-1".to_vec(), b"follow-2".to_vec()]);
+}
+
+#[tokio::test]
 async fn test_follow_mode_with_timestamp_until() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "follow-timestamp-until",
