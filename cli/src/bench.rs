@@ -13,7 +13,7 @@ use bytes::Bytes;
 use colored::Colorize;
 use futures::{Stream, StreamExt, stream::FuturesUnordered};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
     producer::{IndexedAppendAck, ProducerConfig},
