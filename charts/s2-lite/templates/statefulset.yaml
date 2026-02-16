@@ -1,0 +1,184 @@
+{{- if and (and .Values.objectStorage.enabled .Values.objectStorage.bucket) .Values.localStorage.enabled }}
+{{- fail "Cannot enable both objectStorage and localStorage - choose one" }}
+{{- end }}
+---
+# Headless service for StatefulSet stable network identity
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "s2-lite.fullname" . }}-headless
+  labels:
+    {{- include "s2-lite.labels" . | nindent 4 }}
+spec:
+  clusterIP: None  # Headless service
+  selector:
+    {{- include "s2-lite.selectorLabels" . | nindent 4 }}
+  ports:
+  - port: {{ .Values.service.targetPort }}
+    name: http
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "s2-lite.fullname" . }}
+  labels:
+    {{- include "s2-lite.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "s2-lite.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "s2-lite.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "s2-lite.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "s2-lite.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if and .Values.localStorage.enabled .Values.localStorage.initContainer.enabled }}
+      initContainers:
+      - name: fix-permissions
+        image: busybox:latest
+        command: ['sh', '-c', 'chown -R 65532:65532 {{ .Values.localStorage.path }}']
+        volumeMounts:
+        - name: data
+          mountPath: {{ .Values.localStorage.path }}
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+      {{- end }}
+      containers:
+      - name: s2-lite
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: {{ include "s2-lite.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+          - lite
+          - --port
+          - {{ .Values.service.targetPort | quote }}
+          {{- if .Values.tls.enabled }}
+          {{- if .Values.tls.selfSigned }}
+          - --tls-self
+          {{- else if and .Values.tls.cert .Values.tls.key }}
+          - --tls-cert
+          - {{ .Values.tls.cert }}
+          - --tls-key
+          - {{ .Values.tls.key }}
+          {{- end }}
+          {{- end }}
+          {{- if and .Values.objectStorage.enabled .Values.objectStorage.bucket }}
+          - --bucket
+          - {{ .Values.objectStorage.bucket }}
+          {{- if .Values.objectStorage.path }}
+          - --path
+          - {{ .Values.objectStorage.path }}
+          {{- end }}
+          {{- end }}
+          {{- if .Values.localStorage.enabled }}
+          - --local-root
+          - {{ .Values.localStorage.path }}
+          {{- end }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.service.targetPort }}
+          protocol: TCP
+        {{- if or (and .Values.objectStorage.enabled .Values.objectStorage.endpoint) .Values.env }}
+        env:
+        {{- if and .Values.objectStorage.enabled .Values.objectStorage.endpoint }}
+        - name: AWS_ENDPOINT_URL_S3
+          value: {{ .Values.objectStorage.endpoint }}
+        {{- end }}
+        {{- with .Values.env }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- end }}
+        livenessProbe:
+          {{- if and .Values.tls.enabled .Values.livenessProbe.httpGet }}
+          httpGet:
+            path: {{ .Values.livenessProbe.httpGet.path }}
+            port: http
+            scheme: HTTPS
+          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          {{- else }}
+          {{- toYaml .Values.livenessProbe | nindent 10 }}
+          {{- end }}
+        readinessProbe:
+          {{- if and .Values.tls.enabled .Values.readinessProbe.httpGet }}
+          httpGet:
+            path: {{ .Values.readinessProbe.httpGet.path }}
+            port: http
+            scheme: HTTPS
+          initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          {{- else }}
+          {{- toYaml .Values.readinessProbe | nindent 10 }}
+          {{- end }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        {{- if or .Values.localStorage.enabled .Values.volumeMounts }}
+        volumeMounts:
+        {{- if .Values.localStorage.enabled }}
+        - name: data
+          mountPath: {{ .Values.localStorage.path }}
+        {{- end }}
+        {{- with .Values.volumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- end }}
+      {{- $needsEmptyDir := and .Values.localStorage.enabled (not .Values.localStorage.persistentVolumeClaim.enabled) }}
+      {{- if or $needsEmptyDir .Values.volumes }}
+      volumes:
+      {{- if $needsEmptyDir }}
+      - name: data
+        emptyDir: {}
+      {{- end }}
+      {{- with .Values.volumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and .Values.localStorage.enabled .Values.localStorage.persistentVolumeClaim.enabled }}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+        {{- toYaml .Values.localStorage.persistentVolumeClaim.accessModes | nindent 8 }}
+      {{- if .Values.localStorage.persistentVolumeClaim.storageClass }}
+      storageClassName: {{ .Values.localStorage.persistentVolumeClaim.storageClass }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ .Values.localStorage.persistentVolumeClaim.size }}
+  {{- end }}
