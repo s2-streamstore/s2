@@ -2,11 +2,11 @@
   <p>
     <!-- Light mode logo -->
     <a href="https://s2.dev#gh-light-mode-only">
-      <img src="../assets/s2-black.png" height="60">
+      <img src="https://raw.githubusercontent.com/s2-streamstore/s2/main/assets/s2-black.png" height="60">
     </a>
     <!-- Dark mode logo -->
     <a href="https://s2.dev#gh-dark-mode-only">
-      <img src="../assets/s2-white.png" height="60">
+      <img src="https://raw.githubusercontent.com/s2-streamstore/s2/main/assets/s2-white.png" height="60">
     </a>
   </p>
 
@@ -22,7 +22,7 @@
     <!-- Discord (chat) -->
     <a href="https://discord.gg/vTCs7kMkAf"><img src="https://img.shields.io/discord/1209937852528599092?logo=discord" /></a>
     <!-- LICENSE -->
-    <a href="../LICENSE"><img src="https://img.shields.io/github/license/s2-streamstore/s2" /></a>
+    <a href="https://github.com/s2-streamstore/s2/blob/main/LICENSE"><img src="https://img.shields.io/github/license/s2-streamstore/s2" /></a>
   </p>
 </div>
 
@@ -86,7 +86,7 @@ We use [Github Issues](https://github.com/s2-streamstore/s2/issues) to
 track feature requests and issues with the SDK. If you wish to provide feedback,
 report a bug or request a feature, feel free to open a Github issue.
 
-### Contributing
+## Contributing
 
 Developers are welcome to submit Pull Requests on the repository. If there is
 no tracking issue for the bug or feature request corresponding to the PR, we
@@ -101,4 +101,4 @@ You can also email us at [hi@s2.dev](mailto:hi@s2.dev).
 
 ## License
 
-This project is licensed under the [MIT License](../LICENSE).
+This project is licensed under the [MIT License](https://github.com/s2-streamstore/s2/blob/main/LICENSE).
