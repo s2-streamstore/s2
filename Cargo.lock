@@ -198,6 +198,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
+
+[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4502,32 +4508,6 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.27.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9e65783ec1845ca765e7e4c459eaa43d8f7048166c8b558eb6ccdac58351ba2"
-dependencies = [
- "base64ct",
- "bytes",
- "compact_str",
- "enum-ordinalize",
- "flate2",
- "futures",
- "http 1.4.0",
- "itertools",
- "mime",
- "prost",
- "s2-common 0.28.0",
- "serde",
- "serde_json",
- "strum",
- "thiserror 2.0.18",
- "time",
- "tokio-util",
- "zstd",
-]
-
-[[package]]
-name = "s2-api"
 version = "0.27.6"
 dependencies = [
  "axum",
@@ -4544,7 +4524,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rstest",
- "s2-common 0.28.1",
+ "s2-common",
  "serde",
  "serde_json",
  "strum",
@@ -4609,24 +4589,6 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7111323b68a8fd1d3f09666c50dc765a3b21a3f2f344c359816a7c14f978d2e9"
-dependencies = [
- "blake3",
- "bytes",
- "compact_str",
- "enum-ordinalize",
- "enumset",
- "http 1.4.0",
- "serde",
- "strum",
- "thiserror 2.0.18",
- "time",
-]
-
-[[package]]
-name = "s2-common"
 version = "0.28.1"
 dependencies = [
  "axum",
@@ -4678,8 +4640,8 @@ dependencies = [
  "rand 0.10.0",
  "rcgen",
  "rustls",
- "s2-api 0.27.6",
- "s2-common 0.28.1",
+ "s2-api",
+ "s2-common",
  "serde",
  "serde_json",
  "slatedb",
@@ -4697,9 +4659,8 @@ dependencies = [
 [[package]]
 name = "s2-sdk"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d7c7fb9305e7eb06d369aca6cc87632ac454c6d31ccf27b807265deea9c6a85"
 dependencies = [
+ "assert_matches",
  "async-compression",
  "async-stream",
  "async-trait",
@@ -4712,17 +4673,20 @@ dependencies = [
  "hyper-util",
  "prost",
  "rand 0.10.0",
+ "rstest",
  "rustls",
- "s2-api 0.27.5",
- "s2-common 0.28.0",
+ "s2-api",
+ "s2-common",
  "secrecy",
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "test-context",
  "thiserror 2.0.18",
  "time",
  "tokio",
  "tokio-muxt",
+ "tokio-shared-rt",
  "tokio-stream",
  "tokio-util",
  "tracing",
@@ -5365,6 +5329,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-context"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d94db16dc1c321805ce55f286c4023fa58a2c9c742568f95c5cfe2e95d250d7"
+dependencies = [
+ "futures",
+ "test-context-macros",
+]
+
+[[package]]
+name = "test-context-macros"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aabcca9d2cad192cfe258cd3562b7584516191a5c9b6a0002a6bb8b75ee7d21d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.116",
+]
+
+[[package]]
 name = "testing_table"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5545,6 +5530,28 @@ checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-shared-rt"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a6bb03ec682a0bb16ce93d19301abc5b98a0d7936477175a156a213dcc47d85"
+dependencies = [
+ "once_cell",
+ "tokio",
+ "tokio-shared-rt-macro",
+]
+
+[[package]]
+name = "tokio-shared-rt-macro"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fe49a94e3a984b0d0ab97343dc3dcd52baae1ee13f005bfad39faea47d051dc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.116",
 ]
 
 [[package]]

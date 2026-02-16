@@ -27,6 +27,7 @@
 This repository contains:
 - **[s2-cli](cli/)** - The official S2 command-line interface
 - **[s2-lite](lite/)** - An open source, self-hostable server implementation of the [S2 API](https://s2.dev/docs/api)
+- **[s2-sdk](sdk/)** - The official Rust SDK for S2
 
 ## Installation
 

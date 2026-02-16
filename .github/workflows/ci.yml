@@ -10,6 +10,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      sdk: ${{ steps.filter.outputs.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            sdk:
+              - 'sdk/**'
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -79,7 +93,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --all-features -E 'not (package(s2-cli) & binary(integration))'
+      - run: cargo nextest run --workspace --all-features -E 'not (package(s2-cli) & binary(integration)) - package(s2-sdk)'
 
   build-server:
     name: Build s2-lite
@@ -88,7 +102,7 @@ jobs:
       ref: ${{ github.sha }}
 
   sdk-integration-tests:
-    name: SDK Integration Tests
+    name: SDKs <> s2-lite Integration Tests
     needs: [build-server, test, clippy]
     uses: ./.github/workflows/sdk-tests.yml
     with:
@@ -116,15 +130,29 @@ jobs:
           },
           {
             "name": "rust",
-            "repo": "s2-streamstore/s2-sdk-rust",
-            "ref": "main",
+            "repo": "${{ github.repository }}",
+            "ref": "${{ github.sha }}",
             "lang": "rust",
-            "test_cmd": "cargo test --all-features -- --skip access_token --skip metrics"
+            "test_cmd": "cargo test -p s2-sdk --all-features -- --skip access_token --skip metrics"
           }
         ]
 
+  rust-sdk-tests:
+    name: Rust SDK Tests
+    needs: [test, clippy, changes]
+    if: needs.changes.outputs.sdk == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run SDK tests
+        run: cargo test -p s2-sdk --all-features
+        env:
+          S2_ACCESS_TOKEN: ${{ secrets.S2_ACCESS_TOKEN_FOR_RUST_SDK_TESTS }}
+
   cli-integration-tests:
-    name: CLI Integration Tests
+    name: CLI <> s2-lite Integration Tests
     needs: [build-server, test, clippy]
     uses: ./.github/workflows/sdk-tests.yml
     with:
