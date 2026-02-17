@@ -54,17 +54,6 @@ helm install my-s2-lite s2/s2-lite \
 
 Supports AWS S3, MinIO, Tigris, Cloudflare R2, and other S3-compatible services.
 
-### Local storage with PersistentVolumeClaim
-
-```bash
-helm install my-s2-lite s2/s2-lite \
-  --set localStorage.enabled=true \
-  --set localStorage.persistentVolumeClaim.enabled=true \
-  --set localStorage.persistentVolumeClaim.size=10Gi
-```
-
-Data persists across pod restarts using PersistentVolumes.
-
 ### TLS Configuration
 
 **Self-signed certificate (for dev/testing):**
@@ -115,7 +104,6 @@ Common configurations:
 | `objectStorage.enabled` | Enable S3-compatible storage | `false` |
 | `objectStorage.bucket` | S3 bucket name | `""` |
 | `objectStorage.path` | Path prefix within bucket | `""` |
-| `localStorage.enabled` | Enable local disk storage | `false` |
 | `serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
 
 ## Examples
@@ -176,8 +164,3 @@ helm upgrade my-s2-lite s2/s2-lite --version 0.1.0
 helm uninstall my-s2-lite
 ```
 
-Note: PersistentVolumeClaims are not automatically deleted. Delete them manually if needed:
-
-```bash
-kubectl delete pvc -l app.kubernetes.io/name=s2-lite
-```

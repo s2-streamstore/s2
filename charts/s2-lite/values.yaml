@@ -102,9 +102,7 @@ ingress:
 # Storage Configuration
 #
 # By default, s2-lite runs in-memory (great for dev/testing).
-# For persistent data, choose one:
-#   - objectStorage: S3-compatible (AWS S3, MinIO, Tigris, R2)
-#   - localStorage: Local disk (PVC, emptyDir, or hostPath via volumes)
+# For persistent data, enable objectStorage with an S3-compatible bucket.
 # ------------------------------------------------------------------------------
 
 objectStorage:
@@ -119,24 +117,6 @@ objectStorage:
   #   Tigris: "https://fly.storage.tigris.dev"
   #   R2: "https://<account>.r2.cloudflarestorage.com"
   endpoint: ""
-
-# Local disk storage (uses --local-root flag)
-# If enabled without PVC, defaults to emptyDir (data lost on pod restart)
-localStorage:
-  enabled: false
-  # Mount path inside container
-  path: /data
-  # PersistentVolumeClaim configuration (uses StatefulSet volumeClaimTemplates)
-  persistentVolumeClaim:
-    enabled: false
-    storageClass: ""
-    size: 10Gi
-    accessModes:
-      - ReadWriteOnce
-  # InitContainer to fix permissions (useful for hostPath volumes)
-  # Runs as root to chown the data directory to the non-root user (UID 65532)
-  initContainer:
-    enabled: false
 
 # ------------------------------------------------------------------------------
 # Observability
@@ -212,7 +192,7 @@ tolerations: []
 affinity: {}
 
 # ------------------------------------------------------------------------------
-# Volumes (for additional mounts beyond localStorage)
+# Volumes (for mounting TLS certificates, etc.)
 # ------------------------------------------------------------------------------
 
 volumeMounts: []

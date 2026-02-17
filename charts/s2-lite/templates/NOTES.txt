@@ -19,19 +19,12 @@ s2-lite is now running with the following configuration:
   {{- if .Values.objectStorage.endpoint }}
   - Endpoint: {{ .Values.objectStorage.endpoint }}
   {{- end }}
-{{- else if .Values.localStorage.enabled }}
-  - Storage: Local disk ({{ .Values.localStorage.path }})
-  {{- if .Values.localStorage.persistentVolumeClaim.enabled }}
-  - PVC: {{ .Values.localStorage.persistentVolumeClaim.size }}
-  {{- else }}
-  - Volume: emptyDir (data lost on pod restart)
-  {{- end }}
 {{- else }}
   - Storage: In-memory (data lost on pod restart)
 {{- end }}
 
 Get the application URL by running these commands:
-  export POD_NAME={{ include "s2-lite.fullname" . }}-0
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "s2-lite.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
 {{- if contains "NodePort" .Values.service.type }}
   export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "s2-lite.fullname" . }})
   export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")

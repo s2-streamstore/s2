@@ -1,31 +1,10 @@
-{{- if and (and .Values.objectStorage.enabled .Values.objectStorage.bucket) .Values.localStorage.enabled }}
-{{- fail "Cannot enable both objectStorage and localStorage - choose one" }}
-{{- end }}
----
-# Headless service for StatefulSet stable network identity
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "s2-lite.fullname" . }}-headless
-  labels:
-    {{- include "s2-lite.labels" . | nindent 4 }}
-spec:
-  clusterIP: None  # Headless service
-  selector:
-    {{- include "s2-lite.selectorLabels" . | nindent 4 }}
-  ports:
-  - port: {{ .Values.service.targetPort }}
-    name: http
-    protocol: TCP
----
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: {{ include "s2-lite.fullname" . }}
   labels:
     {{- include "s2-lite.labels" . | nindent 4 }}
 spec:
-  serviceName: {{ include "s2-lite.fullname" . }}-headless
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
@@ -49,18 +28,6 @@ spec:
       serviceAccountName: {{ include "s2-lite.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if and .Values.localStorage.enabled .Values.localStorage.initContainer.enabled }}
-      initContainers:
-      - name: fix-permissions
-        image: busybox:latest
-        command: ['sh', '-c', 'chown -R 65532:65532 {{ .Values.localStorage.path }}']
-        volumeMounts:
-        - name: data
-          mountPath: {{ .Values.localStorage.path }}
-        securityContext:
-          runAsUser: 0
-          runAsNonRoot: false
-      {{- end }}
       containers:
       - name: s2-lite
         securityContext:
@@ -88,10 +55,6 @@ spec:
           - --path
           - {{ .Values.objectStorage.path }}
           {{- end }}
-          {{- end }}
-          {{- if .Values.localStorage.enabled }}
-          - --local-root
-          - {{ .Values.localStorage.path }}
           {{- end }}
         ports:
         - name: http
@@ -135,26 +98,13 @@ spec:
           {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
-        {{- if or .Values.localStorage.enabled .Values.volumeMounts }}
-        volumeMounts:
-        {{- if .Values.localStorage.enabled }}
-        - name: data
-          mountPath: {{ .Values.localStorage.path }}
-        {{- end }}
         {{- with .Values.volumeMounts }}
+        volumeMounts:
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- end }}
-      {{- $needsEmptyDir := and .Values.localStorage.enabled (not .Values.localStorage.persistentVolumeClaim.enabled) }}
-      {{- if or $needsEmptyDir .Values.volumes }}
-      volumes:
-      {{- if $needsEmptyDir }}
-      - name: data
-        emptyDir: {}
-      {{- end }}
       {{- with .Values.volumes }}
+      volumes:
       {{- toYaml . | nindent 6 }}
-      {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -168,17 +118,3 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-  {{- if and .Values.localStorage.enabled .Values.localStorage.persistentVolumeClaim.enabled }}
-  volumeClaimTemplates:
-  - metadata:
-      name: data
-    spec:
-      accessModes:
-        {{- toYaml .Values.localStorage.persistentVolumeClaim.accessModes | nindent 8 }}
-      {{- if .Values.localStorage.persistentVolumeClaim.storageClass }}
-      storageClassName: {{ .Values.localStorage.persistentVolumeClaim.storageClass }}
-      {{- end }}
-      resources:
-        requests:
-          storage: {{ .Values.localStorage.persistentVolumeClaim.size }}
-  {{- end }}
