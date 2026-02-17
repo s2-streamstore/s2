@@ -20,7 +20,7 @@ spec:
     {{- if .Values.tls.enabled }}
     scheme: https
     tlsConfig:
-      {{- if .Values.metrics.serviceMonitor.tlsConfig }}
+      {{- if gt (len .Values.metrics.serviceMonitor.tlsConfig) 0 }}
       {{- toYaml .Values.metrics.serviceMonitor.tlsConfig | nindent 6 }}
       {{- else }}
       insecureSkipVerify: true

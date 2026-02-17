@@ -101,6 +101,24 @@ jobs:
             --set metrics.serviceMonitor.enabled=true \
             --dry-run > /dev/null
 
+      - name: Test TLS without cert/key fails but selfSigned and provided cert work
+        run: |
+          if helm template test-release charts/s2-lite \
+            --set tls.enabled=true \
+            --dry-run 2>&1; then
+            echo "Expected failure but got success"
+            exit 1
+          fi
+          helm template test-release charts/s2-lite \
+            --set tls.enabled=true \
+            --set tls.selfSigned=true \
+            --dry-run > /dev/null
+          helm template test-release charts/s2-lite \
+            --set tls.enabled=true \
+            --set tls.cert=/etc/tls/tls.crt \
+            --set tls.key=/etc/tls/tls.key \
+            --dry-run > /dev/null
+
   build-server:
     name: Build s2-lite
     uses: ./.github/workflows/build-s2-lite.yml

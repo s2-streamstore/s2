@@ -104,7 +104,7 @@ Common configurations:
 | `objectStorage.enabled` | Enable S3-compatible storage | `false` |
 | `objectStorage.bucket` | S3 bucket name | `""` |
 | `objectStorage.path` | Path prefix within bucket | `""` |
-| `serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
+| `metrics.serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
 
 ## Examples
 
@@ -140,9 +140,10 @@ service:
 
 ```yaml
 # values.yaml
-serviceMonitor:
-  enabled: true
-  interval: 30s
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
 ```
 
 ## Upgrading

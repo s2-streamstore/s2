@@ -46,6 +46,8 @@ spec:
           - {{ .Values.tls.cert }}
           - --tls-key
           - {{ .Values.tls.key }}
+          {{- else }}
+          {{- fail "tls.enabled is true but neither tls.cert/tls.key nor tls.selfSigned are configured" }}
           {{- end }}
           {{- end }}
           {{- if and .Values.objectStorage.enabled .Values.objectStorage.bucket }}
