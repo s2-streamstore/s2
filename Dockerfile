@@ -7,6 +7,7 @@ WORKDIR /build
 RUN --mount=type=bind,source=api,target=/build/api \
     --mount=type=bind,source=common,target=/build/common \
     --mount=type=bind,source=lite,target=/build/lite \
+    --mount=type=bind,source=sdk,target=/build/sdk \
     --mount=type=bind,source=cli,target=/build/cli \
     --mount=type=bind,source=Cargo.toml,target=/build/Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=/build/Cargo.lock \
