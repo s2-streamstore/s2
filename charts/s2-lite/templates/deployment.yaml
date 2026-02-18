@@ -78,7 +78,7 @@ spec:
         livenessProbe:
           {{- if and .Values.tls.enabled .Values.livenessProbe.httpGet }}
           {{- $probe := omit .Values.livenessProbe "httpGet" }}
-          {{- $httpGet := merge (dict "scheme" "HTTPS" "port" "http") .Values.livenessProbe.httpGet }}
+          {{- $httpGet := merge (dict "scheme" "HTTPS") .Values.livenessProbe.httpGet }}
           {{- $probe := merge (dict "httpGet" $httpGet) $probe }}
           {{- toYaml $probe | nindent 10 }}
           {{- else }}
@@ -87,7 +87,7 @@ spec:
         readinessProbe:
           {{- if and .Values.tls.enabled .Values.readinessProbe.httpGet }}
           {{- $probe := omit .Values.readinessProbe "httpGet" }}
-          {{- $httpGet := merge (dict "scheme" "HTTPS" "port" "http") .Values.readinessProbe.httpGet }}
+          {{- $httpGet := merge (dict "scheme" "HTTPS") .Values.readinessProbe.httpGet }}
           {{- $probe := merge (dict "httpGet" $httpGet) $probe }}
           {{- toYaml $probe | nindent 10 }}
           {{- else }}
