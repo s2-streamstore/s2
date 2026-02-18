@@ -16,6 +16,7 @@ env:
 
 jobs:
   update_helm_chart:
+    needs: create_manifest
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
