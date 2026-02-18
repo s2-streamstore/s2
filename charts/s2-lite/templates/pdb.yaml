@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "s2-lite.labels" . | nindent 4 }}
 spec:
-  {{- if ne .Values.podDisruptionBudget.minAvailable nil }}
+  {{- if hasKey .Values.podDisruptionBudget "minAvailable" }}
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   {{- else }}
   maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}

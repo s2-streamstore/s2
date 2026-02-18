@@ -52,6 +52,7 @@ jobs:
           packages=(.cr-release-packages/*.tgz)
           if [ ${#packages[@]} -eq 0 ]; then
             echo "No packages from chart-releaser, packaging charts directly..."
+            # NOTE: assumes a single chart (s2-lite). If more charts are added, filter to only changed ones.
             for chart in charts/*/; do
               helm package "$chart" -d .cr-release-packages/
             done
