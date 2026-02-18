@@ -77,27 +77,19 @@ spec:
         {{- end }}
         livenessProbe:
           {{- if and .Values.tls.enabled .Values.livenessProbe.httpGet }}
-          httpGet:
-            path: {{ .Values.livenessProbe.httpGet.path }}
-            port: http
-            scheme: HTTPS
-          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
-          periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
-          timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
-          failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          {{- $probe := omit .Values.livenessProbe "httpGet" }}
+          {{- $httpGet := merge (dict "scheme" "HTTPS" "port" "http") .Values.livenessProbe.httpGet }}
+          {{- $probe := merge (dict "httpGet" $httpGet) $probe }}
+          {{- toYaml $probe | nindent 10 }}
           {{- else }}
           {{- toYaml .Values.livenessProbe | nindent 10 }}
           {{- end }}
         readinessProbe:
           {{- if and .Values.tls.enabled .Values.readinessProbe.httpGet }}
-          httpGet:
-            path: {{ .Values.readinessProbe.httpGet.path }}
-            port: http
-            scheme: HTTPS
-          initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
-          periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
-          timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
-          failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          {{- $probe := omit .Values.readinessProbe "httpGet" }}
+          {{- $httpGet := merge (dict "scheme" "HTTPS" "port" "http") .Values.readinessProbe.httpGet }}
+          {{- $probe := merge (dict "httpGet" $httpGet) $probe }}
+          {{- toYaml $probe | nindent 10 }}
           {{- else }}
           {{- toYaml .Values.readinessProbe | nindent 10 }}
           {{- end }}

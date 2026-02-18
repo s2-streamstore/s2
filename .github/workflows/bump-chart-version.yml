@@ -36,5 +36,6 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Bump s2-lite chart version to $(grep '^version:' charts/s2-lite/Chart.yaml | awk '{print $2}')"
+            git pull --rebase
             git push
           fi

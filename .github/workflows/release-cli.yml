@@ -33,6 +33,15 @@ jobs:
           file: cli/Cargo.toml
           field: package.version
 
+      - name: Validate version
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Could not read version from Cargo.toml"
+            exit 1
+          fi
+          echo "CLI version: $VERSION"
+
       - name: Update Helm chart version and appVersion
         run: |
           # Get current chart version
@@ -60,6 +69,7 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Bump s2-lite chart to appVersion ${{ steps.version.outputs.value }}"
+            git pull --rebase
             git push
           fi
 
