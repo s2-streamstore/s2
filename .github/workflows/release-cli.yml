@@ -37,10 +37,14 @@ jobs:
         run: |
           # Get current chart version
           CURRENT_VERSION=$(grep '^version:' charts/s2-lite/Chart.yaml | awk '{print $2}')
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "ERROR: Could not read current chart version"
+            exit 1
+          fi
           echo "Current chart version: $CURRENT_VERSION"
 
           # Increment patch version (e.g., 0.1.0 -> 0.1.1)
-          NEW_VERSION=$(echo $CURRENT_VERSION | awk -F. '{$NF = $NF + 1; print}' OFS=.)
+          NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{$NF = $NF + 1; print}' OFS=.)
           echo "New chart version: $NEW_VERSION"
 
           # Update both version and appVersion in Chart.yaml
