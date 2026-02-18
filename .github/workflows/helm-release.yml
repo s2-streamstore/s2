@@ -49,9 +49,15 @@ jobs:
       - name: Push charts to GHCR
         run: |
           shopt -s nullglob
-          for pkg in .cr-release-packages/*.tgz; do
-            if [ -z "${pkg:-}" ]; then
-              break
-            fi
+          packages=(.cr-release-packages/*.tgz)
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "No packages from chart-releaser, packaging charts directly..."
+            for chart in charts/*/; do
+              helm package "$chart" -d .cr-release-packages/
+            done
+            packages=(.cr-release-packages/*.tgz)
+          fi
+          for pkg in "${packages[@]}"; do
+            echo "Pushing $pkg to GHCR"
             helm push "${pkg}" oci://ghcr.io/${{ github.repository_owner }}/charts
           done
