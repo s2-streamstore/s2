@@ -119,6 +119,15 @@ jobs:
             --set tls.key=/etc/tls/tls.key \
             --dry-run > /dev/null
 
+      - name: Test objectStorage without bucket fails
+        run: |
+          if helm template test-release charts/s2-lite \
+            --set objectStorage.enabled=true \
+            --dry-run 2>&1; then
+            echo "Expected failure but got success"
+            exit 1
+          fi
+
   build-server:
     name: Build s2-lite
     uses: ./.github/workflows/build-s2-lite.yml

@@ -43,19 +43,22 @@ spec:
           - --tls-self
           {{- else if and .Values.tls.cert .Values.tls.key }}
           - --tls-cert
-          - {{ .Values.tls.cert }}
+          - {{ .Values.tls.cert | quote }}
           - --tls-key
-          - {{ .Values.tls.key }}
+          - {{ .Values.tls.key | quote }}
           {{- else }}
           {{- fail "tls.enabled is true but neither tls.cert/tls.key nor tls.selfSigned are configured" }}
           {{- end }}
           {{- end }}
-          {{- if and .Values.objectStorage.enabled .Values.objectStorage.bucket }}
+          {{- if .Values.objectStorage.enabled }}
+          {{- if not .Values.objectStorage.bucket }}
+          {{- fail "objectStorage.enabled is true but objectStorage.bucket is not set" }}
+          {{- end }}
           - --bucket
-          - {{ .Values.objectStorage.bucket }}
+          - {{ .Values.objectStorage.bucket | quote }}
           {{- if .Values.objectStorage.path }}
           - --path
-          - {{ .Values.objectStorage.path }}
+          - {{ .Values.objectStorage.path | quote }}
           {{- end }}
           {{- end }}
         ports:
