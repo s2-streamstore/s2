@@ -345,7 +345,7 @@ impl S2Stream {
             .config
             .retry
             .append_retry_policy
-            .is_compliant(&input);
+            .is_compliant();
         let ack = self
             .client
             .append(&self.name, input.into(), retry_enabled)
