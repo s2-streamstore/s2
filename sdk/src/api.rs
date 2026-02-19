@@ -39,8 +39,8 @@ use crate::{
     client::{self, StreamingResponse, UnaryResponse},
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
-        AccessTokenId, BasinAuthority, BasinName, Compression, RetryConfig, S2Config, S2Endpoints,
-        StreamName,
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, RetryConfig,
+        S2Config, S2Endpoints, StreamName,
     },
 };
 
@@ -346,7 +346,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         input: AppendInput,
-        retry_enabled: bool,
+        append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
         let url = self
             .base_url
@@ -359,7 +359,7 @@ impl BasinClient {
             .build()?;
         let response = self
             .request(request)
-            .with_retry_enabled(retry_enabled)
+            .with_retry_enabled(append_retry_policy.retry_enabled())
             .error_handler(|status, response| {
                 if status == StatusCode::PRECONDITION_FAILED {
                     Err(ApiError::AppendConditionFailed(
