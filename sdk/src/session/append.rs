@@ -22,7 +22,7 @@ use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB, S2Error, StreamName,
+        AppendAck, AppendInput, MeteredBytes, ONE_MIB, S2Error, StreamName,
         StreamPosition, ValidationError,
     },
 };
