@@ -26,7 +26,7 @@ use slatedb::{
     config::{PutOptions, Ttl, WriteOptions},
 };
 use tokio::{
-    sync::{self, Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
+    sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
     time::Instant,
 };
 
@@ -36,7 +36,7 @@ use crate::{
         bgtasks::BgtaskTrigger,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, RequestDroppedError, StreamerError, StreamerMissingInActionError,
+            DeleteStreamError, RequestDroppedError, StreamerMissingInActionError,
         },
         kv,
         stream_id::StreamId,
@@ -514,19 +514,6 @@ impl StreamerClient {
             }),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum StreamerClientState {
-    /// in the process of init
-    Blocked { notify: Arc<sync::Notify> },
-    /// failed to init, but the event could be stale
-    InitError {
-        error: Box<StreamerError>,
-        timestamp: Instant,
-    },
-    /// active and ready to talk
-    Ready { client: StreamerClient },
 }
 
 fn timestamp_now() -> Timestamp {

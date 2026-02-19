@@ -1,8 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use bytesize::ByteSize;
 use dashmap::DashMap;
 use enum_ordinalize::Ordinalize;
+use futures::{
+    FutureExt as _,
+    future::{BoxFuture, Shared},
+};
 use s2_common::{
     record::{NonZeroSeqNum, SeqNum, StreamPosition},
     types::{
@@ -13,10 +23,7 @@ use s2_common::{
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
-use tokio::{
-    sync::{Notify, broadcast},
-    time::Instant,
-};
+use tokio::{sync::broadcast, time::Instant};
 
 use super::{
     error::{
@@ -26,20 +33,47 @@ use super::{
     },
     kv,
     stream_id::StreamId,
-    streamer::{StreamerClient, StreamerClientState},
+    streamer::StreamerClient,
 };
 use crate::backend::bgtasks::BgtaskTrigger;
+
+type InitFuture = Shared<BoxFuture<'static, Result<StreamerClient, StreamerError>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamerInitId(u64);
+
+impl StreamerInitId {
+    fn next() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[derive(Clone)]
+enum StreamerClientSlot {
+    Initializing {
+        init_id: StreamerInitId,
+        future: InitFuture,
+    },
+    Failed {
+        error: StreamerError,
+        timestamp: Instant,
+    },
+    Ready {
+        client: StreamerClient,
+    },
+}
 
 #[derive(Clone)]
 pub struct Backend {
     pub(super) db: slatedb::Db,
-    client_states: Arc<DashMap<StreamId, StreamerClientState>>,
+    client_states: Arc<DashMap<StreamId, StreamerClientSlot>>,
     append_inflight_max: ByteSize,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
 impl Backend {
-    const FAILED_INIT_MEMORY: Duration = Duration::from_secs(1);
+    const STREAMER_FAILED_INIT_MEMORY: Duration = Duration::from_secs(1);
 
     pub fn new(db: slatedb::Db, append_inflight_max: ByteSize) -> Self {
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
@@ -112,7 +146,7 @@ impl Backend {
         }
         .spawn(move |client_id| {
             client_states.remove_if(&stream_id, |_, state| {
-                matches!(state, StreamerClientState::Ready { client } if client.id() == client_id)
+                matches!(state, StreamerClientSlot::Ready { client } if client.id() == client_id)
             });
         }))
     }
@@ -153,40 +187,70 @@ impl Backend {
         Ok(())
     }
 
-    fn streamer_client_state(&self, basin: &BasinName, stream: &StreamName) -> StreamerClientState {
+    fn streamer_client_slot(&self, basin: &BasinName, stream: &StreamName) -> StreamerClientSlot {
         match self.client_states.entry(StreamId::new(basin, stream)) {
             dashmap::Entry::Occupied(oe) => oe.get().clone(),
             dashmap::Entry::Vacant(ve) => {
                 let this = self.clone();
-                let stream_id = *(ve.key());
                 let basin = basin.clone();
                 let stream = stream.clone();
-                let notify = Arc::new(Notify::new());
-                let notify_waiters = {
-                    let notify = notify.clone();
-                    move || notify.notify_waiters()
+                let init_id = StreamerInitId::next();
+                let future = async move { this.start_streamer(basin, stream).await }
+                    .boxed()
+                    .shared();
+                let slot = StreamerClientSlot::Initializing {
+                    init_id,
+                    future: future.clone(),
                 };
-                tokio::spawn(async move {
-                    let state = match this.start_streamer(basin, stream).await {
-                        Ok(client) => StreamerClientState::Ready { client },
-                        Err(error) => StreamerClientState::InitError {
-                            error: Box::new(error),
-                            timestamp: Instant::now(),
-                        },
-                    };
-                    this.client_states.insert(stream_id, state);
-                    notify_waiters();
-                });
-                ve.insert(StreamerClientState::Blocked { notify })
-                    .value()
-                    .clone()
+                ve.insert(slot.clone());
+                slot
             }
         }
     }
 
-    fn streamer_remove_unready(&self, stream_id: StreamId) {
+    fn streamer_finish_initializing(
+        &self,
+        stream_id: StreamId,
+        init_id: StreamerInitId,
+        result: &Result<StreamerClient, StreamerError>,
+    ) {
+        if let dashmap::Entry::Occupied(mut oe) = self.client_states.entry(stream_id) {
+            let is_same_init = matches!(
+                oe.get(),
+                StreamerClientSlot::Initializing {
+                    init_id: state_init_id,
+                    ..
+                } if *state_init_id == init_id
+            );
+            if is_same_init {
+                oe.insert(match result {
+                    Ok(client) => StreamerClientSlot::Ready {
+                        client: client.clone(),
+                    },
+                    Err(error) => StreamerClientSlot::Failed {
+                        error: error.clone(),
+                        timestamp: Instant::now(),
+                    },
+                });
+            }
+        }
+    }
+
+    fn streamer_remove_failed(&self, stream_id: StreamId, failed_at: Instant) {
+        if let dashmap::Entry::Occupied(oe) = self.client_states.entry(stream_id) {
+            let is_same_failure = matches!(
+                oe.get(),
+                StreamerClientSlot::Failed { timestamp, .. } if *timestamp == failed_at
+            );
+            if is_same_failure {
+                oe.remove();
+            }
+        }
+    }
+
+    fn streamer_remove_failed_any(&self, stream_id: StreamId) {
         if let dashmap::Entry::Occupied(oe) = self.client_states.entry(stream_id)
-            && let StreamerClientState::InitError { .. } = oe.get()
+            && matches!(oe.get(), StreamerClientSlot::Failed { .. })
         {
             oe.remove();
         }
@@ -197,21 +261,25 @@ impl Backend {
         basin: &BasinName,
         stream: &StreamName,
     ) -> Result<StreamerClient, StreamerError> {
-        let mut waited = false;
+        let stream_id = StreamId::new(basin, stream);
         loop {
-            match self.streamer_client_state(basin, stream) {
-                StreamerClientState::Blocked { notify } => {
-                    notify.notified().await;
-                    waited = true;
-                }
-                StreamerClientState::InitError { error, timestamp } => {
-                    if !waited || timestamp.elapsed() > Self::FAILED_INIT_MEMORY {
-                        self.streamer_remove_unready(StreamId::new(basin, stream));
-                    } else {
-                        return Err(*error);
+            match self.streamer_client_slot(basin, stream) {
+                StreamerClientSlot::Initializing { init_id, future } => {
+                    let result = future.await;
+                    self.streamer_finish_initializing(stream_id, init_id, &result);
+                    match result {
+                        Ok(client) => return Ok(client),
+                        Err(error) => return Err(error),
                     }
                 }
-                StreamerClientState::Ready { client } => {
+                StreamerClientSlot::Failed { error, timestamp } => {
+                    if timestamp.elapsed() > Self::STREAMER_FAILED_INIT_MEMORY {
+                        self.streamer_remove_failed(stream_id, timestamp);
+                    } else {
+                        return Err(error);
+                    }
+                }
+                StreamerClientSlot::Ready { client } => {
                     return Ok(client);
                 }
             }
@@ -223,8 +291,10 @@ impl Backend {
         basin: &BasinName,
         stream: &StreamName,
     ) -> Option<StreamerClient> {
-        match self.streamer_client_state(basin, stream) {
-            StreamerClientState::Ready { client } => Some(client),
+        let stream_id = StreamId::new(basin, stream);
+        let state = self.client_states.get(&stream_id)?;
+        match state.value() {
+            StreamerClientSlot::Ready { client } => Some(client.clone()),
             _ => None,
         }
     }
@@ -271,6 +341,8 @@ impl Backend {
                             CreateStreamError::StreamAlreadyExists(_) => {}
                         }
                     }
+                    // Clear stale StreamNotFound init failures before immediate re-fetch.
+                    self.streamer_remove_failed_any(StreamId::new(basin, stream));
                     Ok(self.streamer_client(basin, stream).await?)
                 } else {
                     Err(e.into())
@@ -286,7 +358,10 @@ mod tests {
     use std::str::FromStr as _;
 
     use bytes::Bytes;
-    use s2_common::record::{Metered, Record, StreamPosition};
+    use s2_common::{
+        record::{Metered, Record, StreamPosition},
+        types::{config::BasinConfig, resources::CreateMode},
+    };
     use slatedb::{WriteBatch, config::WriteOptions, object_store};
     use time::OffsetDateTime;
 
@@ -352,5 +427,109 @@ mod tests {
             .start_streamer(basin.clone(), stream.clone())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn streamer_client_slot_uses_single_initializer() {
+        let object_store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let db = slatedb::Db::builder("test", object_store)
+            .build()
+            .await
+            .unwrap();
+
+        let backend = Backend::new(db, ByteSize::b(1));
+        let basin = BasinName::from_str("testbasin2").unwrap();
+        let stream = StreamName::from_str("stream2").unwrap();
+
+        let slot_1 = backend.streamer_client_slot(&basin, &stream);
+        let slot_2 = backend.streamer_client_slot(&basin, &stream);
+
+        let (init_id_1, init_id_2) = match (slot_1, slot_2) {
+            (
+                StreamerClientSlot::Initializing {
+                    init_id: init_id_1, ..
+                },
+                StreamerClientSlot::Initializing {
+                    init_id: init_id_2, ..
+                },
+            ) => (init_id_1, init_id_2),
+            _ => panic!("expected both slots to be Initializing"),
+        };
+        assert_eq!(init_id_1, init_id_2);
+        assert_eq!(backend.client_states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn streamer_client_if_active_is_peek_only() {
+        let object_store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let db = slatedb::Db::builder("test", object_store)
+            .build()
+            .await
+            .unwrap();
+
+        let backend = Backend::new(db, ByteSize::b(1));
+        let basin = BasinName::from_str("testbasin3").unwrap();
+        let stream = StreamName::from_str("stream3").unwrap();
+
+        backend
+            .create_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(backend.client_states.is_empty());
+        assert!(backend.streamer_client_if_active(&basin, &stream).is_none());
+        assert!(backend.client_states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn streamer_client_failed_init_is_temporarily_memoized() {
+        let object_store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let db = slatedb::Db::builder("test", object_store)
+            .build()
+            .await
+            .unwrap();
+
+        let backend = Backend::new(db, ByteSize::b(1));
+        let basin = BasinName::from_str("testbasin4").unwrap();
+        let stream = StreamName::from_str("stream4").unwrap();
+        let stream_id = StreamId::new(&basin, &stream);
+
+        let err_1 = backend.streamer_client(&basin, &stream).await;
+        assert!(matches!(err_1, Err(StreamerError::StreamNotFound(_))));
+        let first_failed_at = match backend.client_states.get(&stream_id) {
+            Some(slot) => match slot.value() {
+                StreamerClientSlot::Failed { timestamp, .. } => *timestamp,
+                _ => panic!("expected Failed slot after first init error"),
+            },
+            None => panic!("missing slot after first init error"),
+        };
+
+        let err_2 = backend.streamer_client(&basin, &stream).await;
+        assert!(matches!(err_2, Err(StreamerError::StreamNotFound(_))));
+        let second_failed_at = match backend.client_states.get(&stream_id) {
+            Some(slot) => match slot.value() {
+                StreamerClientSlot::Failed { timestamp, .. } => *timestamp,
+                _ => panic!("expected Failed slot after second init error"),
+            },
+            None => panic!("missing slot after second init error"),
+        };
+
+        assert_eq!(first_failed_at, second_failed_at);
     }
 }
