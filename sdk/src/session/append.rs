@@ -22,8 +22,8 @@ use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendInput, MeteredBytes, ONE_MIB, S2Error, StreamName,
-        StreamPosition, ValidationError,
+        AppendAck, AppendInput, MeteredBytes, ONE_MIB, S2Error, StreamName, StreamPosition,
+        ValidationError,
     },
 };
 
@@ -424,7 +424,8 @@ async fn run_session_with_retry(
                     retry_backoff.reset();
                 }
 
-                let append_retry_policy_compliant = client.config.retry.append_retry_policy.is_compliant();
+                let append_retry_policy_compliant =
+                    client.config.retry.append_retry_policy.is_compliant();
 
                 if append_retry_policy_compliant
                     && err.is_retryable()
