@@ -199,7 +199,7 @@ impl Backend {
         }
     }
 
-    fn finish_streamer_initialization(
+    fn streamer_finish_initialization(
         &self,
         stream_id: StreamId,
         init_id: StreamerInitId,
@@ -237,7 +237,7 @@ impl Backend {
         match self.streamer_client_slot(basin, stream) {
             StreamerClientSlot::Initializing { init_id, future } => {
                 let result = future.await;
-                self.finish_streamer_initialization(stream_id, init_id, &result);
+                self.streamer_finish_initialization(stream_id, init_id, &result);
                 result
             }
             StreamerClientSlot::Ready { client } => Ok(client),
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_streamer_initialization_ignores_stale_init_id() {
+    async fn streamer_finish_initialization_ignores_stale_init_id() {
         let backend = new_test_backend().await;
         let basin = BasinName::from_str("testbasin5").unwrap();
         let stream = StreamName::from_str("stream5").unwrap();
@@ -483,7 +483,7 @@ mod tests {
         );
 
         let stale_result = Err(StreamNotFoundError { basin, stream }.into());
-        backend.finish_streamer_initialization(stream_id, stale_init_id, &stale_result);
+        backend.streamer_finish_initialization(stream_id, stale_init_id, &stale_result);
 
         let Some(slot) = backend.streamer_slots.get(&stream_id) else {
             panic!("stale init completion should not alter slot state");
