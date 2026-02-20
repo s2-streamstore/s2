@@ -34,7 +34,7 @@ use super::{
 };
 use crate::backend::bgtasks::BgtaskTrigger;
 
-type InitFuture = Shared<BoxFuture<'static, Result<StreamerClient, StreamerError>>>;
+type StreamerInitFuture = Shared<BoxFuture<'static, Result<StreamerClient, StreamerError>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StreamerInitId(u64);
@@ -50,7 +50,7 @@ impl StreamerInitId {
 enum StreamerClientSlot {
     Initializing {
         init_id: StreamerInitId,
-        future: InitFuture,
+        future: StreamerInitFuture,
     },
     Ready {
         client: StreamerClient,
@@ -136,8 +136,8 @@ impl Backend {
             bgtask_trigger_tx: self.bgtask_trigger_tx.clone(),
         }
         .spawn(move |client_id| {
-            streamer_slots.remove_if(&stream_id, |_, state| {
-                matches!(state, StreamerClientSlot::Ready { client } if client.id() == client_id)
+            streamer_slots.remove_if(&stream_id, |_, slot| {
+                matches!(slot, StreamerClientSlot::Ready { client } if client.id() == client_id)
             });
         }))
     }
@@ -199,7 +199,7 @@ impl Backend {
         }
     }
 
-    fn streamer_finish_initializing(
+    fn finish_streamer_initialization(
         &self,
         stream_id: StreamId,
         init_id: StreamerInitId,
@@ -237,7 +237,7 @@ impl Backend {
         match self.streamer_client_slot(basin, stream) {
             StreamerClientSlot::Initializing { init_id, future } => {
                 let result = future.await;
-                self.streamer_finish_initializing(stream_id, init_id, &result);
+                self.finish_streamer_initialization(stream_id, init_id, &result);
                 result
             }
             StreamerClientSlot::Ready { client } => Ok(client),
@@ -250,8 +250,8 @@ impl Backend {
         stream: &StreamName,
     ) -> Option<StreamerClient> {
         let stream_id = StreamId::new(basin, stream);
-        let state = self.streamer_slots.get(&stream_id)?;
-        match state.value() {
+        let slot = self.streamer_slots.get(&stream_id)?;
+        match slot.value() {
             StreamerClientSlot::Ready { client } => Some(client.clone()),
             _ => None,
         }
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streamer_finish_initializing_ignores_stale_init_id() {
+    async fn finish_streamer_initialization_ignores_stale_init_id() {
         let backend = new_test_backend().await;
         let basin = BasinName::from_str("testbasin5").unwrap();
         let stream = StreamName::from_str("stream5").unwrap();
@@ -483,7 +483,7 @@ mod tests {
         );
 
         let stale_result = Err(StreamNotFoundError { basin, stream }.into());
-        backend.streamer_finish_initializing(stream_id, stale_init_id, &stale_result);
+        backend.finish_streamer_initialization(stream_id, stale_init_id, &stale_result);
 
         let Some(slot) = backend.streamer_slots.get(&stream_id) else {
             panic!("stale init completion should not alter slot state");
