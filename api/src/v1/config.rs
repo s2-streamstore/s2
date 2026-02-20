@@ -113,15 +113,17 @@ pub struct TimestampingConfig {
     /// Timestamping mode for appends that influences how timestamps are handled.
     pub mode: Option<TimestampingMode>,
     /// Allow client-specified timestamps to exceed the arrival time.
-    /// If this is `false` or not set, client timestamps will be capped at the arrival time.
-    pub uncapped: Option<bool>,
+    /// If this is `false`, client timestamps will be capped at the arrival time.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
+    pub uncapped: bool,
 }
 
 impl TimestampingConfig {
     pub fn to_opt(config: types::config::OptionalTimestampingConfig) -> Option<Self> {
         let config = TimestampingConfig {
             mode: config.mode.map(Into::into),
-            uncapped: config.uncapped,
+            uncapped: config.uncapped.unwrap_or_default(),
         };
         if config == Self::default() {
             None
@@ -135,7 +137,7 @@ impl From<types::config::TimestampingConfig> for TimestampingConfig {
     fn from(value: types::config::TimestampingConfig) -> Self {
         Self {
             mode: Some(value.mode.into()),
-            uncapped: Some(value.uncapped),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -144,7 +146,7 @@ impl From<TimestampingConfig> for types::config::OptionalTimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: value.uncapped,
+            uncapped: Some(value.uncapped),
         }
     }
 }
@@ -160,14 +162,14 @@ pub struct TimestampingReconfiguration {
     /// Allow client-specified timestamps to exceed the arrival time.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<bool>))]
-    pub uncapped: Maybe<Option<bool>>,
+    pub uncapped: Maybe<bool>,
 }
 
 impl From<TimestampingReconfiguration> for types::config::TimestampingReconfiguration {
     fn from(value: TimestampingReconfiguration) -> Self {
         Self {
             mode: value.mode.map_opt(Into::into),
-            uncapped: value.uncapped,
+            uncapped: value.uncapped.map(Some),
         }
     }
 }
@@ -176,7 +178,7 @@ impl From<types::config::TimestampingReconfiguration> for TimestampingReconfigur
     fn from(value: types::config::TimestampingReconfiguration) -> Self {
         Self {
             mode: value.mode.map_opt(Into::into),
-            uncapped: value.uncapped,
+            uncapped: value.uncapped.map(|v| v.unwrap_or_default()),
         }
     }
 }
@@ -406,9 +408,11 @@ pub struct BasinConfig {
     pub default_stream_config: Option<StreamConfig>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
     pub create_stream_on_append: bool,
     /// Create stream on read if it doesn't exist, using the default stream configuration.
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
     pub create_stream_on_read: bool,
 }
 
@@ -527,10 +531,7 @@ mod tests {
     }
 
     fn gen_timestamping_config() -> impl Strategy<Value = TimestampingConfig> {
-        (
-            proptest::option::of(gen_timestamping_mode()),
-            proptest::option::of(any::<bool>()),
-        )
+        (proptest::option::of(gen_timestamping_mode()), any::<bool>())
             .prop_map(|(mode, uncapped)| TimestampingConfig { mode, uncapped })
     }
 
@@ -602,7 +603,13 @@ mod tests {
     }
 
     fn gen_timestamping_reconfiguration() -> impl Strategy<Value = TimestampingReconfiguration> {
-        (gen_maybe(gen_timestamping_mode()), gen_maybe(any::<bool>()))
+        (
+            gen_maybe(gen_timestamping_mode()),
+            prop_oneof![
+                Just(Maybe::Unspecified),
+                any::<bool>().prop_map(Maybe::Specified),
+            ],
+        )
             .prop_map(|(mode, uncapped)| TimestampingReconfiguration { mode, uncapped })
     }
 
