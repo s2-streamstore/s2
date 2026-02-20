@@ -1,9 +1,6 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 use bytesize::ByteSize;
@@ -23,7 +20,7 @@ use s2_common::{
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
-use tokio::{sync::broadcast, time::Instant};
+use tokio::sync::broadcast;
 
 use super::{
     error::{
@@ -55,10 +52,6 @@ enum StreamerClientSlot {
         init_id: StreamerInitId,
         future: InitFuture,
     },
-    Failed {
-        error: StreamerError,
-        timestamp: Instant,
-    },
     Ready {
         client: StreamerClient,
     },
@@ -73,8 +66,6 @@ pub struct Backend {
 }
 
 impl Backend {
-    const STREAMER_FAILED_INIT_MEMORY: Duration = Duration::from_secs(1);
-
     pub fn new(db: slatedb::Db, append_inflight_max: ByteSize) -> Self {
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
         Self {
@@ -223,36 +214,17 @@ impl Backend {
                 } if *state_init_id == init_id
             );
             if is_same_init {
-                oe.insert(match result {
-                    Ok(client) => StreamerClientSlot::Ready {
-                        client: client.clone(),
-                    },
-                    Err(error) => StreamerClientSlot::Failed {
-                        error: error.clone(),
-                        timestamp: Instant::now(),
-                    },
-                });
+                match result {
+                    Ok(client) => {
+                        oe.insert(StreamerClientSlot::Ready {
+                            client: client.clone(),
+                        });
+                    }
+                    Err(_) => {
+                        oe.remove();
+                    }
+                }
             }
-        }
-    }
-
-    fn streamer_remove_failed(&self, stream_id: StreamId, failed_at: Instant) {
-        if let dashmap::Entry::Occupied(oe) = self.client_states.entry(stream_id) {
-            let is_same_failure = matches!(
-                oe.get(),
-                StreamerClientSlot::Failed { timestamp, .. } if *timestamp == failed_at
-            );
-            if is_same_failure {
-                oe.remove();
-            }
-        }
-    }
-
-    fn streamer_remove_failed_any(&self, stream_id: StreamId) {
-        if let dashmap::Entry::Occupied(oe) = self.client_states.entry(stream_id)
-            && matches!(oe.get(), StreamerClientSlot::Failed { .. })
-        {
-            oe.remove();
         }
     }
 
@@ -262,27 +234,13 @@ impl Backend {
         stream: &StreamName,
     ) -> Result<StreamerClient, StreamerError> {
         let stream_id = StreamId::new(basin, stream);
-        loop {
-            match self.streamer_client_slot(basin, stream) {
-                StreamerClientSlot::Initializing { init_id, future } => {
-                    let result = future.await;
-                    self.streamer_finish_initializing(stream_id, init_id, &result);
-                    match result {
-                        Ok(client) => return Ok(client),
-                        Err(error) => return Err(error),
-                    }
-                }
-                StreamerClientSlot::Failed { error, timestamp } => {
-                    if timestamp.elapsed() > Self::STREAMER_FAILED_INIT_MEMORY {
-                        self.streamer_remove_failed(stream_id, timestamp);
-                    } else {
-                        return Err(error);
-                    }
-                }
-                StreamerClientSlot::Ready { client } => {
-                    return Ok(client);
-                }
+        match self.streamer_client_slot(basin, stream) {
+            StreamerClientSlot::Initializing { init_id, future } => {
+                let result = future.await;
+                self.streamer_finish_initializing(stream_id, init_id, &result);
+                result
             }
+            StreamerClientSlot::Ready { client } => Ok(client),
         }
     }
 
@@ -341,8 +299,6 @@ impl Backend {
                             CreateStreamError::StreamAlreadyExists(_) => {}
                         }
                     }
-                    // Clear stale StreamNotFound init failures before immediate re-fetch.
-                    self.streamer_remove_failed_any(StreamId::new(basin, stream));
                     Ok(self.streamer_client(basin, stream).await?)
                 } else {
                     Err(e.into())
@@ -497,7 +453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streamer_client_failed_init_is_temporarily_memoized() {
+    async fn streamer_client_failed_init_is_not_memoized() {
         let object_store: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let db = slatedb::Db::builder("test", object_store)
@@ -512,24 +468,16 @@ mod tests {
 
         let err_1 = backend.streamer_client(&basin, &stream).await;
         assert!(matches!(err_1, Err(StreamerError::StreamNotFound(_))));
-        let first_failed_at = match backend.client_states.get(&stream_id) {
-            Some(slot) => match slot.value() {
-                StreamerClientSlot::Failed { timestamp, .. } => *timestamp,
-                _ => panic!("expected Failed slot after first init error"),
-            },
-            None => panic!("missing slot after first init error"),
-        };
+        assert!(
+            backend.client_states.get(&stream_id).is_none(),
+            "failed init should not be cached"
+        );
 
         let err_2 = backend.streamer_client(&basin, &stream).await;
         assert!(matches!(err_2, Err(StreamerError::StreamNotFound(_))));
-        let second_failed_at = match backend.client_states.get(&stream_id) {
-            Some(slot) => match slot.value() {
-                StreamerClientSlot::Failed { timestamp, .. } => *timestamp,
-                _ => panic!("expected Failed slot after second init error"),
-            },
-            None => panic!("missing slot after second init error"),
-        };
-
-        assert_eq!(first_failed_at, second_failed_at);
+        assert!(
+            backend.client_states.get(&stream_id).is_none(),
+            "failed init should not be cached"
+        );
     }
 }
