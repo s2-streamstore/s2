@@ -632,7 +632,7 @@ impl From<api::config::TimestampingConfig> for TimestampingConfig {
     fn from(value: api::config::TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: value.uncapped.unwrap_or_default(),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -641,7 +641,7 @@ impl From<TimestampingConfig> for api::config::TimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: Some(value.uncapped),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -1105,7 +1105,7 @@ pub struct TimestampingReconfiguration {
     /// Override for the existing [`mode`](TimestampingConfig::mode).
     pub mode: Maybe<Option<TimestampingMode>>,
     /// Override for the existing [`uncapped`](TimestampingConfig::uncapped) setting.
-    pub uncapped: Maybe<Option<bool>>,
+    pub uncapped: Maybe<bool>,
 }
 
 impl TimestampingReconfiguration {
@@ -1125,7 +1125,7 @@ impl TimestampingReconfiguration {
     /// Set the override for the existing [`uncapped`](TimestampingConfig::uncapped).
     pub fn with_uncapped(self, uncapped: bool) -> Self {
         Self {
-            uncapped: Maybe::Specified(Some(uncapped)),
+            uncapped: Maybe::Specified(uncapped),
             ..self
         }
     }
@@ -1430,7 +1430,7 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
         Ok(Self {
             id: value.id,
             expires_at,
-            auto_prefix_streams: value.auto_prefix_streams.unwrap_or(false),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         })
     }
@@ -1523,8 +1523,8 @@ impl ReadWritePermissions {
 impl From<ReadWritePermissions> for api::access::ReadWritePermissions {
     fn from(value: ReadWritePermissions) -> Self {
         Self {
-            read: Some(value.read),
-            write: Some(value.write),
+            read: value.read,
+            write: value.write,
         }
     }
 }
@@ -1532,8 +1532,8 @@ impl From<ReadWritePermissions> for api::access::ReadWritePermissions {
 impl From<api::access::ReadWritePermissions> for ReadWritePermissions {
     fn from(value: api::access::ReadWritePermissions) -> Self {
         Self {
-            read: value.read.unwrap_or_default(),
-            write: value.write.unwrap_or_default(),
+            read: value.read,
+            write: value.write,
         }
     }
 }
@@ -1980,7 +1980,7 @@ impl From<IssueAccessTokenInput> for api::access::AccessTokenInfo {
         Self {
             id: value.id,
             expires_at: value.expires_at.map(Into::into),
-            auto_prefix_streams: value.auto_prefix_streams.then_some(true),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         }
     }

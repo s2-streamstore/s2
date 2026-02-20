@@ -163,8 +163,9 @@ pub struct AccessTokenInfo {
     pub expires_at: Option<OffsetDateTime>,
     /// Namespace streams based on the configured stream-level scope, which must be a prefix.
     /// Stream name arguments will be automatically prefixed, and the prefix will be stripped when listing streams.
-    #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]
-    pub auto_prefix_streams: Option<bool>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
+    pub auto_prefix_streams: bool,
     /// Access token scope.
     pub scope: AccessTokenScope,
 }
@@ -176,7 +177,7 @@ impl TryFrom<AccessTokenInfo> for types::access::IssueAccessTokenRequest {
         Ok(Self {
             id: value.id,
             expires_at: value.expires_at,
-            auto_prefix_streams: value.auto_prefix_streams.unwrap_or_default(),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.try_into()?,
         })
     }
@@ -187,7 +188,7 @@ impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
         Self {
             id: value.id,
             expires_at: Some(value.expires_at),
-            auto_prefix_streams: Some(value.auto_prefix_streams),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         }
     }
@@ -198,7 +199,7 @@ impl From<types::access::IssueAccessTokenRequest> for AccessTokenInfo {
         Self {
             id: value.id,
             expires_at: value.expires_at,
-            auto_prefix_streams: Some(value.auto_prefix_streams),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         }
     }
@@ -352,21 +353,20 @@ impl From<types::access::PermittedOperationGroups> for PermittedOperationGroups 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ReadWritePermissions {
     /// Read permission.
-    #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]
-    pub read: Option<bool>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
+    pub read: bool,
     /// Write permission.
-    #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]
-    pub write: Option<bool>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
+    pub write: bool,
 }
 
 impl From<ReadWritePermissions> for types::access::ReadWritePermissions {
     fn from(value: ReadWritePermissions) -> Self {
         let ReadWritePermissions { read, write } = value;
 
-        Self {
-            read: read.unwrap_or_default(),
-            write: write.unwrap_or_default(),
-        }
+        Self { read, write }
     }
 }
 
@@ -374,10 +374,7 @@ impl From<types::access::ReadWritePermissions> for ReadWritePermissions {
     fn from(value: types::access::ReadWritePermissions) -> Self {
         let types::access::ReadWritePermissions { read, write } = value;
 
-        Self {
-            read: Some(read),
-            write: Some(write),
-        }
+        Self { read, write }
     }
 }
 
