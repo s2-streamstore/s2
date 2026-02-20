@@ -22,8 +22,8 @@ use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB, S2Error, StreamName,
-        StreamPosition, ValidationError,
+        AppendAck, AppendInput, MeteredBytes, ONE_MIB, S2Error, StreamName, StreamPosition,
+        ValidationError,
     },
 };
 
@@ -424,12 +424,10 @@ async fn run_session_with_retry(
                     retry_backoff.reset();
                 }
 
-                let retry_policy_compliant = retry_policy_compliant(
-                    client.config.retry.append_retry_policy,
-                    &state.inflight_appends,
-                );
+                let append_retry_policy_compliant =
+                    client.config.retry.append_retry_policy.is_compliant();
 
-                if retry_policy_compliant
+                if append_retry_policy_compliant
                     && err.is_retryable()
                     && let Some(backoff) = retry_backoff.next()
                 {
@@ -443,7 +441,7 @@ async fn run_session_with_retry(
                 } else {
                     debug!(
                         %err,
-                        retry_policy_compliant,
+                        append_retry_policy_compliant,
                         retries_exhausted = retry_backoff.is_exhausted(),
                         "not retrying append session"
                     );
@@ -764,18 +762,6 @@ impl From<StashedSubmission> for InflightAppend {
             _permit: value.permit,
         }
     }
-}
-
-fn retry_policy_compliant(
-    policy: AppendRetryPolicy,
-    inflight_appends: &VecDeque<InflightAppend>,
-) -> bool {
-    if policy == AppendRetryPolicy::All {
-        return true;
-    }
-    inflight_appends
-        .iter()
-        .all(|ia| policy.is_compliant(&ia.input))
 }
 
 enum Command {

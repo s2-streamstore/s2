@@ -288,16 +288,13 @@ impl From<Compression> for CompressionAlgorithm {
 pub enum AppendRetryPolicy {
     /// Retry all appends. Use when duplicate records on the stream are acceptable.
     All,
-    /// Only retry appends that include [`match_seq_num`](AppendInput::match_seq_num).
+    /// Only retry in circumstances that will not cause duplicate records.
     NoSideEffects,
 }
 
 impl AppendRetryPolicy {
-    pub(crate) fn is_compliant(&self, input: &AppendInput) -> bool {
-        match self {
-            Self::All => true,
-            Self::NoSideEffects => input.match_seq_num.is_some(),
-        }
+    pub(crate) fn is_compliant(&self) -> bool {
+        *self == Self::All
     }
 }
 

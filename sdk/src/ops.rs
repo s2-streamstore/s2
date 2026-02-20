@@ -340,12 +340,7 @@ impl S2Stream {
 
     /// Append records.
     pub async fn append(&self, input: AppendInput) -> Result<AppendAck, S2Error> {
-        let retry_enabled = self
-            .client
-            .config
-            .retry
-            .append_retry_policy
-            .is_compliant(&input);
+        let retry_enabled = self.client.config.retry.append_retry_policy.is_compliant();
         let ack = self
             .client
             .append(&self.name, input.into(), retry_enabled)
