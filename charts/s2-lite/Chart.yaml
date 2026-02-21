@@ -1,0 +1,18 @@
+apiVersion: v2
+name: s2-lite
+description: Self-hostable S2 streaming datastore using SlateDB on object storage
+type: application
+version: 0.1.0
+appVersion: "0.28.0"
+keywords:
+  - s2
+  - streaming
+  - datastore
+  - slatedb
+  - object-storage
+home: https://s2.dev
+sources:
+  - https://github.com/s2-streamstore/s2
+maintainers:
+  - name: S2 Team
+    email: hi@s2.dev

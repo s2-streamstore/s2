@@ -95,6 +95,71 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features -E 'not (package(s2-cli) & binary(integration)) - package(s2-sdk)'
 
+  helm-lint:
+    name: Helm Chart Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Lint Helm chart
+        run: helm lint charts/s2-lite
+
+      - name: Test template rendering (default)
+        run: helm template test-release charts/s2-lite --dry-run > /dev/null
+
+      - name: Test with TLS self-signed
+        run: helm template test-release charts/s2-lite --set tls.enabled=true --set tls.selfSigned=true --dry-run > /dev/null
+
+      - name: Test with TLS provided cert
+        run: helm template test-release charts/s2-lite --set tls.enabled=true --set tls.cert=/etc/tls/tls.crt --set tls.key=/etc/tls/tls.key --dry-run > /dev/null
+
+      - name: Test with S3 object storage
+        run: helm template test-release charts/s2-lite --set objectStorage.enabled=true --set objectStorage.bucket=test-bucket --dry-run > /dev/null
+
+      - name: Test with S3 and TLS
+        run: |
+          helm template test-release charts/s2-lite \
+            --set tls.enabled=true \
+            --set tls.selfSigned=true \
+            --set objectStorage.enabled=true \
+            --set objectStorage.bucket=test-bucket \
+            --set objectStorage.endpoint=https://s3.amazonaws.com \
+            --set metrics.serviceMonitor.enabled=true \
+            --dry-run > /dev/null
+
+      - name: Test TLS without cert/key fails but selfSigned and provided cert work
+        run: |
+          if helm template test-release charts/s2-lite \
+            --set tls.enabled=true \
+            --dry-run 2>&1; then
+            echo "Expected failure but got success"
+            exit 1
+          fi
+          helm template test-release charts/s2-lite \
+            --set tls.enabled=true \
+            --set tls.selfSigned=true \
+            --dry-run > /dev/null
+          helm template test-release charts/s2-lite \
+            --set tls.enabled=true \
+            --set tls.cert=/etc/tls/tls.crt \
+            --set tls.key=/etc/tls/tls.key \
+            --dry-run > /dev/null
+
+      - name: Test objectStorage without bucket fails
+        run: |
+          if helm template test-release charts/s2-lite \
+            --set objectStorage.enabled=true \
+            --dry-run 2>&1; then
+            echo "Expected failure but got success"
+            exit 1
+          fi
+
   build-server:
     name: Build s2-lite
     uses: ./.github/workflows/build-s2-lite.yml
