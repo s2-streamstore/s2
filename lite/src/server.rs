@@ -9,7 +9,10 @@ use axum_server::tls_rustls::RustlsConfig;
 use bytesize::ByteSize;
 use slatedb::object_store;
 use tokio::time::Instant;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tower_http::{
+    cors::CorsLayer,
+    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
 use tracing::info;
 
 use crate::{backend::Backend, handlers};
@@ -56,6 +59,14 @@ pub struct LiteArgs {
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
     pub port: Option<u16>,
+
+    /// Send permissive CORS headers, allowing browser-based clients on any
+    /// origin to access the server.
+    ///
+    /// Only needed when accessing Lite from a browser (e.g. the S2 console).
+    /// Has no effect on non-browser clients.
+    #[arg(long, default_value_t = false)]
+    pub cors: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -133,12 +144,18 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     let backend = Backend::new(db, append_inflight_max);
     crate::backend::bgtasks::spawn(&backend);
 
-    let app = handlers::router().with_state(backend).layer(
-        TraceLayer::new_for_http()
-            .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
-            .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
-            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-    );
+    let mut app = handlers::router()
+        .with_state(backend)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+                .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        );
+
+    if args.cors {
+        app = app.layer(CorsLayer::very_permissive());
+    }
 
     let server_handle = axum_server::Handle::new();
     tokio::spawn(shutdown_signal(server_handle.clone()));
