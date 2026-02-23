@@ -60,13 +60,14 @@ pub struct LiteArgs {
     #[arg(long)]
     pub port: Option<u16>,
 
-    /// Send permissive CORS headers, allowing browser-based clients on any
-    /// origin to access the server.
+    /// Disable permissive CORS headers.
     ///
-    /// Only needed when accessing Lite from a browser (e.g. the S2 console).
-    /// Has no effect on non-browser clients.
-    #[arg(long, default_value_t = false)]
-    pub cors: bool,
+    /// By default, Lite sends CORS headers that allow browser-based clients
+    /// on any origin to connect (e.g. the S2 console). Pass this flag to
+    /// suppress those headers for stricter deployments where browser access
+    /// should be denied at the HTTP layer.
+    #[arg(long)]
+    pub no_cors: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -153,7 +154,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
                 .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
         );
 
-    if args.cors {
+    if !args.no_cors {
         app = app.layer(CorsLayer::very_permissive());
     }
 
