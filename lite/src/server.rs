@@ -145,14 +145,12 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     let backend = Backend::new(db, append_inflight_max);
     crate::backend::bgtasks::spawn(&backend);
 
-    let mut app = handlers::router()
-        .with_state(backend)
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
-                .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
-                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-        );
+    let mut app = handlers::router().with_state(backend).layer(
+        TraceLayer::new_for_http()
+            .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+            .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
+            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+    );
 
     if !args.no_cors {
         app = app.layer(CorsLayer::very_permissive());
