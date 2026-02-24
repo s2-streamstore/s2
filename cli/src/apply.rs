@@ -230,28 +230,23 @@ fn format_timestamping_mode(m: TimestampingMode) -> &'static str {
 }
 
 fn effective_storage_class(sc: Option<StorageClass>) -> StorageClass {
-    // Server-side default when not explicitly configured.
     sc.unwrap_or(StorageClass::Express)
 }
 
 fn effective_retention_policy(rp: Option<RetentionPolicy>) -> RetentionPolicy {
-    // Server-side default when not explicitly configured.
     rp.unwrap_or(RetentionPolicy::Age(7 * 24 * 60 * 60))
 }
 
 fn effective_timestamping_mode(ts: Option<&TimestampingConfig>) -> TimestampingMode {
-    // Server-side default when not explicitly configured.
     ts.and_then(|cfg| cfg.mode)
         .unwrap_or(TimestampingMode::ClientPrefer)
 }
 
 fn effective_timestamping_uncapped(ts: Option<&TimestampingConfig>) -> bool {
-    // Server-side default when not explicitly configured.
     ts.map(|cfg| cfg.uncapped).unwrap_or(false)
 }
 
 fn effective_delete_on_empty_min_age_secs(doe: Option<&DeleteOnEmptyConfig>) -> u64 {
-    // Server-side default when not explicitly configured.
     doe.map(|cfg| cfg.min_age_secs).unwrap_or(0)
 }
 
