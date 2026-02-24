@@ -168,6 +168,11 @@ pub enum Command {
     /// are reconfigured to match the spec. Only the fields present in the spec are
     /// updated.
     ///
+    /// Dry-run output legend:
+    ///   + create
+    ///   ~ reconfigure
+    ///   = unchanged
+    ///
     /// Example spec file:
     ///   {"basins":[{"name":"my-basin","streams":[{"name":"events"}]}]}
     Apply(ApplyArgs),
@@ -541,9 +546,14 @@ pub struct ApplyArgs {
     )]
     pub file: Option<PathBuf>,
     /// Preview changes without making any mutations.
+    ///
+    /// Dry-run output legend:
+    ///   + create
+    ///   ~ reconfigure
+    ///   = unchanged
     #[arg(long)]
     pub dry_run: bool,
-    /// Print the JSON Schema for the spec file format to stdout and exit.
+    /// Print the JSON Schema for the spec file format to stdout.
     #[arg(long)]
     pub schema: bool,
 }

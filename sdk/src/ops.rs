@@ -2,17 +2,20 @@ use futures::StreamExt;
 
 #[cfg(feature = "_hidden")]
 use crate::client::Connect;
+#[cfg(feature = "_hidden")]
+use crate::types::{
+    CreateOrReconfigureBasinInput, CreateOrReconfigureStreamInput, CreateOrReconfigured,
+};
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
     producer::{Producer, ProducerConfig},
     session::{self, AppendSession, AppendSessionConfig},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        BasinState, CreateBasinInput, CreateOrReconfigureBasinInput,
-        CreateOrReconfigureStreamInput, CreateOrReconfigured, CreateStreamInput, DeleteBasinInput,
-        DeleteStreamInput, GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput,
-        IssueAccessTokenInput, ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
-        ListAllStreamsInput, ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
+        BasinState, CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
+        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
+        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput,
+        ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
         ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo,
         StreamName, StreamPosition, Streaming,
     },
@@ -111,6 +114,8 @@ impl S2 {
     ///
     /// Returns [`CreateOrReconfigured::Created`] with the basin info if the basin was newly
     /// created, or [`CreateOrReconfigured::Reconfigured`] if it already existed.
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
     pub async fn create_or_reconfigure_basin(
         &self,
         input: CreateOrReconfigureBasinInput,
@@ -327,6 +332,8 @@ impl S2Basin {
     ///
     /// Returns [`CreateOrReconfigured::Created`] with the stream info if the stream was newly
     /// created, or [`CreateOrReconfigured::Reconfigured`] if it already existed.
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
     pub async fn create_or_reconfigure_stream(
         &self,
         input: CreateOrReconfigureStreamInput,

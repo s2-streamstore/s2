@@ -180,7 +180,7 @@ pub struct CreateOrReconfigureArgs {
     basin: BasinName,
     #[from_request(via(Path))]
     stream: StreamName,
-    config: JsonOpt<v1t::config::StreamConfig>,
+    config: JsonOpt<v1t::config::StreamReconfiguration>,
 }
 
 /// Create or reconfigure a stream.
@@ -188,7 +188,7 @@ pub struct CreateOrReconfigureArgs {
     put,
     path = super::paths::streams::CREATE_OR_RECONFIGURE,
     tag = super::paths::streams::TAG,
-    request_body = Option<v1t::config::StreamConfig>,
+    request_body = Option<v1t::config::StreamReconfiguration>,
     params(v1t::StreamNamePathSegment),
     responses(
         (status = StatusCode::OK, body = v1t::stream::StreamInfo),
@@ -215,7 +215,7 @@ pub async fn create_or_reconfigure_stream(
         config: JsonOpt(config),
     }: CreateOrReconfigureArgs,
 ) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
-    let config: OptionalStreamConfig = config
+    let config: StreamReconfiguration = config
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();

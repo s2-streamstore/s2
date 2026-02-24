@@ -161,7 +161,7 @@ pub async fn create_or_reconfigure_basin(
         request: JsonOpt(request),
     }: CreateOrReconfigureArgs,
 ) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
-    let config: BasinConfig = request
+    let config: BasinReconfiguration = request
         .and_then(|req| req.config)
         .map(TryInto::try_into)
         .transpose()?

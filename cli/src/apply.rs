@@ -10,58 +10,29 @@ use s2_lite::init::{
 use s2_sdk::{
     S2,
     types::{
-        BasinConfig, BasinName, CreateOrReconfigureBasinInput, CreateOrReconfigureStreamInput,
-        CreateOrReconfigured, DeleteOnEmptyConfig, ErrorResponse, RetentionPolicy, S2Error,
-        StorageClass, StreamConfig, StreamName, TimestampingConfig, TimestampingMode,
+        BasinConfig, BasinName, BasinReconfiguration, CreateOrReconfigureBasinInput,
+        CreateOrReconfigureStreamInput, CreateOrReconfigured, DeleteOnEmptyConfig,
+        DeleteOnEmptyReconfiguration, ErrorResponse, RetentionPolicy, S2Error, StorageClass,
+        StreamConfig, StreamName, StreamReconfiguration, TimestampingConfig, TimestampingMode,
+        TimestampingReconfiguration,
     },
 };
 
-fn stream_config_to_sdk(s: StreamConfigSpec) -> StreamConfig {
-    let mut c = StreamConfig::new();
-    if let Some(sc) = s.storage_class {
-        c = c.with_storage_class(storage_class_to_sdk(sc));
-    }
-    if let Some(rp) = s.retention_policy {
-        c = c.with_retention_policy(retention_policy_to_sdk(rp));
-    }
-    if let Some(ts) = s.timestamping {
-        c = c.with_timestamping(timestamping_to_sdk(ts));
-    }
-    if let Some(doe) = s.delete_on_empty {
-        c = c.with_delete_on_empty(delete_on_empty_to_sdk(doe));
-    }
-    c
-}
-
-fn basin_config_to_sdk(s: BasinConfigSpec) -> BasinConfig {
-    let mut c = BasinConfig::new();
-    if let Some(dsc) = s.default_stream_config {
-        c = c.with_default_stream_config(stream_config_to_sdk(dsc));
-    }
-    if let Some(v) = s.create_stream_on_append {
-        c = c.with_create_stream_on_append(v);
-    }
-    if let Some(v) = s.create_stream_on_read {
-        c = c.with_create_stream_on_read(v);
-    }
-    c
-}
-
-fn storage_class_to_sdk(s: StorageClassSpec) -> StorageClass {
+fn storage_class_from_spec(s: StorageClassSpec) -> StorageClass {
     match s {
         StorageClassSpec::Standard => StorageClass::Standard,
         StorageClassSpec::Express => StorageClass::Express,
     }
 }
 
-fn retention_policy_to_sdk(rp: RetentionPolicySpec) -> RetentionPolicy {
+fn retention_policy_from_spec(rp: RetentionPolicySpec) -> RetentionPolicy {
     match rp.age_secs() {
         Some(secs) => RetentionPolicy::Age(secs),
         None => RetentionPolicy::Infinite,
     }
 }
 
-fn timestamping_mode_to_sdk(m: TimestampingModeSpec) -> TimestampingMode {
+fn timestamping_mode_from_spec(m: TimestampingModeSpec) -> TimestampingMode {
     match m {
         TimestampingModeSpec::ClientPrefer => TimestampingMode::ClientPrefer,
         TimestampingModeSpec::ClientRequire => TimestampingMode::ClientRequire,
@@ -69,23 +40,56 @@ fn timestamping_mode_to_sdk(m: TimestampingModeSpec) -> TimestampingMode {
     }
 }
 
-fn timestamping_to_sdk(ts: TimestampingSpec) -> TimestampingConfig {
-    let mut tsc = TimestampingConfig::new();
+fn timestamping_reconfiguration_from_spec(ts: TimestampingSpec) -> TimestampingReconfiguration {
+    let mut tsr = TimestampingReconfiguration::new();
     if let Some(m) = ts.mode {
-        tsc = tsc.with_mode(timestamping_mode_to_sdk(m));
+        tsr = tsr.with_mode(timestamping_mode_from_spec(m));
     }
     if let Some(u) = ts.uncapped {
-        tsc = tsc.with_uncapped(u);
+        tsr = tsr.with_uncapped(u);
     }
-    tsc
+    tsr
 }
 
-fn delete_on_empty_to_sdk(doe: DeleteOnEmptySpec) -> DeleteOnEmptyConfig {
-    let mut doec = DeleteOnEmptyConfig::new();
+fn delete_on_empty_reconfiguration_from_spec(
+    doe: DeleteOnEmptySpec,
+) -> DeleteOnEmptyReconfiguration {
+    let mut doer = DeleteOnEmptyReconfiguration::new();
     if let Some(ma) = doe.min_age {
-        doec = doec.with_min_age(ma.0);
+        doer = doer.with_min_age(ma.0);
     }
-    doec
+    doer
+}
+
+fn stream_reconfiguration_from_spec(s: StreamConfigSpec) -> StreamReconfiguration {
+    let mut r = StreamReconfiguration::new();
+    if let Some(sc) = s.storage_class {
+        r = r.with_storage_class(storage_class_from_spec(sc));
+    }
+    if let Some(rp) = s.retention_policy {
+        r = r.with_retention_policy(retention_policy_from_spec(rp));
+    }
+    if let Some(ts) = s.timestamping {
+        r = r.with_timestamping(timestamping_reconfiguration_from_spec(ts));
+    }
+    if let Some(doe) = s.delete_on_empty {
+        r = r.with_delete_on_empty(delete_on_empty_reconfiguration_from_spec(doe));
+    }
+    r
+}
+
+fn basin_reconfiguration_from_spec(s: BasinConfigSpec) -> BasinReconfiguration {
+    let mut r = BasinReconfiguration::new();
+    if let Some(dsc) = s.default_stream_config {
+        r = r.with_default_stream_config(stream_reconfiguration_from_spec(dsc));
+    }
+    if let Some(v) = s.create_stream_on_append {
+        r = r.with_create_stream_on_append(v);
+    }
+    if let Some(v) = s.create_stream_on_read {
+        r = r.with_create_stream_on_read(v);
+    }
+    r
 }
 
 pub fn validate(spec: &ResourcesSpec) -> miette::Result<()> {
@@ -128,7 +132,7 @@ async fn apply_basin(
 ) -> miette::Result<()> {
     let mut input = CreateOrReconfigureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        input = input.with_config(basin_config_to_sdk(c));
+        input = input.with_config(basin_reconfiguration_from_spec(c));
     }
     match s2
         .create_or_reconfigure_basin(input)
@@ -156,7 +160,7 @@ async fn apply_stream(
 ) -> miette::Result<()> {
     let mut input = CreateOrReconfigureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        input = input.with_config(stream_config_to_sdk(c));
+        input = input.with_config(stream_reconfiguration_from_spec(c));
     }
     let basin_client = s2.basin(basin.clone());
     match basin_client
@@ -225,6 +229,32 @@ fn format_timestamping_mode(m: TimestampingMode) -> &'static str {
     }
 }
 
+fn effective_storage_class(sc: Option<StorageClass>) -> StorageClass {
+    // Server-side default when not explicitly configured.
+    sc.unwrap_or(StorageClass::Express)
+}
+
+fn effective_retention_policy(rp: Option<RetentionPolicy>) -> RetentionPolicy {
+    // Server-side default when not explicitly configured.
+    rp.unwrap_or(RetentionPolicy::Age(7 * 24 * 60 * 60))
+}
+
+fn effective_timestamping_mode(ts: Option<&TimestampingConfig>) -> TimestampingMode {
+    // Server-side default when not explicitly configured.
+    ts.and_then(|cfg| cfg.mode)
+        .unwrap_or(TimestampingMode::ClientPrefer)
+}
+
+fn effective_timestamping_uncapped(ts: Option<&TimestampingConfig>) -> bool {
+    // Server-side default when not explicitly configured.
+    ts.map(|cfg| cfg.uncapped).unwrap_or(false)
+}
+
+fn effective_delete_on_empty_min_age_secs(doe: Option<&DeleteOnEmptyConfig>) -> u64 {
+    // Server-side default when not explicitly configured.
+    doe.map(|cfg| cfg.min_age_secs).unwrap_or(0)
+}
+
 fn diff_basin_config(existing: &BasinConfig, spec: &BasinConfigSpec) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
@@ -248,10 +278,9 @@ fn diff_basin_config(existing: &BasinConfig, spec: &BasinConfigSpec) -> Vec<Fiel
         });
     }
 
-    if let Some(ref spec_dsc) = spec.default_stream_config
-        && let Some(ref existing_dsc) = existing.default_stream_config
-    {
-        let stream_diffs = diff_stream_config(existing_dsc, spec_dsc);
+    if let Some(ref spec_dsc) = spec.default_stream_config {
+        let existing_dsc = existing.default_stream_config.clone().unwrap_or_default();
+        let stream_diffs = diff_stream_config(&existing_dsc, spec_dsc);
         for sd in stream_diffs {
             diffs.push(FieldDiff {
                 field: sd.field,
@@ -268,8 +297,8 @@ fn diff_stream_config(existing: &StreamConfig, spec: &StreamConfigSpec) -> Vec<F
     let mut diffs = Vec::new();
 
     if let Some(ref sc) = spec.storage_class {
-        let existing_sc = existing.storage_class.unwrap_or(StorageClass::Standard);
-        let spec_sc = storage_class_to_sdk(sc.clone());
+        let existing_sc = effective_storage_class(existing.storage_class);
+        let spec_sc = storage_class_from_spec(sc.clone());
         if existing_sc != spec_sc {
             diffs.push(FieldDiff {
                 field: "storage_class",
@@ -280,10 +309,8 @@ fn diff_stream_config(existing: &StreamConfig, spec: &StreamConfigSpec) -> Vec<F
     }
 
     if let Some(ref rp) = spec.retention_policy {
-        let existing_rp = existing
-            .retention_policy
-            .unwrap_or(RetentionPolicy::Infinite);
-        let spec_rp = retention_policy_to_sdk(*rp);
+        let existing_rp = effective_retention_policy(existing.retention_policy);
+        let spec_rp = retention_policy_from_spec(*rp);
         if existing_rp != spec_rp {
             diffs.push(FieldDiff {
                 field: "retention_policy",
@@ -293,42 +320,41 @@ fn diff_stream_config(existing: &StreamConfig, spec: &StreamConfigSpec) -> Vec<F
         }
     }
 
-    if let Some(ref ts) = spec.timestamping
-        && let Some(ref existing_ts) = existing.timestamping
-    {
+    if let Some(ref ts) = spec.timestamping {
+        let existing_ts = existing.timestamping.as_ref();
         if let Some(ref mode) = ts.mode {
-            let spec_mode = timestamping_mode_to_sdk(mode.clone());
-            if existing_ts.mode.unwrap_or(TimestampingMode::Arrival) != spec_mode {
+            let spec_mode = timestamping_mode_from_spec(mode.clone());
+            if effective_timestamping_mode(existing_ts) != spec_mode {
                 diffs.push(FieldDiff {
                     field: "timestamping.mode",
-                    old: format_timestamping_mode(
-                        existing_ts.mode.unwrap_or(TimestampingMode::Arrival),
-                    )
-                    .to_string(),
+                    old: format_timestamping_mode(effective_timestamping_mode(existing_ts))
+                        .to_string(),
                     new: format_timestamping_mode(spec_mode).to_string(),
                 });
             }
         }
         if let Some(uncapped) = ts.uncapped
-            && existing_ts.uncapped != uncapped
+            && effective_timestamping_uncapped(existing_ts) != uncapped
         {
             diffs.push(FieldDiff {
                 field: "timestamping.uncapped",
-                old: existing_ts.uncapped.to_string(),
+                old: effective_timestamping_uncapped(existing_ts).to_string(),
                 new: uncapped.to_string(),
             });
         }
     }
 
     if let Some(ref doe) = spec.delete_on_empty
-        && let Some(ref existing_doe) = existing.delete_on_empty
         && let Some(ref min_age) = doe.min_age
-        && existing_doe.min_age_secs != min_age.0.as_secs()
+        && effective_delete_on_empty_min_age_secs(existing.delete_on_empty.as_ref())
+            != min_age.0.as_secs()
     {
         diffs.push(FieldDiff {
             field: "delete_on_empty.min_age",
-            old: humantime::format_duration(Duration::from_secs(existing_doe.min_age_secs))
-                .to_string(),
+            old: humantime::format_duration(Duration::from_secs(
+                effective_delete_on_empty_min_age_secs(existing.delete_on_empty.as_ref()),
+            ))
+            .to_string(),
             new: humantime::format_duration(min_age.0).to_string(),
         });
     }
@@ -369,14 +395,14 @@ fn spec_stream_fields(spec: &StreamConfigSpec) -> Vec<FieldDiff> {
         fields.push(FieldDiff {
             field: "storage_class",
             old: String::new(),
-            new: format_storage_class(storage_class_to_sdk(sc.clone())).to_string(),
+            new: format_storage_class(storage_class_from_spec(sc.clone())).to_string(),
         });
     }
     if let Some(ref rp) = spec.retention_policy {
         fields.push(FieldDiff {
             field: "retention_policy",
             old: String::new(),
-            new: format_retention_policy(retention_policy_to_sdk(*rp)),
+            new: format_retention_policy(retention_policy_from_spec(*rp)),
         });
     }
     if let Some(ref ts) = spec.timestamping {
@@ -384,7 +410,8 @@ fn spec_stream_fields(spec: &StreamConfigSpec) -> Vec<FieldDiff> {
             fields.push(FieldDiff {
                 field: "timestamping.mode",
                 old: String::new(),
-                new: format_timestamping_mode(timestamping_mode_to_sdk(mode.clone())).to_string(),
+                new: format_timestamping_mode(timestamping_mode_from_spec(mode.clone()))
+                    .to_string(),
             });
         }
         if let Some(uncapped) = ts.uncapped {

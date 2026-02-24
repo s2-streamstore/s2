@@ -15,8 +15,7 @@ use s2_api::v1::{
         ListAccessTokensResponse,
     },
     basin::{
-        BasinInfo, CreateBasinRequest, CreateOrReconfigureBasinRequest, ListBasinsRequest,
-        ListBasinsResponse,
+        BasinInfo, CreateBasinRequest, ListBasinsRequest, ListBasinsResponse,
     },
     config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration},
     metrics::{
@@ -33,6 +32,8 @@ use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 use url::Url;
+#[cfg(feature = "_hidden")]
+use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
 
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
@@ -143,13 +144,17 @@ impl AccountClient {
         Ok(response.json::<BasinConfig>()?)
     }
 
+    #[cfg(feature = "_hidden")]
     pub async fn create_or_reconfigure_basin(
         &self,
         name: BasinName,
         request: Option<CreateOrReconfigureBasinRequest>,
     ) -> Result<(bool, BasinInfo), ApiError> {
         let url = self.base_url.join(&format!("v1/basins/{name}"))?;
-        let request = self.put(url).json(&request).build()?;
+        let request = match request {
+            Some(body) => self.put(url).json(&body).build()?,
+            None => self.put(url).build()?,
+        };
         let response = self.request(request).send().await?;
         let was_created = response.status() == StatusCode::CREATED;
         Ok((was_created, response.json::<BasinInfo>()?))
@@ -293,15 +298,19 @@ impl BasinClient {
         Ok(response.json::<StreamConfig>()?)
     }
 
+    #[cfg(feature = "_hidden")]
     pub async fn create_or_reconfigure_stream(
         &self,
         name: StreamName,
-        config: Option<StreamConfig>,
+        config: Option<StreamReconfiguration>,
     ) -> Result<(bool, StreamInfo), ApiError> {
         let url = self
             .base_url
             .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
-        let request = self.put(url).json(&config).build()?;
+        let request = match config {
+            Some(body) => self.put(url).json(&body).build()?,
+            None => self.put(url).build()?,
+        };
         let response = self.request(request).send().await?;
         let was_created = response.status() == StatusCode::CREATED;
         Ok((was_created, response.json::<StreamInfo>()?))
@@ -787,6 +796,7 @@ impl BaseClient {
             .compression(self.compression)
     }
 
+    #[cfg(feature = "_hidden")]
     pub fn put(&self, url: Url) -> client::RequestBuilder {
         client::RequestBuilder::put(url)
             .timeout(self.request_timeout)

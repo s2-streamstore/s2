@@ -866,6 +866,8 @@ impl From<BasinScope> for api::basin::BasinScope {
 ///
 /// Indicates whether the resource was newly created or already existed and was
 /// reconfigured. Both variants hold the resource's current state.
+#[doc(hidden)]
+#[cfg(feature = "_hidden")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateOrReconfigured<T> {
     /// Resource was newly created.
@@ -874,6 +876,7 @@ pub enum CreateOrReconfigured<T> {
     Reconfigured(T),
 }
 
+#[cfg(feature = "_hidden")]
 impl<T> CreateOrReconfigured<T> {
     /// Returns `true` if the resource was newly created.
     pub fn is_created(&self) -> bool {
@@ -949,19 +952,22 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Input for [`create_or_reconfigure_basin`](crate::S2::create_or_reconfigure_basin) operation.
+#[doc(hidden)]
+#[cfg(feature = "_hidden")]
 pub struct CreateOrReconfigureBasinInput {
     /// Basin name.
     pub name: BasinName,
-    /// Configuration for the basin.
+    /// Reconfiguration for the basin.
     ///
     /// If `None`, the basin is created with default configuration or left unchanged if it exists.
-    pub config: Option<BasinConfig>,
+    pub config: Option<BasinReconfiguration>,
     /// Scope of the basin.
     ///
     /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
     pub scope: Option<BasinScope>,
 }
 
+#[cfg(feature = "_hidden")]
 impl CreateOrReconfigureBasinInput {
     /// Create a new [`CreateOrReconfigureBasinInput`] with the given basin name.
     pub fn new(name: BasinName) -> Self {
@@ -972,8 +978,8 @@ impl CreateOrReconfigureBasinInput {
         }
     }
 
-    /// Set the configuration for the basin.
-    pub fn with_config(self, config: BasinConfig) -> Self {
+    /// Set the reconfiguration for the basin.
+    pub fn with_config(self, config: BasinReconfiguration) -> Self {
         Self {
             config: Some(config),
             ..self
@@ -989,6 +995,7 @@ impl CreateOrReconfigureBasinInput {
     }
 }
 
+#[cfg(feature = "_hidden")]
 impl From<CreateOrReconfigureBasinInput>
     for (
         BasinName,
@@ -2669,23 +2676,26 @@ impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
 #[non_exhaustive]
 /// Input for [`create_or_reconfigure_stream`](crate::S2Basin::create_or_reconfigure_stream)
 /// operation.
+#[doc(hidden)]
+#[cfg(feature = "_hidden")]
 pub struct CreateOrReconfigureStreamInput {
     /// Stream name.
     pub name: StreamName,
-    /// Configuration for the stream.
+    /// Reconfiguration for the stream.
     ///
     /// If `None`, the stream is created with default configuration or left unchanged if it exists.
-    pub config: Option<StreamConfig>,
+    pub config: Option<StreamReconfiguration>,
 }
 
+#[cfg(feature = "_hidden")]
 impl CreateOrReconfigureStreamInput {
     /// Create a new [`CreateOrReconfigureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
         Self { name, config: None }
     }
 
-    /// Set the configuration for the stream.
-    pub fn with_config(self, config: StreamConfig) -> Self {
+    /// Set the reconfiguration for the stream.
+    pub fn with_config(self, config: StreamReconfiguration) -> Self {
         Self {
             config: Some(config),
             ..self
@@ -2693,7 +2703,10 @@ impl CreateOrReconfigureStreamInput {
     }
 }
 
-impl From<CreateOrReconfigureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
+#[cfg(feature = "_hidden")]
+impl From<CreateOrReconfigureStreamInput>
+    for (StreamName, Option<api::config::StreamReconfiguration>)
+{
     fn from(value: CreateOrReconfigureStreamInput) -> Self {
         (value.name, value.config.map(Into::into))
     }
