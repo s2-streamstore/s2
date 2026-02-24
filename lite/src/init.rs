@@ -16,18 +16,18 @@ use s2_common::{
         stream::StreamName,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::backend::Backend;
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, schemars::JsonSchema)]
 pub struct ResourcesSpec {
     #[serde(default)]
     pub basins: Vec<BasinSpec>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct BasinSpec {
     pub name: String,
     #[serde(default)]
@@ -36,40 +36,68 @@ pub struct BasinSpec {
     pub streams: Vec<StreamSpec>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StreamSpec {
     pub name: String,
     #[serde(default)]
     pub config: Option<StreamConfigSpec>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 pub struct BasinConfigSpec {
     #[serde(default)]
     pub default_stream_config: Option<StreamConfigSpec>,
+    /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
     pub create_stream_on_append: Option<bool>,
+    /// Create stream on read if it doesn't exist, using the default stream configuration.
     #[serde(default)]
     pub create_stream_on_read: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 pub struct StreamConfigSpec {
+    /// Storage class for recent writes.
     #[serde(default)]
     pub storage_class: Option<StorageClassSpec>,
+    /// Retention policy for the stream. If unspecified, the default is to retain records for 7
+    /// days.
     #[serde(default)]
     pub retention_policy: Option<RetentionPolicySpec>,
+    /// Timestamping behavior.
     #[serde(default)]
     pub timestamping: Option<TimestampingSpec>,
+    /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptySpec>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClassSpec {
     Standard,
     Express,
+}
+
+impl schemars::JsonSchema for StorageClassSpec {
+    fn schema_name() -> String {
+        "StorageClassSpec".to_string()
+    }
+
+    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some("Storage class for recent writes.".to_string()),
+                ..Default::default()
+            })),
+            enum_values: Some(vec![
+                serde_json::Value::String("standard".to_string()),
+                serde_json::Value::String("express".to_string()),
+            ]),
+            ..Default::default()
+        })
+    }
 }
 
 impl From<StorageClassSpec> for StorageClass {
@@ -111,20 +139,74 @@ impl<'de> Deserialize<'de> for RetentionPolicySpec {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl schemars::JsonSchema for RetentionPolicySpec {
+    fn schema_name() -> String {
+        "RetentionPolicySpec".to_string()
+    }
+
+    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Retain records unless explicitly trimmed (\"infinite\"), or automatically \
+                     trim records older than the given duration (e.g. \"7days\", \"1week\")."
+                        .to_string(),
+                ),
+                examples: vec![
+                    serde_json::Value::String("infinite".to_string()),
+                    serde_json::Value::String("7days".to_string()),
+                    serde_json::Value::String("1week".to_string()),
+                ],
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct TimestampingSpec {
+    /// Timestamping mode for appends that influences how timestamps are handled.
     #[serde(default)]
     pub mode: Option<TimestampingModeSpec>,
+    /// Allow client-specified timestamps to exceed the arrival time.
+    /// If this is `false` or not set, client timestamps will be capped at the arrival time.
     #[serde(default)]
     pub uncapped: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TimestampingModeSpec {
     ClientPrefer,
     ClientRequire,
     Arrival,
+}
+
+impl schemars::JsonSchema for TimestampingModeSpec {
+    fn schema_name() -> String {
+        "TimestampingModeSpec".to_string()
+    }
+
+    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Timestamping mode for appends that influences how timestamps are handled."
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            enum_values: Some(vec![
+                serde_json::Value::String("client-prefer".to_string()),
+                serde_json::Value::String("client-require".to_string()),
+                serde_json::Value::String("arrival".to_string()),
+            ]),
+            ..Default::default()
+        })
+    }
 }
 
 impl From<TimestampingModeSpec> for TimestampingMode {
@@ -137,8 +219,10 @@ impl From<TimestampingModeSpec> for TimestampingMode {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct DeleteOnEmptySpec {
+    /// Minimum age before an empty stream can be deleted.
+    /// Set to 0 (default) to disable delete-on-empty (don't delete automatically).
     #[serde(default)]
     pub min_age: Option<HumanDuration>,
 }
@@ -161,6 +245,29 @@ impl<'de> Deserialize<'de> for HumanDuration {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         HumanDuration::try_from(s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl schemars::JsonSchema for HumanDuration {
+    fn schema_name() -> String {
+        "HumanDuration".to_string()
+    }
+
+    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "A duration string in humantime format, e.g. \"1day\", \"2h 30m\"".to_string(),
+                ),
+                examples: vec![
+                    serde_json::Value::String("1day".to_string()),
+                    serde_json::Value::String("2h 30m".to_string()),
+                ],
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
     }
 }
 
@@ -222,6 +329,48 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
     }
 }
 
+pub fn json_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(ResourcesSpec)).unwrap()
+}
+
+pub fn validate(spec: &ResourcesSpec) -> eyre::Result<()> {
+    let mut errors = Vec::new();
+    let mut seen_basins = std::collections::HashSet::new();
+
+    for basin_spec in &spec.basins {
+        if !seen_basins.insert(basin_spec.name.clone()) {
+            errors.push(format!("duplicate basin name {:?}", basin_spec.name));
+        }
+
+        if let Err(e) = basin_spec.name.parse::<BasinName>() {
+            errors.push(format!("invalid basin name {:?}: {}", basin_spec.name, e));
+            continue;
+        }
+
+        let mut seen_streams = std::collections::HashSet::new();
+        for stream_spec in &basin_spec.streams {
+            if !seen_streams.insert(stream_spec.name.clone()) {
+                errors.push(format!(
+                    "duplicate stream name {:?} in basin {:?}",
+                    stream_spec.name, basin_spec.name
+                ));
+            }
+            if let Err(e) = stream_spec.name.parse::<StreamName>() {
+                errors.push(format!(
+                    "invalid stream name {:?} in basin {:?}: {}",
+                    stream_spec.name, basin_spec.name, e
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("{}", errors.join("\n")))
+    }
+}
+
 pub fn load(path: &Path) -> eyre::Result<ResourcesSpec> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| eyre::eyre!("failed to read init file {:?}: {}", path, e))?;
@@ -231,6 +380,8 @@ pub fn load(path: &Path) -> eyre::Result<ResourcesSpec> {
 }
 
 pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
+    validate(&spec)?;
+
     for basin_spec in spec.basins {
         let basin: BasinName = basin_spec
             .name
@@ -427,6 +578,65 @@ mod tests {
         ));
         assert!(matches!(reconfig.create_stream_on_read, Maybe::Unspecified));
         assert!(matches!(reconfig.default_stream_config, Maybe::Unspecified));
+    }
+
+    #[test]
+    fn validate_valid_spec() {
+        let spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","streams":[{"name":"events"},{"name":"logs"}]}]}"#,
+        );
+        assert!(validate(&spec).is_ok());
+    }
+
+    #[test]
+    fn validate_invalid_basin_name() {
+        let spec = parse_spec(r#"{"basins":[{"name":"INVALID_BASIN"}]}"#);
+        let err = validate(&spec).unwrap_err();
+        assert!(err.to_string().contains("invalid basin name"));
+    }
+
+    #[test]
+    fn validate_invalid_stream_name() {
+        let spec = parse_spec(r#"{"basins":[{"name":"my-basin","streams":[{"name":""}]}]}"#);
+        let err = validate(&spec).unwrap_err();
+        assert!(err.to_string().contains("invalid stream name"));
+    }
+
+    #[test]
+    fn validate_duplicate_basin_names() {
+        let spec = parse_spec(r#"{"basins":[{"name":"my-basin"},{"name":"my-basin"}]}"#);
+        let err = validate(&spec).unwrap_err();
+        assert!(err.to_string().contains("duplicate basin name"));
+    }
+
+    #[test]
+    fn validate_duplicate_stream_names() {
+        let spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","streams":[{"name":"events"},{"name":"events"}]}]}"#,
+        );
+        let err = validate(&spec).unwrap_err();
+        assert!(err.to_string().contains("duplicate stream name"));
+    }
+
+    #[test]
+    fn validate_multiple_errors() {
+        let spec = parse_spec(r#"{"basins":[{"name":"INVALID"},{"name":"INVALID"}]}"#);
+        let err = validate(&spec).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid basin name"));
+        assert!(msg.contains("duplicate basin name"));
+    }
+
+    #[test]
+    fn json_schema_is_valid() {
+        let schema = json_schema();
+        assert!(schema.is_object());
+        let schema_obj = schema.as_object().unwrap();
+        // Should have at minimum a definitions/properties structure
+        assert!(
+            schema_obj.contains_key("definitions") || schema_obj.contains_key("properties"),
+            "schema should have definitions or properties"
+        );
     }
 
     #[test]

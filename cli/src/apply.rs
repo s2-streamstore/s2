@@ -88,6 +88,10 @@ fn delete_on_empty_to_sdk(doe: DeleteOnEmptySpec) -> DeleteOnEmptyConfig {
     doec
 }
 
+pub fn validate(spec: &ResourcesSpec) -> miette::Result<()> {
+    s2_lite::init::validate(spec).map_err(|e| miette::miette!("{}", e))
+}
+
 pub fn load(path: &Path) -> miette::Result<ResourcesSpec> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| miette::miette!("failed to read spec file {:?}: {}", path.display(), e))?;
@@ -97,6 +101,8 @@ pub fn load(path: &Path) -> miette::Result<ResourcesSpec> {
 }
 
 pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
+    validate(&spec)?;
+
     for basin_spec in spec.basins {
         let basin: BasinName = basin_spec
             .name
@@ -455,6 +461,8 @@ fn print_stream_create(basin: &str, stream: &str, spec: &Option<StreamConfigSpec
 }
 
 pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
+    validate(&spec)?;
+
     for basin_spec in spec.basins {
         let basin: BasinName = basin_spec
             .name

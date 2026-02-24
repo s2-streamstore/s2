@@ -48,6 +48,7 @@ rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true, features = ["axum"] }
 s2-common = { workspace = true, features = ["clap"] }
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slatedb = { workspace = true }

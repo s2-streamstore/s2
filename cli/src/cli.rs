@@ -533,11 +533,19 @@ pub struct TailArgs {
 #[derive(Args, Debug)]
 pub struct ApplyArgs {
     /// Path to a JSON spec file defining basins and streams to create or reconfigure.
-    #[arg(short = 'f', long, value_name = "FILE")]
-    pub file: PathBuf,
+    #[arg(
+        short = 'f',
+        long,
+        value_name = "FILE",
+        required_unless_present = "schema"
+    )]
+    pub file: Option<PathBuf>,
     /// Preview changes without making any mutations.
     #[arg(long)]
     pub dry_run: bool,
+    /// Print the JSON Schema for the spec file format to stdout and exit.
+    #[arg(long)]
+    pub schema: bool,
 }
 
 #[derive(Args, Debug)]

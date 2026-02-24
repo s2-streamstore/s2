@@ -526,7 +526,20 @@ async fn run() -> Result<(), CliError> {
             }
         }
 
-        Command::Apply(ApplyArgs { file, dry_run }) => {
+        Command::Apply(ApplyArgs {
+            file,
+            dry_run,
+            schema,
+        }) => {
+            if schema {
+                let schema = s2_lite::init::json_schema();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&schema).expect("valid schema")
+                );
+                return Ok(());
+            }
+            let file = file.expect("--file is required when --schema is not set");
             let spec = apply::load(&file).map_err(CliError::InvalidArgs)?;
             if dry_run {
                 apply::dry_run(&s2, spec)
