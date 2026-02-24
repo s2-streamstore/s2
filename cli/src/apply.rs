@@ -181,20 +181,16 @@ async fn apply_basin(
             eprintln!("{}", format!("  basin {basin}").green().bold());
         }
         Err(ref e) if is_already_exists(e) => {
-            if let Some(config) = config {
-                let reconfig = basin_config_to_reconfig(config);
-                s2.reconfigure_basin(ReconfigureBasinInput::new(basin.clone(), reconfig))
-                    .await
-                    .map_err(|e| {
-                        miette::miette!("failed to reconfigure basin {:?}: {}", basin.as_ref(), e)
-                    })?;
-                eprintln!(
-                    "{}",
-                    format!("  basin {basin} (reconfigured)").yellow().bold()
-                );
-            } else {
-                eprintln!("{}", format!("  basin {basin} (exists)").blue().bold());
-            }
+            let reconfig = config.map(basin_config_to_reconfig).unwrap_or_default();
+            s2.reconfigure_basin(ReconfigureBasinInput::new(basin.clone(), reconfig))
+                .await
+                .map_err(|e| {
+                    miette::miette!("failed to reconfigure basin {:?}: {}", basin.as_ref(), e)
+                })?;
+            eprintln!(
+                "{}",
+                format!("  basin {basin} (reconfigured)").yellow().bold()
+            );
         }
         Err(e) => {
             return Err(miette::miette!(
@@ -226,31 +222,24 @@ async fn apply_stream(
             eprintln!("{}", format!("  stream {basin}/{stream}").green().bold());
         }
         Err(ref e) if is_already_exists(e) => {
-            if let Some(config) = config {
-                let reconfig = stream_config_to_reconfig(config);
-                basin_client
-                    .reconfigure_stream(ReconfigureStreamInput::new(stream.clone(), reconfig))
-                    .await
-                    .map_err(|e| {
-                        miette::miette!(
-                            "failed to reconfigure stream {:?}/{:?}: {}",
-                            basin.as_ref(),
-                            stream.as_ref(),
-                            e
-                        )
-                    })?;
-                eprintln!(
-                    "{}",
-                    format!("  stream {basin}/{stream} (reconfigured)")
-                        .yellow()
-                        .bold()
-                );
-            } else {
-                eprintln!(
-                    "{}",
-                    format!("  stream {basin}/{stream} (exists)").blue().bold()
-                );
-            }
+            let reconfig = config.map(stream_config_to_reconfig).unwrap_or_default();
+            basin_client
+                .reconfigure_stream(ReconfigureStreamInput::new(stream.clone(), reconfig))
+                .await
+                .map_err(|e| {
+                    miette::miette!(
+                        "failed to reconfigure stream {:?}/{:?}: {}",
+                        basin.as_ref(),
+                        stream.as_ref(),
+                        e
+                    )
+                })?;
+            eprintln!(
+                "{}",
+                format!("  stream {basin}/{stream} (reconfigured)")
+                    .yellow()
+                    .bold()
+            );
         }
         Err(e) => {
             return Err(miette::miette!(
