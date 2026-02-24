@@ -1,5 +1,6 @@
 //! S2 command-line interface.
 
+mod apply;
 mod bench;
 mod cli;
 mod config;
@@ -16,7 +17,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::{pin::Pin, time::Duration};
 
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
+use cli::{ApplyArgs, Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
 use colored::Colorize;
 use config::{
     ConfigKey, load_cli_config, load_config_file, sdk_config, set_config_value, unset_config_value,
@@ -523,6 +524,14 @@ async fn run() -> Result<(), CliError> {
                     }
                 }
             }
+        }
+
+        Command::Apply(ApplyArgs { file }) => {
+            let spec = apply::load(&file).map_err(|e| CliError::InvalidArgs(e.into()))?;
+            apply::apply(&s2, spec)
+                .await
+                .map_err(|e| CliError::Apply(e.to_string()))?;
+            eprintln!("{}", "✓ Done".green().bold());
         }
 
         Command::Bench(args) => {

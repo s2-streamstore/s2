@@ -61,6 +61,10 @@ pub enum CliError {
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
     LiteServer(String),
+
+    #[error("Apply failed: {0}")]
+    #[diagnostic(help("{}", HELP))]
+    Apply(String),
 }
 
 impl CliError {

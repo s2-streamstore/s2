@@ -29,13 +29,14 @@ axum-server = { workspace = true, features = ["tls-rustls"] }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 compact_str = { workspace = true }
 dashmap = { workspace = true }
 enum-ordinalize = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+humantime = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 mimalloc = { workspace = true }

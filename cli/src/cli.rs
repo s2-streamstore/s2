@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
@@ -160,6 +160,17 @@ pub enum Command {
 
     /// Benchmark a stream to measure throughput and latency.
     Bench(BenchArgs),
+
+    /// Apply a declarative spec file, creating or reconfiguring basins and streams.
+    ///
+    /// Reads a JSON file and ensures the declared basins and streams exist with the
+    /// specified configuration. Basins and streams that already exist
+    /// are reconfigured to match the spec. Only the fields present in the spec are
+    /// updated.
+    ///
+    /// Example spec file:
+    ///   {"basins":[{"name":"my-basin","streams":[{"name":"events"}]}]}
+    Apply(ApplyArgs),
 
     /// Run S2 Lite server backed by object storage.
     ///
@@ -517,6 +528,13 @@ pub struct TailArgs {
     /// Use "-" to write to stdout.
     #[arg(short = 'o', long, value_parser = parse_records_output_source, default_value = "-")]
     pub output: RecordsOut,
+}
+
+#[derive(Args, Debug)]
+pub struct ApplyArgs {
+    /// Path to a JSON spec file defining basins and streams to create or reconfigure.
+    #[arg(short = 'f', long, value_name = "FILE")]
+    pub file: PathBuf,
 }
 
 #[derive(Args, Debug)]

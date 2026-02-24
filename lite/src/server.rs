@@ -15,7 +15,7 @@ use tower_http::{
 };
 use tracing::info;
 
-use crate::{backend::Backend, handlers};
+use crate::{backend::Backend, handlers, init};
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct TlsConfig {
@@ -68,6 +68,13 @@ pub struct LiteArgs {
     /// should be denied at the HTTP layer.
     #[arg(long)]
     pub no_cors: bool,
+
+    /// Path to a JSON file defining basins and streams to create at startup.
+    ///
+    /// Uses create-or-reconfigure semantics, so it is safe to run on repeated
+    /// restarts. Can also be set via S2LITE_INIT_FILE environment variable.
+    #[arg(long, env = "S2LITE_INIT_FILE")]
+    pub init_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +151,11 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let backend = Backend::new(db, append_inflight_max);
     crate::backend::bgtasks::spawn(&backend);
+
+    if let Some(init_file) = &args.init_file {
+        let spec = init::load(init_file)?;
+        init::apply(&backend, spec).await?;
+    }
 
     let mut app = handlers::router().with_state(backend).layer(
         TraceLayer::new_for_http()
