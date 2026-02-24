@@ -406,9 +406,11 @@ pub struct BasinConfig {
     pub default_stream_config: Option<StreamConfig>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
     pub create_stream_on_append: bool,
     /// Create stream on read if it doesn't exist, using the default stream configuration.
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = false))]
     pub create_stream_on_read: bool,
 }
 
