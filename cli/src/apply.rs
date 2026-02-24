@@ -10,14 +10,14 @@ use s2_lite::init::{
 use s2_sdk::{
     S2,
     types::{
-        BasinName, BasinReconfiguration, CreateBasinInput, CreateStreamInput, DeleteOnEmptyConfig,
-        DeleteOnEmptyReconfiguration, ErrorResponse, ReconfigureBasinInput, ReconfigureStreamInput,
-        S2Error, StreamName, StreamReconfiguration, TimestampingConfig, TimestampingReconfiguration,
+        BasinConfig, BasinName, CreateOrReconfigureBasinInput, CreateOrReconfigureStreamInput,
+        CreateOrReconfigured, DeleteOnEmptyConfig, RetentionPolicy, StorageClass, StreamConfig,
+        StreamName, TimestampingConfig, TimestampingMode,
     },
 };
 
-fn stream_config_to_sdk(s: StreamConfigSpec) -> s2_sdk::types::StreamConfig {
-    let mut c = s2_sdk::types::StreamConfig::new();
+fn stream_config_to_sdk(s: StreamConfigSpec) -> StreamConfig {
+    let mut c = StreamConfig::new();
     if let Some(sc) = s.storage_class {
         c = c.with_storage_class(storage_class_to_sdk(sc));
     }
@@ -33,8 +33,8 @@ fn stream_config_to_sdk(s: StreamConfigSpec) -> s2_sdk::types::StreamConfig {
     c
 }
 
-fn basin_config_to_sdk(s: BasinConfigSpec) -> s2_sdk::types::BasinConfig {
-    let mut c = s2_sdk::types::BasinConfig::new();
+fn basin_config_to_sdk(s: BasinConfigSpec) -> BasinConfig {
+    let mut c = BasinConfig::new();
     if let Some(dsc) = s.default_stream_config {
         c = c.with_default_stream_config(stream_config_to_sdk(dsc));
     }
@@ -47,67 +47,25 @@ fn basin_config_to_sdk(s: BasinConfigSpec) -> s2_sdk::types::BasinConfig {
     c
 }
 
-fn stream_config_to_reconfig(s: StreamConfigSpec) -> StreamReconfiguration {
-    let mut r = StreamReconfiguration::new();
-    if let Some(sc) = s.storage_class {
-        r = r.with_storage_class(storage_class_to_sdk(sc));
-    }
-    if let Some(rp) = s.retention_policy {
-        r = r.with_retention_policy(retention_policy_to_sdk(rp));
-    }
-    if let Some(ts) = s.timestamping {
-        let mut tsr = TimestampingReconfiguration::new();
-        if let Some(m) = ts.mode {
-            tsr = tsr.with_mode(timestamping_mode_to_sdk(m));
-        }
-        if let Some(u) = ts.uncapped {
-            tsr = tsr.with_uncapped(u);
-        }
-        r = r.with_timestamping(tsr);
-    }
-    if let Some(doe) = s.delete_on_empty {
-        let mut doer = DeleteOnEmptyReconfiguration::new();
-        if let Some(ma) = doe.min_age {
-            doer = doer.with_min_age(ma.0);
-        }
-        r = r.with_delete_on_empty(doer);
-    }
-    r
-}
-
-fn basin_config_to_reconfig(s: BasinConfigSpec) -> BasinReconfiguration {
-    let mut r = BasinReconfiguration::new();
-    if let Some(dsc) = s.default_stream_config {
-        r = r.with_default_stream_config(stream_config_to_reconfig(dsc));
-    }
-    if let Some(v) = s.create_stream_on_append {
-        r = r.with_create_stream_on_append(v);
-    }
-    if let Some(v) = s.create_stream_on_read {
-        r = r.with_create_stream_on_read(v);
-    }
-    r
-}
-
-fn storage_class_to_sdk(s: StorageClassSpec) -> s2_sdk::types::StorageClass {
+fn storage_class_to_sdk(s: StorageClassSpec) -> StorageClass {
     match s {
-        StorageClassSpec::Standard => s2_sdk::types::StorageClass::Standard,
-        StorageClassSpec::Express => s2_sdk::types::StorageClass::Express,
+        StorageClassSpec::Standard => StorageClass::Standard,
+        StorageClassSpec::Express => StorageClass::Express,
     }
 }
 
-fn retention_policy_to_sdk(rp: RetentionPolicySpec) -> s2_sdk::types::RetentionPolicy {
+fn retention_policy_to_sdk(rp: RetentionPolicySpec) -> RetentionPolicy {
     match rp.age_secs() {
-        Some(secs) => s2_sdk::types::RetentionPolicy::Age(secs),
-        None => s2_sdk::types::RetentionPolicy::Infinite,
+        Some(secs) => RetentionPolicy::Age(secs),
+        None => RetentionPolicy::Infinite,
     }
 }
 
-fn timestamping_mode_to_sdk(m: TimestampingModeSpec) -> s2_sdk::types::TimestampingMode {
+fn timestamping_mode_to_sdk(m: TimestampingModeSpec) -> TimestampingMode {
     match m {
-        TimestampingModeSpec::ClientPrefer => s2_sdk::types::TimestampingMode::ClientPrefer,
-        TimestampingModeSpec::ClientRequire => s2_sdk::types::TimestampingMode::ClientRequire,
-        TimestampingModeSpec::Arrival => s2_sdk::types::TimestampingMode::Arrival,
+        TimestampingModeSpec::ClientPrefer => TimestampingMode::ClientPrefer,
+        TimestampingModeSpec::ClientRequire => TimestampingMode::ClientRequire,
+        TimestampingModeSpec::Arrival => TimestampingMode::Arrival,
     }
 }
 
@@ -128,13 +86,6 @@ fn delete_on_empty_to_sdk(doe: DeleteOnEmptySpec) -> DeleteOnEmptyConfig {
         doec = doec.with_min_age(ma.0);
     }
     doec
-}
-
-fn is_already_exists(err: &S2Error) -> bool {
-    matches!(
-        err,
-        S2Error::Server(ErrorResponse { code, .. }) if code == "resource_already_exists"
-    )
 }
 
 pub fn load(path: &Path) -> miette::Result<ResourcesSpec> {
@@ -169,35 +120,23 @@ async fn apply_basin(
     basin: BasinName,
     config: Option<BasinConfigSpec>,
 ) -> miette::Result<()> {
-    let sdk_config = config
-        .as_ref()
-        .cloned()
-        .map(basin_config_to_sdk)
-        .unwrap_or_default();
-
-    let input = CreateBasinInput::new(basin.clone()).with_config(sdk_config);
-    match s2.create_basin(input).await {
-        Ok(_) => {
+    let mut input = CreateOrReconfigureBasinInput::new(basin.clone());
+    if let Some(c) = config {
+        input = input.with_config(basin_config_to_sdk(c));
+    }
+    match s2
+        .create_or_reconfigure_basin(input)
+        .await
+        .map_err(|e| miette::miette!("failed to apply basin {:?}: {}", basin.as_ref(), e))?
+    {
+        CreateOrReconfigured::Created(_) => {
             eprintln!("{}", format!("  basin {basin}").green().bold());
         }
-        Err(ref e) if is_already_exists(e) => {
-            let reconfig = config.map(basin_config_to_reconfig).unwrap_or_default();
-            s2.reconfigure_basin(ReconfigureBasinInput::new(basin.clone(), reconfig))
-                .await
-                .map_err(|e| {
-                    miette::miette!("failed to reconfigure basin {:?}: {}", basin.as_ref(), e)
-                })?;
+        CreateOrReconfigured::Reconfigured(_) => {
             eprintln!(
                 "{}",
                 format!("  basin {basin} (reconfigured)").yellow().bold()
             );
-        }
-        Err(e) => {
-            return Err(miette::miette!(
-                "failed to create basin {:?}: {}",
-                basin.as_ref(),
-                e
-            ));
         }
     }
     Ok(())
@@ -209,45 +148,32 @@ async fn apply_stream(
     stream: StreamName,
     config: Option<StreamConfigSpec>,
 ) -> miette::Result<()> {
-    let sdk_config = config
-        .as_ref()
-        .cloned()
-        .map(stream_config_to_sdk)
-        .unwrap_or_default();
-
+    let mut input = CreateOrReconfigureStreamInput::new(stream.clone());
+    if let Some(c) = config {
+        input = input.with_config(stream_config_to_sdk(c));
+    }
     let basin_client = s2.basin(basin.clone());
-    let input = CreateStreamInput::new(stream.clone()).with_config(sdk_config);
-    match basin_client.create_stream(input).await {
-        Ok(_) => {
+    match basin_client
+        .create_or_reconfigure_stream(input)
+        .await
+        .map_err(|e| {
+            miette::miette!(
+                "failed to apply stream {:?}/{:?}: {}",
+                basin.as_ref(),
+                stream.as_ref(),
+                e
+            )
+        })? {
+        CreateOrReconfigured::Created(_) => {
             eprintln!("{}", format!("  stream {basin}/{stream}").green().bold());
         }
-        Err(ref e) if is_already_exists(e) => {
-            let reconfig = config.map(stream_config_to_reconfig).unwrap_or_default();
-            basin_client
-                .reconfigure_stream(ReconfigureStreamInput::new(stream.clone(), reconfig))
-                .await
-                .map_err(|e| {
-                    miette::miette!(
-                        "failed to reconfigure stream {:?}/{:?}: {}",
-                        basin.as_ref(),
-                        stream.as_ref(),
-                        e
-                    )
-                })?;
+        CreateOrReconfigured::Reconfigured(_) => {
             eprintln!(
                 "{}",
                 format!("  stream {basin}/{stream} (reconfigured)")
                     .yellow()
                     .bold()
             );
-        }
-        Err(e) => {
-            return Err(miette::miette!(
-                "failed to create stream {:?}/{:?}: {}",
-                basin.as_ref(),
-                stream.as_ref(),
-                e
-            ));
         }
     }
     Ok(())

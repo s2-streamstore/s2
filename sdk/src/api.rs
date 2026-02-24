@@ -1,39 +1,47 @@
-use crate::client::{self, StreamingResponse, UnaryResponse};
-use crate::retry::{RetryBackoff, RetryBackoffBuilder};
-use crate::types::{
-    AccessTokenId, BasinAuthority, BasinName, Compression, RetryConfig, S2Config, S2Endpoints,
-    StreamName,
-};
+use std::{ops::Deref, pin::Pin, sync::Arc, time::Duration};
+
 use async_stream::try_stream;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use futures::{Stream, StreamExt};
-use http::header::InvalidHeaderValue;
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use http::{HeaderMap, HeaderValue, StatusCode};
+use http::{
+    HeaderMap, HeaderValue, StatusCode,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, InvalidHeaderValue},
+};
 use prost::{self, Message};
-use s2_api::v1::access::{
-    AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest, ListAccessTokensResponse,
-};
-use s2_api::v1::basin::{BasinInfo, CreateBasinRequest, ListBasinsRequest, ListBasinsResponse};
-use s2_api::v1::config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration};
-use s2_api::v1::metrics::{
-    AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
-};
-use s2_api::v1::stream::s2s::{self, FrameDecoder, SessionMessage, TerminalMessage};
-use s2_api::v1::stream::{
-    AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse, ReadEnd,
-    ReadStart, StreamInfo, TailResponse,
-    proto::{AppendAck, AppendInput, ReadBatch},
+use s2_api::v1::{
+    access::{
+        AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
+        ListAccessTokensResponse,
+    },
+    basin::{
+        BasinInfo, CreateBasinRequest, CreateOrReconfigureBasinRequest, ListBasinsRequest,
+        ListBasinsResponse,
+    },
+    config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration},
+    metrics::{
+        AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
+    },
+    stream::{
+        AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
+        ReadEnd, ReadStart, StreamInfo, TailResponse,
+        proto::{AppendAck, AppendInput, ReadBatch},
+        s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
+    },
 };
 use secrecy::ExposeSecret;
-use std::ops::Deref;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 use url::Url;
+
+use crate::{
+    client::{self, StreamingResponse, UnaryResponse},
+    retry::{RetryBackoff, RetryBackoffBuilder},
+    types::{
+        AccessTokenId, BasinAuthority, BasinName, Compression, RetryConfig, S2Config, S2Endpoints,
+        StreamName,
+    },
+};
 
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
@@ -133,6 +141,18 @@ impl AccountClient {
         let request = self.patch(url).json(&config).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<BasinConfig>()?)
+    }
+
+    pub async fn create_or_reconfigure_basin(
+        &self,
+        name: BasinName,
+        request: Option<CreateOrReconfigureBasinRequest>,
+    ) -> Result<(bool, BasinInfo), ApiError> {
+        let url = self.base_url.join(&format!("v1/basins/{name}"))?;
+        let request = self.put(url).json(&request).build()?;
+        let response = self.request(request).send().await?;
+        let was_created = response.status() == StatusCode::CREATED;
+        Ok((was_created, response.json::<BasinInfo>()?))
     }
 
     pub async fn delete_basin(
@@ -271,6 +291,20 @@ impl BasinClient {
         let request = self.patch(url).json(&config).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<StreamConfig>()?)
+    }
+
+    pub async fn create_or_reconfigure_stream(
+        &self,
+        name: StreamName,
+        config: Option<StreamConfig>,
+    ) -> Result<(bool, StreamInfo), ApiError> {
+        let url = self
+            .base_url
+            .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
+        let request = self.put(url).json(&config).build()?;
+        let response = self.request(request).send().await?;
+        let was_created = response.status() == StatusCode::CREATED;
+        Ok((was_created, response.json::<StreamInfo>()?))
     }
 
     pub async fn delete_stream(
@@ -748,6 +782,13 @@ impl BaseClient {
 
     pub fn patch(&self, url: Url) -> client::RequestBuilder {
         client::RequestBuilder::patch(url)
+            .timeout(self.request_timeout)
+            .headers(&self.default_headers)
+            .compression(self.compression)
+    }
+
+    pub fn put(&self, url: Url) -> client::RequestBuilder {
+        client::RequestBuilder::put(url)
             .timeout(self.request_timeout)
             .headers(&self.default_headers)
             .compression(self.compression)

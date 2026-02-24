@@ -213,6 +213,10 @@ impl RequestBuilder {
         Self::new(Method::PATCH, url)
     }
 
+    pub fn put(url: Url) -> Self {
+        Self::new(Method::PUT, url)
+    }
+
     pub fn delete(url: Url) -> Self {
         Self::new(Method::DELETE, url)
     }

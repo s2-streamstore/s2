@@ -8,10 +8,11 @@ use crate::{
     session::{self, AppendSession, AppendSessionConfig},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        BasinState, CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
-        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput,
-        ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
+        BasinState, CreateBasinInput, CreateOrReconfigureBasinInput,
+        CreateOrReconfigureStreamInput, CreateOrReconfigured, CreateStreamInput, DeleteBasinInput,
+        DeleteStreamInput, GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput,
+        IssueAccessTokenInput, ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
+        ListAllStreamsInput, ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
         ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo,
         StreamName, StreamPosition, Streaming,
     },
@@ -101,6 +102,30 @@ impl S2 {
         let (request, idempotency_token) = input.into();
         let info = self.client.create_basin(request, idempotency_token).await?;
         Ok(info.into())
+    }
+
+    /// Create or reconfigure a basin.
+    ///
+    /// Creates the basin if it doesn't exist, or reconfigures it to match the provided
+    /// configuration if it does. Uses HTTP PUT semantics — always idempotent.
+    ///
+    /// Returns [`CreateOrReconfigured::Created`] with the basin info if the basin was newly
+    /// created, or [`CreateOrReconfigured::Reconfigured`] if it already existed.
+    pub async fn create_or_reconfigure_basin(
+        &self,
+        input: CreateOrReconfigureBasinInput,
+    ) -> Result<CreateOrReconfigured<BasinInfo>, S2Error> {
+        let (name, request) = input.into();
+        let (was_created, info) = self
+            .client
+            .create_or_reconfigure_basin(name, request)
+            .await?;
+        let info = info.into();
+        Ok(if was_created {
+            CreateOrReconfigured::Created(info)
+        } else {
+            CreateOrReconfigured::Reconfigured(info)
+        })
     }
 
     /// Get basin configuration.
@@ -293,6 +318,30 @@ impl S2Basin {
             .create_stream(request, idempotency_token)
             .await?;
         Ok(info.try_into()?)
+    }
+
+    /// Create or reconfigure a stream.
+    ///
+    /// Creates the stream if it doesn't exist, or reconfigures it to match the provided
+    /// configuration if it does. Uses HTTP PUT semantics — always idempotent.
+    ///
+    /// Returns [`CreateOrReconfigured::Created`] with the stream info if the stream was newly
+    /// created, or [`CreateOrReconfigured::Reconfigured`] if it already existed.
+    pub async fn create_or_reconfigure_stream(
+        &self,
+        input: CreateOrReconfigureStreamInput,
+    ) -> Result<CreateOrReconfigured<StreamInfo>, S2Error> {
+        let (name, config) = input.into();
+        let (was_created, info) = self
+            .client
+            .create_or_reconfigure_stream(name, config)
+            .await?;
+        let info = info.try_into()?;
+        Ok(if was_created {
+            CreateOrReconfigured::Created(info)
+        } else {
+            CreateOrReconfigured::Reconfigured(info)
+        })
     }
 
     /// Get stream configuration.
