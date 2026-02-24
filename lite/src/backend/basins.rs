@@ -75,22 +75,23 @@ impl Backend {
     pub async fn create_basin(
         &self,
         basin: BasinName,
-        config: BasinConfig,
+        config: impl Into<BasinReconfiguration>,
         mode: CreateMode,
     ) -> Result<CreatedOrReconfigured<BasinInfo>, CreateBasinError> {
+        let config = config.into();
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let new_creation_idempotency_key = match &mode {
             CreateMode::CreateOnly(Some(req_token)) => {
-                Some(creation_idempotency_key(req_token, &config))
+                let resolved = BasinConfig::default().reconfigure(config.clone());
+                Some(creation_idempotency_key(req_token, &resolved))
             }
             _ => None,
         };
 
-        let mut existing_created_at = None;
-        let mut existing_creation_idempotency_key = None;
+        let mut existing_meta_opt = None;
         if let Some(existing_meta) =
             db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?
         {
@@ -112,18 +113,27 @@ impl Backend {
                     };
                 }
                 CreateMode::CreateOrReconfigure => {
-                    existing_created_at = Some(existing_meta.created_at);
-                    existing_creation_idempotency_key = existing_meta.creation_idempotency_key;
+                    existing_meta_opt = Some(existing_meta);
                 }
             }
         }
 
-        let created_at = existing_created_at.unwrap_or_else(OffsetDateTime::now_utc);
-        let creation_idempotency_key =
-            existing_creation_idempotency_key.or(new_creation_idempotency_key);
+        let is_reconfigure = existing_meta_opt.is_some();
+        let (resolved, created_at, creation_idempotency_key) = match existing_meta_opt {
+            Some(existing) => (
+                existing.config.reconfigure(config),
+                existing.created_at,
+                existing.creation_idempotency_key,
+            ),
+            None => (
+                BasinConfig::default().reconfigure(config),
+                OffsetDateTime::now_utc(),
+                new_creation_idempotency_key,
+            ),
+        };
 
         let meta = kv::basin_meta::BasinMeta {
-            config,
+            config: resolved,
             created_at,
             deleted_at: None,
             creation_idempotency_key,
@@ -142,7 +152,7 @@ impl Backend {
             state: BasinState::Active,
         };
 
-        Ok(if existing_created_at.is_some() {
+        Ok(if is_reconfigure {
             CreatedOrReconfigured::Reconfigured(info)
         } else {
             CreatedOrReconfigured::Created(info)

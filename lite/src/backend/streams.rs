@@ -77,9 +77,10 @@ impl Backend {
         &self,
         basin: BasinName,
         stream: StreamName,
-        mut config: OptionalStreamConfig,
+        config: impl Into<StreamReconfiguration>,
         mode: CreateMode,
     ) -> Result<CreatedOrReconfigured<StreamInfo>, CreateStreamError> {
+        let config = config.into();
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -100,12 +101,13 @@ impl Backend {
 
         let creation_idempotency_key = match &mode {
             CreateMode::CreateOnly(Some(req_token)) => {
-                Some(creation_idempotency_key(req_token, &config))
+                let resolved = OptionalStreamConfig::default().reconfigure(config.clone());
+                Some(creation_idempotency_key(req_token, &resolved))
             }
             _ => None,
         };
 
-        let mut existing_created_at = None;
+        let mut existing_meta_opt = None;
         let mut prior_doe_min_age = None;
 
         if let Some(existing_meta) =
@@ -136,16 +138,25 @@ impl Backend {
                     };
                 }
                 CreateMode::CreateOrReconfigure => {
-                    existing_created_at = Some(existing_meta.created_at);
+                    existing_meta_opt = Some(existing_meta);
                 }
             }
         }
 
-        config = config.merge(basin_meta.config.default_stream_config).into();
+        let is_reconfigure = existing_meta_opt.is_some();
+        let (resolved, created_at) = match existing_meta_opt {
+            Some(existing) => (existing.config.reconfigure(config), existing.created_at),
+            None => (
+                OptionalStreamConfig::default().reconfigure(config),
+                OffsetDateTime::now_utc(),
+            ),
+        };
+        let resolved: OptionalStreamConfig = resolved
+            .merge(basin_meta.config.default_stream_config)
+            .into();
 
-        let created_at = existing_created_at.unwrap_or_else(OffsetDateTime::now_utc);
         let meta = kv::stream_meta::StreamMeta {
-            config: config.clone(),
+            config: resolved.clone(),
             created_at,
             deleted_at: None,
             creation_idempotency_key,
@@ -153,7 +164,7 @@ impl Backend {
 
         txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
         let stream_id = StreamId::new(&basin, &stream);
-        if existing_created_at.is_none() {
+        if !is_reconfigure {
             txn.put(
                 kv::stream_id_mapping::ser_key(stream_id),
                 kv::stream_id_mapping::ser_value(&basin, &stream),
@@ -195,10 +206,8 @@ impl Backend {
         };
         txn.commit_with_options(&WRITE_OPTS).await?;
 
-        if existing_created_at.is_some()
-            && let Some(client) = self.streamer_client_if_active(&basin, &stream)
-        {
-            client.advise_reconfig(config);
+        if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
+            client.advise_reconfig(resolved);
         }
 
         let info = StreamInfo {
@@ -207,7 +216,7 @@ impl Backend {
             deleted_at: None,
         };
 
-        Ok(if existing_created_at.is_some() {
+        Ok(if is_reconfigure {
             CreatedOrReconfigured::Reconfigured(info)
         } else {
             CreatedOrReconfigured::Created(info)

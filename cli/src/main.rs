@@ -1,5 +1,6 @@
 //! S2 command-line interface.
 
+mod apply;
 mod bench;
 mod cli;
 mod config;
@@ -16,7 +17,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::{pin::Pin, time::Duration};
 
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
+use cli::{ApplyArgs, Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
 use colored::Colorize;
 use config::{
     ConfigKey, load_cli_config, load_config_file, sdk_config, set_config_value, unset_config_value,
@@ -136,6 +137,15 @@ async fn run() -> Result<(), CliError> {
                 );
             }
         }
+        return Ok(());
+    }
+
+    if let Command::Apply(ApplyArgs { schema: true, .. }) = &command {
+        let schema = s2_lite::init::json_schema();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&schema).expect("valid schema")
+        );
         return Ok(());
     }
 
@@ -522,6 +532,25 @@ async fn run() -> Result<(), CliError> {
                         break;
                     }
                 }
+            }
+        }
+
+        Command::Apply(ApplyArgs {
+            file,
+            dry_run,
+            schema: _,
+        }) => {
+            let file = file.expect("--file is required when --schema is not set");
+            let spec = apply::load(&file).map_err(CliError::InvalidArgs)?;
+            if dry_run {
+                apply::dry_run(&s2, spec)
+                    .await
+                    .map_err(|e| CliError::Apply(e.to_string()))?;
+            } else {
+                apply::apply(&s2, spec)
+                    .await
+                    .map_err(|e| CliError::Apply(e.to_string()))?;
+                eprintln!("{}", "✓ Done".green().bold());
             }
         }
 

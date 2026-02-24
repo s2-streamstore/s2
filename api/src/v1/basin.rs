@@ -4,7 +4,7 @@ use s2_common::types::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::config::BasinConfig;
+use super::config::{BasinConfig, BasinReconfiguration};
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,8 +116,8 @@ impl From<types::basin::BasinState> for BasinState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateOrReconfigureBasinRequest {
-    /// Basin configuration.
-    pub config: Option<BasinConfig>,
+    /// Basin reconfiguration.
+    pub config: Option<BasinReconfiguration>,
     /// Basin scope.
     /// This cannot be reconfigured.
     pub scope: Option<BasinScope>,

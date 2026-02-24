@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sdk: ${{ steps.filter.outputs.sdk }}
+      apply_schema: ${{ steps.filter.outputs.apply_schema }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -23,6 +24,25 @@ jobs:
           filters: |
             sdk:
               - 'sdk/**'
+            apply_schema:
+              - 'cli/src/cli.rs'
+              - 'cli/src/main.rs'
+              - 'lite/src/init.rs'
+              - 'cli/schema.json'
+
+  cli-schema-drift:
+    name: CLI Schema Drift
+    needs: [changes]
+    if: needs.changes.outputs.apply_schema == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate apply schema
+        run: cargo run -q -p s2-cli -- apply --schema > /tmp/apply.schema.json
+      - name: Check for schema drift
+        run: diff -u cli/schema.json /tmp/apply.schema.json
 
   fmt:
     name: Format
