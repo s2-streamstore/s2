@@ -142,6 +142,10 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ![S2 Star Wars Streaming](./assets/starwars.gif)
 
+### Kubernetes Deployment
+
+Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite/README.md) for installation instructions and configuration options.
+
 ### Monitoring
 
 `/health` will return 200 on success for readiness and liveness checks

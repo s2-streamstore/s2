@@ -1,0 +1,208 @@
+# Default values for s2-lite
+# This is a YAML-formatted file.
+#
+# By default, s2-lite runs in-memory mode (no persistent storage).
+# This is suitable for development and testing environments.
+# Enable objectStorage for production use with persistent data.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/s2-streamstore/s2
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Disabled by default - s2-lite doesn't need Kubernetes API access
+  automount: false
+  # Annotations to add to the service account (e.g., for IRSA)
+  # Example for AWS IRSA:
+  #   eks.amazonaws.com/role-arn: "arn:aws:iam::xxx:role/s2-lite"
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# Environment variables
+env: []
+  # - name: AWS_REGION
+  #   value: "us-east-1"
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532  # nonroot user from distroless:nonroot
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+
+# ------------------------------------------------------------------------------
+# Service Configuration
+# ------------------------------------------------------------------------------
+
+service:
+  type: ClusterIP  # Use LoadBalancer for external access
+  port: 80
+  targetPort: 8080  # Non-privileged port (container runs as non-root)
+  # External-DNS example (automatic DNS record creation):
+  #   external-dns.alpha.kubernetes.io/hostname: "s2-lite.example.com"
+  annotations: {}
+
+# ------------------------------------------------------------------------------
+# TLS Configuration
+# ------------------------------------------------------------------------------
+
+tls:
+  enabled: false
+  # Provide certificate and key paths (--tls-cert and --tls-key)
+  # Mount certificates using volumes/volumeMounts (see examples at bottom of file)
+  cert: ""  # e.g., /etc/tls/tls.crt
+  key: ""   # e.g., /etc/tls/tls.key
+  # Or set selfSigned to true to use auto-generated self-signed certificate (--tls-self)
+  selfSigned: false
+
+# ------------------------------------------------------------------------------
+# Ingress Configuration (cloud-agnostic HTTP access)
+# ------------------------------------------------------------------------------
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt
+  hosts:
+    - host: s2-lite.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: s2-lite-tls
+    #   hosts:
+    #     - s2-lite.local
+
+# ------------------------------------------------------------------------------
+# Storage Configuration
+#
+# By default, s2-lite runs in-memory (great for dev/testing).
+# For persistent data, enable objectStorage with an S3-compatible bucket.
+# ------------------------------------------------------------------------------
+
+objectStorage:
+  enabled: false
+  # S3 bucket name
+  bucket: ""
+  # Path prefix within the bucket (optional)
+  path: ""
+  # S3-compatible endpoint URL (leave empty for AWS S3)
+  # Examples:
+  #   MinIO: "http://minio:9000"
+  #   Tigris: "https://fly.storage.tigris.dev"
+  #   R2: "https://<account>.r2.cloudflarestorage.com"
+  endpoint: ""
+
+# ------------------------------------------------------------------------------
+# Observability
+# ------------------------------------------------------------------------------
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false  # Enable if using Prometheus Operator
+    interval: 30s
+    scrapeTimeout: 10s
+    # Additional labels for the ServiceMonitor
+    labels: {}
+    # TLS configuration for scraping metrics when tls.enabled=true
+    # By default uses insecureSkipVerify (suitable for tls.selfSigned=true)
+    # When using provided certificates, reference the same TLS secret:
+    #   tlsConfig:
+    #     ca:
+    #       secret:
+    #         name: s2-lite-tls  # same secret used for tls.cert/tls.key
+    #         key: tls.crt       # or ca.crt if CA-signed
+    tlsConfig: {}
+
+# ------------------------------------------------------------------------------
+# Health Checks
+# ------------------------------------------------------------------------------
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# ------------------------------------------------------------------------------
+# Resources
+# ------------------------------------------------------------------------------
+
+resources: {}
+  # Example:
+  # limits:
+  #   cpu: 2000m
+  #   memory: 2Gi
+  # requests:
+  #   cpu: 500m
+  #   memory: 512Mi
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1
+  maxUnavailable: 1
+
+# ------------------------------------------------------------------------------
+# Scheduling
+# ------------------------------------------------------------------------------
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# ------------------------------------------------------------------------------
+# Volumes (for mounting TLS certificates, etc.)
+# ------------------------------------------------------------------------------
+
+volumeMounts: []
+  # Example: Mount TLS certificates from secret
+  # - name: tls-certs
+  #   mountPath: /etc/tls
+  #   readOnly: true
+
+volumes: []
+  # Example: TLS certificates secret (use with --tls-cert and --tls-key)
+  # - name: tls-certs
+  #   secret:
+  #     secretName: s2-lite-tls
