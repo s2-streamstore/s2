@@ -108,8 +108,6 @@ from source."
 fi
 
 REPO="${S2_REPO:-s2-streamstore/s2}"
-DOWNLOAD_URI="latest/download"
-S2_VERSION="latest"
 if [ -n "${VERSION}" ]
 then
     case "${VERSION}" in
@@ -117,9 +115,18 @@ then
         v*) TAG="s2-cli-${VERSION}" ;;
         *) TAG="s2-cli-v${VERSION}" ;;
     esac
-    S2_VERSION="${TAG}"
-    DOWNLOAD_URI="download/${TAG}"
+else
+    TAG=$(curl -sSL "https://api.github.com/repos/${REPO}/releases" \
+        | grep -o '"tag_name": "s2-cli-v[^"]*"' \
+        | head -1 \
+        | grep -o 's2-cli-v[^"]*')
+    if [ -z "${TAG}" ]; then
+        echo_red "Failed to determine latest s2-cli release."
+        exit 1
+    fi
 fi
+S2_VERSION="${TAG}"
+DOWNLOAD_URI="download/${TAG}"
 
 BIN_PATH="${HOME}/.s2/bin"
 test -d "${BIN_PATH}" || mkdir -p "${BIN_PATH}"
