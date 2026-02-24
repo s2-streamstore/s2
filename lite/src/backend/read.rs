@@ -349,7 +349,7 @@ mod tests {
         read_extent::{ReadLimit, ReadUntil},
         types::{
             basin::BasinName,
-            config::OptionalStreamConfig,
+            config::{BasinConfig, OptionalStreamConfig},
             resources::CreateMode,
             stream::{
                 AppendInput, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom, ReadStart,
@@ -424,7 +424,7 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                Default::default(),
+                BasinConfig::default(),
                 CreateMode::CreateOnly(None),
             )
             .await
