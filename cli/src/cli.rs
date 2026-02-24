@@ -169,9 +169,9 @@ pub enum Command {
     /// updated.
     ///
     /// Dry-run output legend:
-    ///   + create
-    ///   ~ reconfigure
-    ///   = unchanged
+    ///   `+` create
+    ///   `~` reconfigure
+    ///   `=` unchanged
     ///
     /// Example spec file:
     ///   {"basins":[{"name":"my-basin","streams":[{"name":"events"}]}]}
@@ -548,9 +548,9 @@ pub struct ApplyArgs {
     /// Preview changes without making any mutations.
     ///
     /// Dry-run output legend:
-    ///   + create
-    ///   ~ reconfigure
-    ///   = unchanged
+    ///   `+` create
+    ///   `~` reconfigure
+    ///   `=` unchanged
     #[arg(long)]
     pub dry_run: bool,
     /// Print the JSON Schema for the spec file format to stdout.

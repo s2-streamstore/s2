@@ -3771,7 +3771,10 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
 
     // Show progress if appending from file
     if let Some((done, total)) = state.file_append_progress {
-        let pct = if total > 0 { (done * 100) / total } else { 0 };
+        let pct = done
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(total))
+            .unwrap_or(0);
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
             Span::styled(
