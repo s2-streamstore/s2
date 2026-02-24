@@ -535,6 +535,9 @@ pub struct ApplyArgs {
     /// Path to a JSON spec file defining basins and streams to create or reconfigure.
     #[arg(short = 'f', long, value_name = "FILE")]
     pub file: PathBuf,
+    /// Preview changes without making any mutations.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]

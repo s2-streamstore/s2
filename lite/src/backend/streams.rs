@@ -145,17 +145,15 @@ impl Backend {
 
         let is_reconfigure = existing_meta_opt.is_some();
         let (resolved, created_at) = match existing_meta_opt {
-            Some(existing) => (
-                existing.config.reconfigure(config),
-                existing.created_at,
-            ),
+            Some(existing) => (existing.config.reconfigure(config), existing.created_at),
             None => (
                 OptionalStreamConfig::default().reconfigure(config),
                 OffsetDateTime::now_utc(),
             ),
         };
-        let resolved: OptionalStreamConfig =
-            resolved.merge(basin_meta.config.default_stream_config).into();
+        let resolved: OptionalStreamConfig = resolved
+            .merge(basin_meta.config.default_stream_config)
+            .into();
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),

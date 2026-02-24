@@ -526,12 +526,18 @@ async fn run() -> Result<(), CliError> {
             }
         }
 
-        Command::Apply(ApplyArgs { file }) => {
-            let spec = apply::load(&file).map_err(|e| CliError::InvalidArgs(e.into()))?;
-            apply::apply(&s2, spec)
-                .await
-                .map_err(|e| CliError::Apply(e.to_string()))?;
-            eprintln!("{}", "✓ Done".green().bold());
+        Command::Apply(ApplyArgs { file, dry_run }) => {
+            let spec = apply::load(&file).map_err(CliError::InvalidArgs)?;
+            if dry_run {
+                apply::dry_run(&s2, spec)
+                    .await
+                    .map_err(|e| CliError::Apply(e.to_string()))?;
+            } else {
+                apply::apply(&s2, spec)
+                    .await
+                    .map_err(|e| CliError::Apply(e.to_string()))?;
+                eprintln!("{}", "✓ Done".green().bold());
+            }
         }
 
         Command::Bench(args) => {
