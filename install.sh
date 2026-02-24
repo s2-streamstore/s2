@@ -116,8 +116,8 @@ then
         *) TAG="s2-cli-v${VERSION}" ;;
     esac
 else
-    TAG=$(curl -sSL "https://api.github.com/repos/${REPO}/releases" \
-        | grep -o '"tag_name": "s2-cli-v[^"]*"' \
+    TAG=$(curl -sSL "https://github.com/${REPO}/releases?q=s2-cli&expanded=true" \
+        | grep -o 'releases/tag/s2-cli-v[^"]*' \
         | head -1 \
         | grep -o 's2-cli-v[^"]*')
     if [ -z "${TAG}" ]; then
