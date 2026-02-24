@@ -173,8 +173,14 @@ pub enum Command {
     ///   `~` reconfigure
     ///   `=` unchanged
     ///
+    /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
+    ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[]}
+    ///
+    /// For local-only use, point to a local path/URI instead:
+    ///   {"$schema":"./cli/schema.json","basins":[]}
+    ///
     /// Example spec file:
-    ///   {"basins":[{"name":"my-basin","streams":[{"name":"events"}]}]}
+    ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[{"name":"my-basin","streams":[{"name":"events"}]}]}
     Apply(ApplyArgs),
 
     /// Run S2 Lite server backed by object storage.

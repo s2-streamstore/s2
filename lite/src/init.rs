@@ -28,6 +28,7 @@ pub struct ResourcesSpec {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BasinSpec {
     pub name: String,
     #[serde(default)]
@@ -37,6 +38,7 @@ pub struct BasinSpec {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StreamSpec {
     pub name: String,
     #[serde(default)]
@@ -44,6 +46,7 @@ pub struct StreamSpec {
 }
 
 #[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BasinConfigSpec {
     #[serde(default)]
     pub default_stream_config: Option<StreamConfigSpec>,
@@ -56,6 +59,7 @@ pub struct BasinConfigSpec {
 }
 
 #[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StreamConfigSpec {
     /// Storage class for recent writes.
     #[serde(default)]
@@ -166,6 +170,7 @@ impl schemars::JsonSchema for RetentionPolicySpec {
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TimestampingSpec {
     /// Timestamping mode for appends that influences how timestamps are handled.
     #[serde(default)]
@@ -220,6 +225,7 @@ impl From<TimestampingModeSpec> for TimestampingMode {
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteOnEmptySpec {
     /// Minimum age before an empty stream can be deleted.
     /// Set to 0 (default) to disable delete-on-empty (don't delete automatically).
