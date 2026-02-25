@@ -19,12 +19,19 @@ jobs:
     needs: create_manifest
     runs-on: ubuntu-latest
     steps:
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@v2
+        id: generate-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
-          token: ${{ secrets.RELEASE_PAT }}
+          token: ${{ steps.generate-token.outputs.token }}
 
       - name: Get version from tag
         id: version
