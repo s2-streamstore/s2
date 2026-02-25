@@ -386,12 +386,15 @@ impl BasinClient {
         let url = self
             .base_url
             .join(&format!("v1/streams/{}/records", urlencoding::encode(name)))?;
-        let request = self
+        let mut builder = self
             .get(url)
             .header(ACCEPT, ACCEPT_PROTO)
             .query(&start)
-            .query(&end)
-            .build()?;
+            .query(&end);
+        if let Some(wait) = end.wait {
+            builder = builder.timeout(self.client.request_timeout + Duration::from_secs(wait.into()));
+        }
+        let request = builder.build()?;
         let response = self
             .request(request)
             .error_handler(read_response_error_handler)
