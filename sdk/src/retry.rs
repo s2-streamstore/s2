@@ -90,7 +90,7 @@ impl Iterator for RetryBackoff {
         let jitter =
             Duration::try_from_secs_f64(base_delay.as_secs_f64() * rng().random_range(0.0..=1.0))
                 .unwrap_or(Duration::MAX);
-        let delay = base_delay + jitter;
+        let delay = base_delay.saturating_add(jitter);
         self.cur_retry += 1;
         Some(delay)
     }
