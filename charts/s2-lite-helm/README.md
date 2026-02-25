@@ -12,10 +12,10 @@ helm repo add s2 https://s2-streamstore.github.io/s2
 helm repo update
 
 # Install with default settings (in-memory)
-helm install my-s2-lite s2/s2-lite
+helm install my-s2-lite s2/s2-lite-helm
 
 # Or install with S3 storage
-helm install my-s2-lite s2/s2-lite \
+helm install my-s2-lite s2/s2-lite-helm \
   --set objectStorage.enabled=true \
   --set objectStorage.bucket=my-s3-bucket
 ```
@@ -24,10 +24,10 @@ helm install my-s2-lite s2/s2-lite \
 
 ```bash
 # Install directly from GitHub Container Registry
-helm install my-s2-lite oci://ghcr.io/s2-streamstore/charts/s2-lite
+helm install my-s2-lite oci://ghcr.io/s2-streamstore/charts/s2-lite-helm
 
 # Or with custom values
-helm install my-s2-lite oci://ghcr.io/s2-streamstore/charts/s2-lite \
+helm install my-s2-lite oci://ghcr.io/s2-streamstore/charts/s2-lite-helm \
   --set objectStorage.enabled=true \
   --set objectStorage.bucket=my-s3-bucket \
   --set objectStorage.endpoint=https://s3.amazonaws.com
@@ -38,7 +38,7 @@ helm install my-s2-lite oci://ghcr.io/s2-streamstore/charts/s2-lite \
 ### In-memory (default)
 
 ```bash
-helm install my-s2-lite s2/s2-lite
+helm install my-s2-lite s2/s2-lite-helm
 ```
 
 Great for development and testing. Data is lost when the pod restarts.
@@ -46,7 +46,7 @@ Great for development and testing. Data is lost when the pod restarts.
 ### S3-compatible object storage
 
 ```bash
-helm install my-s2-lite s2/s2-lite \
+helm install my-s2-lite s2/s2-lite-helm \
   --set objectStorage.enabled=true \
   --set objectStorage.bucket=my-bucket \
   --set objectStorage.endpoint=https://s3.amazonaws.com
@@ -58,7 +58,7 @@ Supports AWS S3, MinIO, Tigris, Cloudflare R2, and other S3-compatible services.
 
 **Self-signed certificate (for dev/testing):**
 ```bash
-helm install my-s2-lite s2/s2-lite \
+helm install my-s2-lite s2/s2-lite-helm \
   --set tls.enabled=true \
   --set tls.selfSigned=true
 
@@ -72,7 +72,7 @@ s2 config set ssl_no_verify true
 kubectl create secret tls s2-lite-tls --cert=tls.crt --key=tls.key
 
 # Install with provided certificate
-helm install my-s2-lite s2/s2-lite \
+helm install my-s2-lite s2/s2-lite-helm \
   --set tls.enabled=true \
   --set tls.cert=/etc/tls/tls.crt \
   --set tls.key=/etc/tls/tls.key \
@@ -122,7 +122,7 @@ serviceAccount:
 ```
 
 ```bash
-helm install my-s2-lite s2/s2-lite -f values.yaml
+helm install my-s2-lite s2/s2-lite-helm -f values.yaml
 ```
 
 ### Behind AWS Network Load Balancer
@@ -153,10 +153,10 @@ metrics:
 helm repo update
 
 # Upgrade to the latest version
-helm upgrade my-s2-lite s2/s2-lite
+helm upgrade my-s2-lite s2/s2-lite-helm
 
 # Or specify a version
-helm upgrade my-s2-lite s2/s2-lite --version 0.1.0
+helm upgrade my-s2-lite s2/s2-lite-helm --version 0.1.0
 ```
 
 ## Uninstalling
