@@ -40,7 +40,7 @@ jobs:
       - name: Update Helm chart version and appVersion
         run: |
           # Get current chart version
-          CURRENT_VERSION=$(grep '^version:' charts/s2-lite/Chart.yaml | awk '{print $2}')
+          CURRENT_VERSION=$(grep '^version:' charts/s2-lite-helm/Chart.yaml | awk '{print $2}')
           if [ -z "$CURRENT_VERSION" ]; then
             echo "ERROR: Could not read current chart version"
             exit 1
@@ -52,14 +52,14 @@ jobs:
           echo "New chart version: $NEW_VERSION"
 
           # Update both version and appVersion in Chart.yaml
-          sed -i "s/^version: .*/version: $NEW_VERSION/" charts/s2-lite/Chart.yaml
-          sed -i 's/^appVersion: ".*"$/appVersion: "${{ steps.version.outputs.value }}"/' charts/s2-lite/Chart.yaml
+          sed -i "s/^version: .*/version: $NEW_VERSION/" charts/s2-lite-helm/Chart.yaml
+          sed -i 's/^appVersion: ".*"$/appVersion: "${{ steps.version.outputs.value }}"/' charts/s2-lite-helm/Chart.yaml
 
       - name: Commit and push
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-          git add charts/s2-lite/Chart.yaml
+          git add charts/s2-lite-helm/Chart.yaml
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else

@@ -15,7 +15,7 @@ jobs:
 
       - name: Bump chart patch version
         run: |
-          CURRENT_VERSION=$(grep '^version:' charts/s2-lite/Chart.yaml | awk '{print $2}')
+          CURRENT_VERSION=$(grep '^version:' charts/s2-lite-helm/Chart.yaml | awk '{print $2}')
           if [ -z "$CURRENT_VERSION" ]; then
             echo "ERROR: Could not read current chart version"
             exit 1
@@ -25,17 +25,17 @@ jobs:
           NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{$NF = $NF + 1; print}' OFS=.)
           echo "New chart version: $NEW_VERSION"
 
-          sed -i "s/^version: .*/version: $NEW_VERSION/" charts/s2-lite/Chart.yaml
+          sed -i "s/^version: .*/version: $NEW_VERSION/" charts/s2-lite-helm/Chart.yaml
 
       - name: Commit and push
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-          git add charts/s2-lite/Chart.yaml
+          git add charts/s2-lite-helm/Chart.yaml
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Bump s2-lite chart version to $(grep '^version:' charts/s2-lite/Chart.yaml | awk '{print $2}')"
+            git commit -m "Bump s2-lite chart version to $(grep '^version:' charts/s2-lite-helm/Chart.yaml | awk '{print $2}')"
             git pull --rebase
             git push
           fi
