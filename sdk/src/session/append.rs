@@ -43,6 +43,8 @@ pub enum AppendSessionError {
     SessionClosing,
     #[error("session dropped without calling close")]
     SessionDropped,
+    #[error("unexpected append acknowledgement during resend")]
+    UnexpectedAck,
 }
 
 impl AppendSessionError {
@@ -648,7 +650,9 @@ async fn resend(
                             timer.as_mut(),
                             ack_timeout,
                         );
-                        resend_index -= 1;
+                        resend_index = resend_index
+                            .checked_sub(1)
+                            .ok_or(AppendSessionError::UnexpectedAck)?;
                     }
                     Some(Err(err)) => {
                         return Err(err.into());
