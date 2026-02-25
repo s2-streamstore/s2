@@ -1,6 +1,6 @@
 [package]
 name = "s2-cli"
-version = "0.29.10"
+version = "0.29.11"
 description = "CLI for S2"
 edition.workspace = true
 license.workspace = true
