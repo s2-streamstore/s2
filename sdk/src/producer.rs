@@ -229,6 +229,7 @@ impl Producer {
         terminal_err: Arc<OnceLock<S2Error>>,
     ) {
         let (record_tx, record_rx) = mpsc::channel::<AppendRecord>(RECORD_BATCH_MAX.count);
+        let mut record_tx = Some(record_tx);
         let mut inputs = AppendInputs {
             batches: AppendRecordBatches::new(ReceiverStream::new(record_rx), config.batching),
             fencing_token: config.fencing_token,
@@ -241,10 +242,17 @@ impl Producer {
         let mut stashed_submission: Option<StashedSubmission> = None;
         let mut submit_fut: Option<SubmitFuture> = None;
         let mut submit_batch_len: Option<usize> = None;
+        let mut inputs_exhausted = false;
 
         loop {
             tokio::select! {
-                record_tx_permit = record_tx.reserve(), if stashed_submission.is_some() => {
+                record_tx_permit = async {
+                    record_tx
+                        .as_ref()
+                        .expect("record_tx should not be None")
+                        .reserve()
+                        .await
+                }, if stashed_submission.is_some() => {
                     let submission = stashed_submission
                         .take()
                         .expect("stashed_submission should not be None");
@@ -280,13 +288,13 @@ impl Producer {
                     }
                 }
 
-                input = inputs.next(), if submit_fut.is_none() => {
-                    match input.expect("record_tx should not be closed") {
-                        Ok(input) => {
+                input = inputs.next(), if submit_fut.is_none() && !inputs_exhausted => {
+                    match input {
+                        Some(Ok(input)) => {
                             submit_batch_len = Some(input.records.len());
                             submit_fut = Some(Box::pin(session.submit(input)));
                         }
-                        Err(err) => {
+                        Some(Err(err)) => {
                             propagate_terminal_error(
                                 err.into(),
                                 &terminal_err,
@@ -297,6 +305,9 @@ impl Producer {
                             )
                             .await;
                             return;
+                        }
+                        None => {
+                            inputs_exhausted = true;
                         }
                     }
                 }
@@ -336,6 +347,10 @@ impl Producer {
                 Some((batch_ack, pending_acks)) = claimable_tickets.next() => {
                     dispatch_acks(batch_ack, pending_acks);
                 }
+            }
+
+            if close_tx.is_some() && record_tx.is_some() {
+                record_tx = None;
             }
 
             if close_tx.is_some()
