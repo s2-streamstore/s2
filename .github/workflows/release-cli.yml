@@ -63,7 +63,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Bump s2-lite chart to appVersion ${{ steps.version.outputs.value }}"
+            git commit -m "Bump s2-lite-helm chart to appVersion ${{ steps.version.outputs.value }}"
             git pull --rebase
             git push
           fi

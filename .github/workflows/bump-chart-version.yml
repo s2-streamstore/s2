@@ -35,7 +35,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Bump s2-lite chart version to $(grep '^version:' charts/s2-lite-helm/Chart.yaml | awk '{print $2}')"
+            git commit -m "Bump s2-lite-helm chart version to $(grep '^version:' charts/s2-lite-helm/Chart.yaml | awk '{print $2}')"
             git pull --rebase
             git push
           fi
