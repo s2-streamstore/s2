@@ -6,6 +6,8 @@ on:
 jobs:
   bump_chart_version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Generate GitHub token
         uses: actions/create-github-app-token@v2
