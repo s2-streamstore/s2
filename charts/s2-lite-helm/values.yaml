@@ -14,7 +14,7 @@ image:
   tag: ""
 
 imagePullSecrets: []
-nameOverride: ""
+nameOverride: "s2-lite"
 fullnameOverride: ""
 
 serviceAccount:
@@ -169,7 +169,7 @@ startupProbe:
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 5
-  failureThreshold: 30
+  failureThreshold: 60
 
 # ------------------------------------------------------------------------------
 # Resources
