@@ -162,6 +162,15 @@ readinessProbe:
   timeoutSeconds: 3
   failureThreshold: 3
 
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+
 # ------------------------------------------------------------------------------
 # Resources
 # ------------------------------------------------------------------------------

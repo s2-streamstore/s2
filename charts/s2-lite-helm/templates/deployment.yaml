@@ -6,6 +6,8 @@ metadata:
     {{- include "s2-lite.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "s2-lite.selectorLabels" . | nindent 6 }}
@@ -93,6 +95,17 @@ spec:
           {{- else }}
           {{- toYaml .Values.readinessProbe | nindent 10 }}
           {{- end }}
+        {{- with .Values.startupProbe }}
+        startupProbe:
+          {{- if and $.Values.tls.enabled .httpGet }}
+          {{- $probe := omit . "httpGet" }}
+          {{- $httpGet := merge (dict "scheme" "HTTPS") .httpGet }}
+          {{- $probe := merge (dict "httpGet" $httpGet) $probe }}
+          {{- toYaml $probe | nindent 10 }}
+          {{- else }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+        {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
         {{- with .Values.volumeMounts }}
