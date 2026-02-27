@@ -99,7 +99,7 @@ impl StoreType {
 fn default_garbage_collector_options() -> GarbageCollectorOptions {
     let dir_opts = GarbageCollectorDirectoryOptions {
         interval: Some(Duration::from_secs(300)),
-        min_age: Duration::from_secs(900),
+        min_age: Duration::from_secs(300),
     };
     GarbageCollectorOptions {
         manifest_options: Some(dir_opts),
