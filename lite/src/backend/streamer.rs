@@ -424,6 +424,10 @@ impl StreamerClient {
         self.id
     }
 
+    pub fn is_dead(&self) -> bool {
+        self.msg_tx.is_closed()
+    }
+
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
     }

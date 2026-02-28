@@ -216,9 +216,13 @@ impl Backend {
             if is_same_init {
                 match result {
                     Ok(client) => {
-                        oe.insert(StreamerClientSlot::Ready {
-                            client: client.clone(),
-                        });
+                        if client.is_dead() {
+                            oe.remove();
+                        } else {
+                            oe.insert(StreamerClientSlot::Ready {
+                                client: client.clone(),
+                            });
+                        }
                     }
                     Err(_) => {
                         oe.remove();
