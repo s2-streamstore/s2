@@ -11,7 +11,7 @@ use s2_common::{
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time::Instant};
 
 use super::Backend;
 use crate::backend::{
@@ -185,6 +185,8 @@ impl Backend {
                     }
                     match client.follow(state.start_seq_num).await? {
                         Ok(mut follow_rx) => {
+                            let mut wait_deadline =
+                                end.wait.map(|wait| Instant::now() + wait);
                             yield ReadSessionOutput::Heartbeat(state.tail);
                             while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                                 tokio::select! {
@@ -200,6 +202,9 @@ impl Backend {
                                                         records: records.drain(..allowed_count).collect(),
                                                         tail: Some(tail),
                                                     });
+                                                    wait_deadline = end
+                                                        .wait
+                                                        .map(|wait| Instant::now() + wait);
                                                 }
                                                 if allowed_count < count {
                                                     break 'session;
@@ -219,7 +224,7 @@ impl Backend {
                                         yield ReadSessionOutput::Heartbeat(state.tail);
                                         Ok(())
                                     }
-                                    _ = wait_sleep(end.wait) => {
+                                    _ = wait_sleep_until(wait_deadline) => {
                                         break 'session;
                                     }
                                 }?;
@@ -327,13 +332,19 @@ fn count_allowed_records(
     acc_count
 }
 
+#[cfg(not(test))]
 fn new_heartbeat_sleep() -> tokio::time::Sleep {
     tokio::time::sleep(Duration::from_millis(rand::random_range(5_000..15_000)))
 }
 
-async fn wait_sleep(wait: Option<Duration>) {
-    match wait {
-        Some(wait) => tokio::time::sleep(wait).await,
+#[cfg(test)]
+fn new_heartbeat_sleep() -> tokio::time::Sleep {
+    tokio::time::sleep(Duration::from_millis(rand::random_range(5..15)))
+}
+
+async fn wait_sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => {
             std::future::pending::<()>().await;
         }
@@ -345,6 +356,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytesize::ByteSize;
+    use futures::StreamExt;
     use s2_common::{
         read_extent::{ReadLimit, ReadUntil},
         types::{
@@ -357,6 +369,7 @@ mod tests {
         },
     };
     use slatedb::{Db, WriteBatch, config::WriteOptions, object_store::memory::InMemory};
+    use tokio::time::Instant;
 
     use super::*;
     use crate::backend::{kv, stream_id::StreamId};
@@ -489,5 +502,60 @@ mod tests {
         .await
         .expect("read should not spin forever");
         assert!(records.into_iter().all(|r| r.is_ok()));
+    }
+
+    #[tokio::test]
+    async fn read_wait_is_not_extended_by_heartbeats() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let wait = Duration::from_millis(30);
+        let start = ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        };
+        let end = ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: Some(wait),
+        };
+
+        let session = backend.read(basin, stream, start, end).await.unwrap();
+        let started = Instant::now();
+        let outputs = tokio::time::timeout(Duration::from_millis(150), session.collect::<Vec<_>>())
+            .await
+            .expect("read session should close once wait expires");
+
+        assert!(
+            started.elapsed() >= wait,
+            "read session ended before wait elapsed"
+        );
+        assert!(
+            outputs.len() > 1,
+            "expected heartbeats before wait deadline; got {} output(s)",
+            outputs.len()
+        );
+        assert!(outputs.into_iter().all(|o| o.is_ok()));
     }
 }
