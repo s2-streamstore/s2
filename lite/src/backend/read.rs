@@ -11,7 +11,7 @@ use s2_common::{
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time::Instant};
 
 use super::Backend;
 use crate::backend::{
@@ -186,7 +186,7 @@ impl Backend {
                     match client.follow(state.start_seq_num).await? {
                         Ok(mut follow_rx) => {
                             let mut wait_deadline =
-                                end.wait.map(|wait| tokio::time::Instant::now() + wait);
+                                end.wait.map(|wait| Instant::now() + wait);
                             yield ReadSessionOutput::Heartbeat(state.tail);
                             while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                                 tokio::select! {
@@ -204,7 +204,7 @@ impl Backend {
                                                     });
                                                     wait_deadline = end
                                                         .wait
-                                                        .map(|wait| tokio::time::Instant::now() + wait);
+                                                        .map(|wait| Instant::now() + wait);
                                                 }
                                                 if allowed_count < count {
                                                     break 'session;
@@ -342,7 +342,7 @@ fn new_heartbeat_sleep() -> tokio::time::Sleep {
     tokio::time::sleep(Duration::from_millis(rand::random_range(5..15)))
 }
 
-async fn wait_sleep_until(deadline: Option<tokio::time::Instant>) {
+async fn wait_sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => {
@@ -369,6 +369,7 @@ mod tests {
         },
     };
     use slatedb::{Db, WriteBatch, config::WriteOptions, object_store::memory::InMemory};
+    use tokio::time::Instant;
 
     use super::*;
     use crate::backend::{kv, stream_id::StreamId};
@@ -541,7 +542,7 @@ mod tests {
         };
 
         let session = backend.read(basin, stream, start, end).await.unwrap();
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let outputs = tokio::time::timeout(Duration::from_millis(150), session.collect::<Vec<_>>())
             .await
             .expect("read session should close once wait expires");
