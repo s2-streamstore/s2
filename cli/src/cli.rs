@@ -560,7 +560,7 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub dry_run: bool,
     /// Print the JSON Schema for the spec file format to stdout.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["file", "dry_run"])]
     pub schema: bool,
 }
 
