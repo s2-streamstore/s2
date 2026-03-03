@@ -136,12 +136,22 @@ impl CompressedData {
     }
 
     fn decompressed(self) -> std::io::Result<Bytes> {
+        let initial_capacity = self
+            .payload
+            .len()
+            .saturating_mul(2)
+            .min(MAX_DECOMPRESSED_PAYLOAD_BYTES)
+            .max(COMPRESSION_THRESHOLD_BYTES);
+
         // Decode at most `MAX_DECOMPRESSED_PAYLOAD_BYTES + 1` bytes
-        fn read_to_end_limited(mut reader: impl Read) -> std::io::Result<Bytes> {
+        fn read_to_end_limited(
+            mut reader: impl Read,
+            initial_capacity: usize,
+        ) -> std::io::Result<Bytes> {
             let mut limited = reader
                 .by_ref()
                 .take((MAX_DECOMPRESSED_PAYLOAD_BYTES + 1) as u64);
-            let mut buf = Vec::with_capacity(COMPRESSION_THRESHOLD_BYTES);
+            let mut buf = Vec::with_capacity(initial_capacity);
             limited.read_to_end(&mut buf)?;
             if buf.len() > MAX_DECOMPRESSED_PAYLOAD_BYTES {
                 return Err(std::io::Error::new(
@@ -164,11 +174,11 @@ impl CompressedData {
             }
             CompressionAlgorithm::Gzip => {
                 let mut decoder = GzDecoder::new(&self.payload[..]);
-                read_to_end_limited(&mut decoder)
+                read_to_end_limited(&mut decoder, initial_capacity)
             }
             CompressionAlgorithm::Zstd => {
                 let mut decoder = zstd::stream::Decoder::new(&self.payload[..])?;
-                read_to_end_limited(&mut decoder)
+                read_to_end_limited(&mut decoder, initial_capacity)
             }
         }
     }
@@ -716,7 +726,7 @@ mod test {
                 compression: algo,
                 payload: Bytes::from(compressed),
             };
-            assert!(data.payload.len() < MAX_FRAME_BYTES);
+            assert!(data.payload.len() <= MAX_FRAME_PAYLOAD_BYTES);
 
             let err = data.try_into_proto::<TestProto>().expect_err("should fail");
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
