@@ -123,6 +123,12 @@ impl CompressedData {
             CompressionAlgorithm::None => unreachable!("handled above"),
         };
         let payload = Bytes::from(buf.into_boxed_slice());
+        if payload.len() > MAX_FRAME_PAYLOAD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "compressed payload exceeds frame limit",
+            ));
+        }
         Ok(Self {
             compression,
             payload,
@@ -741,6 +747,27 @@ mod test {
         let data = CompressedData::compress(CompressionAlgorithm::None, payload).unwrap();
         let encoded = SessionMessage::from(data).encode();
         assert_eq!(encoded.len(), LENGTH_PREFIX_SIZE + MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn compress_rejects_incompressible_payload_that_exceeds_frame_limit_after_compression() {
+        let mut payload = vec![0u8; MAX_DECOMPRESSED_PAYLOAD_BYTES];
+        let mut x = 0x1234_5678u32;
+        for byte in &mut payload {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *byte = (x & 0xFF) as u8;
+        }
+
+        for algo in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd] {
+            let err = CompressedData::compress(algo, payload.clone()).expect_err("should fail");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string()
+                    .contains("compressed payload exceeds frame limit")
+            );
+        }
     }
 
     #[test]
