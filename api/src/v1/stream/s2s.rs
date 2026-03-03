@@ -35,9 +35,6 @@ const STATUS_CODE_SIZE: usize = 2;
 const COMPRESSION_THRESHOLD_BYTES: usize = 1024; // 1 KiB
 const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
-// Cap decompressed payloads to the same per-frame budget enforced on the wire.
-const MAX_DECOMPRESSED_PAYLOAD_BYTES: usize = MAX_FRAME_BYTES;
-
 /*
 Flag byte layout:
   ┌───┬───┬───┬───┬───┬───┬───┬───┐
@@ -51,6 +48,9 @@ Flag byte layout:
 */
 
 const FLAG_TOTAL_SIZE: usize = 1;
+// The frame length budget includes one flag byte, so payload bytes are capped at budget - flag.
+const MAX_FRAME_PAYLOAD_BYTES: usize = MAX_FRAME_BYTES - FLAG_TOTAL_SIZE;
+const MAX_DECOMPRESSED_PAYLOAD_BYTES: usize = MAX_FRAME_PAYLOAD_BYTES;
 const FLAG_TERMINAL: u8 = 0b1000_0000;
 const FLAG_COMPRESSION_MASK: u8 = 0b0110_0000;
 const FLAG_COMPRESSION_SHIFT: u8 = 5;
@@ -733,6 +733,14 @@ mod test {
             err.to_string()
                 .contains("payload exceeds decompressed limit")
         );
+    }
+
+    #[test]
+    fn compress_allows_payload_at_exact_limit_without_encode_panic() {
+        let payload = vec![0; MAX_DECOMPRESSED_PAYLOAD_BYTES];
+        let data = CompressedData::compress(CompressionAlgorithm::None, payload).unwrap();
+        let encoded = SessionMessage::from(data).encode();
+        assert_eq!(encoded.len(), LENGTH_PREFIX_SIZE + MAX_FRAME_BYTES);
     }
 
     #[test]
