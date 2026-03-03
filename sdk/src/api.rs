@@ -1049,6 +1049,8 @@ mod tests {
                 )
                 .unwrap(),
             )
+            // Skip native root CA loading so the test works in sandboxed
+            // CI environments without keychain access.
             .with_insecure_skip_cert_verification(true);
         let client = BaseClient::init(&config).expect("client init");
         let url = "https://no-such-basin.invalid/v1/streams"
