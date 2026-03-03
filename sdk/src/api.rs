@@ -359,11 +359,9 @@ impl BasinClient {
             .header(ACCEPT, ACCEPT_PROTO)
             .body(input.encode_to_vec())
             .build()?;
-        let mut builder = self.request(request);
-        if append_retry_policy == AppendRetryPolicy::NoSideEffects {
-            builder = builder.with_frame_signal(FrameSignal::new());
-        }
-        let response = builder
+        let response = self
+            .request(request)
+            .with_append_retry_policy(append_retry_policy)
             .error_handler(|status, response| {
                 if status == StatusCode::PRECONDITION_FAILED {
                     Err(ApiError::AppendConditionFailed(
@@ -641,9 +639,17 @@ impl ClientError {
     }
 
     pub fn has_no_side_effects(&self) -> bool {
-        // All classified client errors are transport failures where
-        // no server response was received. `Others` is unclassified.
-        !matches!(self, ClientError::Others(_))
+        match self {
+            ClientError::Connect(_)
+            | ClientError::Timeout
+            | ClientError::ConnectionClosedEarly(_)
+            | ClientError::RequestCanceled(_)
+            | ClientError::UnexpectedEof(_)
+            | ClientError::ConnectionReset(_)
+            | ClientError::ConnectionAborted(_)
+            | ClientError::Others(_) => false,
+            ClientError::ConnectionRefused(_)  => true,
+        }
     }
 }
 
@@ -887,6 +893,7 @@ impl BaseClient {
             client: self,
             request,
             retry_enabled: true,
+            append_retry_policy: None,
             frame_signal: None,
             error_handler: None,
         }
@@ -907,21 +914,20 @@ struct RequestBuilder<'a> {
     client: &'a BaseClient,
     request: client::Request,
     retry_enabled: bool,
+    append_retry_policy: Option<AppendRetryPolicy>,
     frame_signal: Option<FrameSignal>,
     error_handler: Option<ErrorHandlerFn>,
 }
 
 impl<'a> RequestBuilder<'a> {
-    fn with_retry_enabled(self, retry_enabled: bool) -> Self {
+    fn with_append_retry_policy(self, policy: AppendRetryPolicy) -> Self {
+        let frame_signal = match policy {
+            AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
+            AppendRetryPolicy::All => None,
+        };
         Self {
-            retry_enabled,
-            ..self
-        }
-    }
-
-    fn with_frame_signal(self, signal: FrameSignal) -> Self {
-        Self {
-            frame_signal: Some(signal),
+            append_retry_policy: Some(policy),
+            frame_signal,
             ..self
         }
     }
@@ -1002,12 +1008,7 @@ impl<'a> RequestBuilder<'a> {
                 Err(err) => (ApiError::from(err), None),
             };
 
-            if err.is_retryable()
-                && (!self
-                    .frame_signal
-                    .as_ref()
-                    .is_some_and(|s| s.is_signalled())
-                    || err.has_no_side_effects())
+            if is_safe_to_retry(&err, self.append_retry_policy, self.frame_signal.as_ref())
                 && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
             {
                 let backoff = retry_after.map_or(backoff, |ra| ra.max(backoff));
@@ -1030,6 +1031,20 @@ impl<'a> RequestBuilder<'a> {
             }
         }
     }
+}
+
+fn is_safe_to_retry(
+    err: &ApiError,
+    policy: Option<AppendRetryPolicy>,
+    frame_signal: Option<&FrameSignal>,
+) -> bool {
+    let policy_compliant = match policy {
+        None | Some(AppendRetryPolicy::All) => true,
+        Some(AppendRetryPolicy::NoSideEffects) => {
+            !frame_signal.is_some_and(|s| s.is_signalled()) || err.has_no_side_effects()
+        }
+    };
+    policy_compliant && err.is_retryable()
 }
 
 fn add_basin_header_if_required(
@@ -1172,18 +1187,61 @@ mod tests {
 
     #[test]
     fn client_error_has_no_side_effects() {
-        // Classified transport failures — no data reached the server.
-        assert!(ClientError::Connect("test".into()).has_no_side_effects());
-        assert!(ClientError::Timeout.has_no_side_effects());
-        assert!(ClientError::ConnectionClosedEarly("test".into()).has_no_side_effects());
-        assert!(ClientError::RequestCanceled("test".into()).has_no_side_effects());
-        assert!(ClientError::UnexpectedEof("test".into()).has_no_side_effects());
-        assert!(ClientError::ConnectionReset("test".into()).has_no_side_effects());
-        assert!(ClientError::ConnectionAborted("test".into()).has_no_side_effects());
+        // Connection was never established.
         assert!(ClientError::ConnectionRefused("test".into()).has_no_side_effects());
 
-        // Unclassified — cannot guarantee no side effects.
+        // May have side effects — data could have been sent/processed.
+        assert!(!ClientError::Connect("test".into()).has_no_side_effects());
+        assert!(!ClientError::Timeout.has_no_side_effects());
+        assert!(!ClientError::ConnectionClosedEarly("test".into()).has_no_side_effects());
+        assert!(!ClientError::RequestCanceled("test".into()).has_no_side_effects());
+        assert!(!ClientError::UnexpectedEof("test".into()).has_no_side_effects());
+        assert!(!ClientError::ConnectionReset("test".into()).has_no_side_effects());
+        assert!(!ClientError::ConnectionAborted("test".into()).has_no_side_effects());
         assert!(!ClientError::Others("test".into()).has_no_side_effects());
+    }
+
+    #[test]
+    fn safe_to_retry_unary_no_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+
+        // Non-append requests (no policy) — retry if retryable.
+        assert!(is_safe_to_retry(&retryable, None, None));
+        assert!(!is_safe_to_retry(&non_retryable, None, None));
+    }
+
+    #[test]
+    fn safe_to_retry_unary_all_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let policy = Some(AppendRetryPolicy::All);
+
+        // All policy — retry if retryable, no frame signal checks.
+        assert!(is_safe_to_retry(&retryable, policy, None));
+        assert!(!is_safe_to_retry(&non_retryable, policy, None));
+    }
+
+    #[test]
+    fn safe_to_retry_unary_no_side_effects_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        let policy = Some(AppendRetryPolicy::NoSideEffects);
+        let signal = FrameSignal::new();
+
+        // Signal not set — safe to retry.
+        assert!(is_safe_to_retry(&retryable, policy, Some(&signal)));
+
+        // Signal set + error with possible side effects — not safe.
+        signal.signal();
+        assert!(!is_safe_to_retry(&retryable, policy, Some(&signal)));
+
+        // Signal set + no-side-effect error — safe.
+        assert!(is_safe_to_retry(&no_side_effect, policy, Some(&signal)));
+
+        // Signal set + non-retryable — never safe.
+        assert!(!is_safe_to_retry(&non_retryable, policy, Some(&signal)));
     }
 
     #[tokio::test]

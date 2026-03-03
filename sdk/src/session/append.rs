@@ -440,18 +440,12 @@ async fn run_session_with_retry(
                     retry_backoff.reset();
                 }
 
-                let append_retry_policy_compliant = match client.config.retry.append_retry_policy {
-                    AppendRetryPolicy::All => true,
-                    AppendRetryPolicy::NoSideEffects => {
-                        state.inflight_appends.is_empty()
-                            || !frame_signal.as_ref().is_some_and(|s| s.is_signalled())
-                            || err.has_no_side_effects()
-                    }
-                };
-
-                if append_retry_policy_compliant
-                    && err.is_retryable()
-                    && let Some(backoff) = retry_backoff.next()
+                if is_safe_to_retry(
+                    &err,
+                    client.config.retry.append_retry_policy,
+                    !state.inflight_appends.is_empty(),
+                    frame_signal.as_ref(),
+                ) && let Some(backoff) = retry_backoff.next()
                 {
                     debug!(
                         %err,
@@ -463,7 +457,6 @@ async fn run_session_with_retry(
                 } else {
                     debug!(
                         %err,
-                        append_retry_policy_compliant,
                         retries_exhausted = retry_backoff.is_exhausted(),
                         "not retrying append session"
                     );
@@ -826,6 +819,23 @@ impl Command {
     }
 }
 
+fn is_safe_to_retry(
+    err: &AppendSessionError,
+    policy: AppendRetryPolicy,
+    has_inflight: bool,
+    frame_signal: Option<&FrameSignal>,
+) -> bool {
+    let policy_compliant = match policy {
+        AppendRetryPolicy::All => true,
+        AppendRetryPolicy::NoSideEffects => {
+            !has_inflight
+                || !frame_signal.is_some_and(|s| s.is_signalled())
+                || err.has_no_side_effects()
+        }
+    };
+    policy_compliant && err.is_retryable()
+}
+
 const DEFAULT_CHANNEL_BUFFER_SIZE: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -849,5 +859,74 @@ impl From<usize> for TimerEvent {
             0 => TimerEvent::AckDeadline,
             _ => panic!("invalid ordinal"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+    use hyper_side_effect::FrameSignal;
+
+    use super::{AppendSessionError, is_safe_to_retry};
+    use crate::{
+        api::{ApiError, ApiErrorResponse},
+        types::AppendRetryPolicy,
+    };
+
+    fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
+        AppendSessionError::Api(ApiError::Server(
+            status,
+            ApiErrorResponse {
+                code: code.to_owned(),
+                message: "test".to_owned(),
+            },
+        ))
+    }
+
+    #[test]
+    fn safe_to_retry_session_all_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let policy = AppendRetryPolicy::All;
+
+        // All policy — always policy-compliant, just needs retryable.
+        assert!(is_safe_to_retry(&retryable, policy, true, None));
+        assert!(!is_safe_to_retry(&non_retryable, policy, true, None));
+    }
+
+    #[test]
+    fn safe_to_retry_session_no_side_effects_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        let policy = AppendRetryPolicy::NoSideEffects;
+        let signal = FrameSignal::new();
+
+        // No inflight — always safe.
+        signal.signal();
+        assert!(is_safe_to_retry(&retryable, policy, false, Some(&signal)));
+
+        // Inflight + signal not set — safe (no data sent this attempt).
+        signal.reset();
+        assert!(is_safe_to_retry(&retryable, policy, true, Some(&signal)));
+
+        // Inflight + signal set + error with possible side effects — not safe.
+        signal.signal();
+        assert!(!is_safe_to_retry(&retryable, policy, true, Some(&signal)));
+
+        // Inflight + signal set + no-side-effect error — safe.
+        assert!(is_safe_to_retry(
+            &no_side_effect,
+            policy,
+            true,
+            Some(&signal)
+        ));
+
+        // AckTimeout — retryable but has possible side effects.
+        assert!(!is_safe_to_retry(
+            &AppendSessionError::AckTimeout,
+            policy,
+            true,
+            Some(&signal),
+        ));
     }
 }
