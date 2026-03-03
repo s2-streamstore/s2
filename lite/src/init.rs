@@ -600,10 +600,29 @@ mod tests {
         let schema = json_schema();
         assert!(schema.is_object());
         let schema_obj = schema.as_object().unwrap();
-        // Should have at minimum a definitions/properties structure
+
+        // using the default generated
+        assert_eq!(
+            schema_obj.get("$schema"),
+            Some(&serde_json::Value::String(
+                "https://json-schema.org/draft/2020-12/schema".to_string()
+            ))
+        );
+
         assert!(
-            schema_obj.contains_key("definitions") || schema_obj.contains_key("properties"),
-            "schema should have definitions or properties"
+            schema_obj.contains_key("properties"),
+            "schema should have root properties"
+        );
+
+        assert!(
+            schema_obj.contains_key("$defs"),
+            "schema should have $defs for reusable definitions"
+        );
+
+        let properties = schema_obj.get("properties").unwrap().as_object().unwrap();
+        assert!(
+            properties.contains_key("basins"),
+            "schema should include the `basins` property"
         );
     }
 
