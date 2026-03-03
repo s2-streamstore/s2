@@ -54,11 +54,11 @@ s2-api = { path = "api", version = "0.27" }
 s2-common = { path = "common", version = "0.28" }
 s2-lite = { path = "lite", version = "0.29" }
 s2-sdk = { path = "sdk", version = "0.24" }
-schemars = "0.8"
+schemars = "1.2"
 serde = "1.0"
 serde_json = "1.0"
-slatedb = "0.10"
-strum = "0.27"
+slatedb = "0.11"
+strum = "0.28"
 tabled = "0.20"
 thiserror = "2.0"
 time = "0.3"
@@ -75,7 +75,6 @@ xxhash-rust = "0.8"
 zstd = "0.13"
 
 [patch.crates-io]
-slatedb = { git = "https://github.com/slatedb/slatedb", rev = "9efc9f55a31d5634c5685ae1580971715c03bd37" }
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
 
 [profile.release]
