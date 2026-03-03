@@ -18,6 +18,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
+use hyper_side_effect::FrameSignal;
+
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     retry::RetryBackoffBuilder,
@@ -400,6 +402,11 @@ async fn run_session_with_retry(
     buffer_size: usize,
     terminal_err: Arc<OnceLock<S2Error>>,
 ) {
+    let frame_signal = match client.config.retry.append_retry_policy {
+        AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
+        AppendRetryPolicy::All => None,
+    };
+
     let mut state = SessionState {
         cmd_rx,
         inflight_appends: VecDeque::new(),
@@ -414,7 +421,7 @@ async fn run_session_with_retry(
     let mut retry_backoff = retry_builder.build();
 
     loop {
-        let result = run_session(&client, &stream, &mut state, buffer_size).await;
+        let result = run_session(&client, &stream, &mut state, buffer_size, &frame_signal).await;
 
         match result {
             Ok(()) => {
@@ -428,7 +435,10 @@ async fn run_session_with_retry(
 
                 let append_retry_policy_compliant = match client.config.retry.append_retry_policy {
                     AppendRetryPolicy::All => true,
-                    AppendRetryPolicy::NoSideEffects => state.inflight_appends.is_empty(),
+                    AppendRetryPolicy::NoSideEffects => {
+                        state.inflight_appends.is_empty()
+                            || !frame_signal.as_ref().is_some_and(|s| s.is_signalled())
+                    }
                 };
 
                 if append_retry_policy_compliant
@@ -486,12 +496,21 @@ async fn run_session(
     stream: &StreamName,
     state: &mut SessionState,
     buffer_size: usize,
+    frame_signal: &Option<FrameSignal>,
 ) -> Result<(), AppendSessionError> {
-    let (input_tx, mut acks) = connect(client, stream, buffer_size).await?;
+    if let Some(s) = frame_signal {
+        s.reset();
+    }
+
+    let (input_tx, mut acks) = connect(client, stream, buffer_size, frame_signal.clone()).await?;
     let ack_timeout = client.config.request_timeout;
 
     if !state.inflight_appends.is_empty() {
         resend(state, &input_tx, &mut acks, ack_timeout).await?;
+
+        if let Some(s) = frame_signal {
+            s.reset();
+        }
 
         assert!(state.inflight_appends.is_empty());
         assert_eq!(state.inflight_bytes, 0);
@@ -677,11 +696,16 @@ async fn connect(
     client: &BasinClient,
     stream: &StreamName,
     buffer_size: usize,
+    frame_signal: Option<FrameSignal>,
 ) -> Result<(mpsc::Sender<AppendInput>, Streaming<AppendAck>), AppendSessionError> {
     let (input_tx, input_rx) = mpsc::channel::<AppendInput>(buffer_size);
     let ack_stream = Box::pin(
         client
-            .append_session(stream, ReceiverStream::new(input_rx).map(|i| i.into()))
+            .append_session(
+                stream,
+                ReceiverStream::new(input_rx).map(|i| i.into()),
+                frame_signal,
+            )
             .await?
             .map(|ack| match ack {
                 Ok(ack) => Ok(ack.into()),

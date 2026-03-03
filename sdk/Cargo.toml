@@ -25,6 +25,7 @@ futures = { workspace = true }
 http = { workspace = true }
 http-body-util = "0.1"
 hyper = "1.8"
+hyper-side-effect = { workspace = true }
 hyper-rustls = { version = "0.27", default-features = false, features = [
     "http2",
     "native-tokio",

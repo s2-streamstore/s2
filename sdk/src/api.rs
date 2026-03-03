@@ -35,6 +35,8 @@ use url::Url;
 #[cfg(feature = "_hidden")]
 use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
 
+use hyper_side_effect::FrameSignal;
+
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
     retry::{RetryBackoff, RetryBackoffBuilder},
@@ -357,9 +359,11 @@ impl BasinClient {
             .header(ACCEPT, ACCEPT_PROTO)
             .body(input.encode_to_vec())
             .build()?;
-        let response = self
-            .request(request)
-            .with_retry_enabled(append_retry_policy.retry_enabled())
+        let mut builder = self.request(request).with_retry_enabled(true);
+        if append_retry_policy == AppendRetryPolicy::NoSideEffects {
+            builder = builder.with_frame_signal(FrameSignal::new());
+        }
+        let response = builder
             .error_handler(|status, response| {
                 if status == StatusCode::PRECONDITION_FAILED {
                     Err(ApiError::AppendConditionFailed(
@@ -407,6 +411,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         inputs: I,
+        frame_signal: Option<FrameSignal>,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
         I: Stream<Item = AppendInput> + Send + 'static,
@@ -421,11 +426,17 @@ impl BasinClient {
             s2s::SessionMessage::regular(compression, &input).map(|msg| msg.encode())
         });
 
+        let body = client::Body::wrap_stream(encoded_stream);
+        let body = match frame_signal {
+            Some(signal) => body.monitored(signal),
+            None => body,
+        };
+
         let mut request_builder = self
             .client
             .post(url)
             .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
-            .body(client::Body::wrap_stream(encoded_stream))
+            .body(body)
             .timeout(self.client.request_timeout);
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
@@ -858,6 +869,7 @@ impl BaseClient {
             client: self,
             request,
             retry_enabled: true,
+            frame_signal: None,
             error_handler: None,
         }
     }
@@ -877,6 +889,7 @@ struct RequestBuilder<'a> {
     client: &'a BaseClient,
     request: client::Request,
     retry_enabled: bool,
+    frame_signal: Option<FrameSignal>,
     error_handler: Option<ErrorHandlerFn>,
 }
 
@@ -884,6 +897,13 @@ impl<'a> RequestBuilder<'a> {
     fn with_retry_enabled(self, retry_enabled: bool) -> Self {
         Self {
             retry_enabled,
+            ..self
+        }
+    }
+
+    fn with_frame_signal(self, signal: FrameSignal) -> Self {
+        Self {
+            frame_signal: Some(signal),
             ..self
         }
     }
@@ -906,9 +926,21 @@ impl<'a> RequestBuilder<'a> {
             .then(|| self.client.retry_builder.build());
 
         loop {
+            if let Some(ref signal) = self.frame_signal {
+                signal.reset();
+            }
+
+            let attempt_request = {
+                let mut r = request.try_clone().expect("body should not be a stream");
+                if let Some(ref signal) = self.frame_signal {
+                    r = r.with_monitored_body(signal.clone());
+                }
+                r
+            };
+
             let response = self
                 .client
-                .execute_unary(request.try_clone().expect("body should not be a stream"))
+                .execute_unary(attempt_request)
                 .await;
 
             let (err, retry_after) = match response {
@@ -953,6 +985,10 @@ impl<'a> RequestBuilder<'a> {
             };
 
             if err.is_retryable()
+                && !self
+                    .frame_signal
+                    .as_ref()
+                    .is_some_and(|s| s.is_signalled())
                 && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
             {
                 let backoff = retry_after.map_or(backoff, |ra| ra.max(backoff));

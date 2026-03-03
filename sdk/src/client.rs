@@ -25,6 +25,7 @@ use http::{
 use http_body_util::{BodyExt, Empty, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::body::{Frame, Incoming};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_side_effect::{FrameSignal, RequestFrameMonitorBody};
 pub use hyper_util::client::legacy::connect::Connect;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
@@ -111,6 +112,12 @@ impl Body {
         Self(BodyInner::Streaming(BoxBody::new(stream_body)))
     }
 
+    pub(crate) fn monitored(self, signal: FrameSignal) -> Self {
+        Self(BodyInner::Streaming(BoxBody::new(
+            RequestFrameMonitorBody::new(self.into_http_body(), signal),
+        )))
+    }
+
     fn as_bytes(&self) -> Option<&[u8]> {
         match &self.0 {
             BodyInner::Empty => Some(&[]),
@@ -154,6 +161,13 @@ pub struct Request {
 impl Request {
     pub fn headers_mut(&mut self) -> &mut HeaderMap {
         &mut self.headers
+    }
+
+    pub fn with_monitored_body(self, signal: FrameSignal) -> Self {
+        Self {
+            body: self.body.monitored(signal),
+            ..self
+        }
     }
 
     pub fn authority(&self) -> &str {
