@@ -213,12 +213,11 @@ pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
     Ok(sdk_config)
 }
 
-pub fn access_token_source() -> Option<TokenSource> {
+pub fn access_token_source(config: &CliConfig) -> Option<TokenSource> {
     if std::env::var_os("S2_ACCESS_TOKEN").is_some() {
         return Some(TokenSource::Environment);
     }
 
-    let config = load_config_file().ok()?;
     if config.access_token.is_some() {
         Some(TokenSource::ConfigFile)
     } else {
