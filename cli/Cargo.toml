@@ -38,6 +38,7 @@ ratatui = "0.30"
 rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-lite = { workspace = true }
+s2-api = { workspace = true }
 s2-sdk = { workspace = true, features = ["_hidden"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }

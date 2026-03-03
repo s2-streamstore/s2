@@ -7,7 +7,7 @@ use s2_sdk::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CliConfigError, CliError};
+use crate::error::{CliConfigError, CliError, TokenSource};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display, strum::EnumString,
@@ -211,4 +211,17 @@ pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
     }
 
     Ok(sdk_config)
+}
+
+pub fn access_token_source() -> Option<TokenSource> {
+    if std::env::var_os("S2_ACCESS_TOKEN").is_some() {
+        return Some(TokenSource::Environment);
+    }
+
+    let config = load_config_file().ok()?;
+    if config.access_token.is_some() {
+        Some(TokenSource::ConfigFile)
+    } else {
+        None
+    }
 }
