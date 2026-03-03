@@ -9,6 +9,7 @@ use std::{
 };
 
 use futures::StreamExt;
+use hyper_side_effect::FrameSignal;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::Instant,
@@ -17,8 +18,6 @@ use tokio_muxt::{CoalesceMode, MuxTimer};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
-
-use hyper_side_effect::FrameSignal;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},

@@ -92,9 +92,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Empty, Full};
+
+    use super::*;
 
     #[test]
     fn signal_starts_unsignalled() {
