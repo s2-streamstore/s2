@@ -359,7 +359,7 @@ impl BasinClient {
             .header(ACCEPT, ACCEPT_PROTO)
             .body(input.encode_to_vec())
             .build()?;
-        let mut builder = self.request(request).with_retry_enabled(true);
+        let mut builder = self.request(request);
         if append_retry_policy == AppendRetryPolicy::NoSideEffects {
             builder = builder.with_frame_signal(FrameSignal::new());
         }
