@@ -35,6 +35,9 @@ const STATUS_CODE_SIZE: usize = 2;
 const COMPRESSION_THRESHOLD_BYTES: usize = 1024; // 1 KiB
 const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
+// Cap decompressed payloads to the same per-frame budget enforced on the wire.
+const MAX_DECOMPRESSED_PAYLOAD_BYTES: usize = MAX_FRAME_BYTES;
+
 /*
 Flag byte layout:
   ┌───┬───┬───┬───┬───┬───┬───┬───┐
@@ -94,6 +97,13 @@ impl CompressedData {
     }
 
     fn compress(compression: CompressionAlgorithm, data: Vec<u8>) -> std::io::Result<Self> {
+        if data.len() > MAX_DECOMPRESSED_PAYLOAD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "payload exceeds decompressed limit",
+            ));
+        }
+
         if compression == CompressionAlgorithm::None || data.len() < COMPRESSION_THRESHOLD_BYTES {
             return Ok(Self {
                 compression: CompressionAlgorithm::None,
@@ -120,18 +130,39 @@ impl CompressedData {
     }
 
     fn decompressed(self) -> std::io::Result<Bytes> {
+        // Decode at most `MAX_DECOMPRESSED_PAYLOAD_BYTES + 1` bytes
+        fn read_to_end_limited(mut reader: impl Read) -> std::io::Result<Bytes> {
+            let mut limited = reader
+                .by_ref()
+                .take((MAX_DECOMPRESSED_PAYLOAD_BYTES + 1) as u64);
+            let mut buf = Vec::with_capacity(COMPRESSION_THRESHOLD_BYTES);
+            limited.read_to_end(&mut buf)?;
+            if buf.len() > MAX_DECOMPRESSED_PAYLOAD_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decompressed payload exceeds limit",
+                ));
+            }
+            Ok(Bytes::from(buf.into_boxed_slice()))
+        }
+
         match self.compression {
-            CompressionAlgorithm::None => Ok(self.payload),
+            CompressionAlgorithm::None => {
+                if self.payload.len() > MAX_DECOMPRESSED_PAYLOAD_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "decompressed payload exceeds limit",
+                    ));
+                }
+                Ok(self.payload)
+            }
             CompressionAlgorithm::Gzip => {
                 let mut decoder = GzDecoder::new(&self.payload[..]);
-                let mut buf = Vec::with_capacity(self.payload.len() * 2);
-                decoder.read_to_end(&mut buf)?;
-                Ok(Bytes::from(buf.into_boxed_slice()))
+                read_to_end_limited(&mut decoder)
             }
             CompressionAlgorithm::Zstd => {
-                let mut buf = Vec::with_capacity(self.payload.len() * 2);
-                zstd::stream::copy_decode(&self.payload[..], &mut buf)?;
-                Ok(Bytes::from(buf.into_boxed_slice()))
+                let mut decoder = zstd::stream::Decoder::new(&self.payload[..])?;
+                read_to_end_limited(&mut decoder)
             }
         }
     }
@@ -650,6 +681,58 @@ mod test {
             }
             SessionMessage::Terminal(_) => panic!("expected regular message"),
         }
+    }
+
+    #[test]
+    fn decompression_rejects_payloads_exceeding_limit() {
+        let payload = vec![0; MAX_DECOMPRESSED_PAYLOAD_BYTES + 1];
+        let proto = TestProto::new(payload);
+        let encoded = proto.encode_to_vec();
+
+        for algo in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd] {
+            let compressed = match algo {
+                CompressionAlgorithm::Gzip => {
+                    let mut out = Vec::new();
+                    let mut encoder = GzEncoder::new(&mut out, Compression::default());
+                    encoder.write_all(encoded.as_slice()).unwrap();
+                    encoder.finish().unwrap();
+                    out
+                }
+                CompressionAlgorithm::Zstd => {
+                    let mut out = Vec::new();
+                    zstd::stream::copy_encode(encoded.as_slice(), &mut out, 0).unwrap();
+                    out
+                }
+                CompressionAlgorithm::None => unreachable!("explicitly excluded in test"),
+            };
+
+            let data = CompressedData {
+                compression: algo,
+                payload: Bytes::from(compressed),
+            };
+            assert!(data.payload.len() < MAX_FRAME_BYTES);
+
+            let err = data.try_into_proto::<TestProto>().expect_err("should fail");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                err.to_string()
+                    .contains("decompressed payload exceeds limit")
+            );
+        }
+    }
+
+    #[test]
+    fn compress_rejects_payloads_exceeding_decompressed_limit() {
+        let payload = vec![0; MAX_DECOMPRESSED_PAYLOAD_BYTES + 1];
+        let proto = TestProto::new(payload);
+
+        let err = CompressedData::compress(CompressionAlgorithm::Gzip, proto.encode_to_vec())
+            .expect_err("should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("payload exceeds decompressed limit")
+        );
     }
 
     #[test]
