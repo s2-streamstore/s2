@@ -7,10 +7,7 @@ use std::{
 
 use axum_server::tls_rustls::RustlsConfig;
 use bytesize::ByteSize;
-use slatedb::{
-    config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions},
-    object_store,
-};
+use slatedb::object_store;
 use tokio::time::Instant;
 use tower_http::{
     cors::CorsLayer,
@@ -96,19 +93,6 @@ impl StoreType {
     }
 }
 
-fn default_garbage_collector_options() -> GarbageCollectorOptions {
-    let dir_opts = GarbageCollectorDirectoryOptions {
-        interval: Some(Duration::from_secs(300)),
-        min_age: Duration::from_secs(300),
-    };
-    GarbageCollectorOptions {
-        manifest_options: Some(dir_opts),
-        wal_options: Some(dir_opts),
-        compacted_options: Some(dir_opts),
-        compactions_options: Some(dir_opts),
-    }
-}
-
 pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     info!(?args);
 
@@ -137,7 +121,6 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         "SL8_",
         slatedb::Settings {
             flush_interval: Some(store_type.default_flush_interval()),
-            garbage_collector_options: Some(default_garbage_collector_options()),
             ..Default::default()
         },
     )?;

@@ -1,149 +1,96 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ResourcesSpec",
   "type": "object",
   "properties": {
     "basins": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/BasinSpec"
+        "$ref": "#/$defs/BasinSpec"
       }
     }
   },
-  "definitions": {
-    "BasinConfigSpec": {
-      "type": "object",
-      "properties": {
-        "create_stream_on_append": {
-          "description": "Create stream on append if it doesn't exist, using the default stream configuration.",
-          "default": null,
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "create_stream_on_read": {
-          "description": "Create stream on read if it doesn't exist, using the default stream configuration.",
-          "default": null,
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "default_stream_config": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/StreamConfigSpec"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
-    },
+  "$defs": {
     "BasinSpec": {
       "type": "object",
-      "required": [
-        "name"
-      ],
       "properties": {
+        "name": {
+          "type": "string"
+        },
         "config": {
           "anyOf": [
             {
-              "$ref": "#/definitions/BasinConfigSpec"
+              "$ref": "#/$defs/BasinConfigSpec"
             },
             {
               "type": "null"
             }
           ]
-        },
-        "name": {
-          "type": "string"
         },
         "streams": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/StreamSpec"
+            "$ref": "#/$defs/StreamSpec"
           }
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
     },
-    "DeleteOnEmptySpec": {
+    "BasinConfigSpec": {
       "type": "object",
       "properties": {
-        "min_age": {
-          "description": "Minimum age before an empty stream can be deleted. Set to 0 (default) to disable delete-on-empty (don't delete automatically).",
+        "default_stream_config": {
           "anyOf": [
             {
-              "$ref": "#/definitions/HumanDuration"
+              "$ref": "#/$defs/StreamConfigSpec"
             },
             {
               "type": "null"
             }
           ]
+        },
+        "create_stream_on_append": {
+          "description": "Create stream on append if it doesn't exist, using the default stream configuration.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "create_stream_on_read": {
+          "description": "Create stream on read if it doesn't exist, using the default stream configuration.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
-    },
-    "HumanDuration": {
-      "description": "A duration string in humantime format, e.g. \"1day\", \"2h 30m\"",
-      "examples": [
-        "1day",
-        "2h 30m"
-      ],
-      "type": "string"
-    },
-    "RetentionPolicySpec": {
-      "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically trim records older than the given duration (e.g. \"7days\", \"1week\").",
-      "examples": [
-        "infinite",
-        "7days",
-        "1week"
-      ],
-      "type": "string"
-    },
-    "StorageClassSpec": {
-      "description": "Storage class for recent writes.",
-      "type": "string",
-      "enum": [
-        "standard",
-        "express"
-      ]
     },
     "StreamConfigSpec": {
       "type": "object",
       "properties": {
-        "delete_on_empty": {
-          "description": "Delete-on-empty configuration.",
-          "anyOf": [
-            {
-              "$ref": "#/definitions/DeleteOnEmptySpec"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "retention_policy": {
-          "description": "Retention policy for the stream. If unspecified, the default is to retain records for 7 days.",
-          "anyOf": [
-            {
-              "$ref": "#/definitions/RetentionPolicySpec"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "storage_class": {
           "description": "Storage class for recent writes.",
-          "default": null,
           "anyOf": [
             {
-              "$ref": "#/definitions/StorageClassSpec"
+              "$ref": "#/$defs/StorageClassSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "retention_policy": {
+          "description": "Retention policy for the stream. If unspecified, the default is to retain records for 7\ndays.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetentionPolicySpec"
             },
             {
               "type": "null"
@@ -154,7 +101,18 @@
           "description": "Timestamping behavior.",
           "anyOf": [
             {
-              "$ref": "#/definitions/TimestampingSpec"
+              "$ref": "#/$defs/TimestampingSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delete_on_empty": {
+          "description": "Delete-on-empty configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeleteOnEmptySpec"
             },
             {
               "type": "null"
@@ -164,24 +122,45 @@
       },
       "additionalProperties": false
     },
-    "StreamSpec": {
+    "StorageClassSpec": {
+      "description": "Storage class for recent writes.",
+      "type": "string",
+      "enum": [
+        "standard",
+        "express"
+      ]
+    },
+    "RetentionPolicySpec": {
+      "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically trim records older than the given duration (e.g. \"7days\", \"1week\").",
+      "type": "string",
+      "examples": [
+        "infinite",
+        "7days",
+        "1week"
+      ]
+    },
+    "TimestampingSpec": {
       "type": "object",
-      "required": [
-        "name"
-      ],
       "properties": {
-        "config": {
+        "mode": {
+          "description": "Timestamping mode for appends that influences how timestamps are handled.",
           "anyOf": [
             {
-              "$ref": "#/definitions/StreamConfigSpec"
+              "$ref": "#/$defs/TimestampingModeSpec"
             },
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
-        "name": {
-          "type": "string"
+        "uncapped": {
+          "description": "Allow client-specified timestamps to exceed the arrival time.\nIf this is `false` or not set, client timestamps will be capped at the arrival time.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -195,31 +174,52 @@
         "arrival"
       ]
     },
-    "TimestampingSpec": {
+    "DeleteOnEmptySpec": {
       "type": "object",
       "properties": {
-        "mode": {
-          "description": "Timestamping mode for appends that influences how timestamps are handled.",
-          "default": null,
+        "min_age": {
+          "description": "Minimum age before an empty stream can be deleted.\nSet to 0 (default) to disable delete-on-empty (don't delete automatically).",
           "anyOf": [
             {
-              "$ref": "#/definitions/TimestampingModeSpec"
+              "$ref": "#/$defs/HumanDuration"
             },
             {
               "type": "null"
             }
           ]
-        },
-        "uncapped": {
-          "description": "Allow client-specified timestamps to exceed the arrival time. If this is `false` or not set, client timestamps will be capped at the arrival time.",
-          "default": null,
-          "type": [
-            "boolean",
-            "null"
-          ]
         }
       },
       "additionalProperties": false
+    },
+    "HumanDuration": {
+      "description": "A duration string in humantime format, e.g. \"1day\", \"2h 30m\"",
+      "type": "string",
+      "examples": [
+        "1day",
+        "2h 30m"
+      ]
+    },
+    "StreamSpec": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamConfigSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
     }
   }
 }

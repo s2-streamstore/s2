@@ -2,7 +2,7 @@
 //!
 //! Loaded at startup when `--init-file` / `S2LITE_INIT_FILE` is set.
 
-use std::{path::Path, time::Duration};
+use std::{borrow::Cow, path::Path, time::Duration};
 
 use s2_common::{
     maybe::Maybe,
@@ -84,22 +84,15 @@ pub enum StorageClassSpec {
 }
 
 impl schemars::JsonSchema for StorageClassSpec {
-    fn schema_name() -> String {
-        "StorageClassSpec".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        "StorageClassSpec".into()
     }
 
-    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some("Storage class for recent writes.".to_string()),
-                ..Default::default()
-            })),
-            enum_values: Some(vec![
-                serde_json::Value::String("standard".to_string()),
-                serde_json::Value::String("express".to_string()),
-            ]),
-            ..Default::default()
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Storage class for recent writes.",
+            "enum": ["standard", "express"]
         })
     }
 }
@@ -144,27 +137,16 @@ impl<'de> Deserialize<'de> for RetentionPolicySpec {
 }
 
 impl schemars::JsonSchema for RetentionPolicySpec {
-    fn schema_name() -> String {
-        "RetentionPolicySpec".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        "RetentionPolicySpec".into()
     }
 
-    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Retain records unless explicitly trimmed (\"infinite\"), or automatically \
-                     trim records older than the given duration (e.g. \"7days\", \"1week\")."
-                        .to_string(),
-                ),
-                examples: vec![
-                    serde_json::Value::String("infinite".to_string()),
-                    serde_json::Value::String("7days".to_string()),
-                    serde_json::Value::String("1week".to_string()),
-                ],
-                ..Default::default()
-            })),
-            ..Default::default()
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically \
+                trim records older than the given duration (e.g. \"7days\", \"1week\").",
+            "examples": ["infinite", "7days", "1week"]
         })
     }
 }
@@ -190,26 +172,15 @@ pub enum TimestampingModeSpec {
 }
 
 impl schemars::JsonSchema for TimestampingModeSpec {
-    fn schema_name() -> String {
-        "TimestampingModeSpec".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        "TimestampingModeSpec".into()
     }
 
-    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Timestamping mode for appends that influences how timestamps are handled."
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            enum_values: Some(vec![
-                serde_json::Value::String("client-prefer".to_string()),
-                serde_json::Value::String("client-require".to_string()),
-                serde_json::Value::String("arrival".to_string()),
-            ]),
-            ..Default::default()
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Timestamping mode for appends that influences how timestamps are handled.",
+            "enum": ["client-prefer", "client-require", "arrival"]
         })
     }
 }
@@ -255,24 +226,15 @@ impl<'de> Deserialize<'de> for HumanDuration {
 }
 
 impl schemars::JsonSchema for HumanDuration {
-    fn schema_name() -> String {
-        "HumanDuration".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        "HumanDuration".into()
     }
 
-    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "A duration string in humantime format, e.g. \"1day\", \"2h 30m\"".to_string(),
-                ),
-                examples: vec![
-                    serde_json::Value::String("1day".to_string()),
-                    serde_json::Value::String("2h 30m".to_string()),
-                ],
-                ..Default::default()
-            })),
-            ..Default::default()
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A duration string in humantime format, e.g. \"1day\", \"2h 30m\"",
+            "examples": ["1day", "2h 30m"]
         })
     }
 }
@@ -638,10 +600,29 @@ mod tests {
         let schema = json_schema();
         assert!(schema.is_object());
         let schema_obj = schema.as_object().unwrap();
-        // Should have at minimum a definitions/properties structure
+
+        // using the default generated
+        assert_eq!(
+            schema_obj.get("$schema"),
+            Some(&serde_json::Value::String(
+                "https://json-schema.org/draft/2020-12/schema".to_string()
+            ))
+        );
+
         assert!(
-            schema_obj.contains_key("definitions") || schema_obj.contains_key("properties"),
-            "schema should have definitions or properties"
+            schema_obj.contains_key("properties"),
+            "schema should have root properties"
+        );
+
+        assert!(
+            schema_obj.contains_key("$defs"),
+            "schema should have $defs for reusable definitions"
+        );
+
+        let properties = schema_obj.get("properties").unwrap().as_object().unwrap();
+        assert!(
+            properties.contains_key("basins"),
+            "schema should include the `basins` property"
         );
     }
 

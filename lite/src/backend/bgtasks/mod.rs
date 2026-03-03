@@ -77,7 +77,15 @@ fn spawn_bgtask<Tick, Fut, E>(
                                 reset_sleep(&mut sleep);
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(
+                                task = name,
+                                skipped,
+                                "bgtask trigger channel lagged, running tick immediately"
+                            );
+                            run_tick(name, &tick, &backend).await;
+                            reset_sleep(&mut sleep);
+                        }
                         Err(broadcast::error::RecvError::Closed) => {
                             break;
                         }
