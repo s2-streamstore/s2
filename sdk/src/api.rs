@@ -623,7 +623,9 @@ impl From<client::Error> for ClientError {
         let err_msg = err.to_string();
         match err {
             client::Error::Send(ref send_err) if send_err.is_connect() => {
-                classify_io_source(&err, &err_msg).unwrap_or(Self::Connect(err_msg))
+                classify_io_source(&err, &err_msg)
+                    .or_else(|| classify_dns_source(&err, &err_msg))
+                    .unwrap_or(Self::Connect(err_msg))
             }
             client::Error::Send(_) | client::Error::Receive(_) => {
                 classify_hyper_source(&err, &err_msg)
@@ -658,6 +660,30 @@ fn classify_io_source(err: &client::Error, err_msg: &str) -> Option<ClientError>
         std::io::ErrorKind::ConnectionRefused => ClientError::ConnectionRefused(err_msg),
         _ => return None,
     })
+}
+
+/// Walk the error source chain looking for a "dns error" tag.
+///
+/// hyper-util's `ConnectError` (not publicly exported, so we can't downcast)
+/// tags DNS failures with the static string "dns error" via `ConnectError::dns()`.
+/// This is not a platform-specific message — it's a structural tag from the
+/// Rust library. If the HTTP client changes, this will harmlessly stop matching
+/// and DNS errors will fall through to the generic `Connect` variant.
+fn classify_dns_source(err: &client::Error, _err_msg: &str) -> Option<ClientError> {
+    let mut source = Some(err as &dyn std::error::Error);
+    while let Some(err) = source {
+        if err.to_string() == "dns error" {
+            // Build the message from the DNS error's source (the actual
+            // resolver error) rather than the top-level hyper wrapper.
+            let detail = match err.source() {
+                Some(cause) => format!("dns resolution: {cause}"),
+                None => "dns resolution failed".to_owned(),
+            };
+            return Some(ClientError::Connect(detail));
+        }
+        source = err.source();
+    }
+    None
 }
 
 fn source_err<T: std::error::Error + 'static>(err: &dyn std::error::Error) -> Option<&T> {
@@ -1055,5 +1081,44 @@ impl IgnoreNotFound for Result<UnaryResponse, ApiError> {
             Err(ApiError::Server(StatusCode::NOT_FOUND, _)) if enabled => Ok(()),
             Err(err) => Err(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that DNS resolution failures produce a clear error message
+    /// containing "dns resolution" rather than the opaque hyper wrapper.
+    /// This also serves as a regression test: if hyper-util changes its
+    /// internal "dns error" tag, this test will fail, signaling that
+    /// `classify_dns_source` needs updating.
+    #[tokio::test]
+    async fn dns_error_message_is_clear() {
+        let config = crate::types::S2Config::new("test-token".to_owned())
+            .with_endpoints(
+                crate::types::S2Endpoints::new(
+                    "https://no-such-basin.invalid".parse().unwrap(),
+                    "https://no-such-basin.invalid".parse().unwrap(),
+                )
+                .unwrap(),
+            )
+            // Skip native root CA loading so the test works in sandboxed
+            // CI environments without keychain access.
+            .with_insecure_skip_cert_verification(true);
+        let client = BaseClient::init(&config).expect("client init");
+        let url = "https://no-such-basin.invalid/v1/streams"
+            .parse::<url::Url>()
+            .unwrap();
+        let request = client.get(url).build().unwrap();
+        let err: ApiError = match client.request(request).send().await {
+            Err(e) => e,
+            Ok(_) => panic!("should fail with DNS error"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dns resolution"),
+            "expected 'dns resolution' in error, got: {msg}"
+        );
     }
 }
