@@ -593,6 +593,18 @@ impl ApiError {
             _ => false,
         }
     }
+
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            Self::Server(status, err_resp) => matches!(
+                (*status, err_resp.code.as_str()),
+                (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+                    | (StatusCode::BAD_GATEWAY, "hot_server")
+            ),
+            Self::Client(err) => err.has_no_side_effects(),
+            _ => false,
+        }
+    }
 }
 
 impl From<client::Error> for ApiError {
@@ -625,6 +637,12 @@ pub enum ClientError {
 
 impl ClientError {
     pub fn is_retryable(&self) -> bool {
+        !matches!(self, ClientError::Others(_))
+    }
+
+    pub fn has_no_side_effects(&self) -> bool {
+        // All classified client errors are transport failures where
+        // no server response was received. `Others` is unclassified.
         !matches!(self, ClientError::Others(_))
     }
 }
@@ -985,10 +1003,11 @@ impl<'a> RequestBuilder<'a> {
             };
 
             if err.is_retryable()
-                && !self
+                && (!self
                     .frame_signal
                     .as_ref()
                     .is_some_and(|s| s.is_signalled())
+                    || err.has_no_side_effects())
                 && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
             {
                 let backoff = retry_after.map_or(backoff, |ra| ra.max(backoff));
@@ -1129,6 +1148,44 @@ mod tests {
     /// This also serves as a regression test: if hyper-util changes its
     /// internal "dns error" tag, this test will fail, signaling that
     /// `classify_dns_source` needs updating.
+    fn server_error(status: StatusCode, code: &str) -> ApiError {
+        ApiError::Server(
+            status,
+            ApiErrorResponse {
+                code: code.to_owned(),
+                message: "test".to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn api_error_has_no_side_effects() {
+        // Server errors that guarantee no mutation.
+        assert!(server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited").has_no_side_effects());
+        assert!(server_error(StatusCode::BAD_GATEWAY, "hot_server").has_no_side_effects());
+
+        // Server errors that do NOT guarantee no mutation.
+        assert!(!server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal").has_no_side_effects());
+        assert!(!server_error(StatusCode::BAD_GATEWAY, "other").has_no_side_effects());
+        assert!(!server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects());
+    }
+
+    #[test]
+    fn client_error_has_no_side_effects() {
+        // Classified transport failures — no data reached the server.
+        assert!(ClientError::Connect("test".into()).has_no_side_effects());
+        assert!(ClientError::Timeout.has_no_side_effects());
+        assert!(ClientError::ConnectionClosedEarly("test".into()).has_no_side_effects());
+        assert!(ClientError::RequestCanceled("test".into()).has_no_side_effects());
+        assert!(ClientError::UnexpectedEof("test".into()).has_no_side_effects());
+        assert!(ClientError::ConnectionReset("test".into()).has_no_side_effects());
+        assert!(ClientError::ConnectionAborted("test".into()).has_no_side_effects());
+        assert!(ClientError::ConnectionRefused("test".into()).has_no_side_effects());
+
+        // Unclassified — cannot guarantee no side effects.
+        assert!(!ClientError::Others("test".into()).has_no_side_effects());
+    }
+
     #[tokio::test]
     async fn dns_error_message_is_clear() {
         let config = crate::types::S2Config::new("test-token".to_owned())

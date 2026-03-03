@@ -288,11 +288,15 @@ impl From<Compression> for CompressionAlgorithm {
 pub enum AppendRetryPolicy {
     /// Retry all appends. Use when duplicate records on the stream are acceptable.
     All,
-    /// Retry when it can be determined that the request data was never transmitted.
+    /// Retry when it can be determined that the request had no side effects.
     ///
     /// Uses a frame-level signal to detect whether any body frames were consumed
     /// by the HTTP transport. If no frames were sent, the server never saw the
     /// request, so retry is safe and will not cause duplicate records.
+    ///
+    /// Certain server errors (`rate_limited`, `hot_server`) are also safe to
+    /// retry regardless of frame signal state, since they guarantee no mutation
+    /// occurred.
     NoSideEffects,
 }
 

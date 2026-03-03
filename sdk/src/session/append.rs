@@ -57,6 +57,14 @@ impl AppendSessionError {
             _ => false,
         }
     }
+
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            Self::Api(err) => err.has_no_side_effects(),
+            // AckTimeout/ServerDisconnected: server may have processed appends.
+            _ => false,
+        }
+    }
 }
 
 impl From<AppendSessionError> for S2Error {
@@ -437,6 +445,7 @@ async fn run_session_with_retry(
                     AppendRetryPolicy::NoSideEffects => {
                         state.inflight_appends.is_empty()
                             || !frame_signal.as_ref().is_some_and(|s| s.is_signalled())
+                            || err.has_no_side_effects()
                     }
                 };
 
