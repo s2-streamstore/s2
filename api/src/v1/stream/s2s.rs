@@ -140,8 +140,7 @@ impl CompressedData {
             .payload
             .len()
             .saturating_mul(2)
-            .min(MAX_DECOMPRESSED_PAYLOAD_BYTES)
-            .max(COMPRESSION_THRESHOLD_BYTES);
+            .clamp(COMPRESSION_THRESHOLD_BYTES, MAX_DECOMPRESSED_PAYLOAD_BYTES);
 
         // Decode at most `MAX_DECOMPRESSED_PAYLOAD_BYTES + 1` bytes
         fn read_to_end_limited(
