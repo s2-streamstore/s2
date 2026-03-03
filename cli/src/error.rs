@@ -163,16 +163,16 @@ impl std::fmt::Display for TokenSource {
 
 fn is_auth_error(err: &S2Error) -> bool {
     match err {
-        S2Error::Server(response) => matches!(
-            response.code.parse::<ErrorCode>().ok(),
-            Some(                
-                    | ErrorCode::Authn
-                    | ErrorCode::Authz
-                    | ErrorCode::PermissionDenied
-            )
-        ),
+        S2Error::Server(response) => is_auth_error_code(&response.code),
         _ => false,
     }
+}
+
+fn is_auth_error_code(code: &str) -> bool {
+    let Ok(code) = code.parse::<ErrorCode>() else {
+        return false;
+    };
+    matches!(code, ErrorCode::Authn | ErrorCode::Authz)
 }
 
 #[cfg(test)]
