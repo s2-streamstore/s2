@@ -82,6 +82,7 @@ issue.
 #[rustfmt::skip]
 mod api;
 mod client;
+mod frame_signal;
 mod session;
 
 pub mod batching;

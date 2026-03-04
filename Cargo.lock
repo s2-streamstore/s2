@@ -2416,17 +2416,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-side-effect"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "http-body 1.0.1",
- "http-body-util",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4705,11 +4694,12 @@ dependencies = [
  "bytes",
  "futures",
  "http 1.4.0",
+ "http-body 1.0.1",
  "http-body-util",
  "hyper",
  "hyper-rustls",
- "hyper-side-effect",
  "hyper-util",
+ "pin-project-lite",
  "prost",
  "rand 0.10.0",
  "rstest",

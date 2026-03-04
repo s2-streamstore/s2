@@ -9,7 +9,6 @@ use std::{
 };
 
 use futures::StreamExt;
-use hyper_side_effect::FrameSignal;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::Instant,
@@ -21,6 +20,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
+    frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
         AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB, S2Error, StreamName,
@@ -829,7 +829,7 @@ fn is_safe_to_retry(
         AppendRetryPolicy::All => true,
         AppendRetryPolicy::NoSideEffects => {
             !has_inflight
-                || !frame_signal.map_or(true, |s| s.is_signalled())
+                || !frame_signal.is_none_or(|s| s.is_signalled())
                 || err.has_no_side_effects()
         }
     };
@@ -865,11 +865,11 @@ impl From<usize> for TimerEvent {
 #[cfg(test)]
 mod tests {
     use http::StatusCode;
-    use hyper_side_effect::FrameSignal;
 
     use super::{AppendSessionError, is_safe_to_retry};
     use crate::{
         api::{ApiError, ApiErrorResponse},
+        frame_signal::FrameSignal,
         types::AppendRetryPolicy,
     };
 

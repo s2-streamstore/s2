@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["api", "cli", "common", "hyper-side-effect", "lite", "sdk"]
+members = ["api", "cli", "common", "lite", "sdk"]
 
 [workspace.package]
 edition = "2024"
@@ -33,7 +33,6 @@ flate2 = "1.1"
 futures = "0.3"
 http = "1.4"
 humantime = "2.3"
-hyper-side-effect = { path = "hyper-side-effect", version = "0.1" }
 indexmap = "2.13"
 indicatif = "0.18"
 itertools = "0.14"

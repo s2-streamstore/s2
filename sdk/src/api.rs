@@ -35,7 +35,7 @@ use url::Url;
 #[cfg(feature = "_hidden")]
 use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
 
-use hyper_side_effect::FrameSignal;
+use crate::frame_signal::FrameSignal;
 
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
@@ -1041,7 +1041,7 @@ fn is_safe_to_retry(
     let policy_compliant = match policy {
         None | Some(AppendRetryPolicy::All) => true,
         Some(AppendRetryPolicy::NoSideEffects) => {
-            !frame_signal.map_or(true, |s| s.is_signalled()) || err.has_no_side_effects()
+            !frame_signal.is_none_or(|s| s.is_signalled()) || err.has_no_side_effects()
         }
     };
     policy_compliant && err.is_retryable()

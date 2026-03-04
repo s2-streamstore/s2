@@ -25,7 +25,6 @@ use http::{
 use http_body_util::{BodyExt, Empty, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::body::{Frame, Incoming};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-use hyper_side_effect::{FrameSignal, RequestFrameMonitorBody};
 pub use hyper_util::client::legacy::connect::Connect;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
@@ -39,6 +38,8 @@ use tokio::{
 };
 use tokio_util::task::AbortOnDropHandle;
 use url::Url;
+
+use crate::frame_signal::{FrameSignal, RequestFrameMonitorBody};
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 90;
