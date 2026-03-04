@@ -639,9 +639,10 @@ fn pos_span<T>(records: &[T]) -> (StreamPosition, StreamPosition)
 where
     T: std::ops::Deref<Target = SequencedRecord>,
 {
-    let first_pos = records.first().expect("non-empty").position;
-    let next_pos = next_pos(&records);
-    (first_pos, next_pos)
+    (
+        records.first().expect("non-empty").position,
+        next_pos(records),
+    )
 }
 
 pub fn next_pos<T>(records: &[T]) -> StreamPosition
