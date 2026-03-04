@@ -94,7 +94,7 @@ pub enum Key {
     StreamRecordTimestamp(StreamId, StreamPosition),
     /// (SDOED) per-deadline-per-stream, deletable, present while pending
     /// Key: TimestampSecs StreamID
-    /// Value: MinAge seconds (u64)
+    /// Value: MinAge seconds + delete-on-empty config epoch
     StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId),
 }
 

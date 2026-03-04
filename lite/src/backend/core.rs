@@ -129,6 +129,7 @@ impl Backend {
             db: self.db.clone(),
             stream_id,
             config: meta.config,
+            doe_config_epoch: meta.doe_config_epoch,
             tail_pos,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
@@ -350,6 +351,7 @@ mod tests {
             config: OptionalStreamConfig::default(),
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
+            doe_config_epoch: 0,
             creation_idempotency_key: None,
         };
 

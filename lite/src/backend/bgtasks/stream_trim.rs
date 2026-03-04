@@ -286,6 +286,7 @@ mod tests {
             config: OptionalStreamConfig::default(),
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
+            doe_config_epoch: 0,
             creation_idempotency_key: None,
         };
 

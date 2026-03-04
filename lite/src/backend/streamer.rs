@@ -62,12 +62,14 @@ impl StreamerId {
 struct DeleteOnEmptyDeadline {
     deadline: kv::timestamp::TimestampSecs,
     min_age: Duration,
+    doe_config_epoch: u64,
 }
 
 pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: OptionalStreamConfig,
+    pub doe_config_epoch: u64,
     pub tail_pos: StreamPosition,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
@@ -81,6 +83,7 @@ impl Spawner {
             db,
             stream_id,
             config,
+            doe_config_epoch,
             tail_pos,
             fencing_token,
             trim_point,
@@ -99,6 +102,7 @@ impl Spawner {
             db,
             stream_id,
             config,
+            doe_config_epoch,
             fencing_token: CommandState {
                 state: fencing_token,
                 applied_point: ..tail_pos.seq_num,
@@ -154,6 +158,7 @@ struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
     config: OptionalStreamConfig,
+    doe_config_epoch: u64,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -305,7 +310,11 @@ impl Streamer {
                     .saturating_add(min_age)
                     .saturating_add(DOE_DEADLINE_REFRESH_PERIOD),
             );
-            Some(DeleteOnEmptyDeadline { deadline, min_age })
+            Some(DeleteOnEmptyDeadline {
+                deadline,
+                min_age,
+                doe_config_epoch: self.doe_config_epoch,
+            })
         } else {
             None
         }
@@ -337,8 +346,12 @@ impl Streamer {
             Message::CheckTail { reply_tx } => {
                 let _ = reply_tx.send(self.stable_pos);
             }
-            Message::Reconfigure { config } => {
+            Message::Reconfigure {
+                config,
+                doe_config_epoch,
+            } => {
                 self.config = config;
+                self.doe_config_epoch = doe_config_epoch;
             }
         }
     }
@@ -407,6 +420,7 @@ enum Message {
     },
     Reconfigure {
         config: OptionalStreamConfig,
+        doe_config_epoch: u64,
     },
 }
 
@@ -482,8 +496,13 @@ impl StreamerClient {
         })
     }
 
-    pub fn advise_reconfig(&self, config: OptionalStreamConfig) -> bool {
-        self.msg_tx.send(Message::Reconfigure { config }).is_ok()
+    pub fn advise_reconfig(&self, config: OptionalStreamConfig, doe_config_epoch: u64) -> bool {
+        self.msg_tx
+            .send(Message::Reconfigure {
+                config,
+                doe_config_epoch,
+            })
+            .is_ok()
     }
 
     pub async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
@@ -665,7 +684,10 @@ async fn db_write_records(
     if let Some(doe_deadline) = doe_deadline {
         wb.put(
             kv::stream_doe_deadline::ser_key(doe_deadline.deadline, stream_id),
-            kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
+            kv::stream_doe_deadline::ser_value(kv::stream_doe_deadline::StreamDoeDeadlineValue {
+                min_age: doe_deadline.min_age,
+                doe_config_epoch: doe_deadline.doe_config_epoch,
+            }),
         );
     }
     let write_timestamp_secs = kv::timestamp::TimestampSecs::now();

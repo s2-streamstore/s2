@@ -166,6 +166,7 @@ mod tests {
             config: Default::default(),
             created_at: OffsetDateTime::now_utc(),
             deleted_at,
+            doe_config_epoch: 0,
             creation_idempotency_key: None,
         }
     }

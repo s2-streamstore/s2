@@ -26,6 +26,22 @@ use crate::backend::{
     stream_id::StreamId,
 };
 
+fn doe_min_age(config: &OptionalStreamConfig) -> Option<std::time::Duration> {
+    config.delete_on_empty.min_age.filter(|age| !age.is_zero())
+}
+
+fn next_doe_config_epoch(
+    current_epoch: u64,
+    previous_min_age: Option<std::time::Duration>,
+    current_min_age: Option<std::time::Duration>,
+) -> u64 {
+    if previous_min_age == current_min_age {
+        current_epoch
+    } else {
+        current_epoch.saturating_add(1)
+    }
+}
+
 impl Backend {
     pub async fn list_streams(
         &self,
@@ -109,6 +125,7 @@ impl Backend {
 
         let mut existing_meta_opt = None;
         let mut prior_doe_min_age = None;
+        let mut prior_doe_config_epoch = 0;
 
         if let Some(existing_meta) =
             db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?
@@ -123,6 +140,7 @@ impl Backend {
                 .delete_on_empty
                 .min_age
                 .filter(|age| !age.is_zero());
+            prior_doe_config_epoch = existing_meta.doe_config_epoch;
             match mode {
                 CreateMode::CreateOnly(_) => {
                     return if creation_idempotency_key.is_some()
@@ -154,11 +172,18 @@ impl Backend {
         let resolved: OptionalStreamConfig = resolved
             .merge(basin_meta.config.default_stream_config)
             .into();
+        let current_doe_min_age = doe_min_age(&resolved);
+        let doe_config_epoch = next_doe_config_epoch(
+            prior_doe_config_epoch,
+            prior_doe_min_age,
+            current_doe_min_age,
+        );
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
             created_at,
             deleted_at: None,
+            doe_config_epoch,
             creation_idempotency_key,
         };
 
@@ -185,11 +210,7 @@ impl Backend {
                 ),
             )?;
         }
-        if let Some(min_age) = meta
-            .config
-            .delete_on_empty
-            .min_age
-            .filter(|age| !age.is_zero())
+        if let Some(min_age) = current_doe_min_age
             && prior_doe_min_age != Some(min_age)
         {
             txn.put(
@@ -197,7 +218,12 @@ impl Backend {
                     kv::timestamp::TimestampSecs::after(min_age),
                     stream_id,
                 ),
-                kv::stream_doe_deadline::ser_value(min_age),
+                kv::stream_doe_deadline::ser_value(
+                    kv::stream_doe_deadline::StreamDoeDeadlineValue {
+                        min_age,
+                        doe_config_epoch,
+                    },
+                ),
             )?;
         }
 
@@ -207,7 +233,7 @@ impl Backend {
         txn.commit_with_options(&WRITE_OPTS).await?;
 
         if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(resolved);
+            client.advise_reconfig(resolved, doe_config_epoch);
         }
 
         let info = StreamInfo {
@@ -281,17 +307,20 @@ impl Backend {
             .delete_on_empty
             .min_age
             .filter(|age| !age.is_zero());
+        let prior_doe_config_epoch = meta.doe_config_epoch;
 
         meta.config = meta.config.reconfigure(reconfig);
+        let current_doe_min_age = doe_min_age(&meta.config);
+        meta.doe_config_epoch = next_doe_config_epoch(
+            prior_doe_config_epoch,
+            prior_doe_min_age,
+            current_doe_min_age,
+        );
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
         let stream_id = StreamId::new(&basin, &stream);
-        if let Some(min_age) = meta
-            .config
-            .delete_on_empty
-            .min_age
-            .filter(|age| !age.is_zero())
+        if let Some(min_age) = current_doe_min_age
             && prior_doe_min_age != Some(min_age)
         {
             txn.put(
@@ -299,7 +328,12 @@ impl Backend {
                     kv::timestamp::TimestampSecs::after(min_age),
                     stream_id,
                 ),
-                kv::stream_doe_deadline::ser_value(min_age),
+                kv::stream_doe_deadline::ser_value(
+                    kv::stream_doe_deadline::StreamDoeDeadlineValue {
+                        min_age,
+                        doe_config_epoch: meta.doe_config_epoch,
+                    },
+                ),
             )?;
         }
 
@@ -309,7 +343,7 @@ impl Backend {
         txn.commit_with_options(&WRITE_OPTS).await?;
 
         if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(meta.config.clone());
+            client.advise_reconfig(meta.config.clone(), meta.doe_config_epoch);
         }
 
         Ok(meta.config)

@@ -26,6 +26,7 @@ pub struct StreamMeta {
     pub config: OptionalStreamConfig,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
+    pub doe_config_epoch: u64,
     pub creation_idempotency_key: Option<Bash>,
 }
 
@@ -36,6 +37,8 @@ struct StreamMetaSerde {
     created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
     deleted_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    doe_config_epoch: u64,
     creation_idempotency_key: Option<Bash>,
 }
 
@@ -45,6 +48,7 @@ impl From<StreamMeta> for StreamMetaSerde {
             config: s2_api::v1::config::StreamConfig::to_opt(meta.config),
             created_at: meta.created_at,
             deleted_at: meta.deleted_at,
+            doe_config_epoch: meta.doe_config_epoch,
             creation_idempotency_key: meta.creation_idempotency_key,
         }
     }
@@ -63,6 +67,7 @@ impl TryFrom<StreamMetaSerde> for StreamMeta {
             config,
             created_at: serde.created_at,
             deleted_at: serde.deleted_at,
+            doe_config_epoch: serde.doe_config_epoch,
             creation_idempotency_key: serde.creation_idempotency_key,
         })
     }
@@ -183,6 +188,7 @@ mod tests {
             config: config.clone(),
             created_at,
             deleted_at,
+            doe_config_epoch: 7,
             creation_idempotency_key: Some(Bash::length_prefixed(&[
                 b"test-basin",
                 b"test-stream",
@@ -199,6 +205,7 @@ mod tests {
         );
         assert_eq!(stream_meta.created_at, decoded.created_at);
         assert_eq!(stream_meta.deleted_at, decoded.deleted_at);
+        assert_eq!(stream_meta.doe_config_epoch, decoded.doe_config_epoch);
     }
 
     #[test]
@@ -207,6 +214,7 @@ mod tests {
             config: None,
             created_at: OffsetDateTime::from_unix_timestamp(2_345_678).unwrap(),
             deleted_at: None,
+            doe_config_epoch: 0,
             creation_idempotency_key: Some(Bash::length_prefixed(&[
                 b"my-basin",
                 b"my-stream",
@@ -234,6 +242,7 @@ mod tests {
             decoded.config.delete_on_empty.min_age,
             default_config.delete_on_empty.min_age
         );
+        assert_eq!(decoded.doe_config_epoch, 0);
         assert_eq!(decoded.created_at, serde_value.created_at);
         assert_eq!(decoded.deleted_at, serde_value.deleted_at);
     }
