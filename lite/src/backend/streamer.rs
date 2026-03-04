@@ -761,11 +761,15 @@ async fn db_submit_append(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, sync::Arc};
+
     use bytes::Bytes;
     use s2_common::{
         record::{EnvelopeRecord, Metered, Record},
         types::stream::{AppendRecord, AppendRecordParts},
     };
+    use slatedb::object_store::memory::InMemory;
+    use tokio::sync::{broadcast, mpsc, oneshot};
 
     use super::*;
 
@@ -997,5 +1001,179 @@ mod tests {
         assert!(!state.is_applied_in(&(5..10)));
         assert!(state.is_applied_in(&(4..10)));
         assert!(state.is_applied_in(&(0..5)));
+    }
+
+    fn append_input(body: &[u8]) -> AppendInput {
+        AppendInput {
+            records: vec![test_record(Bytes::copy_from_slice(body), None)]
+                .try_into()
+                .expect("valid batch"),
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
+
+    async fn test_streamer() -> Streamer {
+        let object_store = Arc::new(InMemory::new());
+        let db = slatedb::Db::builder("/test", object_store)
+            .build()
+            .await
+            .expect("db");
+        let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
+        let (bgtask_trigger_tx, _) = broadcast::channel(16);
+        Streamer {
+            db: db.clone(),
+            stream_id: [3u8; StreamId::LEN].into(),
+            msg_tx,
+            config: OptionalStreamConfig::default(),
+            fencing_token: CommandState {
+                state: FencingToken::default(),
+                applied_point: ..SeqNum::MIN,
+            },
+            trim_point: CommandState {
+                state: ..SeqNum::MIN,
+                applied_point: ..SeqNum::MIN,
+            },
+            last_doe_deadline_at: None,
+            db_writes_pending: VecDeque::new(),
+            db_durability_subscription: 0,
+            inflight_appends: VecDeque::new(),
+            pending_appends: append::PendingAppends::new(),
+            stable_pos: StreamPosition::MIN,
+            follow_tx: broadcast::Sender::new(super::super::FOLLOWER_MAX_LAG),
+            durability_notifier: DurabilityNotifier::spawn(&db),
+            bgtask_trigger_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn append_acks_release_only_after_durable_seq_and_in_order() {
+        let mut streamer = test_streamer().await;
+        let mut follow_rx = streamer.follow_tx.subscribe();
+
+        let (tx1, mut rx1) = oneshot::channel();
+        streamer.handle_append(append_input(b"p0"), None, tx1, AppendType::Regular);
+
+        let (tx2, mut rx2) = oneshot::channel();
+        streamer.handle_append(append_input(b"p1"), None, tx2, AppendType::Regular);
+
+        let (tx3, mut rx3) = oneshot::channel();
+        streamer.handle_append(append_input(b"p2"), None, tx3, AppendType::Regular);
+
+        let mut db_seqs = Vec::new();
+        while let Some(fut) = streamer.db_writes_pending.pop_front() {
+            let submitted = fut.await.expect("db submit");
+            db_seqs.push(submitted.db_seq);
+            streamer.inflight_appends.push_back(submitted);
+        }
+        assert_eq!(db_seqs.len(), 3);
+        assert!(db_seqs.windows(2).all(|w| w[0] < w[1]));
+        assert!(matches!(
+            rx1.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            rx2.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            rx3.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let first_seq = db_seqs[0];
+        if first_seq > 0 {
+            streamer.on_db_durable_seq_advanced(first_seq - 1);
+            assert!(matches!(
+                rx1.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+
+        streamer.on_db_durable_seq_advanced(first_seq);
+        let ack1 = rx1.await.expect("ack 1").expect("append ack 1");
+        assert_eq!(ack1.start.seq_num, 0);
+        assert_eq!(ack1.end.seq_num, 1);
+        assert_eq!(ack1.tail.seq_num, 1);
+        assert!(matches!(
+            rx2.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            rx3.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let batch1 = follow_rx.recv().await.expect("follow batch 1");
+        assert_eq!(batch1.len(), 1);
+        let Record::Envelope(env) = &batch1[0].record else {
+            panic!("expected envelope")
+        };
+        assert_eq!(env.body().as_ref(), b"p0");
+
+        streamer.on_db_durable_seq_advanced(db_seqs[2]);
+        let ack2 = rx2.await.expect("ack 2").expect("append ack 2");
+        let ack3 = rx3.await.expect("ack 3").expect("append ack 3");
+        assert_eq!(ack2.start.seq_num, 1);
+        assert_eq!(ack2.end.seq_num, 2);
+        assert_eq!(ack3.start.seq_num, 2);
+        assert_eq!(ack3.end.seq_num, 3);
+        assert_eq!(streamer.stable_pos.seq_num, 3);
+        assert!(streamer.inflight_appends.is_empty());
+
+        let batch2 = follow_rx.recv().await.expect("follow batch 2");
+        let batch3 = follow_rx.recv().await.expect("follow batch 3");
+        let Record::Envelope(env2) = &batch2[0].record else {
+            panic!("expected envelope")
+        };
+        let Record::Envelope(env3) = &batch3[0].record else {
+            panic!("expected envelope")
+        };
+        assert_eq!(env2.body().as_ref(), b"p1");
+        assert_eq!(env3.body().as_ref(), b"p2");
+    }
+
+    #[tokio::test]
+    async fn durable_seq_jump_releases_multiple_inflight_batches() {
+        let mut streamer = test_streamer().await;
+        let mut follow_rx = streamer.follow_tx.subscribe();
+        let mut ack_rxs = Vec::new();
+
+        for i in 0..4 {
+            let (tx, rx) = oneshot::channel();
+            ack_rxs.push(rx);
+            let payload = format!("jump-{i}");
+            streamer.handle_append(
+                append_input(payload.as_bytes()),
+                None,
+                tx,
+                AppendType::Regular,
+            );
+        }
+
+        let mut db_seqs = Vec::new();
+        while let Some(fut) = streamer.db_writes_pending.pop_front() {
+            let submitted = fut.await.expect("db submit");
+            db_seqs.push(submitted.db_seq);
+            streamer.inflight_appends.push_back(submitted);
+        }
+        assert_eq!(db_seqs.len(), 4);
+
+        streamer.on_db_durable_seq_advanced(*db_seqs.last().expect("non-empty"));
+
+        for (i, rx) in ack_rxs.into_iter().enumerate() {
+            let ack = rx.await.expect("ack").expect("append ack");
+            assert_eq!(ack.start.seq_num, i as u64);
+            assert_eq!(ack.end.seq_num, i as u64 + 1);
+        }
+
+        for i in 0..4 {
+            let batch = follow_rx.recv().await.expect("follow batch");
+            let Record::Envelope(env) = &batch[0].record else {
+                panic!("expected envelope")
+            };
+            assert_eq!(env.body(), format!("jump-{i}").as_bytes());
+        }
+        assert_eq!(streamer.stable_pos.seq_num, 4);
+        assert!(streamer.inflight_appends.is_empty());
     }
 }
