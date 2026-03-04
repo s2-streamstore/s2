@@ -75,6 +75,10 @@ pub struct LiteArgs {
     /// restarts. Can also be set via S2LITE_INIT_FILE environment variable.
     #[arg(long, env = "S2LITE_INIT_FILE")]
     pub init_file: Option<PathBuf>,
+
+    /// Maximum in-flight append metered bytes across all streams before admission blocks.
+    #[arg(long, default_value = "128MiB")]
+    pub append_inflight_bytes: ByteSize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,8 +131,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let manifest_poll_interval = db_settings.manifest_poll_interval;
 
-    let append_inflight_max = ByteSize::mib(25);
-    info!("pipelining enabled on append sessions up to 25MiB");
+    info!(%args.append_inflight_bytes);
 
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)
@@ -142,7 +145,8 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     tokio::time::sleep(manifest_poll_interval).await;
 
-    let backend = Backend::new(db, append_inflight_max);
+    info!(%args.append_inflight_bytes, "starting backend");
+    let backend = Backend::new(db, args.append_inflight_bytes);
     crate::backend::bgtasks::spawn(&backend);
 
     if let Some(init_file) = &args.init_file {

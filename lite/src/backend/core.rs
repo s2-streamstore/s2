@@ -20,7 +20,7 @@ use s2_common::{
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 
 use super::{
     durability_notifier::DurabilityNotifier,
@@ -62,19 +62,25 @@ enum StreamerClientSlot {
 pub struct Backend {
     pub(super) db: slatedb::Db,
     streamer_slots: Arc<DashMap<StreamId, StreamerClientSlot>>,
-    append_inflight_max: ByteSize,
+    append_inflight_bytes_sema: Arc<Semaphore>,
     durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
 impl Backend {
-    pub fn new(db: slatedb::Db, append_inflight_max: ByteSize) -> Self {
+    pub fn new(db: slatedb::Db, append_inflight_bytes: ByteSize) -> Self {
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
+        let append_inflight_bytes = Arc::new(Semaphore::new(
+            (append_inflight_bytes.as_u64() as usize).clamp(
+                s2_common::caps::RECORD_BATCH_MAX.bytes,
+                Semaphore::MAX_PERMITS,
+            ),
+        ));
         let durability_notifier = DurabilityNotifier::spawn(&db);
         Self {
             db,
             streamer_slots: Arc::new(DashMap::new()),
-            append_inflight_max,
+            append_inflight_bytes_sema: append_inflight_bytes,
             durability_notifier,
             bgtask_trigger_tx,
         }
@@ -136,7 +142,7 @@ impl Backend {
             tail_pos,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
-            append_inflight_max: self.append_inflight_max,
+            append_inflight_bytes_sema: self.append_inflight_bytes_sema.clone(),
             durability_notifier: self.durability_notifier.clone(),
             bgtask_trigger_tx: self.bgtask_trigger_tx.clone(),
         }

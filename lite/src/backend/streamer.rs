@@ -8,7 +8,6 @@ use std::{
     time::Duration,
 };
 
-use bytesize::ByteSize;
 use futures::{
     FutureExt as _,
     future::{BoxFuture, OptionFuture},
@@ -82,7 +81,7 @@ pub(super) struct Spawner {
     pub tail_pos: StreamPosition,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
-    pub append_inflight_max: ByteSize,
+    pub append_inflight_bytes_sema: Arc<Semaphore>,
     pub durability_notifier: DurabilityNotifier,
     pub bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
@@ -96,17 +95,12 @@ impl Spawner {
             tail_pos,
             fencing_token,
             trim_point,
-            append_inflight_max,
+            append_inflight_bytes_sema,
             durability_notifier,
             bgtask_trigger_tx,
         } = self;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-
-        let append_inflight_bytes_max =
-            (append_inflight_max.as_u64() as usize).min(Semaphore::MAX_PERMITS);
-
-        let append_inflight_bytes_sema = Arc::new(Semaphore::new(append_inflight_bytes_max));
 
         let streamer = Streamer {
             db,
@@ -143,8 +137,7 @@ impl Spawner {
             id,
             stream_id,
             msg_tx,
-            append_inflight_bytes_sema,
-            append_inflight_bytes_max,
+            append_inflight_bytes: append_inflight_bytes_sema,
         }
     }
 }
@@ -482,8 +475,7 @@ pub(super) struct StreamerClient {
     id: StreamerId,
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
-    append_inflight_bytes_sema: Arc<Semaphore>,
-    append_inflight_bytes_max: usize,
+    append_inflight_bytes: Arc<Semaphore>,
 }
 
 impl StreamerClient {
@@ -531,10 +523,10 @@ impl StreamerClient {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
         let start = Instant::now();
-        // Allow admitting at least one batch if none are in flight.
-        let num_permits = metered_size.clamp(1, self.append_inflight_bytes_max) as u32;
+        let num_permits =
+            u32::try_from(metered_size.max(1)).expect("append batch size fits in u32");
         let sema_permit = tokio::select! {
-            res = self.append_inflight_bytes_sema.acquire_many(num_permits) => {
+            res = self.append_inflight_bytes.acquire_many(num_permits) => {
                 res.map_err(|_| StreamerMissingInActionError)
             }
             _ = self.msg_tx.closed() => {
