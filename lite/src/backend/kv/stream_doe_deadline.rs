@@ -71,10 +71,10 @@ pub fn deser_value(mut bytes: Bytes) -> Result<StreamDoeDeadlineValue, Deseriali
             min_age: Duration::from_secs(bytes.get_u64()),
             doe_config_epoch: bytes.get_u64(),
         }),
-        _ => {
-            check_exact_size(&bytes, VALUE_LEN_V2)?;
-            unreachable!("size already checked")
-        }
+        _ => Err(DeserializationError::InvalidSize {
+            expected: VALUE_LEN_V2,
+            actual: len,
+        }),
     }
 }
 
