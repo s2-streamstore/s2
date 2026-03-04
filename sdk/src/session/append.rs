@@ -61,7 +61,6 @@ impl AppendSessionError {
     pub fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Api(err) => err.has_no_side_effects(),
-            // AckTimeout/ServerDisconnected: server may have processed appends.
             _ => false,
         }
     }
