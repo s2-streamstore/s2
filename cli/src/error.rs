@@ -59,8 +59,11 @@ pub enum CliError {
     #[diagnostic(help("{}", HELP))]
     Operation(OpKind, #[source] S2Error),
 
-    #[error("{}: {}\n  token source: {}", .0, .1, .2)]
-    #[diagnostic(help("{}", HELP))]
+    #[error("{}: {}", .0, .1)]
+    #[diagnostic(help(
+        "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
+         Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`."
+    ))]
     OperationWithTokenSource(OpKind, #[source] S2Error, TokenSource),
 
     #[error("S2 Lite server error: {0}")]
