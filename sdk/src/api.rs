@@ -648,7 +648,7 @@ impl ClientError {
             | ClientError::ConnectionReset(_)
             | ClientError::ConnectionAborted(_)
             | ClientError::Others(_) => false,
-            ClientError::ConnectionRefused(_)  => true,
+            ClientError::ConnectionRefused(_) => true,
         }
     }
 }
