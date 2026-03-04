@@ -20,7 +20,8 @@ use clap::{CommandFactory, Parser};
 use cli::{ApplyArgs, Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
 use colored::Colorize;
 use config::{
-    ConfigKey, load_cli_config, load_config_file, sdk_config, set_config_value, unset_config_value,
+    ConfigKey, access_token_source, load_cli_config, load_config_file, sdk_config,
+    set_config_value, unset_config_value,
 };
 use error::{CliError, OpKind};
 use futures::{Stream, StreamExt};
@@ -152,8 +153,9 @@ async fn run() -> Result<(), CliError> {
     let cli_config = load_cli_config()?;
     let sdk_config = sdk_config(&cli_config)?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
-
-    match command {
+    let token_source = access_token_source(&cli_config);
+    let result: Result<(), CliError> = (async {
+        match command {
         Command::Config(..) | Command::Lite(..) => unreachable!(),
 
         Command::Ls(args) => {
@@ -614,9 +616,12 @@ async fn run() -> Result<(), CliError> {
                 .await
                 .map_err(|e| CliError::op(OpKind::Bench, e))?;
         }
-    }
+        }
+        Ok(())
+    })
+    .await;
 
-    Ok(())
+    result.map_err(|err| err.with_token_source(token_source))
 }
 
 fn format_basin_state(state: BasinState) -> colored::ColoredString {

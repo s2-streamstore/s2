@@ -4592,6 +4592,7 @@ dependencies = [
  "rcgen",
  "rstest",
  "rustls",
+ "s2-api",
  "s2-lite",
  "s2-sdk",
  "serde",

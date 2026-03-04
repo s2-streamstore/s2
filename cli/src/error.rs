@@ -1,4 +1,5 @@
 use miette::Diagnostic;
+use s2_api::v1::error::ErrorCode;
 use s2_sdk::types::S2Error;
 use thiserror::Error;
 
@@ -58,6 +59,13 @@ pub enum CliError {
     #[diagnostic(help("{}", HELP))]
     Operation(OpKind, #[source] S2Error),
 
+    #[error("{}: {}", .0, .1)]
+    #[diagnostic(help(
+        "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
+         Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`."
+    ))]
+    OperationWithTokenSource(OpKind, #[source] S2Error, TokenSource),
+
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
     LiteServer(String),
@@ -70,6 +78,15 @@ pub enum CliError {
 impl CliError {
     pub fn op(kind: OpKind, source: S2Error) -> Self {
         Self::Operation(kind, source)
+    }
+
+    pub fn with_token_source(self, token_source: Option<TokenSource>) -> Self {
+        match (self, token_source) {
+            (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
+                CliError::OperationWithTokenSource(kind, source, token_source)
+            }
+            (err, _) => err,
+        }
     }
 }
 
@@ -130,6 +147,35 @@ pub enum S2UriParseError {
     UnexpectedStreamName,
     #[error("Missing stream name in S2 URI")]
     MissingStreamName,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TokenSource {
+    Environment,
+    ConfigFile,
+}
+
+impl std::fmt::Display for TokenSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenSource::Environment => write!(f, "environment (S2_ACCESS_TOKEN)"),
+            TokenSource::ConfigFile => write!(f, "config file"),
+        }
+    }
+}
+
+fn is_auth_error(err: &S2Error) -> bool {
+    match err {
+        S2Error::Server(response) => is_auth_error_code(&response.code),
+        _ => false,
+    }
+}
+
+fn is_auth_error_code(code: &str) -> bool {
+    let Ok(code) = code.parse::<ErrorCode>() else {
+        return false;
+    };
+    matches!(code, ErrorCode::Authn | ErrorCode::Authz)
 }
 
 #[cfg(test)]
