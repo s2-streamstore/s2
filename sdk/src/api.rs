@@ -1041,6 +1041,7 @@ fn is_safe_to_retry(
     let policy_compliant = match policy {
         None | Some(AppendRetryPolicy::All) => true,
         Some(AppendRetryPolicy::NoSideEffects) => {
+            assert!(frame_signal.is_some());
             !frame_signal.is_some_and(|s| s.is_signalled()) || err.has_no_side_effects()
         }
     };
