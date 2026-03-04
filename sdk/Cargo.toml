@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+http-body = "1"
 http-body-util = "0.1"
 hyper = "1.8"
 hyper-rustls = { version = "0.27", default-features = false, features = [
@@ -31,14 +32,13 @@ hyper-rustls = { version = "0.27", default-features = false, features = [
     "aws-lc-rs",
     "tls12",
 ] }
-http-body = "1"
-pin-project-lite = "0.2"
 hyper-util = { version = "0.1", features = [
     "client-legacy",
     "tokio",
     "http1",
     "http2",
 ] }
+pin-project-lite = "0.2"
 prost = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
