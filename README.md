@@ -174,10 +174,6 @@ SL8_FLUSH_INTERVAL=10ms
 - Appends are pipelined to improve performance against high-latency object storage
 - [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data modeling in SlateDB
 
-> [!TIP]
-> Pipelining is temporarily [disabled by default](https://github.com/s2-streamstore/s2/issues/48), and it will be enabled once it is completely safe. 
-> For now, you can use `S2LITE_PIPELINE=true` to get a sense of what performance will look like.
-
 ### Compatibility
 
 - [CLI](cli/) ✅ v0.26+

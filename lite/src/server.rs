@@ -127,15 +127,8 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let manifest_poll_interval = db_settings.manifest_poll_interval;
 
-    let append_inflight_max = if std::env::var("S2LITE_PIPELINE")
-        .is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
-    {
-        info!("pipelining enabled on append sessions up to 25MiB");
-        ByteSize::mib(25)
-    } else {
-        info!("pipelining disabled");
-        ByteSize::b(1)
-    };
+    let append_inflight_max = ByteSize::mib(25);
+    info!("pipelining enabled on append sessions up to 25MiB");
 
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)

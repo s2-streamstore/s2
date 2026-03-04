@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     ops::{Range, RangeTo},
     sync::{
         Arc,
@@ -8,7 +9,10 @@ use std::{
 };
 
 use bytesize::ByteSize;
-use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
+use futures::{
+    FutureExt as _,
+    future::{BoxFuture, OptionFuture},
+};
 use s2_common::{
     record::{
         CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
@@ -34,6 +38,7 @@ use crate::{
     backend::{
         append,
         bgtasks::BgtaskTrigger,
+        durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
             DeleteStreamError, RequestDroppedError, StreamerMissingInActionError,
@@ -64,6 +69,12 @@ struct DeleteOnEmptyDeadline {
     min_age: Duration,
 }
 
+#[derive(Debug)]
+struct InFlightAppend {
+    db_seq: u64,
+    records: Vec<Metered<SequencedRecord>>,
+}
+
 pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
@@ -72,6 +83,7 @@ pub(super) struct Spawner {
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
     pub append_inflight_max: ByteSize,
+    pub durability_notifier: DurabilityNotifier,
     pub bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
@@ -85,6 +97,7 @@ impl Spawner {
             fencing_token,
             trim_point,
             append_inflight_max,
+            durability_notifier,
             bgtask_trigger_tx,
         } = self;
 
@@ -98,6 +111,7 @@ impl Spawner {
         let streamer = Streamer {
             db,
             stream_id,
+            msg_tx: msg_tx.clone(),
             config,
             fencing_token: CommandState {
                 state: fencing_token,
@@ -108,10 +122,13 @@ impl Spawner {
                 applied_point: ..tail_pos.seq_num,
             },
             last_doe_deadline_at: None,
-            append_futs: FuturesOrdered::new(),
+            db_writes_pending: VecDeque::new(),
+            db_durability_subscription: 0,
+            inflight_appends: VecDeque::new(),
             pending_appends: append::PendingAppends::new(),
             stable_pos: tail_pos,
             follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
+            durability_notifier,
             bgtask_trigger_tx,
         };
 
@@ -153,15 +170,18 @@ impl<T> CommandState<T> {
 struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
+    msg_tx: mpsc::UnboundedSender<Message>,
     config: OptionalStreamConfig,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
-    append_futs:
-        FuturesOrdered<BoxFuture<'static, Result<Vec<Metered<SequencedRecord>>, slatedb::Error>>>,
+    db_writes_pending: VecDeque<BoxFuture<'static, Result<InFlightAppend, slatedb::Error>>>,
+    db_durability_subscription: u64,
+    inflight_appends: VecDeque<InFlightAppend>,
     pending_appends: append::PendingAppends,
     stable_pos: StreamPosition,
     follow_tx: broadcast::Sender<Vec<Metered<SequencedRecord>>>,
+    durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
@@ -257,11 +277,10 @@ impl Streamer {
                         self.apply_command(sr.position.seq_num, cmd, append_type);
                     }
                 }
-                let first_pos = sequenced_records.first().expect("non-empty").position;
-                let next_pos = next_pos(&sequenced_records);
+                let (first_pos, next_pos) = pos_span(&sequenced_records);
                 let seq_num_range = first_pos.seq_num..next_pos.seq_num;
-                self.append_futs.push_back(
-                    db_write_records(
+                self.db_writes_pending.push_back(
+                    db_submit_append(
                         self.db.clone(),
                         self.stream_id,
                         retention,
@@ -311,35 +330,43 @@ impl Streamer {
         }
     }
 
-    fn handle_message(&mut self, msg: Message) {
-        match msg {
-            Message::Append {
-                input,
-                session,
-                reply_tx,
-                append_type,
-            } => {
-                if self.trim_point.state.end < SeqNum::MAX {
-                    self.handle_append(input, session, reply_tx, append_type);
-                }
+    fn subscribe_durability(&mut self) {
+        if let Some(inflight_append) = self
+            .inflight_appends
+            .front()
+            .filter(|pa| pa.db_seq > self.db_durability_subscription)
+        {
+            let msg_tx = self.msg_tx.clone();
+            self.durability_notifier
+                .subscribe(inflight_append.db_seq, move |res| {
+                    let _ = msg_tx.send(Message::DurabilityStatus(res));
+                });
+            self.db_durability_subscription = inflight_append.db_seq;
+        }
+    }
+
+    fn on_db_durable_seq_advanced(&mut self, db_durable_seq: u64) {
+        while self
+            .inflight_appends
+            .front()
+            .is_some_and(|pa| pa.db_seq <= db_durable_seq)
+        {
+            let records = self
+                .inflight_appends
+                .pop_front()
+                .expect("non-empty")
+                .records;
+            let (first_pos, stable_pos) = pos_span(&records);
+            assert!(self.stable_pos.seq_num <= stable_pos.seq_num);
+            self.pending_appends.on_stable(stable_pos);
+            self.stable_pos = stable_pos;
+            if self
+                .trim_point
+                .is_applied_in(&(first_pos.seq_num..stable_pos.seq_num))
+            {
+                let _ = self.bgtask_trigger_tx.send(BgtaskTrigger::StreamTrim);
             }
-            Message::Follow {
-                start_seq_num,
-                reply_tx,
-            } => {
-                let reply = if start_seq_num == self.stable_pos.seq_num {
-                    Ok(self.follow_tx.subscribe())
-                } else {
-                    Err(self.stable_pos)
-                };
-                let _ = reply_tx.send(reply);
-            }
-            Message::CheckTail { reply_tx } => {
-                let _ = reply_tx.send(self.stable_pos);
-            }
-            Message::Reconfigure { config } => {
-                self.config = config;
-            }
+            let _ = self.follow_tx.send(records);
         }
     }
 
@@ -358,27 +385,66 @@ impl Streamer {
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
                 Some(msg) = msg_rx.recv() => {
-                    self.handle_message(msg);
-                }
-                Some(res) = self.append_futs.next() => {
-                    match res {
-                        Ok(records) => {
-                            let has_trim = records.iter().any(|record| {
-                                matches!(record.record, Record::Command(CommandRecord::Trim(_)))
-                            });
-                            let last_pos = records.last().expect("non-empty").position;
-                            let stable_pos = StreamPosition { seq_num: last_pos.seq_num + 1, timestamp: last_pos.timestamp };
-                            self.pending_appends.on_stable(stable_pos);
-                            self.stable_pos = stable_pos;
-                            if has_trim {
-                                let _ = self.bgtask_trigger_tx.send(BgtaskTrigger::StreamTrim);
+                    match msg {
+                        Message::Append {
+                            input,
+                            session,
+                            reply_tx,
+                            append_type,
+                        } => {
+                            if self.trim_point.state.end < SeqNum::MAX {
+                                self.handle_append(input, session, reply_tx, append_type);
                             }
-                            let _ = self.follow_tx.send(records);
-                        },
+                        }
+                        Message::Follow {
+                            start_seq_num,
+                            reply_tx,
+                        } => {
+                            let reply = if start_seq_num == self.stable_pos.seq_num {
+                                Ok(self.follow_tx.subscribe())
+                            } else {
+                                Err(self.stable_pos)
+                            };
+                            let _ = reply_tx.send(reply);
+                        }
+                        Message::CheckTail { reply_tx } => {
+                            let _ = reply_tx.send(self.stable_pos);
+                        }
+                        Message::Reconfigure { config } => {
+                            self.config = config;
+                        }
+                        Message::DurabilityStatus(status) => {
+                            match status {
+                                Ok(durable_seq) => {
+                                    assert!(durable_seq >= self.db_durability_subscription);
+                                    self.on_db_durable_seq_advanced(durable_seq);
+                                    self.subscribe_durability();
+                                }
+                                Err(reason) => {
+                                    self.pending_appends.on_durability_failed(slatedb::Error::closed(
+                                        "database closed while waiting for durability".to_owned(),
+                                        reason,
+                                    ));
+                                    break;
+                                },
+                            }
+                        }
+                    }
+                }
+                Some(res) = OptionFuture::from(self.db_writes_pending.front_mut()) => {
+                    drop(self.db_writes_pending.pop_front().expect("polled"));
+                    match res {
+                        Ok(submitted_append) => {
+                            if let Some(prev) = self.inflight_appends.back() {
+                                assert!(prev.db_seq < submitted_append.db_seq);
+                            }
+                            self.inflight_appends.push_back(submitted_append);
+                            self.subscribe_durability();
+                        }
                         Err(db_err) => {
                             self.pending_appends.on_durability_failed(db_err);
                             break;
-                        },
+                        }
                     }
                 }
                 _ = dormancy.as_mut() => {
@@ -408,6 +474,7 @@ enum Message {
     Reconfigure {
         config: OptionalStreamConfig,
     },
+    DurabilityStatus(Result<u64, slatedb::CloseReason>),
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +643,15 @@ impl AppendPermit<'_> {
     }
 }
 
+fn pos_span<T>(records: &[T]) -> (StreamPosition, StreamPosition)
+where
+    T: std::ops::Deref<Target = SequencedRecord>,
+{
+    let first_pos = records.first().expect("non-empty").position;
+    let next_pos = next_pos(&records);
+    (first_pos, next_pos)
+}
+
 pub fn next_pos<T>(records: &[T]) -> StreamPosition
 where
     T: std::ops::Deref<Target = SequencedRecord>,
@@ -623,7 +699,7 @@ fn sequenced_records(
     Ok(sequenced_records)
 }
 
-async fn db_write_records(
+async fn db_submit_append(
     db: slatedb::Db,
     stream_id: StreamId,
     retention: RetentionPolicy,
@@ -631,7 +707,7 @@ async fn db_write_records(
     records: Vec<Metered<SequencedRecord>>,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
-) -> Result<Vec<Metered<SequencedRecord>>, slatedb::Error> {
+) -> Result<InFlightAppend, slatedb::Error> {
     let ttl = match retention {
         RetentionPolicy::Age(age) => Ttl::ExpireAfter(age.as_millis() as u64),
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
@@ -674,10 +750,13 @@ async fn db_write_records(
         kv::stream_tail_position::ser_value(next_pos(&records), write_timestamp_secs),
     );
     static WRITE_OPTS: WriteOptions = WriteOptions {
-        await_durable: true,
+        await_durable: false,
     };
-    db.write_with_options(wb, &WRITE_OPTS).await?;
-    Ok(records)
+    let write_handle = db.write_with_options(wb, &WRITE_OPTS).await?;
+    Ok(InFlightAppend {
+        db_seq: write_handle.seqnum(),
+        records,
+    })
 }
 
 #[cfg(test)]

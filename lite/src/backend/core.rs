@@ -23,6 +23,7 @@ use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::broadcast;
 
 use super::{
+    durability_notifier::DurabilityNotifier,
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
         StorageError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
@@ -62,16 +63,19 @@ pub struct Backend {
     pub(super) db: slatedb::Db,
     streamer_slots: Arc<DashMap<StreamId, StreamerClientSlot>>,
     append_inflight_max: ByteSize,
+    durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
 impl Backend {
     pub fn new(db: slatedb::Db, append_inflight_max: ByteSize) -> Self {
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
+        let durability_notifier = DurabilityNotifier::spawn(&db);
         Self {
             db,
             streamer_slots: Arc::new(DashMap::new()),
             append_inflight_max,
+            durability_notifier,
             bgtask_trigger_tx,
         }
     }
@@ -133,6 +137,7 @@ impl Backend {
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
             append_inflight_max: self.append_inflight_max,
+            durability_notifier: self.durability_notifier.clone(),
             bgtask_trigger_tx: self.bgtask_trigger_tx.clone(),
         }
         .spawn(move |client_id| {
