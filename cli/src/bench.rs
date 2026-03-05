@@ -647,7 +647,10 @@ pub async fn run(
 
     eprintln!();
     eprintln!("Waiting {:?} before catchup read...", catchup_delay);
-    tokio::time::sleep(catchup_delay).await;
+    tokio::select! {
+        _ = tokio::time::sleep(catchup_delay) => {}
+        _ = tokio::signal::ctrl_c() => return Ok(()),
+    }
 
     let catchup_bar = ProgressBar::no_length()
         .with_prefix(format!("{:width$}", "catchup", width = prefix_width))
