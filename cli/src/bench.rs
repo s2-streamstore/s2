@@ -38,6 +38,19 @@ const WRITE_DONE_SENTINEL: u64 = u64::MAX;
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
 
+#[derive(Debug, PartialEq, Eq)]
+enum DelayOutcome {
+    Elapsed,
+    Cancelled,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CatchupOutcome<T> {
+    Item(T),
+    TimedOut,
+    Cancelled,
+}
+
 pub struct BenchWriteSample {
     pub bytes: u64,
     pub records: u64,
@@ -138,6 +151,34 @@ fn chain_hash(prev_hash: u64, body: &[u8]) -> u64 {
     hasher.update(&prev_hash.to_be_bytes());
     hasher.update(body);
     hasher.digest()
+}
+
+async fn wait_or_cancel<F>(delay: Duration, cancel: F) -> DelayOutcome
+where
+    F: Future,
+{
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => DelayOutcome::Elapsed,
+        _ = cancel => DelayOutcome::Cancelled,
+    }
+}
+
+async fn timeout_or_cancel<F, C>(
+    deadline: tokio::time::Instant,
+    future: F,
+    cancel: C,
+) -> CatchupOutcome<F::Output>
+where
+    F: Future,
+    C: Future,
+{
+    tokio::select! {
+        result = tokio::time::timeout_at(deadline, future) => match result {
+            Ok(item) => CatchupOutcome::Item(item),
+            Err(_) => CatchupOutcome::TimedOut,
+        },
+        _ = cancel => CatchupOutcome::Cancelled,
+    }
 }
 
 pub fn bench_write(
@@ -647,7 +688,9 @@ pub async fn run(
 
     eprintln!();
     eprintln!("Waiting {:?} before catchup read...", catchup_delay);
-    tokio::time::sleep(catchup_delay).await;
+    if wait_or_cancel(catchup_delay, tokio::signal::ctrl_c()).await == DelayOutcome::Cancelled {
+        return Ok(());
+    }
 
     let catchup_bar = ProgressBar::no_length()
         .with_prefix(format!("{:width$}", "catchup", width = prefix_width))
@@ -663,24 +706,34 @@ pub async fn run(
     let catchup_timeout = Duration::from_secs(300);
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
     loop {
-        match tokio::time::timeout_at(catchup_deadline, catchup_stream.next()).await {
-            Ok(Some(Ok(sample))) => {
+        match timeout_or_cancel(
+            catchup_deadline,
+            catchup_stream.next(),
+            tokio::signal::ctrl_c(),
+        )
+        .await
+        {
+            CatchupOutcome::Item(Some(Ok(sample))) => {
                 update_bench_bar(&catchup_bar, &sample);
                 if let Some(hash) = sample.chain_hash {
                     catchup_chain_hash = Some(hash);
                 }
                 catchup_sample = Some(sample);
             }
-            Ok(Some(Err(e))) => {
+            CatchupOutcome::Item(Some(Err(e))) => {
                 catchup_bar.finish_and_clear();
                 return Err(e);
             }
-            Ok(None) => break,
-            Err(_) => {
+            CatchupOutcome::Item(None) => break,
+            CatchupOutcome::TimedOut => {
                 catchup_bar.finish_and_clear();
                 return Err(CliError::BenchVerification(
                     "catchup read timed out after 5 minutes".to_string(),
                 ));
+            }
+            CatchupOutcome::Cancelled => {
+                catchup_bar.finish_and_clear();
+                return Ok(());
             }
         }
     }
@@ -761,5 +814,47 @@ fn print_latency_stats(stats: LatencyStats, name: &str) {
 
     for (name, val) in stats {
         stat_duration(&name, val, scale);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future, time::Duration};
+
+    use super::{CatchupOutcome, DelayOutcome, timeout_or_cancel, wait_or_cancel};
+
+    #[tokio::test]
+    async fn wait_or_cancel_returns_cancelled_when_cancel_fires_first() {
+        let outcome = wait_or_cancel(Duration::from_secs(60), future::ready(())).await;
+        assert_eq!(outcome, DelayOutcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn wait_or_cancel_returns_elapsed_when_delay_finishes_first() {
+        let outcome = wait_or_cancel(Duration::ZERO, future::pending::<()>()).await;
+        assert_eq!(outcome, DelayOutcome::Elapsed);
+    }
+
+    #[tokio::test]
+    async fn timeout_or_cancel_returns_cancelled_when_cancel_fires_first() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let outcome = timeout_or_cancel(deadline, future::pending::<()>(), future::ready(())).await;
+        assert_eq!(outcome, CatchupOutcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn timeout_or_cancel_returns_item_when_future_finishes_first() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let outcome =
+            timeout_or_cancel(deadline, future::ready(7_u8), future::pending::<()>()).await;
+        assert_eq!(outcome, CatchupOutcome::Item(7));
+    }
+
+    #[tokio::test]
+    async fn timeout_or_cancel_returns_timed_out_when_deadline_expires_first() {
+        let deadline = tokio::time::Instant::now() - Duration::from_millis(1);
+        let outcome =
+            timeout_or_cancel(deadline, future::pending::<()>(), future::pending::<()>()).await;
+        assert_eq!(outcome, CatchupOutcome::TimedOut);
     }
 }
