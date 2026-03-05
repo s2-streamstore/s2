@@ -131,7 +131,6 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let manifest_poll_interval = db_settings.manifest_poll_interval;
 
-    info!(%args.append_inflight_bytes);
 
     let db = slatedb::Db::builder(args.path, object_store)
         .with_settings(db_settings)
