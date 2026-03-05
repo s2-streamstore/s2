@@ -58,12 +58,14 @@ docker pull ghcr.io/s2-streamstore/s2
 
 It uses [SlateDB](https://slatedb.io) as its storage engine, which relies entirely on object storage for durability.
 
-It is easy to run `s2 lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
+It is easy to run `s2 lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. 
 
 You can also simply not specify a `--bucket`, which makes it operate entirely in-memory (or use `--local-root` to persist to local disk instead).
 
 > [!TIP]
-> In-memory `s2-lite` is a very effective S2 emulator for integration tests.
+> When you point lite at a `--bucket`, data is **always durable** on object storage before being acknowledged or returned to readers — just like [s2.dev](https://s2.dev).
+> 
+> The _optional_ in-memory mode (no `--bucket` or `--local-root` specified) just makes it an effective S2 emulator for integration tests.
 
 ### Quickstart
 
