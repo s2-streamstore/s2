@@ -232,11 +232,10 @@ async fn init_object_store(
                 std::env::var_os("AWS_SECRET_ACCESS_KEY").and_then(|s| s.into_string().ok()),
             ) {
                 (endpoint, Some(key_id), Some(secret_key)) => {
-                    info!(key_id, "using static credentials from env vars");
+                    info!(endpoint, key_id, "using static credentials from env vars");
 
                     if let Some(endpoint) = endpoint {
                         if endpoint.starts_with("http://") {
-                            info!(endpoint, "using insecure HTTP S3 endpoint");
                             builder = builder.with_allow_http(true);
                         }
                         builder = builder.with_endpoint(endpoint);
@@ -286,6 +285,7 @@ async fn init_object_store(
         }
     })
 }
+
 async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.expect("ctrl-c");
