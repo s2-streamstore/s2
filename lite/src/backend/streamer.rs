@@ -366,15 +366,7 @@ impl Streamer {
         }
     }
 
-    async fn run(self, msg_rx: mpsc::UnboundedReceiver<Message>) {
-        self.run_with_dormant_timeout(msg_rx, DORMANT_TIMEOUT).await;
-    }
-
-    async fn run_with_dormant_timeout(
-        mut self,
-        mut msg_rx: mpsc::UnboundedReceiver<Message>,
-        dormant_timeout: Duration,
-    ) {
+    async fn run(mut self, mut msg_rx: mpsc::UnboundedReceiver<Message>) {
         let dormancy = tokio::time::sleep(Duration::MAX);
         tokio::pin!(dormancy);
         loop {
@@ -387,7 +379,7 @@ impl Streamer {
                 }
             }
             let active_followers = self.active_followers.load(Ordering::Relaxed);
-            dormancy.as_mut().reset(Instant::now() + dormant_timeout);
+            dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
                 Some(msg) = msg_rx.recv() => {
                     match msg {
