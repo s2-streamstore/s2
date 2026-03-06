@@ -187,6 +187,8 @@ impl Backend {
                     }
                     match client.follow(state.start_seq_num).await? {
                         Ok(mut follow_rx) => {
+                            // Re-entering follow after lagged recovery must not extend the
+                            // absolute wait budget unless records were actually delivered.
                             state.arm_wait_deadline_if_unset();
                             if state.wait_deadline_expired() {
                                 break;
@@ -375,7 +377,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytesize::ByteSize;
-    use futures::{FutureExt as _, StreamExt};
+    use futures::StreamExt;
     use s2_common::{
         read_extent::{ReadLimit, ReadUntil},
         types::{
@@ -671,11 +673,7 @@ mod tests {
 
         let next = session.as_mut().next().await;
         assert!(
-            matches!(next, None | Some(Ok(ReadSessionOutput::Heartbeat(_)))),
-            "lagged recovery should not emit a catch-up batch when DB records are gone"
-        );
-        assert!(
-            matches!(session.as_mut().next().now_or_never(), Some(None)),
+            next.is_none(),
             "session should close immediately once the original wait budget has elapsed"
         );
     }
