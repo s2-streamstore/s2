@@ -59,12 +59,12 @@ impl PendingStreamDoe {
     fn latest_deadline_for_current_config(
         &self,
         min_age: Duration,
-        doe_config_epoch: u64,
+        doe_epoch: u64,
     ) -> Option<TimestampSecs> {
         self.deadlines
             .iter()
             .filter_map(|entry| {
-                (entry.value.min_age == min_age && entry.value.doe_config_epoch == doe_config_epoch)
+                (entry.value.min_age == min_age && entry.value.doe_epoch == doe_epoch)
                     .then_some(entry.deadline)
             })
             .max()
@@ -148,7 +148,7 @@ impl Backend {
                     .filter(|age| !age.is_zero())
                 {
                     if let Some(max_deadline) =
-                        pending.latest_deadline_for_current_config(min_age, meta.doe_config_epoch)
+                        pending.latest_deadline_for_current_config(min_age, meta.doe_epoch)
                     {
                         !self.stream_has_records(stream_id).await?
                             && self
@@ -277,7 +277,7 @@ impl Backend {
                 kv::stream_doe_deadline::ser_value(
                     kv::stream_doe_deadline::StreamDoeDeadlineValue {
                         min_age,
-                        doe_config_epoch: meta.doe_config_epoch,
+                        doe_epoch: meta.doe_epoch,
                     },
                 ),
                 &PutOptions::default(),
@@ -307,12 +307,9 @@ mod tests {
 
     fn doe_deadline_value(
         min_age: Duration,
-        doe_config_epoch: u64,
+        doe_epoch: u64,
     ) -> kv::stream_doe_deadline::StreamDoeDeadlineValue {
-        kv::stream_doe_deadline::StreamDoeDeadlineValue {
-            min_age,
-            doe_config_epoch,
-        }
+        kv::stream_doe_deadline::StreamDoeDeadlineValue { min_age, doe_epoch }
     }
 
     fn stream_meta() -> kv::stream_meta::StreamMeta {
@@ -333,13 +330,13 @@ mod tests {
     fn stream_meta_with_config_and_epoch(
         config: OptionalStreamConfig,
         created_at: OffsetDateTime,
-        doe_config_epoch: u64,
+        doe_epoch: u64,
     ) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
             config,
             created_at,
             deleted_at: None,
-            doe_config_epoch,
+            doe_epoch,
             creation_idempotency_key: None,
         }
     }
@@ -669,9 +666,12 @@ mod tests {
         let mut expected = vec![deadline_a, deadline_b];
         expected.sort();
         assert_eq!(deadlines, expected);
-        assert!(pending.deadlines.iter().all(
-            |entry| entry.value.min_age == MIN_AGE && entry.value.doe_config_epoch == DOE_EPOCH
-        ));
+        assert!(
+            pending
+                .deadlines
+                .iter()
+                .all(|entry| entry.value.min_age == MIN_AGE && entry.value.doe_epoch == DOE_EPOCH)
+        );
 
         backend
             .process_stream_doe(stream_id, pending)

@@ -66,13 +66,13 @@ impl StreamerId {
 struct DeleteOnEmptyDeadline {
     deadline: kv::timestamp::TimestampSecs,
     min_age: Duration,
-    doe_config_epoch: u64,
+    doe_epoch: u64,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct StreamerRuntimeConfig {
     pub stream: OptionalStreamConfig,
-    pub doe_config_epoch: u64,
+    pub doe_epoch: u64,
 }
 
 impl StreamerRuntimeConfig {
@@ -341,7 +341,7 @@ impl Streamer {
             Some(DeleteOnEmptyDeadline {
                 deadline,
                 min_age,
-                doe_config_epoch: self.config.doe_config_epoch,
+                doe_epoch: self.config.doe_epoch,
             })
         } else {
             None
@@ -793,7 +793,7 @@ async fn db_submit_append(
             kv::stream_doe_deadline::ser_key(doe_deadline.deadline, stream_id),
             kv::stream_doe_deadline::ser_value(kv::stream_doe_deadline::StreamDoeDeadlineValue {
                 min_age: doe_deadline.min_age,
-                doe_config_epoch: doe_deadline.doe_config_epoch,
+                doe_epoch: doe_deadline.doe_epoch,
             }),
         );
     }
@@ -1080,7 +1080,7 @@ mod tests {
             msg_tx,
             config: StreamerRuntimeConfig {
                 stream: OptionalStreamConfig::default(),
-                doe_config_epoch: 0,
+                doe_epoch: 0,
             },
             fencing_token: CommandState {
                 state: FencingToken::default(),

@@ -140,7 +140,7 @@ impl Backend {
             stream_id,
             config: StreamerRuntimeConfig {
                 stream: meta.config,
-                doe_config_epoch: meta.doe_config_epoch,
+                doe_epoch: meta.doe_epoch,
             },
             tail_pos,
             fencing_token,
@@ -364,7 +364,7 @@ mod tests {
             config: OptionalStreamConfig::default(),
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
-            doe_config_epoch: 0,
+            doe_epoch: 0,
             creation_idempotency_key: None,
         };
 

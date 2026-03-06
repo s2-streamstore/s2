@@ -37,7 +37,7 @@ fn retention_age(config: &OptionalStreamConfig) -> Option<Duration> {
     config.retention_policy.unwrap_or_default().age()
 }
 
-fn next_doe_config_epoch(
+fn next_doe_epoch(
     current_epoch: u64,
     previous_min_age: Option<std::time::Duration>,
     current_min_age: Option<std::time::Duration>,
@@ -118,7 +118,7 @@ async fn seed_doe_deadline_if_needed(
     prior_retention_age: Option<Duration>,
     current_doe_min_age: Option<Duration>,
     current_retention_age: Option<Duration>,
-    doe_config_epoch: u64,
+    doe_epoch: u64,
 ) -> Result<(), StorageError> {
     if prior_doe_min_age == current_doe_min_age && prior_retention_age == current_retention_age {
         return Ok(());
@@ -136,7 +136,7 @@ async fn seed_doe_deadline_if_needed(
         kv::stream_doe_deadline::ser_key(deadline, stream_id),
         kv::stream_doe_deadline::ser_value(kv::stream_doe_deadline::StreamDoeDeadlineValue {
             min_age,
-            doe_config_epoch,
+            doe_epoch,
         }),
     )?;
     Ok(())
@@ -226,7 +226,7 @@ impl Backend {
         let mut existing_meta_opt = None;
         let mut prior_doe_min_age = None;
         let mut prior_retention_age = None;
-        let mut prior_doe_config_epoch = 0;
+        let mut prior_doe_epoch = 0;
 
         if let Some(existing_meta) =
             db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?
@@ -242,7 +242,7 @@ impl Backend {
                 .min_age
                 .filter(|age| !age.is_zero());
             prior_retention_age = retention_age(&existing_meta.config);
-            prior_doe_config_epoch = existing_meta.doe_config_epoch;
+            prior_doe_epoch = existing_meta.doe_epoch;
             match mode {
                 CreateMode::CreateOnly(_) => {
                     return if creation_idempotency_key.is_some()
@@ -276,17 +276,13 @@ impl Backend {
             .into();
         let current_doe_min_age = doe_min_age(&resolved);
         let current_retention_age = retention_age(&resolved);
-        let doe_config_epoch = next_doe_config_epoch(
-            prior_doe_config_epoch,
-            prior_doe_min_age,
-            current_doe_min_age,
-        );
+        let doe_epoch = next_doe_epoch(prior_doe_epoch, prior_doe_min_age, current_doe_min_age);
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
             created_at,
             deleted_at: None,
-            doe_config_epoch,
+            doe_epoch,
             creation_idempotency_key,
         };
 
@@ -320,7 +316,7 @@ impl Backend {
             prior_retention_age,
             current_doe_min_age,
             current_retention_age,
-            doe_config_epoch,
+            doe_epoch,
         )
         .await?;
 
@@ -332,7 +328,7 @@ impl Backend {
         if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
             client.advise_reconfig(StreamerRuntimeConfig {
                 stream: resolved,
-                doe_config_epoch,
+                doe_epoch,
             });
         }
 
@@ -408,16 +404,12 @@ impl Backend {
             .min_age
             .filter(|age| !age.is_zero());
         let prior_retention_age = retention_age(&meta.config);
-        let prior_doe_config_epoch = meta.doe_config_epoch;
+        let prior_doe_epoch = meta.doe_epoch;
 
         meta.config = meta.config.reconfigure(reconfig);
         let current_doe_min_age = doe_min_age(&meta.config);
         let current_retention_age = retention_age(&meta.config);
-        meta.doe_config_epoch = next_doe_config_epoch(
-            prior_doe_config_epoch,
-            prior_doe_min_age,
-            current_doe_min_age,
-        );
+        meta.doe_epoch = next_doe_epoch(prior_doe_epoch, prior_doe_min_age, current_doe_min_age);
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
@@ -429,7 +421,7 @@ impl Backend {
             prior_retention_age,
             current_doe_min_age,
             current_retention_age,
-            meta.doe_config_epoch,
+            meta.doe_epoch,
         )
         .await?;
 
@@ -441,7 +433,7 @@ impl Backend {
         if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
             client.advise_reconfig(StreamerRuntimeConfig {
                 stream: meta.config.clone(),
-                doe_config_epoch: meta.doe_config_epoch,
+                doe_epoch: meta.doe_epoch,
             });
         }
 
