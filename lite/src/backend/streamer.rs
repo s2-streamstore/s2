@@ -3,7 +3,7 @@ use std::{
     ops::{Range, RangeTo},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -101,8 +101,6 @@ impl Spawner {
         } = self;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let active_followers = Arc::new(AtomicUsize::new(0));
-
         let streamer = Streamer {
             db,
             stream_id,
@@ -123,7 +121,6 @@ impl Spawner {
             pending_appends: append::PendingAppends::new(),
             stable_pos: tail_pos,
             follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
-            active_followers: active_followers.clone(),
             durability_notifier,
             bgtask_trigger_tx,
         };
@@ -176,7 +173,6 @@ struct Streamer {
     pending_appends: append::PendingAppends,
     stable_pos: StreamPosition,
     follow_tx: broadcast::Sender<Vec<Metered<SequencedRecord>>>,
-    active_followers: Arc<AtomicUsize>,
     durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
@@ -378,7 +374,6 @@ impl Streamer {
                     assert!(self.stable_pos.seq_num < self.trim_point.applied_point.end);
                 }
             }
-            let active_followers = self.active_followers.load(Ordering::Acquire);
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
                 Some(msg) = msg_rx.recv() => {
@@ -398,13 +393,7 @@ impl Streamer {
                             reply_tx,
                         } => {
                             let reply = if start_seq_num == self.stable_pos.seq_num {
-                                Ok(FollowReceiver {
-                                    _guard: FollowGuard::new(
-                                        self.active_followers.clone(),
-                                        self.msg_tx.clone(),
-                                    ),
-                                    rx: self.follow_tx.subscribe(),
-                                })
+                                Ok(self.follow_tx.subscribe())
                             } else {
                                 Err(self.stable_pos)
                             };
@@ -416,7 +405,6 @@ impl Streamer {
                         Message::Reconfigure { config } => {
                             self.config = config;
                         }
-                        Message::FollowerDropped => {}
                         Message::DurabilityStatus(status) => {
                             match status {
                                 Ok(durable_seq) => {
@@ -451,8 +439,10 @@ impl Streamer {
                         }
                     }
                 }
-                _ = dormancy.as_mut(), if active_followers == 0 => {
-                    break;
+                _ = dormancy.as_mut() => {
+                    if self.follow_tx.receiver_count() == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -468,7 +458,9 @@ enum Message {
     },
     Follow {
         start_seq_num: SeqNum,
-        reply_tx: oneshot::Sender<Result<FollowReceiver, StreamPosition>>,
+        reply_tx: oneshot::Sender<
+            Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>,
+        >,
     },
     CheckTail {
         reply_tx: oneshot::Sender<StreamPosition>,
@@ -476,46 +468,7 @@ enum Message {
     Reconfigure {
         config: OptionalStreamConfig,
     },
-    FollowerDropped,
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
-}
-
-pub(super) struct FollowReceiver {
-    _guard: FollowGuard,
-    rx: broadcast::Receiver<Vec<Metered<SequencedRecord>>>,
-}
-
-impl FollowReceiver {
-    pub async fn recv(
-        &mut self,
-    ) -> Result<Vec<Metered<SequencedRecord>>, broadcast::error::RecvError> {
-        self.rx.recv().await
-    }
-}
-
-struct FollowGuard {
-    active_followers: Arc<AtomicUsize>,
-    msg_tx: mpsc::UnboundedSender<Message>,
-}
-
-impl FollowGuard {
-    fn new(active_followers: Arc<AtomicUsize>, msg_tx: mpsc::UnboundedSender<Message>) -> Self {
-        active_followers.fetch_add(1, Ordering::Release);
-        Self {
-            active_followers,
-            msg_tx,
-        }
-    }
-}
-
-impl Drop for FollowGuard {
-    fn drop(&mut self) {
-        let prev = self.active_followers.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(prev > 0, "follow guard count underflow");
-        if prev == 1 {
-            let _ = self.msg_tx.send(Message::FollowerDropped);
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -550,7 +503,10 @@ impl StreamerClient {
     pub async fn follow(
         &self,
         start_seq_num: SeqNum,
-    ) -> Result<Result<FollowReceiver, StreamPosition>, StreamerMissingInActionError> {
+    ) -> Result<
+        Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>,
+        StreamerMissingInActionError,
+    > {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::Follow {
@@ -1059,7 +1015,6 @@ mod tests {
             .expect("db");
         let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
-        let active_followers = Arc::new(AtomicUsize::new(0));
         Streamer {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
@@ -1080,7 +1035,6 @@ mod tests {
             pending_appends: append::PendingAppends::new(),
             stable_pos: StreamPosition::MIN,
             follow_tx: broadcast::Sender::new(super::super::FOLLOWER_MAX_LAG),
-            active_followers,
             durability_notifier: DurabilityNotifier::spawn(&db),
             bgtask_trigger_tx,
         }
