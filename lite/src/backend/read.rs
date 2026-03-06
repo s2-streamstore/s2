@@ -187,8 +187,7 @@ impl Backend {
                     }
                     match client.follow(state.start_seq_num).await? {
                         Ok(mut follow_rx) => {
-                            // Re-entering follow after lagged recovery must not extend the
-                            // absolute wait budget unless records were actually delivered.
+                            // Only a delivered batch should reset the absolute wait budget.
                             state.arm_wait_deadline_if_unset();
                             if state.wait_deadline_expired() {
                                 break;
