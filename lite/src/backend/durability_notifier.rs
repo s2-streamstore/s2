@@ -39,13 +39,15 @@ fn waiters_are_sorted(waiters: &VecDeque<Waiter>) -> bool {
 impl DurabilityNotifier {
     pub fn spawn(db: &slatedb::Db) -> Self {
         let status_rx = db.subscribe();
-        let initial_durable_seq = status_rx.borrow().durable_seq;
+        let initial_status = status_rx.borrow().clone();
         let state = Arc::new(Mutex::new(State {
-            closed_reason: None,
-            last_durable_seq: initial_durable_seq,
+            closed_reason: initial_status.close_reason,
+            last_durable_seq: initial_status.durable_seq,
             waiters: VecDeque::new(),
         }));
-        tokio::spawn(run_notifier(status_rx, state.clone()));
+        if initial_status.close_reason.is_none() {
+            tokio::spawn(run_notifier(status_rx, state.clone()));
+        }
         Self { state }
     }
 
@@ -134,6 +136,8 @@ mod tests {
         },
         time::Duration,
     };
+
+    use slatedb::{Db, object_store::memory::InMemory};
 
     use super::*;
 
@@ -280,5 +284,31 @@ mod tests {
             .expect_err("closed notifier should fail immediately");
         assert_eq!(err, CloseReason::Clean);
         assert!(notifier.state.lock().waiters.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_on_closed_db_fails_subscribers_immediately() {
+        let object_store: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("test", object_store)
+            .build()
+            .await
+            .expect("build test db");
+        db.close().await.expect("close test db");
+
+        let notifier = DurabilityNotifier::spawn(&db);
+        let (tx, rx) = mpsc::channel();
+        notifier.subscribe(0, move |res| {
+            tx.send(res).expect("send callback result");
+        });
+
+        let err = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("callback should run")
+            .expect_err("closed db should fail immediately");
+        assert_eq!(err, CloseReason::Clean);
+        assert_eq!(
+            notifier.state.lock().closed_reason,
+            Some(CloseReason::Clean)
+        );
     }
 }
