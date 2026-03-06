@@ -1749,9 +1749,7 @@ async fn compression_with_no_side_effects_unary(
 ) -> Result<(), S2Error> {
     let config = s2_config(compression)
         .expect("valid S2 config")
-        .with_retry(
-            RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
-        );
+        .with_retry(RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects));
     let s2 = s2_sdk::S2::new(config).expect("valid S2");
 
     let basin_name = unique_basin_name();

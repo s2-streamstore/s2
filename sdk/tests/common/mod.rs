@@ -177,6 +177,11 @@ fn default_s2_config() -> Result<S2Config, ValidationError> {
 }
 
 pub fn s2_config(compression: Compression) -> Result<S2Config, ValidationError> {
+    // When both `aws-lc-rs` and `ring` features are enabled (e.g. via
+    // `--all-features`), rustls cannot auto-detect the provider so we
+    // install one explicitly. Ignore the error if another test already did.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let access_token =
         std::env::var("S2_ACCESS_TOKEN").map_err(|_| "S2_ACCESS_TOKEN env var not set")?;
     let mut config = S2Config::new(access_token);
