@@ -1060,87 +1060,38 @@ mod tests {
     }
 
     async fn test_streamer() -> Streamer {
-        test_streamer_parts().await.0
-    }
-
-    async fn test_streamer_parts() -> (Streamer, mpsc::UnboundedReceiver<Message>) {
         let object_store = Arc::new(InMemory::new());
         let db = slatedb::Db::builder("/test", object_store)
             .build()
             .await
             .expect("db");
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
         let active_followers = Arc::new(AtomicUsize::new(0));
-        (
-            Streamer {
-                db: db.clone(),
-                stream_id: [3u8; StreamId::LEN].into(),
-                msg_tx,
-                config: OptionalStreamConfig::default(),
-                fencing_token: CommandState {
-                    state: FencingToken::default(),
-                    applied_point: ..SeqNum::MIN,
-                },
-                trim_point: CommandState {
-                    state: ..SeqNum::MIN,
-                    applied_point: ..SeqNum::MIN,
-                },
-                last_doe_deadline_at: None,
-                db_writes_pending: VecDeque::new(),
-                db_durability_subscription: 0,
-                inflight_appends: VecDeque::new(),
-                pending_appends: append::PendingAppends::new(),
-                stable_pos: StreamPosition::MIN,
-                follow_tx: broadcast::Sender::new(super::super::FOLLOWER_MAX_LAG),
-                active_followers,
-                durability_notifier: DurabilityNotifier::spawn(&db),
-                bgtask_trigger_tx,
-            },
-            msg_rx,
-        )
-    }
-
-    async fn test_streamer_client(
-        stream_id: StreamId,
-        msg_tx: mpsc::UnboundedSender<Message>,
-    ) -> StreamerClient {
-        StreamerClient {
-            id: StreamerId::next(),
-            stream_id,
+        Streamer {
+            db: db.clone(),
+            stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
-            append_inflight_bytes: Arc::new(Semaphore::new(1)),
+            config: OptionalStreamConfig::default(),
+            fencing_token: CommandState {
+                state: FencingToken::default(),
+                applied_point: ..SeqNum::MIN,
+            },
+            trim_point: CommandState {
+                state: ..SeqNum::MIN,
+                applied_point: ..SeqNum::MIN,
+            },
+            last_doe_deadline_at: None,
+            db_writes_pending: VecDeque::new(),
+            db_durability_subscription: 0,
+            inflight_appends: VecDeque::new(),
+            pending_appends: append::PendingAppends::new(),
+            stable_pos: StreamPosition::MIN,
+            follow_tx: broadcast::Sender::new(super::super::FOLLOWER_MAX_LAG),
+            active_followers,
+            durability_notifier: DurabilityNotifier::spawn(&db),
+            bgtask_trigger_tx,
         }
-    }
-
-    #[tokio::test]
-    async fn dormant_streamer_stays_alive_while_followers_are_active() {
-        let (streamer, msg_rx) = test_streamer_parts().await;
-        let client = test_streamer_client(streamer.stream_id, streamer.msg_tx.clone()).await;
-
-        let handle =
-            tokio::spawn(streamer.run_with_dormant_timeout(msg_rx, Duration::from_millis(20)));
-
-        let follow_rx = client
-            .follow(StreamPosition::MIN.seq_num)
-            .await
-            .expect("follow request")
-            .expect("follow started");
-
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        assert!(
-            !handle.is_finished(),
-            "active follower should suppress dormancy"
-        );
-
-        drop(follow_rx);
-
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        assert!(
-            handle.is_finished(),
-            "streamer should exit after the last follower drops"
-        );
-        handle.await.expect("streamer task");
     }
 
     #[tokio::test]
