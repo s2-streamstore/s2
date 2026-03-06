@@ -30,45 +30,22 @@ struct PendingDoeDeadline {
     value: kv::stream_doe_deadline::StreamDoeDeadlineValue,
 }
 
-struct PendingStreamDoe {
-    deadlines: Vec<PendingDoeDeadline>,
+fn pending_deadline_keys(deadlines: &[PendingDoeDeadline]) -> Vec<TimestampSecs> {
+    deadlines.iter().map(|d| d.deadline).collect()
 }
 
-impl PendingStreamDoe {
-    fn new(
-        deadline: TimestampSecs,
-        value: kv::stream_doe_deadline::StreamDoeDeadlineValue,
-    ) -> Self {
-        Self {
-            deadlines: vec![PendingDoeDeadline { deadline, value }],
-        }
-    }
-
-    fn push(
-        &mut self,
-        deadline: TimestampSecs,
-        value: kv::stream_doe_deadline::StreamDoeDeadlineValue,
-    ) {
-        self.deadlines.push(PendingDoeDeadline { deadline, value });
-    }
-
-    fn keys(&self) -> Vec<TimestampSecs> {
-        self.deadlines.iter().map(|d| d.deadline).collect()
-    }
-
-    fn latest_deadline_for_current_config(
-        &self,
-        min_age: Duration,
-        doe_epoch: u64,
-    ) -> Option<TimestampSecs> {
-        self.deadlines
-            .iter()
-            .filter_map(|entry| {
-                (entry.value.min_age == min_age && entry.value.doe_epoch == doe_epoch)
-                    .then_some(entry.deadline)
-            })
-            .max()
-    }
+fn latest_deadline_for_current_config(
+    deadlines: &[PendingDoeDeadline],
+    min_age: Duration,
+    doe_epoch: u64,
+) -> Option<TimestampSecs> {
+    deadlines
+        .iter()
+        .filter_map(|entry| {
+            (entry.value.min_age == min_age && entry.value.doe_epoch == doe_epoch)
+                .then_some(entry.deadline)
+        })
+        .max()
 }
 
 impl Backend {
@@ -93,7 +70,7 @@ impl Backend {
     async fn list_pending_stream_doe(
         &self,
         now: TimestampSecs,
-    ) -> Result<Page<(StreamId, PendingStreamDoe)>, StorageError> {
+    ) -> Result<Page<(StreamId, Vec<PendingDoeDeadline>)>, StorageError> {
         static SCAN_OPTS: ScanOptions = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             dirty: false,
@@ -105,7 +82,7 @@ impl Backend {
             .db
             .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &SCAN_OPTS)
             .await?;
-        let mut pending: IndexMap<StreamId, PendingStreamDoe> = IndexMap::new();
+        let mut pending: IndexMap<StreamId, Vec<PendingDoeDeadline>> = IndexMap::new();
         let mut has_more = false;
         let mut count = 0;
         while let Some(kv) = it.next().await? {
@@ -114,8 +91,8 @@ impl Backend {
             assert!(deadline <= now);
             pending
                 .entry(stream_id)
-                .and_modify(|entry| entry.push(deadline, value))
-                .or_insert_with(|| PendingStreamDoe::new(deadline, value));
+                .or_default()
+                .push(PendingDoeDeadline { deadline, value });
             count += 1;
             if count == PENDING_LIST_LIMIT {
                 has_more = true;
@@ -128,9 +105,9 @@ impl Backend {
     async fn process_stream_doe(
         &self,
         stream_id: StreamId,
-        pending: PendingStreamDoe,
+        pending: Vec<PendingDoeDeadline>,
     ) -> Result<(), StreamDeleteOnEmptyError> {
-        let deadline_keys = pending.keys();
+        let deadline_keys = pending_deadline_keys(&pending);
         if let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? {
             let meta = self
                 .db_get(
@@ -148,7 +125,7 @@ impl Backend {
                     .filter(|age| !age.is_zero())
                 {
                     if let Some(max_deadline) =
-                        pending.latest_deadline_for_current_config(min_age, meta.doe_epoch)
+                        latest_deadline_for_current_config(&pending, min_age, meta.doe_epoch)
                     {
                         !self.stream_has_records(stream_id).await?
                             && self
@@ -657,18 +634,13 @@ mod tests {
         assert_eq!(page.values.len(), 1);
         let (pending_stream_id, pending) = page.values.into_iter().next().unwrap();
         assert_eq!(pending_stream_id, stream_id);
-        let mut deadlines = pending
-            .deadlines
-            .iter()
-            .map(|entry| entry.deadline)
-            .collect_vec();
+        let mut deadlines = pending.iter().map(|entry| entry.deadline).collect_vec();
         deadlines.sort();
         let mut expected = vec![deadline_a, deadline_b];
         expected.sort();
         assert_eq!(deadlines, expected);
         assert!(
             pending
-                .deadlines
                 .iter()
                 .all(|entry| entry.value.min_age == MIN_AGE && entry.value.doe_epoch == DOE_EPOCH)
         );
