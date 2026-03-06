@@ -187,7 +187,7 @@ impl Backend {
                     }
                     match client.follow(state.start_seq_num).await? {
                         Ok(mut follow_rx) => {
-                            state.ensure_wait_deadline();
+                            state.arm_wait_deadline_if_unset();
                             if state.wait_deadline_expired() {
                                 break;
                             }
@@ -298,10 +298,14 @@ struct ReadSessionState {
 }
 
 impl ReadSessionState {
-    fn ensure_wait_deadline(&mut self) {
+    fn arm_wait_deadline_if_unset(&mut self) {
         if self.wait_deadline.is_none() {
-            self.wait_deadline = self.wait.map(|wait| Instant::now() + wait);
+            self.reset_wait_deadline();
         }
+    }
+
+    fn reset_wait_deadline(&mut self) {
+        self.wait_deadline = self.wait.map(|wait| Instant::now() + wait);
     }
 
     fn wait_deadline_expired(&self) -> bool {
@@ -323,7 +327,7 @@ impl ReadSessionState {
         assert!(self.until.allow(last_record.position.timestamp));
         self.start_seq_num = last_record.position.seq_num + 1;
         self.limit = limit.remaining(count, bytes);
-        self.wait_deadline = self.wait.map(|wait| Instant::now() + wait);
+        self.reset_wait_deadline();
         ReadSessionOutput::Batch(batch)
     }
 }
