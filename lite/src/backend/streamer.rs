@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     ops::{Range, RangeTo},
     sync::{
         Arc,
@@ -7,8 +8,10 @@ use std::{
     time::Duration,
 };
 
-use bytesize::ByteSize;
-use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
+use futures::{
+    FutureExt as _,
+    future::{BoxFuture, OptionFuture},
+};
 use s2_common::{
     record::{
         CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
@@ -34,6 +37,7 @@ use crate::{
     backend::{
         append,
         bgtasks::BgtaskTrigger,
+        durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
             DeleteStreamError, RequestDroppedError, StreamerMissingInActionError,
@@ -44,7 +48,7 @@ use crate::{
     metrics,
 };
 
-const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 // Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
 const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
 
@@ -65,6 +69,12 @@ struct DeleteOnEmptyDeadline {
     doe_config_epoch: u64,
 }
 
+#[derive(Debug)]
+struct InFlightAppend {
+    db_seq: u64,
+    records: Vec<Metered<SequencedRecord>>,
+}
+
 pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
@@ -73,7 +83,8 @@ pub(super) struct Spawner {
     pub tail_pos: StreamPosition,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
-    pub append_inflight_max: ByteSize,
+    pub append_inflight_bytes_sema: Arc<Semaphore>,
+    pub durability_notifier: DurabilityNotifier,
     pub bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
@@ -87,20 +98,16 @@ impl Spawner {
             tail_pos,
             fencing_token,
             trim_point,
-            append_inflight_max,
+            append_inflight_bytes_sema,
+            durability_notifier,
             bgtask_trigger_tx,
         } = self;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-
-        let append_inflight_bytes_max =
-            (append_inflight_max.as_u64() as usize).min(Semaphore::MAX_PERMITS);
-
-        let append_inflight_bytes_sema = Arc::new(Semaphore::new(append_inflight_bytes_max));
-
         let streamer = Streamer {
             db,
             stream_id,
+            msg_tx: msg_tx.clone(),
             config,
             doe_config_epoch,
             fencing_token: CommandState {
@@ -112,10 +119,14 @@ impl Spawner {
                 applied_point: ..tail_pos.seq_num,
             },
             last_doe_deadline_at: None,
-            append_futs: FuturesOrdered::new(),
+            db_writes_pending: VecDeque::new(),
+            db_durability_subscription: 0,
+            inflight_appends: VecDeque::new(),
             pending_appends: append::PendingAppends::new(),
             stable_pos: tail_pos,
             follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
+            active_followers: 0,
+            durability_notifier,
             bgtask_trigger_tx,
         };
 
@@ -130,8 +141,7 @@ impl Spawner {
             id,
             stream_id,
             msg_tx,
-            append_inflight_bytes_sema,
-            append_inflight_bytes_max,
+            append_inflight_bytes: append_inflight_bytes_sema,
         }
     }
 }
@@ -157,16 +167,20 @@ impl<T> CommandState<T> {
 struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
+    msg_tx: mpsc::UnboundedSender<Message>,
     config: OptionalStreamConfig,
     doe_config_epoch: u64,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
-    append_futs:
-        FuturesOrdered<BoxFuture<'static, Result<Vec<Metered<SequencedRecord>>, slatedb::Error>>>,
+    db_writes_pending: VecDeque<BoxFuture<'static, Result<InFlightAppend, slatedb::Error>>>,
+    db_durability_subscription: u64,
+    inflight_appends: VecDeque<InFlightAppend>,
     pending_appends: append::PendingAppends,
     stable_pos: StreamPosition,
     follow_tx: broadcast::Sender<Vec<Metered<SequencedRecord>>>,
+    active_followers: usize,
+    durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
@@ -262,11 +276,10 @@ impl Streamer {
                         self.apply_command(sr.position.seq_num, cmd, append_type);
                     }
                 }
-                let first_pos = sequenced_records.first().expect("non-empty").position;
-                let next_pos = next_pos(&sequenced_records);
+                let (first_pos, next_pos) = pos_span(&sequenced_records);
                 let seq_num_range = first_pos.seq_num..next_pos.seq_num;
-                self.append_futs.push_back(
-                    db_write_records(
+                self.db_writes_pending.push_back(
+                    db_submit_append(
                         self.db.clone(),
                         self.stream_id,
                         retention,
@@ -320,39 +333,43 @@ impl Streamer {
         }
     }
 
-    fn handle_message(&mut self, msg: Message) {
-        match msg {
-            Message::Append {
-                input,
-                session,
-                reply_tx,
-                append_type,
-            } => {
-                if self.trim_point.state.end < SeqNum::MAX {
-                    self.handle_append(input, session, reply_tx, append_type);
-                }
+    fn subscribe_durability(&mut self) {
+        if let Some(inflight_append) = self
+            .inflight_appends
+            .front()
+            .filter(|pa| pa.db_seq > self.db_durability_subscription)
+        {
+            let msg_tx = self.msg_tx.clone();
+            self.durability_notifier
+                .subscribe(inflight_append.db_seq, move |res| {
+                    let _ = msg_tx.send(Message::DurabilityStatus(res));
+                });
+            self.db_durability_subscription = inflight_append.db_seq;
+        }
+    }
+
+    fn on_db_durable_seq_advanced(&mut self, db_durable_seq: u64) {
+        while self
+            .inflight_appends
+            .front()
+            .is_some_and(|pa| pa.db_seq <= db_durable_seq)
+        {
+            let records = self
+                .inflight_appends
+                .pop_front()
+                .expect("non-empty")
+                .records;
+            let (first_pos, stable_pos) = pos_span(&records);
+            assert!(self.stable_pos.seq_num <= stable_pos.seq_num);
+            self.pending_appends.on_stable(stable_pos);
+            self.stable_pos = stable_pos;
+            if self
+                .trim_point
+                .is_applied_in(&(first_pos.seq_num..stable_pos.seq_num))
+            {
+                let _ = self.bgtask_trigger_tx.send(BgtaskTrigger::StreamTrim);
             }
-            Message::Follow {
-                start_seq_num,
-                reply_tx,
-            } => {
-                let reply = if start_seq_num == self.stable_pos.seq_num {
-                    Ok(self.follow_tx.subscribe())
-                } else {
-                    Err(self.stable_pos)
-                };
-                let _ = reply_tx.send(reply);
-            }
-            Message::CheckTail { reply_tx } => {
-                let _ = reply_tx.send(self.stable_pos);
-            }
-            Message::Reconfigure {
-                config,
-                doe_config_epoch,
-            } => {
-                self.config = config;
-                self.doe_config_epoch = doe_config_epoch;
-            }
+            let _ = self.follow_tx.send(records);
         }
     }
 
@@ -370,32 +387,88 @@ impl Streamer {
             }
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
-                Some(msg) = msg_rx.recv() => {
-                    self.handle_message(msg);
-                }
-                Some(res) = self.append_futs.next() => {
+                biased;
+                Some(res) = OptionFuture::from(self.db_writes_pending.front_mut()) => {
+                    drop(self.db_writes_pending.pop_front().expect("polled"));
                     match res {
-                        Ok(records) => {
-                            let has_trim = records.iter().any(|record| {
-                                matches!(record.record, Record::Command(CommandRecord::Trim(_)))
-                            });
-                            let last_pos = records.last().expect("non-empty").position;
-                            let stable_pos = StreamPosition { seq_num: last_pos.seq_num + 1, timestamp: last_pos.timestamp };
-                            self.pending_appends.on_stable(stable_pos);
-                            self.stable_pos = stable_pos;
-                            if has_trim {
-                                let _ = self.bgtask_trigger_tx.send(BgtaskTrigger::StreamTrim);
+                        Ok(submitted_append) => {
+                            if let Some(prev) = self.inflight_appends.back() {
+                                assert!(prev.db_seq < submitted_append.db_seq);
                             }
-                            let _ = self.follow_tx.send(records);
-                        },
+                            self.inflight_appends.push_back(submitted_append);
+                            self.subscribe_durability();
+                        }
                         Err(db_err) => {
                             self.pending_appends.on_durability_failed(db_err);
                             break;
-                        },
+                        }
+                    }
+                }
+                Some(msg) = msg_rx.recv() => {
+                    match msg {
+                        Message::Append {
+                            input,
+                            session,
+                            reply_tx,
+                            append_type,
+                        } => {
+                            if self.trim_point.state.end < SeqNum::MAX {
+                                self.handle_append(input, session, reply_tx, append_type);
+                            }
+                        }
+                        Message::Follow {
+                            start_seq_num,
+                            reply_tx,
+                        } => {
+                            let reply = if start_seq_num == self.stable_pos.seq_num {
+                                self.active_followers += 1;
+                                Ok(FollowReceiver {
+                                    _guard: FollowGuard {
+                                        msg_tx: self.msg_tx.clone(),
+                                    },
+                                    rx: self.follow_tx.subscribe(),
+                                })
+                            } else {
+                                Err(self.stable_pos)
+                            };
+                            let _ = reply_tx.send(reply);
+                        }
+                        Message::CheckTail { reply_tx } => {
+                            let _ = reply_tx.send(self.stable_pos);
+                        }
+                        Message::Reconfigure {
+                            config,
+                            doe_config_epoch,
+                        } => {
+                            self.config = config;
+                            self.doe_config_epoch = doe_config_epoch;
+                        }
+                        Message::FollowerDropped => {
+                            assert!(self.active_followers > 0, "follow guard count underflow");
+                            self.active_followers -= 1;
+                        }
+                        Message::DurabilityStatus(status) => {
+                            match status {
+                                Ok(durable_seq) => {
+                                    assert!(durable_seq >= self.db_durability_subscription);
+                                    self.on_db_durable_seq_advanced(durable_seq);
+                                    self.subscribe_durability();
+                                }
+                                Err(reason) => {
+                                    self.pending_appends.on_durability_failed(slatedb::Error::closed(
+                                        "database closed while waiting for durability".to_owned(),
+                                        reason,
+                                    ));
+                                    break;
+                                },
+                            }
+                        }
                     }
                 }
                 _ = dormancy.as_mut() => {
-                    break;
+                    if self.active_followers == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -411,9 +484,7 @@ enum Message {
     },
     Follow {
         start_seq_num: SeqNum,
-        reply_tx: oneshot::Sender<
-            Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>,
-        >,
+        reply_tx: oneshot::Sender<Result<FollowReceiver, StreamPosition>>,
     },
     CheckTail {
         reply_tx: oneshot::Sender<StreamPosition>,
@@ -422,6 +493,31 @@ enum Message {
         config: OptionalStreamConfig,
         doe_config_epoch: u64,
     },
+    FollowerDropped,
+    DurabilityStatus(Result<u64, slatedb::CloseReason>),
+}
+
+pub(super) struct FollowReceiver {
+    _guard: FollowGuard,
+    rx: broadcast::Receiver<Vec<Metered<SequencedRecord>>>,
+}
+
+impl FollowReceiver {
+    pub async fn recv(
+        &mut self,
+    ) -> Result<Vec<Metered<SequencedRecord>>, broadcast::error::RecvError> {
+        self.rx.recv().await
+    }
+}
+
+struct FollowGuard {
+    msg_tx: mpsc::UnboundedSender<Message>,
+}
+
+impl Drop for FollowGuard {
+    fn drop(&mut self) {
+        let _ = self.msg_tx.send(Message::FollowerDropped);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -429,8 +525,7 @@ pub(super) struct StreamerClient {
     id: StreamerId,
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
-    append_inflight_bytes_sema: Arc<Semaphore>,
-    append_inflight_bytes_max: usize,
+    append_inflight_bytes: Arc<Semaphore>,
 }
 
 impl StreamerClient {
@@ -457,10 +552,7 @@ impl StreamerClient {
     pub async fn follow(
         &self,
         start_seq_num: SeqNum,
-    ) -> Result<
-        Result<broadcast::Receiver<Vec<Metered<SequencedRecord>>>, StreamPosition>,
-        StreamerMissingInActionError,
-    > {
+    ) -> Result<Result<FollowReceiver, StreamPosition>, StreamerMissingInActionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::Follow {
@@ -478,10 +570,10 @@ impl StreamerClient {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
         let start = Instant::now();
-        // Allow admitting at least one batch if none are in flight.
-        let num_permits = metered_size.clamp(1, self.append_inflight_bytes_max) as u32;
+        let num_permits =
+            u32::try_from(metered_size.max(1)).expect("append batch size fits in u32");
         let sema_permit = tokio::select! {
-            res = self.append_inflight_bytes_sema.acquire_many(num_permits) => {
+            res = self.append_inflight_bytes.acquire_many(num_permits) => {
                 res.map_err(|_| StreamerMissingInActionError)
             }
             _ = self.msg_tx.closed() => {
@@ -595,6 +687,16 @@ impl AppendPermit<'_> {
     }
 }
 
+fn pos_span<T>(records: &[T]) -> (StreamPosition, StreamPosition)
+where
+    T: std::ops::Deref<Target = SequencedRecord>,
+{
+    (
+        records.first().expect("non-empty").position,
+        next_pos(records),
+    )
+}
+
 pub fn next_pos<T>(records: &[T]) -> StreamPosition
 where
     T: std::ops::Deref<Target = SequencedRecord>,
@@ -642,7 +744,7 @@ fn sequenced_records(
     Ok(sequenced_records)
 }
 
-async fn db_write_records(
+async fn db_submit_append(
     db: slatedb::Db,
     stream_id: StreamId,
     retention: RetentionPolicy,
@@ -650,7 +752,7 @@ async fn db_write_records(
     records: Vec<Metered<SequencedRecord>>,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
-) -> Result<Vec<Metered<SequencedRecord>>, slatedb::Error> {
+) -> Result<InFlightAppend, slatedb::Error> {
     let ttl = match retention {
         RetentionPolicy::Age(age) => Ttl::ExpireAfter(age.as_millis() as u64),
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
@@ -696,19 +798,26 @@ async fn db_write_records(
         kv::stream_tail_position::ser_value(next_pos(&records), write_timestamp_secs),
     );
     static WRITE_OPTS: WriteOptions = WriteOptions {
-        await_durable: true,
+        await_durable: false,
     };
-    db.write_with_options(wb, &WRITE_OPTS).await?;
-    Ok(records)
+    let write_handle = db.write_with_options(wb, &WRITE_OPTS).await?;
+    Ok(InFlightAppend {
+        db_seq: write_handle.seqnum(),
+        records,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, sync::Arc};
+
     use bytes::Bytes;
     use s2_common::{
         record::{EnvelopeRecord, Metered, Record},
         types::stream::{AppendRecord, AppendRecordParts},
     };
+    use slatedb::object_store::memory::InMemory;
+    use tokio::sync::{broadcast, mpsc, oneshot};
 
     use super::*;
 
@@ -940,5 +1049,181 @@ mod tests {
         assert!(!state.is_applied_in(&(5..10)));
         assert!(state.is_applied_in(&(4..10)));
         assert!(state.is_applied_in(&(0..5)));
+    }
+
+    fn append_input(body: &[u8]) -> AppendInput {
+        AppendInput {
+            records: vec![test_record(Bytes::copy_from_slice(body), None)]
+                .try_into()
+                .expect("valid batch"),
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
+
+    async fn test_streamer() -> Streamer {
+        let object_store = Arc::new(InMemory::new());
+        let db = slatedb::Db::builder("/test", object_store)
+            .build()
+            .await
+            .expect("db");
+        let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
+        let (bgtask_trigger_tx, _) = broadcast::channel(16);
+        Streamer {
+            db: db.clone(),
+            stream_id: [3u8; StreamId::LEN].into(),
+            msg_tx,
+            config: OptionalStreamConfig::default(),
+            doe_config_epoch: 0,
+            fencing_token: CommandState {
+                state: FencingToken::default(),
+                applied_point: ..SeqNum::MIN,
+            },
+            trim_point: CommandState {
+                state: ..SeqNum::MIN,
+                applied_point: ..SeqNum::MIN,
+            },
+            last_doe_deadline_at: None,
+            db_writes_pending: VecDeque::new(),
+            db_durability_subscription: 0,
+            inflight_appends: VecDeque::new(),
+            pending_appends: append::PendingAppends::new(),
+            stable_pos: StreamPosition::MIN,
+            follow_tx: broadcast::Sender::new(super::super::FOLLOWER_MAX_LAG),
+            active_followers: 0,
+            durability_notifier: DurabilityNotifier::spawn(&db),
+            bgtask_trigger_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn append_acks_release_only_after_durable_seq_and_in_order() {
+        let mut streamer = test_streamer().await;
+        let mut follow_rx = streamer.follow_tx.subscribe();
+
+        let (tx1, mut rx1) = oneshot::channel();
+        streamer.handle_append(append_input(b"p0"), None, tx1, AppendType::Regular);
+
+        let (tx2, mut rx2) = oneshot::channel();
+        streamer.handle_append(append_input(b"p1"), None, tx2, AppendType::Regular);
+
+        let (tx3, mut rx3) = oneshot::channel();
+        streamer.handle_append(append_input(b"p2"), None, tx3, AppendType::Regular);
+
+        let mut db_seqs = Vec::new();
+        while let Some(fut) = streamer.db_writes_pending.pop_front() {
+            let submitted = fut.await.expect("db submit");
+            db_seqs.push(submitted.db_seq);
+            streamer.inflight_appends.push_back(submitted);
+        }
+        assert_eq!(db_seqs.len(), 3);
+        assert!(db_seqs.windows(2).all(|w| w[0] < w[1]));
+        assert!(matches!(
+            rx1.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            rx2.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            rx3.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let first_seq = db_seqs[0];
+        if first_seq > 0 {
+            streamer.on_db_durable_seq_advanced(first_seq - 1);
+            assert!(matches!(
+                rx1.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+
+        streamer.on_db_durable_seq_advanced(first_seq);
+        let ack1 = rx1.await.expect("ack 1").expect("append ack 1");
+        assert_eq!(ack1.start.seq_num, 0);
+        assert_eq!(ack1.end.seq_num, 1);
+        assert_eq!(ack1.tail.seq_num, 1);
+        assert!(matches!(
+            rx2.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            rx3.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let batch1 = follow_rx.recv().await.expect("follow batch 1");
+        assert_eq!(batch1.len(), 1);
+        let Record::Envelope(env) = &batch1[0].record else {
+            panic!("expected envelope")
+        };
+        assert_eq!(env.body().as_ref(), b"p0");
+
+        streamer.on_db_durable_seq_advanced(db_seqs[2]);
+        let ack2 = rx2.await.expect("ack 2").expect("append ack 2");
+        let ack3 = rx3.await.expect("ack 3").expect("append ack 3");
+        assert_eq!(ack2.start.seq_num, 1);
+        assert_eq!(ack2.end.seq_num, 2);
+        assert_eq!(ack3.start.seq_num, 2);
+        assert_eq!(ack3.end.seq_num, 3);
+        assert_eq!(streamer.stable_pos.seq_num, 3);
+        assert!(streamer.inflight_appends.is_empty());
+
+        let batch2 = follow_rx.recv().await.expect("follow batch 2");
+        let batch3 = follow_rx.recv().await.expect("follow batch 3");
+        let Record::Envelope(env2) = &batch2[0].record else {
+            panic!("expected envelope")
+        };
+        let Record::Envelope(env3) = &batch3[0].record else {
+            panic!("expected envelope")
+        };
+        assert_eq!(env2.body().as_ref(), b"p1");
+        assert_eq!(env3.body().as_ref(), b"p2");
+    }
+
+    #[tokio::test]
+    async fn durable_seq_jump_releases_multiple_inflight_batches() {
+        let mut streamer = test_streamer().await;
+        let mut follow_rx = streamer.follow_tx.subscribe();
+        let mut ack_rxs = Vec::new();
+
+        for i in 0..4 {
+            let (tx, rx) = oneshot::channel();
+            ack_rxs.push(rx);
+            let payload = format!("jump-{i}");
+            streamer.handle_append(
+                append_input(payload.as_bytes()),
+                None,
+                tx,
+                AppendType::Regular,
+            );
+        }
+
+        let mut db_seqs = Vec::new();
+        while let Some(fut) = streamer.db_writes_pending.pop_front() {
+            let submitted = fut.await.expect("db submit");
+            db_seqs.push(submitted.db_seq);
+            streamer.inflight_appends.push_back(submitted);
+        }
+        assert_eq!(db_seqs.len(), 4);
+
+        streamer.on_db_durable_seq_advanced(*db_seqs.last().expect("non-empty"));
+
+        for (i, rx) in ack_rxs.into_iter().enumerate() {
+            let ack = rx.await.expect("ack").expect("append ack");
+            assert_eq!(ack.start.seq_num, i as u64);
+            assert_eq!(ack.end.seq_num, i as u64 + 1);
+        }
+
+        for i in 0..4 {
+            let batch = follow_rx.recv().await.expect("follow batch");
+            let Record::Envelope(env) = &batch[0].record else {
+                panic!("expected envelope")
+            };
+            assert_eq!(env.body(), format!("jump-{i}").as_bytes());
+        }
+        assert_eq!(streamer.stable_pos.seq_num, 4);
+        assert!(streamer.inflight_appends.is_empty());
     }
 }

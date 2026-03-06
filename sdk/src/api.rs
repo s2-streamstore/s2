@@ -35,12 +35,14 @@ use url::Url;
 #[cfg(feature = "_hidden")]
 use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
 
+use crate::frame_signal::FrameSignal;
+
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
-        AccessTokenId, BasinAuthority, BasinName, Compression, RetryConfig, S2Config, S2Endpoints,
-        StreamName,
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, RetryConfig,
+        S2Config, S2Endpoints, StreamName,
     },
 };
 
@@ -346,7 +348,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         input: AppendInput,
-        retry_enabled: bool,
+        append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
         let url = self
             .base_url
@@ -359,7 +361,7 @@ impl BasinClient {
             .build()?;
         let response = self
             .request(request)
-            .with_retry_enabled(retry_enabled)
+            .with_append_retry_policy(append_retry_policy)
             .error_handler(|status, response| {
                 if status == StatusCode::PRECONDITION_FAILED {
                     Err(ApiError::AppendConditionFailed(
@@ -407,6 +409,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         inputs: I,
+        frame_signal: Option<FrameSignal>,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
         I: Stream<Item = AppendInput> + Send + 'static,
@@ -421,11 +424,17 @@ impl BasinClient {
             s2s::SessionMessage::regular(compression, &input).map(|msg| msg.encode())
         });
 
+        let body = client::Body::wrap_stream(encoded_stream);
+        let body = match frame_signal {
+            Some(signal) => body.monitored(signal),
+            None => body,
+        };
+
         let mut request_builder = self
             .client
             .post(url)
             .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
-            .body(client::Body::wrap_stream(encoded_stream))
+            .body(body)
             .timeout(self.client.request_timeout);
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
@@ -582,6 +591,18 @@ impl ApiError {
             _ => false,
         }
     }
+
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            Self::Server(status, err_resp) => matches!(
+                (*status, err_resp.code.as_str()),
+                (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+                    | (StatusCode::BAD_GATEWAY, "hot_server")
+            ),
+            Self::Client(err) => err.has_no_side_effects(),
+            _ => false,
+        }
+    }
 }
 
 impl From<client::Error> for ApiError {
@@ -615,6 +636,20 @@ pub enum ClientError {
 impl ClientError {
     pub fn is_retryable(&self) -> bool {
         !matches!(self, ClientError::Others(_))
+    }
+
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            ClientError::Connect(_)
+            | ClientError::Timeout
+            | ClientError::ConnectionClosedEarly(_)
+            | ClientError::RequestCanceled(_)
+            | ClientError::UnexpectedEof(_)
+            | ClientError::ConnectionReset(_)
+            | ClientError::ConnectionAborted(_)
+            | ClientError::Others(_) => false,
+            ClientError::ConnectionRefused(_) => true,
+        }
     }
 }
 
@@ -858,6 +893,8 @@ impl BaseClient {
             client: self,
             request,
             retry_enabled: true,
+            append_retry_policy: None,
+            frame_signal: None,
             error_handler: None,
         }
     }
@@ -877,13 +914,20 @@ struct RequestBuilder<'a> {
     client: &'a BaseClient,
     request: client::Request,
     retry_enabled: bool,
+    append_retry_policy: Option<AppendRetryPolicy>,
+    frame_signal: Option<FrameSignal>,
     error_handler: Option<ErrorHandlerFn>,
 }
 
 impl<'a> RequestBuilder<'a> {
-    fn with_retry_enabled(self, retry_enabled: bool) -> Self {
+    fn with_append_retry_policy(self, policy: AppendRetryPolicy) -> Self {
+        let frame_signal = match policy {
+            AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
+            AppendRetryPolicy::All => None,
+        };
         Self {
-            retry_enabled,
+            append_retry_policy: Some(policy),
+            frame_signal,
             ..self
         }
     }
@@ -906,9 +950,21 @@ impl<'a> RequestBuilder<'a> {
             .then(|| self.client.retry_builder.build());
 
         loop {
+            if let Some(ref signal) = self.frame_signal {
+                signal.reset();
+            }
+
+            let attempt_request = {
+                let mut r = request.try_clone().expect("body should not be a stream");
+                if let Some(ref signal) = self.frame_signal {
+                    r = r.with_monitored_body(signal.clone());
+                }
+                r
+            };
+
             let response = self
                 .client
-                .execute_unary(request.try_clone().expect("body should not be a stream"))
+                .execute_unary(attempt_request)
                 .await;
 
             let (err, retry_after) = match response {
@@ -952,7 +1008,7 @@ impl<'a> RequestBuilder<'a> {
                 Err(err) => (ApiError::from(err), None),
             };
 
-            if err.is_retryable()
+            if is_safe_to_retry(&err, self.append_retry_policy, self.frame_signal.as_ref())
                 && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
             {
                 let backoff = retry_after.map_or(backoff, |ra| ra.max(backoff));
@@ -975,6 +1031,20 @@ impl<'a> RequestBuilder<'a> {
             }
         }
     }
+}
+
+fn is_safe_to_retry(
+    err: &ApiError,
+    policy: Option<AppendRetryPolicy>,
+    frame_signal: Option<&FrameSignal>,
+) -> bool {
+    let policy_compliant = match policy {
+        None | Some(AppendRetryPolicy::All) => true,
+        Some(AppendRetryPolicy::NoSideEffects) => {
+            !frame_signal.is_none_or(|s| s.is_signalled()) || err.has_no_side_effects()
+        }
+    };
+    policy_compliant && err.is_retryable()
 }
 
 fn add_basin_header_if_required(
@@ -1093,6 +1163,87 @@ mod tests {
     /// This also serves as a regression test: if hyper-util changes its
     /// internal "dns error" tag, this test will fail, signaling that
     /// `classify_dns_source` needs updating.
+    fn server_error(status: StatusCode, code: &str) -> ApiError {
+        ApiError::Server(
+            status,
+            ApiErrorResponse {
+                code: code.to_owned(),
+                message: "test".to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn api_error_has_no_side_effects() {
+        // Server errors that guarantee no mutation.
+        assert!(server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited").has_no_side_effects());
+        assert!(server_error(StatusCode::BAD_GATEWAY, "hot_server").has_no_side_effects());
+
+        // Server errors that do NOT guarantee no mutation.
+        assert!(!server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal").has_no_side_effects());
+        assert!(!server_error(StatusCode::BAD_GATEWAY, "other").has_no_side_effects());
+        assert!(!server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects());
+    }
+
+    #[test]
+    fn client_error_has_no_side_effects() {
+        // Connection was never established.
+        assert!(ClientError::ConnectionRefused("test".into()).has_no_side_effects());
+
+        // May have side effects — data could have been sent/processed.
+        assert!(!ClientError::Connect("test".into()).has_no_side_effects());
+        assert!(!ClientError::Timeout.has_no_side_effects());
+        assert!(!ClientError::ConnectionClosedEarly("test".into()).has_no_side_effects());
+        assert!(!ClientError::RequestCanceled("test".into()).has_no_side_effects());
+        assert!(!ClientError::UnexpectedEof("test".into()).has_no_side_effects());
+        assert!(!ClientError::ConnectionReset("test".into()).has_no_side_effects());
+        assert!(!ClientError::ConnectionAborted("test".into()).has_no_side_effects());
+        assert!(!ClientError::Others("test".into()).has_no_side_effects());
+    }
+
+    #[test]
+    fn safe_to_retry_unary_no_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+
+        // Non-append requests (no policy) — retry if retryable.
+        assert!(is_safe_to_retry(&retryable, None, None));
+        assert!(!is_safe_to_retry(&non_retryable, None, None));
+    }
+
+    #[test]
+    fn safe_to_retry_unary_all_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let policy = Some(AppendRetryPolicy::All);
+
+        // All policy — retry if retryable, no frame signal checks.
+        assert!(is_safe_to_retry(&retryable, policy, None));
+        assert!(!is_safe_to_retry(&non_retryable, policy, None));
+    }
+
+    #[test]
+    fn safe_to_retry_unary_no_side_effects_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        let policy = Some(AppendRetryPolicy::NoSideEffects);
+        let signal = FrameSignal::new();
+
+        // Signal not set — safe to retry.
+        assert!(is_safe_to_retry(&retryable, policy, Some(&signal)));
+
+        // Signal set + error with possible side effects — not safe.
+        signal.signal();
+        assert!(!is_safe_to_retry(&retryable, policy, Some(&signal)));
+
+        // Signal set + no-side-effect error — safe.
+        assert!(is_safe_to_retry(&no_side_effect, policy, Some(&signal)));
+
+        // Signal set + non-retryable — never safe.
+        assert!(!is_safe_to_retry(&non_retryable, policy, Some(&signal)));
+    }
+
     #[tokio::test]
     async fn dns_error_message_is_clear() {
         let config = crate::types::S2Config::new("test-token".to_owned())

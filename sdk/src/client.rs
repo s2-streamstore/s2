@@ -39,6 +39,8 @@ use tokio::{
 use tokio_util::task::AbortOnDropHandle;
 use url::Url;
 
+use crate::frame_signal::{FrameSignal, RequestFrameMonitorBody};
+
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 90;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -111,6 +113,12 @@ impl Body {
         Self(BodyInner::Streaming(BoxBody::new(stream_body)))
     }
 
+    pub(crate) fn monitored(self, signal: FrameSignal) -> Self {
+        Self(BodyInner::Streaming(BoxBody::new(
+            RequestFrameMonitorBody::new(self.into_http_body(), signal),
+        )))
+    }
+
     fn as_bytes(&self) -> Option<&[u8]> {
         match &self.0 {
             BodyInner::Empty => Some(&[]),
@@ -154,6 +162,13 @@ pub struct Request {
 impl Request {
     pub fn headers_mut(&mut self) -> &mut HeaderMap {
         &mut self.headers
+    }
+
+    pub fn with_monitored_body(self, signal: FrameSignal) -> Self {
+        Self {
+            body: self.body.monitored(signal),
+            ..self
+        }
     }
 
     pub fn authority(&self) -> &str {

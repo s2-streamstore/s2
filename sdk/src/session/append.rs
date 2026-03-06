@@ -20,6 +20,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
+    frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
         AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB, S2Error, StreamName,
@@ -53,6 +54,13 @@ impl AppendSessionError {
             Self::Api(err) => err.is_retryable(),
             Self::AckTimeout => true,
             Self::ServerDisconnected => true,
+            _ => false,
+        }
+    }
+
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            Self::Api(err) => err.has_no_side_effects(),
             _ => false,
         }
     }
@@ -400,6 +408,11 @@ async fn run_session_with_retry(
     buffer_size: usize,
     terminal_err: Arc<OnceLock<S2Error>>,
 ) {
+    let frame_signal = match client.config.retry.append_retry_policy {
+        AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
+        AppendRetryPolicy::All => None,
+    };
+
     let mut state = SessionState {
         cmd_rx,
         inflight_appends: VecDeque::new(),
@@ -414,7 +427,7 @@ async fn run_session_with_retry(
     let mut retry_backoff = retry_builder.build();
 
     loop {
-        let result = run_session(&client, &stream, &mut state, buffer_size).await;
+        let result = run_session(&client, &stream, &mut state, buffer_size, &frame_signal).await;
 
         match result {
             Ok(()) => {
@@ -426,14 +439,12 @@ async fn run_session_with_retry(
                     retry_backoff.reset();
                 }
 
-                let retry_policy_compliant = retry_policy_compliant(
+                if is_safe_to_retry(
+                    &err,
                     client.config.retry.append_retry_policy,
-                    &state.inflight_appends,
-                );
-
-                if retry_policy_compliant
-                    && err.is_retryable()
-                    && let Some(backoff) = retry_backoff.next()
+                    !state.inflight_appends.is_empty(),
+                    frame_signal.as_ref(),
+                ) && let Some(backoff) = retry_backoff.next()
                 {
                     debug!(
                         %err,
@@ -445,7 +456,6 @@ async fn run_session_with_retry(
                 } else {
                     debug!(
                         %err,
-                        retry_policy_compliant,
                         retries_exhausted = retry_backoff.is_exhausted(),
                         "not retrying append session"
                     );
@@ -486,12 +496,21 @@ async fn run_session(
     stream: &StreamName,
     state: &mut SessionState,
     buffer_size: usize,
+    frame_signal: &Option<FrameSignal>,
 ) -> Result<(), AppendSessionError> {
-    let (input_tx, mut acks) = connect(client, stream, buffer_size).await?;
+    if let Some(s) = frame_signal {
+        s.reset();
+    }
+
+    let (input_tx, mut acks) = connect(client, stream, buffer_size, frame_signal.clone()).await?;
     let ack_timeout = client.config.request_timeout;
 
     if !state.inflight_appends.is_empty() {
         resend(state, &input_tx, &mut acks, ack_timeout).await?;
+
+        if let Some(s) = frame_signal {
+            s.reset();
+        }
 
         assert!(state.inflight_appends.is_empty());
         assert_eq!(state.inflight_bytes, 0);
@@ -677,11 +696,16 @@ async fn connect(
     client: &BasinClient,
     stream: &StreamName,
     buffer_size: usize,
+    frame_signal: Option<FrameSignal>,
 ) -> Result<(mpsc::Sender<AppendInput>, Streaming<AppendAck>), AppendSessionError> {
     let (input_tx, input_rx) = mpsc::channel::<AppendInput>(buffer_size);
     let ack_stream = Box::pin(
         client
-            .append_session(stream, ReceiverStream::new(input_rx).map(|i| i.into()))
+            .append_session(
+                stream,
+                ReceiverStream::new(input_rx).map(|i| i.into()),
+                frame_signal,
+            )
             .await?
             .map(|ack| match ack {
                 Ok(ack) => Ok(ack.into()),
@@ -770,18 +794,6 @@ impl From<StashedSubmission> for InflightAppend {
     }
 }
 
-fn retry_policy_compliant(
-    policy: AppendRetryPolicy,
-    inflight_appends: &VecDeque<InflightAppend>,
-) -> bool {
-    if policy == AppendRetryPolicy::All {
-        return true;
-    }
-    inflight_appends
-        .iter()
-        .all(|ia| policy.is_compliant(&ia.input))
-}
-
 enum Command {
     Submit {
         input: AppendInput,
@@ -804,6 +816,23 @@ impl Command {
             }
         }
     }
+}
+
+fn is_safe_to_retry(
+    err: &AppendSessionError,
+    policy: AppendRetryPolicy,
+    has_inflight: bool,
+    frame_signal: Option<&FrameSignal>,
+) -> bool {
+    let policy_compliant = match policy {
+        AppendRetryPolicy::All => true,
+        AppendRetryPolicy::NoSideEffects => {
+            !has_inflight
+                || !frame_signal.is_none_or(|s| s.is_signalled())
+                || err.has_no_side_effects()
+        }
+    };
+    policy_compliant && err.is_retryable()
 }
 
 const DEFAULT_CHANNEL_BUFFER_SIZE: usize = 100;
@@ -829,5 +858,74 @@ impl From<usize> for TimerEvent {
             0 => TimerEvent::AckDeadline,
             _ => panic!("invalid ordinal"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+
+    use super::{AppendSessionError, is_safe_to_retry};
+    use crate::{
+        api::{ApiError, ApiErrorResponse},
+        frame_signal::FrameSignal,
+        types::AppendRetryPolicy,
+    };
+
+    fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
+        AppendSessionError::Api(ApiError::Server(
+            status,
+            ApiErrorResponse {
+                code: code.to_owned(),
+                message: "test".to_owned(),
+            },
+        ))
+    }
+
+    #[test]
+    fn safe_to_retry_session_all_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let policy = AppendRetryPolicy::All;
+
+        // All policy — always policy-compliant, just needs retryable.
+        assert!(is_safe_to_retry(&retryable, policy, true, None));
+        assert!(!is_safe_to_retry(&non_retryable, policy, true, None));
+    }
+
+    #[test]
+    fn safe_to_retry_session_no_side_effects_policy() {
+        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        let policy = AppendRetryPolicy::NoSideEffects;
+        let signal = FrameSignal::new();
+
+        // No inflight — always safe.
+        signal.signal();
+        assert!(is_safe_to_retry(&retryable, policy, false, Some(&signal)));
+
+        // Inflight + signal not set — safe (no data sent this attempt).
+        signal.reset();
+        assert!(is_safe_to_retry(&retryable, policy, true, Some(&signal)));
+
+        // Inflight + signal set + error with possible side effects — not safe.
+        signal.signal();
+        assert!(!is_safe_to_retry(&retryable, policy, true, Some(&signal)));
+
+        // Inflight + signal set + no-side-effect error — safe.
+        assert!(is_safe_to_retry(
+            &no_side_effect,
+            policy,
+            true,
+            Some(&signal)
+        ));
+
+        // AckTimeout — retryable but has possible side effects.
+        assert!(!is_safe_to_retry(
+            &AppendSessionError::AckTimeout,
+            policy,
+            true,
+            Some(&signal),
+        ));
     }
 }

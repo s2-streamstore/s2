@@ -602,3 +602,79 @@ async fn test_append_session_large_batches() {
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, batch_count);
 }
+
+#[tokio::test]
+async fn test_append_session_pipeline_preserves_ack_tail_and_read_order() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "append-session-pipeline-order",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let expected_bodies = (0..32)
+        .map(|i| format!("msg-{i:02}").into_bytes())
+        .collect::<Vec<_>>();
+    let inputs = futures::stream::iter(
+        expected_bodies
+            .iter()
+            .map(|body| AppendInput {
+                records: create_test_record_batch(vec![Bytes::copy_from_slice(body)]),
+                match_seq_num: None,
+                fencing_token: None,
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let session = backend
+        .clone()
+        .append_session(basin_name.clone(), stream_name.clone(), inputs)
+        .await
+        .expect("Failed to create append session");
+    tokio::pin!(session);
+
+    let mut acks = Vec::new();
+    while let Some(result) = session.next().await {
+        acks.push(result.expect("append should succeed"));
+    }
+
+    assert_eq!(acks.len(), expected_bodies.len());
+    for (i, ack) in acks.iter().enumerate() {
+        assert_eq!(ack.start.seq_num, i as u64);
+        assert_eq!(ack.end.seq_num, i as u64 + 1);
+        assert!(
+            ack.tail.seq_num >= ack.end.seq_num,
+            "tail must include acknowledged append"
+        );
+        if let Some(prev) = i.checked_sub(1).and_then(|idx| acks.get(idx)) {
+            assert!(
+                ack.tail.seq_num >= prev.tail.seq_num,
+                "tail seq must be monotonic"
+            );
+        }
+    }
+
+    let tail = backend
+        .check_tail(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to check tail");
+    assert_eq!(tail.seq_num, expected_bodies.len() as u64);
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::ZERO),
+    };
+    let read_session = backend
+        .read(basin_name, stream_name, start, end)
+        .await
+        .expect("Failed to create read session");
+    let mut read_session = Box::pin(read_session);
+    let records = collect_records(&mut read_session).await;
+    assert_eq!(records.len(), expected_bodies.len());
+    assert_eq!(envelope_bodies(&records), expected_bodies);
+}

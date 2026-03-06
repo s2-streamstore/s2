@@ -372,7 +372,7 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::backend::{kv, stream_id::StreamId};
+    use crate::backend::{kv, stream_id::StreamId, streamer::DORMANT_TIMEOUT};
 
     #[tokio::test]
     async fn resolve_timestamp_bounded_to_stream() {
@@ -557,5 +557,123 @@ mod tests {
             outputs.len()
         );
         assert!(outputs.into_iter().all(|o| o.is_ok()));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn unbounded_follow_survives_streamer_dormancy() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let initial_record =
+            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("initial"))
+                .unwrap();
+        let initial_metered: s2_common::record::Metered<s2_common::record::Record> =
+            initial_record.into();
+        let initial_parts = AppendRecordParts {
+            timestamp: None,
+            record: initial_metered,
+        };
+        let initial_append_record: s2_common::types::stream::AppendRecord =
+            initial_parts.try_into().unwrap();
+        let initial_batch: AppendRecordBatch = vec![initial_append_record].try_into().unwrap();
+        let initial_input = AppendInput {
+            records: initial_batch,
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        backend
+            .append(basin.clone(), stream.clone(), initial_input)
+            .await
+            .unwrap();
+
+        let start = ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        };
+        let end = ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: None,
+        };
+        let session = backend
+            .read(basin.clone(), stream.clone(), start, end)
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should yield initial batch")
+            .expect("session should not error");
+        assert!(matches!(first, ReadSessionOutput::Batch(_)));
+
+        let second = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should enter follow mode")
+            .expect("session should not error");
+        assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
+
+        tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        let follow_record =
+            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("follow-1"))
+                .unwrap();
+        let follow_metered: s2_common::record::Metered<s2_common::record::Record> =
+            follow_record.into();
+        let follow_parts = AppendRecordParts {
+            timestamp: None,
+            record: follow_metered,
+        };
+        let follow_append_record: s2_common::types::stream::AppendRecord =
+            follow_parts.try_into().unwrap();
+        let follow_batch: AppendRecordBatch = vec![follow_append_record].try_into().unwrap();
+        let follow_input = AppendInput {
+            records: follow_batch,
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        backend.append(basin, stream, follow_input).await.unwrap();
+
+        let next = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should stay open after dormancy")
+            .expect("session should not error after dormancy");
+        let ReadSessionOutput::Batch(batch) = next else {
+            panic!("expected new batch after append");
+        };
+        assert_eq!(batch.records.len(), 1);
+        let record = batch.records.first().expect("batch should have one record");
+        let s2_common::record::Record::Envelope(envelope) = &record.record else {
+            panic!("expected envelope record");
+        };
+        assert_eq!(envelope.body().as_ref(), b"follow-1");
     }
 }
