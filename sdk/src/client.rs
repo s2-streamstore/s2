@@ -171,7 +171,7 @@ impl Request {
         }
     }
 
-    pub(crate) async fn compress(self) -> Result<Self, Error> {
+    pub async fn compress(self) -> Result<Self, Error> {
         let (body, content_encoding) = compress_body(self.body, self.compression).await?;
         let mut headers = self.headers;
         if let Some(encoding) = content_encoding {
