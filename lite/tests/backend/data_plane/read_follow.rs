@@ -175,6 +175,63 @@ async fn test_follow_mode_receives_new_data() {
     );
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_unbounded_follow_survives_streamer_dormancy() {
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream("follow-dormancy", "stream", OptionalStreamConfig::default())
+            .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"initial"]).await;
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: None,
+    };
+
+    let session = backend
+        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .await
+        .expect("Failed to create read session");
+    let mut session = Box::pin(session);
+
+    let first = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should yield initial batch")
+        .expect("session should not error");
+    assert!(matches!(first, ReadSessionOutput::Batch(_)));
+
+    let second = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should enter follow mode")
+        .expect("session should not error");
+    assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
+
+    tokio::time::advance(Duration::from_secs(61)).await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"follow-1"]).await;
+
+    let next = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should stay open after dormancy")
+        .expect("session should not error after dormancy");
+
+    let ReadSessionOutput::Batch(batch) = next else {
+        panic!("expected new batch after append");
+    };
+    assert_eq!(envelope_bodies(&batch.records), vec![b"follow-1".to_vec()]);
+}
+
 #[tokio::test]
 async fn test_follow_mode_with_multiple_appends() {
     let (backend, basin_name, stream_name) =
