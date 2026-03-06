@@ -639,6 +639,7 @@ mod tests {
         assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
 
         tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
 
         let follow_record =
             s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("follow-1"))
