@@ -232,10 +232,15 @@ async fn init_object_store(
                 std::env::var_os("AWS_SECRET_ACCESS_KEY").and_then(|s| s.into_string().ok()),
             ) {
                 (endpoint, Some(key_id), Some(secret_key)) => {
-                    info!(key_id, "using static credentials from env vars");
+                    info!(endpoint, key_id, "using static credentials from env vars");
+
                     if let Some(endpoint) = endpoint {
+                        if endpoint.starts_with("http://") {
+                            builder = builder.with_allow_http(true);
+                        }
                         builder = builder.with_endpoint(endpoint);
                     }
+
                     builder = builder.with_credentials(Arc::new(
                         object_store::StaticCredentialProvider::new(
                             object_store::aws::AwsCredential {

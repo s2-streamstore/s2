@@ -98,6 +98,8 @@ impl Backend {
             start_seq_num: self.read_start_seq_num(stream_id, start, end, tail).await?,
             limit: EvaluatedReadLimit::Remaining(end.limit),
             until: end.until,
+            wait: end.wait,
+            wait_deadline: None,
             tail,
         };
         let db = self.db.clone();
@@ -185,8 +187,11 @@ impl Backend {
                     }
                     match client.follow(state.start_seq_num).await? {
                         Ok(mut follow_rx) => {
-                            let mut wait_deadline =
-                                end.wait.map(|wait| Instant::now() + wait);
+                            // Only a delivered batch should reset the absolute wait budget.
+                            state.arm_wait_deadline_if_unset();
+                            if state.wait_deadline_expired() {
+                                break;
+                            }
                             yield ReadSessionOutput::Heartbeat(state.tail);
                             while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                                 tokio::select! {
@@ -202,9 +207,6 @@ impl Backend {
                                                         records: records.drain(..allowed_count).collect(),
                                                         tail: Some(tail),
                                                     });
-                                                    wait_deadline = end
-                                                        .wait
-                                                        .map(|wait| Instant::now() + wait);
                                                 }
                                                 if allowed_count < count {
                                                     break 'session;
@@ -224,7 +226,7 @@ impl Backend {
                                         yield ReadSessionOutput::Heartbeat(state.tail);
                                         Ok(())
                                     }
-                                    _ = wait_sleep_until(wait_deadline) => {
+                                    _ = wait_sleep_until(state.wait_deadline) => {
                                         break 'session;
                                     }
                                 }?;
@@ -291,10 +293,27 @@ struct ReadSessionState {
     start_seq_num: u64,
     limit: EvaluatedReadLimit,
     until: ReadUntil,
+    wait: Option<Duration>,
+    wait_deadline: Option<Instant>,
     tail: StreamPosition,
 }
 
 impl ReadSessionState {
+    fn arm_wait_deadline_if_unset(&mut self) {
+        if self.wait_deadline.is_none() {
+            self.reset_wait_deadline();
+        }
+    }
+
+    fn reset_wait_deadline(&mut self) {
+        self.wait_deadline = self.wait.map(|wait| Instant::now() + wait);
+    }
+
+    fn wait_deadline_expired(&self) -> bool {
+        self.wait_deadline
+            .is_some_and(|deadline| deadline <= Instant::now())
+    }
+
     fn on_batch(&mut self, batch: ReadBatch) -> ReadSessionOutput {
         if let Some(tail) = batch.tail {
             self.tail = tail;
@@ -309,6 +328,7 @@ impl ReadSessionState {
         assert!(self.until.allow(last_record.position.timestamp));
         self.start_seq_num = last_record.position.seq_num + 1;
         self.limit = limit.remaining(count, bytes);
+        self.reset_wait_deadline();
         ReadSessionOutput::Batch(batch)
     }
 }
@@ -372,7 +392,7 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::backend::{kv, stream_id::StreamId, streamer::DORMANT_TIMEOUT};
+    use crate::backend::{FOLLOWER_MAX_LAG, kv, stream_id::StreamId, streamer::DORMANT_TIMEOUT};
 
     #[tokio::test]
     async fn resolve_timestamp_bounded_to_stream() {
@@ -557,6 +577,104 @@ mod tests {
             outputs.len()
         );
         assert!(outputs.into_iter().all(|o| o.is_ok()));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_wait_is_not_reset_after_follow_lag_without_catchup_records() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let wait = Duration::from_secs(30);
+        let start = ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        };
+        let end = ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: Some(wait),
+        };
+        let session = backend
+            .read(basin.clone(), stream.clone(), start, end)
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should enter follow mode")
+            .expect("session should not error");
+        assert!(matches!(first, ReadSessionOutput::Heartbeat(_)));
+
+        let stream_id = StreamId::new(&basin, &stream);
+        let mut delete_batch = WriteBatch::new();
+        let lagged_appends = FOLLOWER_MAX_LAG + 25;
+
+        for i in 0..lagged_appends {
+            let record = s2_common::record::Record::try_from_parts(
+                vec![],
+                bytes::Bytes::from(format!("lagged-{i}")),
+            )
+            .unwrap();
+            let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
+            let parts = AppendRecordParts {
+                timestamp: None,
+                record: metered,
+            };
+            let append_record: s2_common::types::stream::AppendRecord = parts.try_into().unwrap();
+            let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
+            let input = AppendInput {
+                records: batch,
+                match_seq_num: None,
+                fencing_token: None,
+            };
+            let ack = backend
+                .append(basin.clone(), stream.clone(), input)
+                .await
+                .unwrap();
+            delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
+        }
+
+        static WRITE_OPTS: WriteOptions = WriteOptions {
+            await_durable: true,
+        };
+        backend
+            .db
+            .write_with_options(delete_batch, &WRITE_OPTS)
+            .await
+            .unwrap();
+
+        tokio::time::advance(wait + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        let next = session.as_mut().next().await;
+        assert!(
+            next.is_none(),
+            "session should close immediately once the original wait budget has elapsed"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
