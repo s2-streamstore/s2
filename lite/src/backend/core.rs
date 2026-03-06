@@ -31,7 +31,7 @@ use super::{
     },
     kv,
     stream_id::StreamId,
-    streamer::StreamerClient,
+    streamer::{StreamerClient, StreamerRuntimeConfig},
 };
 use crate::backend::bgtasks::BgtaskTrigger;
 
@@ -138,8 +138,10 @@ impl Backend {
         Ok(super::streamer::Spawner {
             db: self.db.clone(),
             stream_id,
-            config: meta.config,
-            doe_config_epoch: meta.doe_config_epoch,
+            config: StreamerRuntimeConfig {
+                stream: meta.config,
+                doe_config_epoch: meta.doe_config_epoch,
+            },
             tail_pos,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),

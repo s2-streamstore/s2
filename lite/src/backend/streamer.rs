@@ -69,6 +69,29 @@ struct DeleteOnEmptyDeadline {
     doe_config_epoch: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct StreamerRuntimeConfig {
+    pub stream: OptionalStreamConfig,
+    pub doe_config_epoch: u64,
+}
+
+impl StreamerRuntimeConfig {
+    fn timestamping(&self) -> &OptionalTimestampingConfig {
+        &self.stream.timestamping
+    }
+
+    fn retention_policy(&self) -> RetentionPolicy {
+        self.stream.retention_policy.unwrap_or_default()
+    }
+
+    fn delete_on_empty_min_age(&self) -> Option<Duration> {
+        self.stream
+            .delete_on_empty
+            .min_age
+            .filter(|age| !age.is_zero())
+    }
+}
+
 #[derive(Debug)]
 struct InFlightAppend {
     db_seq: u64,
@@ -78,8 +101,7 @@ struct InFlightAppend {
 pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
-    pub config: OptionalStreamConfig,
-    pub doe_config_epoch: u64,
+    pub config: StreamerRuntimeConfig,
     pub tail_pos: StreamPosition,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
@@ -94,7 +116,6 @@ impl Spawner {
             db,
             stream_id,
             config,
-            doe_config_epoch,
             tail_pos,
             fencing_token,
             trim_point,
@@ -109,7 +130,6 @@ impl Spawner {
             stream_id,
             msg_tx: msg_tx.clone(),
             config,
-            doe_config_epoch,
             fencing_token: CommandState {
                 state: fencing_token,
                 applied_point: ..tail_pos.seq_num,
@@ -168,8 +188,7 @@ struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
-    config: OptionalStreamConfig,
-    doe_config_epoch: u64,
+    config: StreamerRuntimeConfig,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -222,7 +241,7 @@ impl Streamer {
             records,
             first_seq_num,
             next_assignable_pos.timestamp,
-            &self.config.timestamping,
+            self.config.timestamping(),
         )
     }
 
@@ -262,7 +281,7 @@ impl Streamer {
         };
         match self.sequence_records(input) {
             Ok(sequenced_records) => {
-                let retention = self.config.retention_policy.unwrap_or_default();
+                let retention = self.config.retention_policy();
                 let doe_deadline = self.maybe_doe_deadline(retention.age());
                 if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
@@ -307,11 +326,7 @@ impl Streamer {
         retention_age: Option<Duration>,
     ) -> Option<DeleteOnEmptyDeadline> {
         let retention_age = retention_age?;
-        let min_age = self
-            .config
-            .delete_on_empty
-            .min_age
-            .filter(|d| !d.is_zero())?;
+        let min_age = self.config.delete_on_empty_min_age()?;
         let now = Instant::now();
         if self
             .last_doe_deadline_at
@@ -326,7 +341,7 @@ impl Streamer {
             Some(DeleteOnEmptyDeadline {
                 deadline,
                 min_age,
-                doe_config_epoch: self.doe_config_epoch,
+                doe_config_epoch: self.config.doe_config_epoch,
             })
         } else {
             None
@@ -436,12 +451,8 @@ impl Streamer {
                         Message::CheckTail { reply_tx } => {
                             let _ = reply_tx.send(self.stable_pos);
                         }
-                        Message::Reconfigure {
-                            config,
-                            doe_config_epoch,
-                        } => {
+                        Message::Reconfigure { config } => {
                             self.config = config;
-                            self.doe_config_epoch = doe_config_epoch;
                         }
                         Message::FollowerDropped => {
                             assert!(self.active_followers > 0, "follow guard count underflow");
@@ -490,8 +501,7 @@ enum Message {
         reply_tx: oneshot::Sender<StreamPosition>,
     },
     Reconfigure {
-        config: OptionalStreamConfig,
-        doe_config_epoch: u64,
+        config: StreamerRuntimeConfig,
     },
     FollowerDropped,
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
@@ -588,13 +598,8 @@ impl StreamerClient {
         })
     }
 
-    pub fn advise_reconfig(&self, config: OptionalStreamConfig, doe_config_epoch: u64) -> bool {
-        self.msg_tx
-            .send(Message::Reconfigure {
-                config,
-                doe_config_epoch,
-            })
-            .is_ok()
+    pub fn advise_reconfig(&self, config: StreamerRuntimeConfig) -> bool {
+        self.msg_tx.send(Message::Reconfigure { config }).is_ok()
     }
 
     pub async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
@@ -1073,8 +1078,10 @@ mod tests {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
-            config: OptionalStreamConfig::default(),
-            doe_config_epoch: 0,
+            config: StreamerRuntimeConfig {
+                stream: OptionalStreamConfig::default(),
+                doe_config_epoch: 0,
+            },
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,

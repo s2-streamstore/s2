@@ -56,7 +56,7 @@ impl PendingStreamDoe {
         self.deadlines.iter().map(|d| d.deadline).collect()
     }
 
-    fn max_matching_deadline(
+    fn latest_deadline_for_current_config(
         &self,
         min_age: Duration,
         doe_config_epoch: u64,
@@ -148,7 +148,7 @@ impl Backend {
                     .filter(|age| !age.is_zero())
                 {
                     if let Some(max_deadline) =
-                        pending.max_matching_deadline(min_age, meta.doe_config_epoch)
+                        pending.latest_deadline_for_current_config(min_age, meta.doe_config_epoch)
                     {
                         !self.stream_has_records(stream_id).await?
                             && self
@@ -679,6 +679,85 @@ mod tests {
             .unwrap();
 
         for deadline in [deadline_a, deadline_b] {
+            let deadline_key = backend
+                .db
+                .get(kv::stream_doe_deadline::ser_key(deadline, stream_id))
+                .await
+                .unwrap();
+            assert!(deadline_key.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_doe_deletes_when_any_current_config_deadline_is_eligible() {
+        let backend = test_backend().await;
+        let basin = BasinName::from_str("doe-basin-eligible-any").unwrap();
+        let stream = StreamName::from_str("doe-stream-eligible-any").unwrap();
+        let current_min_age = Duration::from_secs(10);
+        let longer_legacy_min_age = Duration::from_secs(100);
+        let mut config = OptionalStreamConfig::default();
+        config.delete_on_empty.min_age = Some(current_min_age);
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_config(config, OffsetDateTime::now_utc()),
+        )
+        .await;
+
+        let write_timestamp = TimestampSecs::from_secs(1_050);
+        backend
+            .db
+            .put(
+                kv::stream_tail_position::ser_key(stream_id),
+                kv::stream_tail_position::ser_value(
+                    StreamPosition {
+                        seq_num: 1,
+                        timestamp: 1234,
+                    },
+                    write_timestamp,
+                ),
+            )
+            .await
+            .unwrap();
+
+        let later_deadline = TimestampSecs::from_secs(1_100);
+        let eligible_current_deadline = TimestampSecs::from_secs(1_062);
+        // Mirrors the #274 counterexample with legacy epoch-0 entries:
+        // the current-config pair is eligible even though a different entry has the max deadline.
+        backend
+            .db
+            .put(
+                kv::stream_doe_deadline::ser_key(later_deadline, stream_id),
+                kv::stream_doe_deadline::ser_value(doe_deadline_value(
+                    longer_legacy_min_age,
+                    DOE_EPOCH,
+                )),
+            )
+            .await
+            .unwrap();
+        backend
+            .db
+            .put(
+                kv::stream_doe_deadline::ser_key(eligible_current_deadline, stream_id),
+                kv::stream_doe_deadline::ser_value(doe_deadline_value(current_min_age, DOE_EPOCH)),
+            )
+            .await
+            .unwrap();
+
+        let has_more = backend.clone().tick_stream_doe().await.unwrap();
+        assert!(!has_more);
+
+        let meta = backend
+            .db
+            .get(kv::stream_meta::ser_key(&basin, &stream))
+            .await
+            .unwrap()
+            .expect("stream meta should remain");
+        let decoded = kv::stream_meta::deser_value(meta).unwrap();
+        assert!(decoded.deleted_at.is_some());
+
+        for deadline in [later_deadline, eligible_current_deadline] {
             let deadline_key = backend
                 .db
                 .get(kv::stream_doe_deadline::ser_key(deadline, stream_id))

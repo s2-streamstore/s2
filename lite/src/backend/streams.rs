@@ -18,7 +18,7 @@ use slatedb::{
 use time::OffsetDateTime;
 use tracing::instrument;
 
-use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
+use super::{Backend, CreatedOrReconfigured, store::db_txn_get, streamer::StreamerRuntimeConfig};
 use crate::backend::{
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
@@ -330,7 +330,10 @@ impl Backend {
         txn.commit_with_options(&WRITE_OPTS).await?;
 
         if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(resolved, doe_config_epoch);
+            client.advise_reconfig(StreamerRuntimeConfig {
+                stream: resolved,
+                doe_config_epoch,
+            });
         }
 
         let info = StreamInfo {
@@ -436,7 +439,10 @@ impl Backend {
         txn.commit_with_options(&WRITE_OPTS).await?;
 
         if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(meta.config.clone(), meta.doe_config_epoch);
+            client.advise_reconfig(StreamerRuntimeConfig {
+                stream: meta.config.clone(),
+                doe_config_epoch: meta.doe_config_epoch,
+            });
         }
 
         Ok(meta.config)
