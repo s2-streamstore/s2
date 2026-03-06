@@ -957,6 +957,7 @@ impl<'a> RequestBuilder<'a> {
             let attempt_request = {
                 let mut r = request.try_clone().expect("body should not be a stream");
                 if let Some(ref signal) = self.frame_signal {
+                    r = r.compress().await.map_err(ApiError::from)?;
                     r = r.with_monitored_body(signal.clone());
                 }
                 r

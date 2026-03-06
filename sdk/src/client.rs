@@ -171,6 +171,20 @@ impl Request {
         }
     }
 
+    pub(crate) async fn compress(self) -> Result<Self, Error> {
+        let (body, content_encoding) = compress_body(self.body, self.compression).await?;
+        let mut headers = self.headers;
+        if let Some(encoding) = content_encoding {
+            headers.insert(CONTENT_ENCODING, encoding);
+        }
+        Ok(Self {
+            body,
+            headers,
+            compression: Compression::None,
+            ..self
+        })
+    }
+
     pub fn authority(&self) -> &str {
         self.url.authority()
     }

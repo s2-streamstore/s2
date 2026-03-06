@@ -1744,6 +1744,53 @@ async fn compression_roundtrip_unary(#[case] compression: Compression) -> Result
 #[case::gzip(Compression::Gzip)]
 #[case::zstd(Compression::Zstd)]
 #[tokio::test]
+async fn compression_with_no_side_effects_unary(
+    #[case] compression: Compression,
+) -> Result<(), S2Error> {
+    let config = s2_config(compression)
+        .expect("valid S2 config")
+        .with_retry(
+            RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
+        );
+    let s2 = s2_sdk::S2::new(config).expect("valid S2");
+
+    let basin_name = unique_basin_name();
+    let basin_config = BasinConfig::new()
+        .with_default_stream_config(StreamConfig::new().with_storage_class(StorageClass::Standard));
+    s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(basin_config))
+        .await?;
+
+    let basin = s2.basin(basin_name.clone());
+    let stream_name = unique_stream_name();
+    basin
+        .create_stream(CreateStreamInput::new(stream_name.clone()))
+        .await?;
+
+    let stream = basin.stream(stream_name.clone());
+
+    let input = AppendInput::new(AppendRecordBatch::try_from_iter([
+        AppendRecord::new("s".repeat(2048))?,
+        AppendRecord::new("2".repeat(2048))?,
+    ])?);
+    let ack = stream.append(input).await?;
+    assert_eq!(ack.start.seq_num, 0);
+    assert_eq!(ack.end.seq_num, 2);
+
+    let batch = stream.read(ReadInput::new()).await?;
+    assert_eq!(batch.records.len(), 2);
+
+    basin
+        .delete_stream(DeleteStreamInput::new(stream_name))
+        .await?;
+    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+
+    Ok(())
+}
+
+#[rstest]
+#[case::gzip(Compression::Gzip)]
+#[case::zstd(Compression::Zstd)]
+#[tokio::test]
 async fn compression_roundtrip_session(#[case] compression: Compression) -> Result<(), S2Error> {
     let config = s2_config(compression).expect("valid S2 config");
     let s2 = s2_sdk::S2::new(config).expect("valid S2");
