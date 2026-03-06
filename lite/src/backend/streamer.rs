@@ -48,7 +48,7 @@ use crate::{
     metrics,
 };
 
-const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 // Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
 const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
 
