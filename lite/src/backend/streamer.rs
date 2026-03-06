@@ -378,6 +378,23 @@ impl Streamer {
             }
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
+                biased;
+                Some(res) = OptionFuture::from(self.db_writes_pending.front_mut()) => {
+                    drop(self.db_writes_pending.pop_front().expect("polled"));
+                    match res {
+                        Ok(submitted_append) => {
+                            if let Some(prev) = self.inflight_appends.back() {
+                                assert!(prev.db_seq < submitted_append.db_seq);
+                            }
+                            self.inflight_appends.push_back(submitted_append);
+                            self.subscribe_durability();
+                        }
+                        Err(db_err) => {
+                            self.pending_appends.on_durability_failed(db_err);
+                            break;
+                        }
+                    }
+                }
                 Some(msg) = msg_rx.recv() => {
                     match msg {
                         Message::Append {
@@ -432,22 +449,6 @@ impl Streamer {
                                     break;
                                 },
                             }
-                        }
-                    }
-                }
-                Some(res) = OptionFuture::from(self.db_writes_pending.front_mut()) => {
-                    drop(self.db_writes_pending.pop_front().expect("polled"));
-                    match res {
-                        Ok(submitted_append) => {
-                            if let Some(prev) = self.inflight_appends.back() {
-                                assert!(prev.db_seq < submitted_append.db_seq);
-                            }
-                            self.inflight_appends.push_back(submitted_append);
-                            self.subscribe_durability();
-                        }
-                        Err(db_err) => {
-                            self.pending_appends.on_durability_failed(db_err);
-                            break;
                         }
                     }
                 }
