@@ -378,7 +378,7 @@ impl Streamer {
                     assert!(self.stable_pos.seq_num < self.trim_point.applied_point.end);
                 }
             }
-            let active_followers = self.active_followers.load(Ordering::Relaxed);
+            let active_followers = self.active_followers.load(Ordering::Acquire);
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
                 Some(msg) = msg_rx.recv() => {
@@ -500,7 +500,7 @@ struct FollowGuard {
 
 impl FollowGuard {
     fn new(active_followers: Arc<AtomicUsize>, msg_tx: mpsc::UnboundedSender<Message>) -> Self {
-        active_followers.fetch_add(1, Ordering::Relaxed);
+        active_followers.fetch_add(1, Ordering::Release);
         Self {
             active_followers,
             msg_tx,
@@ -510,7 +510,7 @@ impl FollowGuard {
 
 impl Drop for FollowGuard {
     fn drop(&mut self) {
-        let prev = self.active_followers.fetch_sub(1, Ordering::Relaxed);
+        let prev = self.active_followers.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(prev > 0, "follow guard count underflow");
         if prev == 1 {
             let _ = self.msg_tx.send(Message::FollowerDropped);
