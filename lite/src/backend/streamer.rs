@@ -58,7 +58,7 @@ pub(super) fn doe_arm_delay(retention_age: Duration, min_age: Duration) -> Durat
         .saturating_add(DOE_DEADLINE_REFRESH_PERIOD)
 }
 
-pub(super) fn doe_arm_retention_age(config: &OptionalStreamConfig) -> Duration {
+pub(super) fn retention_age_or_zero(config: &OptionalStreamConfig) -> Duration {
     config
         .retention_policy
         .unwrap_or_default()
