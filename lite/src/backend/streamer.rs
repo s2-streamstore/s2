@@ -272,7 +272,7 @@ impl Streamer {
         match self.sequence_records(input) {
             Ok(sequenced_records) => {
                 let retention = self.config.retention_policy.unwrap_or_default();
-                let doe_deadline = self.maybe_doe_deadline_for_append();
+                let doe_deadline = self.maybe_doe_deadline(retention.age());
                 if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
@@ -311,8 +311,11 @@ impl Streamer {
         }
     }
 
-    fn maybe_doe_deadline_for_append(&mut self) -> Option<DeleteOnEmptyDeadline> {
-        let retention_age = self.config.retention_policy?.age()?;
+    fn maybe_doe_deadline(
+        &mut self,
+        retention_age: Option<Duration>,
+    ) -> Option<DeleteOnEmptyDeadline> {
+        let retention_age = retention_age?;
         let min_age = self
             .config
             .delete_on_empty
