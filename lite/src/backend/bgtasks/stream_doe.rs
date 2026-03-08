@@ -19,7 +19,7 @@ use crate::backend::{
     error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
     kv::{self, timestamp::TimestampSecs},
     stream_id::StreamId,
-    streamer::doe_arm_delay_for_config,
+    streamer::{doe_arm_delay, doe_arm_retention_age},
 };
 
 const PENDING_LIST_LIMIT: usize = 10_000;
@@ -192,7 +192,8 @@ impl Backend {
         let Some(min_age) = meta.config.delete_on_empty.min_age.filter(|d| !d.is_zero()) else {
             return Ok(());
         };
-        let deadline = TimestampSecs::after(doe_arm_delay_for_config(&meta.config, min_age));
+        let deadline =
+            TimestampSecs::after(doe_arm_delay(doe_arm_retention_age(&meta.config), min_age));
         static WRITE_OPTS: WriteOptions = WriteOptions {
             await_durable: true,
         };

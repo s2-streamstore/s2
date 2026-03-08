@@ -16,7 +16,9 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend, CreatedOrReconfigured, store::db_txn_get, streamer::doe_arm_delay_for_config,
+    Backend, CreatedOrReconfigured,
+    store::db_txn_get,
+    streamer::{doe_arm_delay, doe_arm_retention_age},
 };
 use crate::backend::{
     error::{
@@ -196,8 +198,8 @@ impl Backend {
         {
             txn.put(
                 kv::stream_doe_deadline::ser_key(
-                    kv::timestamp::TimestampSecs::after(doe_arm_delay_for_config(
-                        &meta.config,
+                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
+                        doe_arm_retention_age(&meta.config),
                         min_age,
                     )),
                     stream_id,
@@ -301,8 +303,8 @@ impl Backend {
         {
             txn.put(
                 kv::stream_doe_deadline::ser_key(
-                    kv::timestamp::TimestampSecs::after(doe_arm_delay_for_config(
-                        &meta.config,
+                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
+                        doe_arm_retention_age(&meta.config),
                         min_age,
                     )),
                     stream_id,
