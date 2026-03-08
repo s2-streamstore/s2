@@ -52,6 +52,26 @@ pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 // Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
 const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
 
+pub(super) fn doe_arm_delay(retention_age: Duration, min_age: Duration) -> Duration {
+    retention_age
+        .saturating_add(min_age)
+        .saturating_add(DOE_DEADLINE_REFRESH_PERIOD)
+}
+
+pub(super) fn doe_arm_delay_for_config(
+    config: &OptionalStreamConfig,
+    min_age: Duration,
+) -> Duration {
+    doe_arm_delay(
+        config
+            .retention_policy
+            .unwrap_or_default()
+            .age()
+            .unwrap_or_default(),
+        min_age,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct StreamerId(u64);
 
@@ -258,7 +278,7 @@ impl Streamer {
         match self.sequence_records(input) {
             Ok(sequenced_records) => {
                 let retention = self.config.retention_policy.unwrap_or_default();
-                let doe_deadline = self.maybe_doe_deadline(retention.age());
+                let doe_deadline = self.maybe_doe_deadline_for_append();
                 if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
@@ -297,11 +317,8 @@ impl Streamer {
         }
     }
 
-    fn maybe_doe_deadline(
-        &mut self,
-        retention_age: Option<Duration>,
-    ) -> Option<DeleteOnEmptyDeadline> {
-        let retention_age = retention_age?;
+    fn maybe_doe_deadline_for_append(&mut self) -> Option<DeleteOnEmptyDeadline> {
+        let retention_age = self.config.retention_policy?.age()?;
         let min_age = self
             .config
             .delete_on_empty
@@ -313,11 +330,8 @@ impl Streamer {
             .is_none_or(|t| now.duration_since(t) >= DOE_DEADLINE_REFRESH_PERIOD)
         {
             self.last_doe_deadline_at = Some(now);
-            let deadline = kv::timestamp::TimestampSecs::after(
-                retention_age
-                    .saturating_add(min_age)
-                    .saturating_add(DOE_DEADLINE_REFRESH_PERIOD),
-            );
+            let deadline =
+                kv::timestamp::TimestampSecs::after(doe_arm_delay(retention_age, min_age));
             Some(DeleteOnEmptyDeadline { deadline, min_age })
         } else {
             None

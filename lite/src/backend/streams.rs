@@ -15,7 +15,9 @@ use slatedb::{
 use time::OffsetDateTime;
 use tracing::instrument;
 
-use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
+use super::{
+    Backend, CreatedOrReconfigured, store::db_txn_get, streamer::doe_arm_delay_for_config,
+};
 use crate::backend::{
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
@@ -190,11 +192,14 @@ impl Backend {
             .delete_on_empty
             .min_age
             .filter(|age| !age.is_zero())
-            && prior_doe_min_age != Some(min_age)
+            && (!is_reconfigure || prior_doe_min_age.is_none())
         {
             txn.put(
                 kv::stream_doe_deadline::ser_key(
-                    kv::timestamp::TimestampSecs::after(min_age),
+                    kv::timestamp::TimestampSecs::after(doe_arm_delay_for_config(
+                        &meta.config,
+                        min_age,
+                    )),
                     stream_id,
                 ),
                 kv::stream_doe_deadline::ser_value(min_age),
@@ -292,11 +297,14 @@ impl Backend {
             .delete_on_empty
             .min_age
             .filter(|age| !age.is_zero())
-            && prior_doe_min_age != Some(min_age)
+            && prior_doe_min_age.is_none()
         {
             txn.put(
                 kv::stream_doe_deadline::ser_key(
-                    kv::timestamp::TimestampSecs::after(min_age),
+                    kv::timestamp::TimestampSecs::after(doe_arm_delay_for_config(
+                        &meta.config,
+                        min_age,
+                    )),
                     stream_id,
                 ),
                 kv::stream_doe_deadline::ser_value(min_age),
