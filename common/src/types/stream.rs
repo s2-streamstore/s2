@@ -30,6 +30,14 @@ impl<T: StrProps> StreamNameStr<T> {
             return Err(format!("stream {} must not be empty", T::FIELD_NAME).into());
         }
 
+        if !T::IS_PREFIX && (name == "." || name == "..") {
+            return Err(format!(
+                "stream {} must not be \".\" or \"..\"",
+                T::FIELD_NAME
+            )
+            .into());
+        }
+
         if name.len() > caps::MAX_STREAM_NAME_LEN {
             return Err(format!(
                 "stream {} must not exceed {} bytes in length",

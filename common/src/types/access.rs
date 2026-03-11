@@ -24,6 +24,14 @@ impl<T: StrProps> AccessTokenIdStr<T> {
             return Err(format!("access token {} must not be empty", T::FIELD_NAME).into());
         }
 
+        if !T::IS_PREFIX && (id == "." || id == "..") {
+            return Err(format!(
+                "access token {} must not be \".\" or \"..\"",
+                T::FIELD_NAME
+            )
+            .into());
+        }
+
         if id.len() > caps::MAX_ACCESS_TOKEN_ID_LEN {
             return Err(format!(
                 "access token {} must not exceed {} bytes in length",
