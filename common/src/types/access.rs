@@ -239,3 +239,64 @@ pub struct IssueAccessTokenRequest {
 }
 
 pub type ListAccessTokensRequest = ListItemsRequest<AccessTokenIdPrefix, AccessTokenIdStartAfter>;
+
+#[cfg(test)]
+mod test {
+    use rstest::rstest;
+
+    use super::{AccessTokenIdStr, super::strings::{IdProps, PrefixProps, StartAfterProps}};
+
+    #[rstest]
+    #[case::normal("my-token".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN))]
+    fn validate_id_ok(#[case] id: String) {
+        assert_eq!(AccessTokenIdStr::<IdProps>::validate_str(&id), Ok(()));
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::dot(".".to_owned())]
+    #[case::dot_dot("..".to_owned())]
+    #[case::too_long("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN + 1))]
+    fn validate_id_err(#[case] id: String) {
+        AccessTokenIdStr::<IdProps>::validate_str(&id).expect_err("expected validation error");
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::dot(".".to_owned())]
+    #[case::dot_dot("..".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN))]
+    fn validate_prefix_ok(#[case] prefix: String) {
+        assert_eq!(
+            AccessTokenIdStr::<PrefixProps>::validate_str(&prefix),
+            Ok(())
+        );
+    }
+
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN + 1))]
+    fn validate_prefix_err(#[case] prefix: String) {
+        AccessTokenIdStr::<PrefixProps>::validate_str(&prefix)
+            .expect_err("expected validation error");
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::dot(".".to_owned())]
+    #[case::dot_dot("..".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN))]
+    fn validate_start_after_ok(#[case] start_after: String) {
+        assert_eq!(
+            AccessTokenIdStr::<StartAfterProps>::validate_str(&start_after),
+            Ok(())
+        );
+    }
+
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN + 1))]
+    fn validate_start_after_err(#[case] start_after: String) {
+        AccessTokenIdStr::<StartAfterProps>::validate_str(&start_after)
+            .expect_err("expected validation error");
+    }
+}
