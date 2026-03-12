@@ -47,6 +47,11 @@ test-cli-integration: sync _ensure-nextest
 check-locked:
     cargo metadata --locked --format-version 1 >/dev/null
 
+# Install git hooks from hooks/
+install-hooks:
+    ln -sf `pwd`/hooks/pre-commit .git/hooks/pre-commit
+    @echo "Git hooks installed"
+
 # Clean build artifacts
 clean:
     cargo clean

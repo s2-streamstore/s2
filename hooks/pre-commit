@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# LINK ME (from the root of the repo): ln -sf `pwd`/hooks/pre-commit .git/hooks/pre-commit
+
+function save_unstaged_changes() {
+  staged_changes_diff=$(mktemp -t format_patch.XXXXXX)
+  set +e
+  git diff --ignore-submodules --binary --exit-code --no-color >"${staged_changes_diff}"
+  if [ $? -eq 1 ]; then
+    echo "Found unstaged changes, storing in ${staged_changes_diff}"
+    echo "Clearing unstaged changes for formatting, will restore after."
+    git checkout -- "${root_dir}"
+    stored_unstaged_changes=true
+  fi
+}
+
+function restore_unstaged_changes() {
+  echo "Restoring unstaged changes"
+  set +e
+  git apply "${staged_changes_diff}"
+  if [ $? -eq 1 ]; then
+    echo "Failed to re-apply unstaged changes with \`git apply\`."
+    echo "The patch is preserved at ${staged_changes_diff}"
+  fi
+}
+
+function refine_rust() {
+  if ! cargo -V &>/dev/null; then
+    echo "cargo could not be found, please install it from https://rustup.rs/"
+    exit 1
+  fi
+  if ! cargo +nightly -V &>/dev/null; then
+    echo "cargo +nightly could not be found, please install it with: rustup toolchain install nightly"
+    exit 1
+  fi
+
+  rust_staged_files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$')
+  if [ -z "$rust_staged_files" ]; then
+    return
+  fi
+
+  echo "Executing: cargo fmt"
+  for file in $rust_staged_files; do
+    cargo +nightly fmt -- "$file"
+    git add "$file"
+  done
+}
+
+stored_unstaged_changes=false
+root_dir="$(git rev-parse --show-toplevel)"
+if [ ! -d "${root_dir}" ]; then
+  echo "${root_dir} is not a directory"
+  exit 1
+fi
+
+echo "Running pre-commit hooks"
+
+save_unstaged_changes
+
+set -o pipefail
+
+refine_rust
+
+if ${stored_unstaged_changes}; then
+  restore_unstaged_changes
+fi

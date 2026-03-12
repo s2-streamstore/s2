@@ -25,11 +25,9 @@ impl<T: StrProps> AccessTokenIdStr<T> {
         }
 
         if !T::IS_PREFIX && (id == "." || id == "..") {
-            return Err(format!(
-                "access token {} must not be \".\" or \"..\"",
-                T::FIELD_NAME
-            )
-            .into());
+            return Err(
+                format!("access token {} must not be \".\" or \"..\"", T::FIELD_NAME).into(),
+            );
         }
 
         if id.len() > caps::MAX_ACCESS_TOKEN_ID_LEN {

@@ -31,11 +31,7 @@ impl<T: StrProps> StreamNameStr<T> {
         }
 
         if !T::IS_PREFIX && (name == "." || name == "..") {
-            return Err(format!(
-                "stream {} must not be \".\" or \"..\"",
-                T::FIELD_NAME
-            )
-            .into());
+            return Err(format!("stream {} must not be \".\" or \"..\"", T::FIELD_NAME).into());
         }
 
         if name.len() > caps::MAX_STREAM_NAME_LEN {
