@@ -189,9 +189,10 @@ pub async fn read(
             let session = backend.read(basin, stream, start, end).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
-                JsonOrProto::Json => {
-                    Ok(Json(v1t::stream::serialize_read_batch(format, &batch)).into_response())
-                }
+                JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
+                    format, &batch,
+                ))
+                .into_response()),
                 JsonOrProto::Proto => {
                     let batch: v1t::stream::proto::ReadBatch = batch.into();
                     Ok(Proto(batch).into_response())

@@ -4,8 +4,6 @@ use s2_common::{http::ParseableHeader, types};
 use serde::Serialize;
 
 use super::ReadBatch;
-#[cfg(feature = "axum")]
-use crate::data::Format;
 
 static LAST_EVENT_ID_HEADER: http::HeaderName = http::HeaderName::from_static("last-event-id");
 
@@ -160,14 +158,14 @@ impl ReadEvent {
 
 #[cfg(feature = "axum")]
 pub fn batch_event(
-    format: Format,
+    format: crate::data::Format,
     batch: &types::stream::ReadBatch,
     id: LastEventId,
 ) -> Result<axum::response::sse::Event, axum::Error> {
     axum::response::sse::Event::default()
         .event(Batch::Batch)
         .id(id.to_string())
-        .json_data(super::serialize_read_batch(format, batch))
+        .json_data(super::json::serialize_read_batch(format, batch))
 }
 
 #[cfg(feature = "axum")]
