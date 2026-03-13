@@ -11,15 +11,15 @@ pub fn serialize_read_batch(
     format: Format,
     batch: &types::stream::ReadBatch,
 ) -> impl Serialize + '_ {
-    SerializedReadBatch { format, batch }
+    ReadBatchJson { format, batch }
 }
 
-struct SerializedReadBatch<'a> {
+struct ReadBatchJson<'a> {
     format: Format,
     batch: &'a types::stream::ReadBatch,
 }
 
-impl Serialize for SerializedReadBatch<'_> {
+impl Serialize for ReadBatchJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -28,31 +28,31 @@ impl Serialize for SerializedReadBatch<'_> {
             serializer.serialize_struct("ReadBatch", 1 + usize::from(self.batch.tail.is_some()))?;
         state.serialize_field(
             "records",
-            &SerializedRecords {
+            &RecordsJson {
                 format: self.format,
                 records: self.batch.records.as_slice(),
             },
         )?;
         if let Some(tail) = self.batch.tail {
-            state.serialize_field("tail", &SerializedStreamPosition(tail))?;
+            state.serialize_field("tail", &StreamPositionJson(tail))?;
         }
         state.end()
     }
 }
 
-struct SerializedRecords<'a> {
+struct RecordsJson<'a> {
     format: Format,
     records: &'a [record::SequencedRecord],
 }
 
-impl Serialize for SerializedRecords<'_> {
+impl Serialize for RecordsJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         let mut seq = serializer.serialize_seq(Some(self.records.len()))?;
         for record in self.records {
-            seq.serialize_element(&SerializedRecord {
+            seq.serialize_element(&RecordJson {
                 format: self.format,
                 record,
             })?;
@@ -61,12 +61,12 @@ impl Serialize for SerializedRecords<'_> {
     }
 }
 
-struct SerializedRecord<'a> {
+struct RecordJson<'a> {
     format: Format,
     record: &'a record::SequencedRecord,
 }
 
-impl Serialize for SerializedRecord<'_> {
+impl Serialize for RecordJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -78,7 +78,7 @@ impl Serialize for SerializedRecord<'_> {
             record::Record::Command(command) => {
                 state.serialize_field(
                     "headers",
-                    &SerializedCommandHeaders {
+                    &CommandHeadersJson {
                         format: self.format,
                         command,
                     },
@@ -111,7 +111,7 @@ impl Serialize for SerializedRecord<'_> {
                 if !envelope.headers().is_empty() {
                     state.serialize_field(
                         "headers",
-                        &SerializedHeaders {
+                        &HeadersJson {
                             format: self.format,
                             headers: envelope.headers(),
                         },
@@ -132,19 +132,19 @@ impl Serialize for SerializedRecord<'_> {
     }
 }
 
-struct SerializedHeaders<'a> {
+struct HeadersJson<'a> {
     format: Format,
     headers: &'a [record::Header],
 }
 
-impl Serialize for SerializedHeaders<'_> {
+impl Serialize for HeadersJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         let mut seq = serializer.serialize_seq(Some(self.headers.len()))?;
         for header in self.headers {
-            seq.serialize_element(&SerializedHeader {
+            seq.serialize_element(&HeaderJson {
                 format: self.format,
                 header,
             })?;
@@ -153,12 +153,12 @@ impl Serialize for SerializedHeaders<'_> {
     }
 }
 
-struct SerializedHeader<'a> {
+struct HeaderJson<'a> {
     format: Format,
     header: &'a record::Header,
 }
 
-impl Serialize for SerializedHeader<'_> {
+impl Serialize for HeaderJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -176,18 +176,18 @@ impl Serialize for SerializedHeader<'_> {
     }
 }
 
-struct SerializedCommandHeaders<'a> {
+struct CommandHeadersJson<'a> {
     format: Format,
     command: &'a record::CommandRecord,
 }
 
-impl Serialize for SerializedCommandHeaders<'_> {
+impl Serialize for CommandHeadersJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         let mut seq = serializer.serialize_seq(Some(1))?;
-        seq.serialize_element(&SerializedCommandHeader {
+        seq.serialize_element(&CommandHeaderJson {
             format: self.format,
             command: self.command,
         })?;
@@ -195,12 +195,12 @@ impl Serialize for SerializedCommandHeaders<'_> {
     }
 }
 
-struct SerializedCommandHeader<'a> {
+struct CommandHeaderJson<'a> {
     format: Format,
     command: &'a record::CommandRecord,
 }
 
-impl Serialize for SerializedCommandHeader<'_> {
+impl Serialize for CommandHeaderJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -218,9 +218,9 @@ impl Serialize for SerializedCommandHeader<'_> {
     }
 }
 
-struct SerializedStreamPosition(record::StreamPosition);
+struct StreamPositionJson(record::StreamPosition);
 
-impl Serialize for SerializedStreamPosition {
+impl Serialize for StreamPositionJson {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
