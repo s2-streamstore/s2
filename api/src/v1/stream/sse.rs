@@ -135,14 +135,6 @@ fn elapsed_since_epoch() -> Duration {
 }
 
 impl ReadEvent {
-    pub fn batch(data: ReadBatch, id: LastEventId) -> Self {
-        Self::Batch {
-            event: Batch::Batch,
-            data,
-            id,
-        }
-    }
-
     pub fn error(data: String) -> Self {
         Self::Error {
             event: Error::Error,

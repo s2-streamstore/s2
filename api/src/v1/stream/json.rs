@@ -294,9 +294,9 @@ impl std::fmt::Display for Base64Display<'_> {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use serde_json::json;
 
     use super::*;
-    use crate::v1::stream::ReadBatch;
 
     fn fixture_batch() -> types::stream::ReadBatch {
         let envelope = record::Record::try_from_parts(
@@ -343,10 +343,32 @@ mod tests {
         let batch = fixture_batch();
 
         for format in [Format::Raw, Format::Base64] {
-            let expected =
-                serde_json::to_string(&ReadBatch::encode(format, batch.clone())).expect("json");
-            let actual =
-                serde_json::to_string(&serialize_read_batch(format, &batch)).expect("json");
+            let expected = json!({
+                "records": [
+                    {
+                        "seq_num": 7,
+                        "timestamp": 11,
+                        "headers": [[format.encode(b"kind"), format.encode(&[b'a', 0xff, b'z'])]],
+                        "body": format.encode(&[0xf0, 0x28, 0x8c, 0xbc]),
+                    },
+                    {
+                        "seq_num": 8,
+                        "timestamp": 12,
+                        "headers": [[format.encode(b""), format.encode(b"fence")]],
+                    },
+                    {
+                        "seq_num": 9,
+                        "timestamp": 13,
+                        "headers": [[format.encode(b""), format.encode(b"trim")]],
+                        "body": format.encode(&42u64.to_be_bytes()),
+                    }
+                ],
+                "tail": {
+                    "seq_num": 10,
+                    "timestamp": 14,
+                }
+            });
+            let actual = serde_json::to_value(serialize_read_batch(format, &batch)).expect("json");
             assert_eq!(actual, expected);
         }
     }

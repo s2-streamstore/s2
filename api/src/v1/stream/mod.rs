@@ -286,27 +286,6 @@ pub struct SequencedRecord {
     pub body: String,
 }
 
-impl SequencedRecord {
-    pub fn encode(
-        format: Format,
-        record::SequencedRecord {
-            position: record::StreamPosition { seq_num, timestamp },
-            record,
-        }: record::SequencedRecord,
-    ) -> Self {
-        let (headers, body) = record.into_parts();
-        Self {
-            seq_num,
-            timestamp,
-            headers: headers
-                .into_iter()
-                .map(|h| Header(format.encode(&h.name), format.encode(&h.value)))
-                .collect(),
-            body: format.encode(&body),
-        }
-    }
-}
-
 #[rustfmt::skip]
 /// Record to be appended to a stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,17 +422,4 @@ pub struct ReadBatch {
     /// This will only be present when reading recent records.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail: Option<StreamPosition>,
-}
-
-impl ReadBatch {
-    pub fn encode(format: Format, batch: types::stream::ReadBatch) -> Self {
-        Self {
-            records: batch
-                .records
-                .into_iter()
-                .map(|record| SequencedRecord::encode(format, record))
-                .collect(),
-            tail: batch.tail.map(Into::into),
-        }
-    }
 }
