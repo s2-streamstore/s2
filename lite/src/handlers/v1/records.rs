@@ -213,7 +213,7 @@ pub async fn read(
                 while let Some(output) = session.next().await {
                     match output {
                         Ok(ReadSessionOutput::Heartbeat(_tail)) => {
-                            yield v1t::stream::sse::ReadEvent::ping().try_into();
+                            yield v1t::stream::sse::ping_event();
                         },
                         Ok(ReadSessionOutput::Batch(batch)) => {
                             let Some(last_record) = batch.records.last() else {
@@ -226,17 +226,17 @@ pub async fn read(
                                 count: processed.count,
                                 bytes: processed.bytes,
                             };
-                            yield v1t::stream::sse::batch_event(format, &batch, id);
+                            yield v1t::stream::sse::read_batch_event(format, &batch, id);
                         },
                         Err(err) => {
                             let (_, body) = ServiceError::from(err).to_response().to_parts();
-                            yield v1t::stream::sse::ReadEvent::error(body).try_into();
+                            yield v1t::stream::sse::error_event(body);
                             errored = true;
                         }
                     }
                 }
                 if !errored {
-                    yield v1t::stream::sse::ReadEvent::done().try_into();
+                    yield v1t::stream::sse::done_event();
                 }
             };
 
