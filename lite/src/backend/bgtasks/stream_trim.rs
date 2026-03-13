@@ -153,7 +153,7 @@ impl Backend {
         else {
             return Ok(());
         };
-        if !is_full_delete && current_trim_point != trim_point {
+        if current_trim_point != trim_point {
             return Ok(());
         }
         txn.delete(trim_point_key)?;
