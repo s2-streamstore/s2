@@ -1,6 +1,7 @@
 #[cfg(feature = "axum")]
 pub mod extract;
 
+mod json;
 pub mod proto;
 pub mod s2s;
 pub mod sse;
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use futures::stream::BoxStream;
 use itertools::Itertools as _;
+pub use json::serialize_read_batch;
 use s2_common::{
     record,
     types::{

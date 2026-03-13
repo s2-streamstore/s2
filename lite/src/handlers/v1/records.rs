@@ -190,8 +190,7 @@ pub async fn read(
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
                 JsonOrProto::Json => {
-                    let batch = v1t::stream::ReadBatch::encode(format, batch);
-                    Ok(Json(batch).into_response())
+                    Ok(Json(v1t::stream::serialize_read_batch(format, &batch)).into_response())
                 }
                 JsonOrProto::Proto => {
                     let batch: v1t::stream::proto::ReadBatch = batch.into();
