@@ -312,6 +312,10 @@ mod tests {
             "".parse().expect("valid token"),
         ));
 
+        let non_empty_fence = record::Record::Command(record::CommandRecord::Fence(
+            "token-1".parse().expect("valid token"),
+        ));
+
         let trim = record::Record::Command(record::CommandRecord::Trim(42));
 
         types::stream::ReadBatch {
@@ -324,16 +328,20 @@ mod tests {
                     seq_num: 8,
                     timestamp: 12,
                 }),
-                record::Metered::from(trim).sequenced(record::StreamPosition {
+                record::Metered::from(non_empty_fence).sequenced(record::StreamPosition {
                     seq_num: 9,
                     timestamp: 13,
+                }),
+                record::Metered::from(trim).sequenced(record::StreamPosition {
+                    seq_num: 10,
+                    timestamp: 14,
                 }),
             ]
             .into_iter()
             .collect(),
             tail: Some(record::StreamPosition {
-                seq_num: 10,
-                timestamp: 14,
+                seq_num: 11,
+                timestamp: 15,
             }),
         }
     }
