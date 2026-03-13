@@ -226,8 +226,7 @@ pub async fn read(
                                 count: processed.count,
                                 bytes: processed.bytes,
                             };
-                            let batch = v1t::stream::ReadBatch::encode(format, batch);
-                            yield v1t::stream::sse::ReadEvent::batch(batch, id).try_into();
+                            yield v1t::stream::sse::batch_event(format, &batch, id);
                         },
                         Err(err) => {
                             let (_, body) = ServiceError::from(err).to_response().to_parts();
