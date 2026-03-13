@@ -71,6 +71,8 @@ impl Serialize for RecordJson<'_> {
     where
         S: serde::Serializer,
     {
+        // Some records omit `headers` and/or `body`, but `serde_json` does not rely on an exact
+        // field count here, so keep the fixed upper bound and avoid extra bookkeeping.
         let mut state = serializer.serialize_struct("SequencedRecord", 4)?;
         state.serialize_field("seq_num", &self.record.position.seq_num)?;
         state.serialize_field("timestamp", &self.record.position.timestamp)?;
