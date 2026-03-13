@@ -325,11 +325,13 @@ where
         }
 
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(item))) => {
-                let bytes =
-                    SessionMessage::regular(self.compression, &item).map(|msg| msg.encode());
-                Poll::Ready(Some(bytes))
-            }
+            Poll::Ready(Some(Ok(item))) => match SessionMessage::regular(self.compression, &item) {
+                Ok(msg) => Poll::Ready(Some(Ok(msg.encode()))),
+                Err(err) => {
+                    self.terminated = true;
+                    Poll::Ready(Some(Err(err)))
+                }
+            },
             Poll::Ready(Some(Err(e))) => {
                 self.terminated = true;
                 let bytes = SessionMessage::Terminal(e.into()).encode();
@@ -855,6 +857,35 @@ mod test {
         match Pin::new(&mut stream).poll_next(&mut cx) {
             Poll::Ready(None) => {}
             other => panic!("expected stream to terminate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn framed_message_stream_terminates_after_encoding_error() {
+        let oversized = MAX_DECOMPRESSED_PAYLOAD_BYTES + 1;
+        let items: Vec<Result<TestProto, TestError>> = vec![
+            Ok(TestProto::new(vec![0u8; oversized])),
+            Ok(TestProto::new(vec![1u8; oversized])),
+        ];
+        let mut stream =
+            FramedMessageStream::new(CompressionAlgorithm::None, futures::stream::iter(items));
+
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Err(err))) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                assert!(
+                    err.to_string()
+                        .contains("payload exceeds decompressed limit")
+                );
+            }
+            other => panic!("expected encoding error, got {other:?}"),
+        }
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(None) => {}
+            other => panic!("expected stream to terminate after encoding error, got {other:?}"),
         }
     }
 }
