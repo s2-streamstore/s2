@@ -756,5 +756,4 @@ mod tests {
             .unwrap();
         assert!(trim_point.is_none());
     }
-
 }
