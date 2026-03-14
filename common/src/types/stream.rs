@@ -363,7 +363,10 @@ pub type ListStreamsRequest = ListItemsRequest<StreamNamePrefix, StreamNameStart
 mod test {
     use rstest::rstest;
 
-    use super::{StreamNameStr, super::strings::{NameProps, PrefixProps, StartAfterProps}};
+    use super::{
+        super::strings::{NameProps, PrefixProps, StartAfterProps},
+        StreamNameStr,
+    };
 
     #[rstest]
     #[case::normal("my-stream".to_owned())]

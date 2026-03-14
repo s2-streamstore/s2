@@ -244,7 +244,10 @@ pub type ListAccessTokensRequest = ListItemsRequest<AccessTokenIdPrefix, AccessT
 mod test {
     use rstest::rstest;
 
-    use super::{AccessTokenIdStr, super::strings::{IdProps, PrefixProps, StartAfterProps}};
+    use super::{
+        super::strings::{IdProps, PrefixProps, StartAfterProps},
+        AccessTokenIdStr,
+    };
 
     #[rstest]
     #[case::normal("my-token".to_owned())]
