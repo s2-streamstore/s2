@@ -189,10 +189,10 @@ pub async fn read(
             let session = backend.read(basin, stream, start, end).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
-                JsonOrProto::Json => {
-                    let batch = v1t::stream::ReadBatch::encode(format, batch);
-                    Ok(Json(batch).into_response())
-                }
+                JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
+                    format, &batch,
+                ))
+                .into_response()),
                 JsonOrProto::Proto => {
                     let batch: v1t::stream::proto::ReadBatch = batch.into();
                     Ok(Proto(batch).into_response())
@@ -213,7 +213,7 @@ pub async fn read(
                 while let Some(output) = session.next().await {
                     match output {
                         Ok(ReadSessionOutput::Heartbeat(_tail)) => {
-                            yield v1t::stream::sse::ReadEvent::ping().try_into();
+                            yield v1t::stream::sse::ping_event();
                         },
                         Ok(ReadSessionOutput::Batch(batch)) => {
                             let Some(last_record) = batch.records.last() else {
@@ -226,18 +226,17 @@ pub async fn read(
                                 count: processed.count,
                                 bytes: processed.bytes,
                             };
-                            let batch = v1t::stream::ReadBatch::encode(format, batch);
-                            yield v1t::stream::sse::ReadEvent::batch(batch, id).try_into();
+                            yield v1t::stream::sse::read_batch_event(format, &batch, id);
                         },
                         Err(err) => {
                             let (_, body) = ServiceError::from(err).to_response().to_parts();
-                            yield v1t::stream::sse::ReadEvent::error(body).try_into();
+                            yield v1t::stream::sse::error_event(body);
                             errored = true;
                         }
                     }
                 }
                 if !errored {
-                    yield v1t::stream::sse::ReadEvent::done().try_into();
+                    yield v1t::stream::sse::done_event();
                 }
             };
 

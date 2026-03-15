@@ -1,6 +1,7 @@
 #[cfg(feature = "axum")]
 pub mod extract;
 
+pub mod json;
 pub mod proto;
 pub mod s2s;
 pub mod sse;

@@ -132,53 +132,37 @@ fn elapsed_since_epoch() -> Duration {
         .expect("healthy clock")
 }
 
-impl ReadEvent {
-    pub fn batch(data: ReadBatch, id: LastEventId) -> Self {
-        Self::Batch {
-            event: Batch::Batch,
-            data,
-            id,
-        }
-    }
-
-    pub fn error(data: String) -> Self {
-        Self::Error {
-            event: Error::Error,
-            data,
-        }
-    }
-
-    pub fn ping() -> Self {
-        Self::Ping {
-            event: Ping::Ping,
-            data: PingEventData {
-                timestamp: elapsed_since_epoch().as_millis() as u64,
-            },
-        }
-    }
-
-    pub fn done() -> Self {
-        Self::Done {
-            data: DoneEventData,
-        }
-    }
+#[cfg(feature = "axum")]
+pub fn read_batch_event(
+    format: crate::data::Format,
+    batch: &types::stream::ReadBatch,
+    id: LastEventId,
+) -> Result<axum::response::sse::Event, axum::Error> {
+    axum::response::sse::Event::default()
+        .event(Batch::Batch)
+        .id(id.to_string())
+        .json_data(super::json::serialize_read_batch(format, batch))
 }
 
 #[cfg(feature = "axum")]
-impl TryFrom<ReadEvent> for axum::response::sse::Event {
-    type Error = axum::Error;
+pub fn error_event(data: String) -> Result<axum::response::sse::Event, axum::Error> {
+    Ok(axum::response::sse::Event::default()
+        .event(Error::Error)
+        .data(data))
+}
 
-    fn try_from(event: ReadEvent) -> Result<Self, Self::Error> {
-        match event {
-            ReadEvent::Batch { event, data, id } => Self::default()
-                .event(event)
-                .id(id.to_string())
-                .json_data(data),
-            ReadEvent::Error { event, data } => Ok(Self::default().event(event).data(data)),
-            ReadEvent::Ping { event, data } => Self::default().event(event).json_data(data),
-            ReadEvent::Done { data } => Ok(Self::default().data(data)),
-        }
-    }
+#[cfg(feature = "axum")]
+pub fn ping_event() -> Result<axum::response::sse::Event, axum::Error> {
+    axum::response::sse::Event::default()
+        .event(Ping::Ping)
+        .json_data(PingEventData {
+            timestamp: elapsed_since_epoch().as_millis() as u64,
+        })
+}
+
+#[cfg(feature = "axum")]
+pub fn done_event() -> Result<axum::response::sse::Event, axum::Error> {
+    Ok(axum::response::sse::Event::default().data(DoneEventData))
 }
 
 #[derive(Debug, Clone, Serialize)]

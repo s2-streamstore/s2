@@ -144,29 +144,27 @@ impl Backend {
             .begin(slatedb::IsolationLevel::SerializableSnapshot)
             .await?;
         let is_full_delete = trim_point == ..NonZeroSeqNum::MAX;
-        if !is_full_delete {
-            let Some(current_trim_point) = db_txn_get(
-                &txn,
-                trim_point_key.clone(),
-                kv::stream_trim_point::deser_value,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            if current_trim_point != trim_point {
-                return Ok(());
-            }
+        let Some(current_trim_point) = db_txn_get(
+            &txn,
+            trim_point_key.clone(),
+            kv::stream_trim_point::deser_value,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        if current_trim_point != trim_point {
+            return Ok(());
         }
         txn.delete(trim_point_key)?;
         if is_full_delete {
             let id_mapping_key = kv::stream_id_mapping::ser_key(stream_id);
-            let (basin, stream) =
-                db_txn_get(&txn, &id_mapping_key, kv::stream_id_mapping::deser_value)
-                    .await?
-                    .expect("invariant violation: missing stream ID mapping");
-            txn.delete(kv::stream_meta::ser_key(&basin, &stream))?;
-            txn.delete(id_mapping_key)?;
+            if let Some((basin, stream)) =
+                db_txn_get(&txn, &id_mapping_key, kv::stream_id_mapping::deser_value).await?
+            {
+                txn.delete(kv::stream_meta::ser_key(&basin, &stream))?;
+                txn.delete(id_mapping_key)?;
+            }
             txn.delete(kv::stream_tail_position::ser_key(stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(stream_id))?;
         }
