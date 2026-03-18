@@ -153,7 +153,7 @@ impl Backend {
             Some(existing) => (existing.config.reconfigure(config), existing.created_at),
             None => {
                 let mut cfg = OptionalStreamConfig::default().reconfigure(config);
-                cfg.encryption = encryption;
+                cfg.encryption_algorithm = encryption;
                 (cfg, OffsetDateTime::now_utc())
             }
         };
@@ -161,19 +161,22 @@ impl Backend {
             .merge(basin_meta.config.default_stream_config)
             .into();
 
-        // Enforce basin's allowed_encryption list on creation.
-        if !is_reconfigure && !basin_meta.config.allowed_encryption.is_empty() {
-            let is_allowed = match resolved.encryption {
+        // Enforce basin's allowed_encryption_algorithms list on creation.
+        if !is_reconfigure && !basin_meta.config.allowed_encryption_algorithms.is_empty() {
+            let is_allowed = match resolved.encryption_algorithm {
                 None => basin_meta
                     .config
-                    .allowed_encryption
+                    .allowed_encryption_algorithms
                     .contains(&EncryptionAlgorithm::None),
-                Some(alg) => basin_meta.config.allowed_encryption.contains(&alg),
+                Some(alg) => basin_meta
+                    .config
+                    .allowed_encryption_algorithms
+                    .contains(&alg),
             };
             if !is_allowed {
                 return Err(CreateStreamError::InvalidConfig(format!(
                     "encryption algorithm {:?} not permitted for this basin",
-                    resolved.encryption
+                    resolved.encryption_algorithm
                 )));
             }
         }
@@ -308,12 +311,14 @@ impl Backend {
             .min_age
             .filter(|age| !age.is_zero());
 
-        let original_encryption = meta.config.encryption;
+        let original_encryption = meta.config.encryption_algorithm;
         meta.config = meta.config.reconfigure(reconfig);
 
         // Encryption is immutable after creation.
-        if meta.config.encryption != original_encryption {
-            return Err(ReconfigureStreamError::ImmutableField("encryption"));
+        if meta.config.encryption_algorithm != original_encryption {
+            return Err(ReconfigureStreamError::ImmutableField(
+                "encryption_algorithm",
+            ));
         }
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;

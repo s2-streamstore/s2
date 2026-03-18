@@ -272,7 +272,7 @@ pub struct StreamConfig {
     /// Encryption algorithm. `"aegis-256"` | `"aes-256-gcm"` | absent (plaintext).
     /// Immutable after stream creation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption: Option<String>,
+    pub encryption_algorithm: Option<String>,
 }
 
 impl StreamConfig {
@@ -282,7 +282,7 @@ impl StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
+            encryption_algorithm,
         } = config;
 
         let config = StreamConfig {
@@ -290,7 +290,7 @@ impl StreamConfig {
             retention_policy: retention_policy.map(Into::into),
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
-            encryption: encryption.and_then(|alg| match alg {
+            encryption_algorithm: encryption_algorithm.and_then(|alg| match alg {
                 types::config::EncryptionAlgorithm::None => None,
                 types::config::EncryptionAlgorithm::Aegis256 => Some("aegis-256".to_owned()),
                 types::config::EncryptionAlgorithm::Aes256Gcm => Some("aes-256-gcm".to_owned()),
@@ -311,7 +311,7 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
+            encryption_algorithm,
         } = value;
 
         Self {
@@ -319,7 +319,7 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
-            encryption: encryption.map(|alg| match alg {
+            encryption_algorithm: encryption_algorithm.map(|alg| match alg {
                 types::config::EncryptionAlgorithm::None => "none".to_owned(),
                 types::config::EncryptionAlgorithm::Aegis256 => "aegis-256".to_owned(),
                 types::config::EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm".to_owned(),
@@ -337,7 +337,7 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
+            encryption_algorithm,
         } = value;
 
         let retention_policy = match retention_policy {
@@ -345,7 +345,7 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             Some(policy) => Some(policy.try_into()?),
         };
 
-        let encryption = match encryption.as_deref() {
+        let encryption_algorithm = match encryption_algorithm.as_deref() {
             None => None,
             Some("aegis-256") => Some(types::config::EncryptionAlgorithm::Aegis256),
             Some("aes-256-gcm") => Some(types::config::EncryptionAlgorithm::Aes256Gcm),
@@ -361,7 +361,7 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             retention_policy,
             timestamping: timestamping.map(Into::into).unwrap_or_default(),
             delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
-            encryption,
+            encryption_algorithm,
         })
     }
 }
@@ -445,7 +445,7 @@ pub struct BasinConfig {
     /// `"none"` = plaintext allowed; `"aegis-256"` | `"aes-256-gcm"` = algorithm allowed.
     /// Empty = all allowed (including plaintext).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_encryption: Vec<String>,
+    pub allowed_encryption_algorithms: Vec<String>,
 }
 
 impl TryFrom<BasinConfig> for types::config::BasinConfig {
@@ -456,22 +456,23 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
             default_stream_config,
             create_stream_on_append,
             create_stream_on_read,
-            allowed_encryption,
+            allowed_encryption_algorithms,
         } = value;
 
-        let mut parsed_allowed_encryption = Vec::with_capacity(allowed_encryption.len());
-        for s in &allowed_encryption {
+        let mut parsed_allowed_encryption_algorithms =
+            Vec::with_capacity(allowed_encryption_algorithms.len());
+        for s in &allowed_encryption_algorithms {
             let alg = match s.as_str() {
                 "none" => types::config::EncryptionAlgorithm::None,
                 "aegis-256" => types::config::EncryptionAlgorithm::Aegis256,
                 "aes-256-gcm" => types::config::EncryptionAlgorithm::Aes256Gcm,
                 other => {
                     return Err(types::ValidationError(format!(
-                        "unknown encryption algorithm in allowed_encryption: {other:?}"
+                        "unknown encryption algorithm in allowed_encryption_algorithms: {other:?}"
                     )));
                 }
             };
-            parsed_allowed_encryption.push(alg);
+            parsed_allowed_encryption_algorithms.push(alg);
         }
 
         Ok(Self {
@@ -481,7 +482,7 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
             },
             create_stream_on_append,
             create_stream_on_read,
-            allowed_encryption: parsed_allowed_encryption,
+            allowed_encryption_algorithms: parsed_allowed_encryption_algorithms,
         })
     }
 }
@@ -492,14 +493,14 @@ impl From<types::config::BasinConfig> for BasinConfig {
             default_stream_config,
             create_stream_on_append,
             create_stream_on_read,
-            allowed_encryption,
+            allowed_encryption_algorithms,
         } = value;
 
         Self {
             default_stream_config: StreamConfig::to_opt(default_stream_config),
             create_stream_on_append,
             create_stream_on_read,
-            allowed_encryption: allowed_encryption
+            allowed_encryption_algorithms: allowed_encryption_algorithms
                 .into_iter()
                 .map(|alg| match alg {
                     types::config::EncryptionAlgorithm::None => "none".to_owned(),
@@ -613,6 +614,7 @@ mod tests {
                     retention_policy,
                     timestamping,
                     delete_on_empty,
+                    encryption_algorithm: None,
                 },
             )
     }
@@ -629,7 +631,7 @@ mod tests {
                         default_stream_config,
                         create_stream_on_append,
                         create_stream_on_read,
-                        allowed_encryption: vec![],
+                        allowed_encryption_algorithms: vec![],
                     }
                 },
             )
@@ -723,6 +725,7 @@ mod tests {
                     delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
                         min_age: doe.map(Duration::from_secs),
                     },
+                    encryption_algorithm: None,
                 }
             })
     }
@@ -910,6 +913,7 @@ mod tests {
                 },
                 create_stream_on_append: base_on_append,
                 create_stream_on_read: base_on_read,
+                allowed_encryption_algorithms: vec![],
             };
 
             let reconfig = types::config::BasinReconfiguration::default();

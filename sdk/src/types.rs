@@ -764,7 +764,7 @@ impl From<StreamConfig> for api::config::StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption: None,
+            encryption_algorithm: None,
         }
     }
 }
@@ -835,7 +835,7 @@ impl From<BasinConfig> for api::config::BasinConfig {
             default_stream_config: value.default_stream_config.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
-            allowed_encryption: vec![],
+            allowed_encryption_algorithms: vec![],
         }
     }
 }

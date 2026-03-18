@@ -35,12 +35,13 @@ use crate::maybe::Maybe;
 
 /// Encryption algorithm for stream records.
 ///
-/// When used in `StreamConfig.encryption`, `None` is represented by Rust's `Option::None`
-/// (meaning plaintext). When used in `BasinConfig.allowed_encryption`, the `None` variant
-/// is a sentinel that explicitly permits plaintext streams.
+/// When used in `StreamConfig.encryption_algorithm`, `None` is represented by Rust's `Option::None`
+/// (meaning plaintext). When used in `BasinConfig.allowed_encryption_algorithms`, the `None`
+/// variant is a sentinel that explicitly permits plaintext streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionAlgorithm {
-    /// Sentinel: plaintext is explicitly allowed (used only in `allowed_encryption` lists).
+    /// Sentinel: plaintext is explicitly allowed (used only in `allowed_encryption_algorithms`
+    /// lists).
     None,
     Aegis256,
     Aes256Gcm,
@@ -120,7 +121,7 @@ pub struct StreamConfig {
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
     /// Encryption algorithm for this stream. `None` = plaintext. Immutable after creation.
-    pub encryption: Option<EncryptionAlgorithm>,
+    pub encryption_algorithm: Option<EncryptionAlgorithm>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -246,7 +247,7 @@ pub struct OptionalStreamConfig {
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,
     /// Encryption algorithm. `None` = not specified (falls back to basin default or plaintext).
-    pub encryption: Option<EncryptionAlgorithm>,
+    pub encryption_algorithm: Option<EncryptionAlgorithm>,
 }
 
 impl OptionalStreamConfig {
@@ -291,14 +292,16 @@ impl OptionalStreamConfig {
 
         let delete_on_empty = self.delete_on_empty.merge(basin_defaults.delete_on_empty);
 
-        let encryption = self.encryption.or(basin_defaults.encryption);
+        let encryption_algorithm = self
+            .encryption_algorithm
+            .or(basin_defaults.encryption_algorithm);
 
         StreamConfig {
             storage_class,
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
+            encryption_algorithm,
         }
     }
 }
@@ -310,7 +313,8 @@ impl From<OptionalStreamConfig> for StreamReconfiguration {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption: _, // encryption is immutable; not represented in StreamReconfiguration
+            encryption_algorithm: _, /* encryption_algorithm is immutable; not represented in
+                                      * StreamReconfiguration */
         } = value;
 
         Self {
@@ -329,7 +333,7 @@ impl From<OptionalStreamConfig> for StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
+            encryption_algorithm,
         } = value;
 
         Self {
@@ -337,7 +341,7 @@ impl From<OptionalStreamConfig> for StreamConfig {
             retention_policy: retention_policy.unwrap_or_default(),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
-            encryption,
+            encryption_algorithm,
         }
     }
 }
@@ -349,7 +353,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
+            encryption_algorithm,
         } = value;
 
         Self {
@@ -357,7 +361,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
             retention_policy: Some(retention_policy),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
-            encryption,
+            encryption_algorithm,
         }
     }
 }
@@ -370,7 +374,7 @@ pub struct BasinConfig {
     /// Allowlist of encryption algorithms for streams in this basin.
     /// Empty = all allowed (including plaintext). Use `EncryptionAlgorithm::None` to
     /// explicitly permit plaintext when the list is non-empty.
-    pub allowed_encryption: Vec<EncryptionAlgorithm>,
+    pub allowed_encryption_algorithms: Vec<EncryptionAlgorithm>,
 }
 
 impl BasinConfig {
@@ -395,7 +399,8 @@ impl BasinConfig {
             self.create_stream_on_read = create_stream_on_read;
         }
 
-        // allowed_encryption is not reconfigurable via BasinReconfiguration (S2-ops managed).
+        // allowed_encryption_algorithms is not reconfigurable via BasinReconfiguration (S2-ops
+        // managed).
         self
     }
 }
@@ -406,7 +411,7 @@ impl From<BasinConfig> for BasinReconfiguration {
             default_stream_config,
             create_stream_on_append,
             create_stream_on_read,
-            allowed_encryption: _, // not reconfigurable via BasinReconfiguration
+            allowed_encryption_algorithms: _, // not reconfigurable via BasinReconfiguration
         } = value;
 
         Self {

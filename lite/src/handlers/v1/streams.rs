@@ -121,7 +121,7 @@ pub async fn create_stream(
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
-    let encryption = config.encryption;
+    let encryption = config.encryption_algorithm;
     let info = backend
         .create_stream(
             basin,

@@ -197,12 +197,12 @@ pub async fn read(
         .await?;
 
     // On reads, EncryptionRequired is OK — return opaque bytes without decryption.
-    let decrypt_directive = match check_encryption_directive(config.encryption, directive.as_ref())
-    {
-        Ok(checked) => checked.cloned(),
-        Err(EncryptionError::EncryptionRequired(_)) => None,
-        Err(e) => return Err(ServiceError::Validation(ValidationError(e.to_string()))),
-    };
+    let decrypt_directive =
+        match check_encryption_directive(config.encryption_algorithm, directive.as_ref()) {
+            Ok(checked) => checked.cloned(),
+            Err(EncryptionError::EncryptionRequired(_)) => None,
+            Err(e) => return Err(ServiceError::Validation(ValidationError(e.to_string()))),
+        };
 
     let start: ReadStart = start.try_into()?;
     match request {
@@ -445,7 +445,7 @@ pub async fn append(
         .get_stream_config(basin.clone(), stream.clone())
         .await?;
 
-    check_encryption_directive(config.encryption, directive.as_ref())
+    check_encryption_directive(config.encryption_algorithm, directive.as_ref())
         .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
 
     match request {
@@ -455,7 +455,7 @@ pub async fn append(
         } => {
             let input = encrypt_append_input(
                 input,
-                config.encryption,
+                config.encryption_algorithm,
                 directive.as_ref(),
                 &basin,
                 &stream,
@@ -479,7 +479,7 @@ pub async fn append(
         } => {
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
-            let stream_alg = config.encryption;
+            let stream_alg = config.encryption_algorithm;
             let enc_basin = basin.clone();
             let enc_stream = stream.clone();
             let inputs = async_stream::stream! {
