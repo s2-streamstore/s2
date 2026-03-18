@@ -16,6 +16,7 @@ use crate::backend::error::{
     AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError, CreateStreamError,
     DeleteBasinError, DeleteStreamError, GetBasinConfigError, GetStreamConfigError,
     ListBasinsError, ListStreamsError, ReadError, ReconfigureBasinError, ReconfigureStreamError,
+    ReconfigureStreamError::ImmutableField,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +63,12 @@ pub enum ServiceError {
     Read(#[from] ReadError),
     #[error("Not implemented")]
     NotImplemented,
+}
+
+impl From<std::convert::Infallible> for ServiceError {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
+    }
 }
 
 impl From<AppendRequestRejection> for ServiceError {
@@ -148,6 +155,7 @@ impl ServiceError {
                 CreateStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
+                CreateStreamError::InvalidConfig(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::GetStreamConfig(e) => match e {
                 GetStreamConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -183,6 +191,7 @@ impl ServiceError {
                 ReconfigureStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
+                ImmutableField(_) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::CheckTail(e) => match e {
                 CheckTailError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -237,6 +246,7 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
+                AppendError::Encryption(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -257,6 +267,7 @@ impl ServiceError {
                 ReadError::Unwritten(tail) => ErrorResponse::Unwritten(v1t::stream::TailResponse {
                     tail: tail.0.into(),
                 }),
+                ReadError::Encryption(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::NotImplemented => {
                 standard(ErrorCode::PermissionDenied, "Not implemented".to_string())

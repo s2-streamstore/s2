@@ -15,6 +15,8 @@ rkyv = ["dep:rkyv", "compact_str/rkyv"]
 utoipa = ["dep:utoipa"]
 
 [dependencies]
+aegis = { workspace = true }
+aes-gcm = { workspace = true }
 axum = { workspace = true, optional = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
@@ -22,8 +24,11 @@ clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
 enum-ordinalize = { workspace = true }
 enumset = { workspace = true }
+hex = { workspace = true }
 http = { workspace = true }
+rand = { workspace = true }
 rkyv = { workspace = true, optional = true }
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }

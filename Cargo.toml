@@ -74,6 +74,12 @@ uuid = "1.22"
 xxhash-rust = "0.8"
 zstd = "0.13"
 
+# Encryption
+aegis = "0.9"
+aes-gcm = "0.10"
+hex = "0.4"
+secrecy = "0.10.3"
+
 [patch.crates-io]
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
 

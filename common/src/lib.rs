@@ -3,6 +3,7 @@
 pub mod bash;
 pub mod caps;
 pub mod deep_size;
+pub mod encryption;
 pub mod http;
 pub mod maybe;
 pub mod read_extent;

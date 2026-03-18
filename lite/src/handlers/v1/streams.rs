@@ -121,11 +121,13 @@ pub async fn create_stream(
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
+    let encryption = config.encryption;
     let info = backend
         .create_stream(
             basin,
             request.stream,
             config,
+            encryption,
             CreateMode::CreateOnly(request_token),
         )
         .await?;
@@ -220,7 +222,7 @@ pub async fn create_or_reconfigure_stream(
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_stream(basin, stream, config, CreateMode::CreateOrReconfigure)
+        .create_stream(basin, stream, config, None, CreateMode::CreateOrReconfigure)
         .await?;
     let status = if info.is_created() {
         StatusCode::CREATED

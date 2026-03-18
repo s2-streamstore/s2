@@ -269,6 +269,10 @@ pub struct StreamConfig {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
+    /// Encryption algorithm. `"aegis-256"` | `"aes-256-gcm"` | absent (plaintext).
+    /// Immutable after stream creation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<String>,
 }
 
 impl StreamConfig {
@@ -278,6 +282,7 @@ impl StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption,
         } = config;
 
         let config = StreamConfig {
@@ -285,6 +290,11 @@ impl StreamConfig {
             retention_policy: retention_policy.map(Into::into),
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
+            encryption: encryption.and_then(|alg| match alg {
+                types::config::EncryptionAlgorithm::None => None,
+                types::config::EncryptionAlgorithm::Aegis256 => Some("aegis-256".to_owned()),
+                types::config::EncryptionAlgorithm::Aes256Gcm => Some("aes-256-gcm".to_owned()),
+            }),
         };
         if config == Self::default() {
             None
@@ -301,6 +311,7 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption,
         } = value;
 
         Self {
@@ -308,6 +319,11 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
+            encryption: encryption.map(|alg| match alg {
+                types::config::EncryptionAlgorithm::None => "none".to_owned(),
+                types::config::EncryptionAlgorithm::Aegis256 => "aegis-256".to_owned(),
+                types::config::EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm".to_owned(),
+            }),
         }
     }
 }
@@ -321,6 +337,7 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption,
         } = value;
 
         let retention_policy = match retention_policy {
@@ -328,11 +345,23 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             Some(policy) => Some(policy.try_into()?),
         };
 
+        let encryption = match encryption.as_deref() {
+            None => None,
+            Some("aegis-256") => Some(types::config::EncryptionAlgorithm::Aegis256),
+            Some("aes-256-gcm") => Some(types::config::EncryptionAlgorithm::Aes256Gcm),
+            Some(other) => {
+                return Err(types::ValidationError(format!(
+                    "unknown encryption algorithm: {other:?}"
+                )));
+            }
+        };
+
         Ok(Self {
             storage_class: storage_class.map(Into::into),
             retention_policy,
             timestamping: timestamping.map(Into::into).unwrap_or_default(),
             delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
+            encryption,
         })
     }
 }
@@ -412,6 +441,11 @@ pub struct BasinConfig {
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(default = false))]
     pub create_stream_on_read: bool,
+    /// Allowlist of encryption algorithms permitted for streams in this basin.
+    /// `"none"` = plaintext allowed; `"aegis-256"` | `"aes-256-gcm"` = algorithm allowed.
+    /// Empty = all allowed (including plaintext).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_encryption: Vec<String>,
 }
 
 impl TryFrom<BasinConfig> for types::config::BasinConfig {
@@ -422,7 +456,23 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
             default_stream_config,
             create_stream_on_append,
             create_stream_on_read,
+            allowed_encryption,
         } = value;
+
+        let mut parsed_allowed_encryption = Vec::with_capacity(allowed_encryption.len());
+        for s in &allowed_encryption {
+            let alg = match s.as_str() {
+                "none" => types::config::EncryptionAlgorithm::None,
+                "aegis-256" => types::config::EncryptionAlgorithm::Aegis256,
+                "aes-256-gcm" => types::config::EncryptionAlgorithm::Aes256Gcm,
+                other => {
+                    return Err(types::ValidationError(format!(
+                        "unknown encryption algorithm in allowed_encryption: {other:?}"
+                    )));
+                }
+            };
+            parsed_allowed_encryption.push(alg);
+        }
 
         Ok(Self {
             default_stream_config: match default_stream_config {
@@ -431,6 +481,7 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
             },
             create_stream_on_append,
             create_stream_on_read,
+            allowed_encryption: parsed_allowed_encryption,
         })
     }
 }
@@ -441,12 +492,21 @@ impl From<types::config::BasinConfig> for BasinConfig {
             default_stream_config,
             create_stream_on_append,
             create_stream_on_read,
+            allowed_encryption,
         } = value;
 
         Self {
             default_stream_config: StreamConfig::to_opt(default_stream_config),
             create_stream_on_append,
             create_stream_on_read,
+            allowed_encryption: allowed_encryption
+                .into_iter()
+                .map(|alg| match alg {
+                    types::config::EncryptionAlgorithm::None => "none".to_owned(),
+                    types::config::EncryptionAlgorithm::Aegis256 => "aegis-256".to_owned(),
+                    types::config::EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm".to_owned(),
+                })
+                .collect(),
         }
     }
 }
@@ -569,6 +629,7 @@ mod tests {
                         default_stream_config,
                         create_stream_on_append,
                         create_stream_on_read,
+                        allowed_encryption: vec![],
                     }
                 },
             )

@@ -3,7 +3,7 @@ use s2_common::{
     record::StreamPosition,
     types::{
         basin::BasinName,
-        config::{OptionalStreamConfig, StreamReconfiguration},
+        config::{EncryptionAlgorithm, OptionalStreamConfig, StreamReconfiguration},
         resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
@@ -82,6 +82,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         config: impl Into<StreamReconfiguration>,
+        encryption: Option<EncryptionAlgorithm>,
         mode: CreateMode,
     ) -> Result<CreatedOrReconfigured<StreamInfo>, CreateStreamError> {
         let config = config.into();
@@ -150,14 +151,32 @@ impl Backend {
         let is_reconfigure = existing_meta_opt.is_some();
         let (resolved, created_at) = match existing_meta_opt {
             Some(existing) => (existing.config.reconfigure(config), existing.created_at),
-            None => (
-                OptionalStreamConfig::default().reconfigure(config),
-                OffsetDateTime::now_utc(),
-            ),
+            None => {
+                let mut cfg = OptionalStreamConfig::default().reconfigure(config);
+                cfg.encryption = encryption;
+                (cfg, OffsetDateTime::now_utc())
+            }
         };
         let resolved: OptionalStreamConfig = resolved
             .merge(basin_meta.config.default_stream_config)
             .into();
+
+        // Enforce basin's allowed_encryption list on creation.
+        if !is_reconfigure && !basin_meta.config.allowed_encryption.is_empty() {
+            let is_allowed = match resolved.encryption {
+                None => basin_meta
+                    .config
+                    .allowed_encryption
+                    .contains(&EncryptionAlgorithm::None),
+                Some(alg) => basin_meta.config.allowed_encryption.contains(&alg),
+            };
+            if !is_allowed {
+                return Err(CreateStreamError::InvalidConfig(format!(
+                    "encryption algorithm {:?} not permitted for this basin",
+                    resolved.encryption
+                )));
+            }
+        }
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
@@ -289,7 +308,13 @@ impl Backend {
             .min_age
             .filter(|age| !age.is_zero());
 
+        let original_encryption = meta.config.encryption;
         meta.config = meta.config.reconfigure(reconfig);
+
+        // Encryption is immutable after creation.
+        if meta.config.encryption != original_encryption {
+            return Err(ReconfigureStreamError::ImmutableField("encryption"));
+        }
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
