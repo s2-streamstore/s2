@@ -161,7 +161,6 @@ impl Backend {
             .merge(basin_meta.config.default_stream_config)
             .into();
 
-        // Enforce basin's allowed_encryption_algorithms list on creation.
         if !is_reconfigure && !basin_meta.config.allowed_encryption_algorithms.is_empty() {
             let is_allowed = match resolved.encryption_algorithm {
                 None => basin_meta
@@ -314,7 +313,6 @@ impl Backend {
         let original_encryption = meta.config.encryption_algorithm;
         meta.config = meta.config.reconfigure(reconfig);
 
-        // Encryption is immutable after creation.
         if meta.config.encryption_algorithm != original_encryption {
             return Err(ReconfigureStreamError::ImmutableField(
                 "encryption_algorithm",

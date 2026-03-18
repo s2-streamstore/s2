@@ -15,20 +15,17 @@ use s2_api::{
 use s2_common::{
     caps::RECORD_BATCH_MAX,
     encryption::{
-        EncryptionDirective, EncryptionError, check_encryption_directive, decode_record_plaintext,
-        decrypt_record, encode_record_plaintext, encrypt_record, parse_s2_encryption_header,
+        self, EncryptionDirective, EncryptionError, check_encryption_directive,
+        parse_s2_encryption_header, stream_aad,
     },
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
-    record::{Metered, MeteredSize as _, Record, SequencedRecord},
+    record::{Metered, MeteredSize as _},
     types::{
         ValidationError,
         basin::BasinName,
         config::EncryptionAlgorithm,
-        stream::{
-            AppendInput, AppendRecordBatch, AppendRecordParts, ReadBatch, ReadEnd, ReadFrom,
-            ReadSessionOutput, ReadStart, StreamName,
-        },
+        stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
     },
 };
 
@@ -43,6 +40,71 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::streams::records::CHECK_TAIL, get(check_tail))
         .route(super::paths::streams::records::READ, get(read))
         .route(super::paths::streams::records::APPEND, post(append))
+}
+
+struct EncryptionContext {
+    aad: Vec<u8>,
+    stream_alg: Option<EncryptionAlgorithm>,
+    directive: Option<EncryptionDirective>,
+}
+
+impl EncryptionContext {
+    async fn resolve_for_append(
+        backend: &Backend,
+        headers: &http::HeaderMap,
+        basin: &BasinName,
+        stream: &StreamName,
+    ) -> Result<Self, ServiceError> {
+        let directive = parse_s2_encryption_header(headers)
+            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
+        let config = backend
+            .get_stream_config(basin.clone(), stream.clone())
+            .await?;
+        check_encryption_directive(config.encryption_algorithm, directive.as_ref())
+            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
+        Ok(Self {
+            aad: stream_aad(basin, stream).into_bytes(),
+            stream_alg: config.encryption_algorithm,
+            directive,
+        })
+    }
+
+    async fn resolve_for_read(
+        backend: &Backend,
+        headers: &http::HeaderMap,
+        basin: &BasinName,
+        stream: &StreamName,
+    ) -> Result<Self, ServiceError> {
+        let directive = parse_s2_encryption_header(headers)
+            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
+        let config = backend
+            .get_stream_config(basin.clone(), stream.clone())
+            .await?;
+        let checked =
+            match check_encryption_directive(config.encryption_algorithm, directive.as_ref()) {
+                Ok(d) => d.cloned(),
+                Err(EncryptionError::EncryptionRequired(_)) => None,
+                Err(e) => {
+                    return Err(ServiceError::Validation(ValidationError(e.to_string())));
+                }
+            };
+        Ok(Self {
+            aad: stream_aad(basin, stream).into_bytes(),
+            stream_alg: config.encryption_algorithm,
+            directive: checked,
+        })
+    }
+
+    fn encrypt_input(
+        &self,
+        input: s2_common::types::stream::AppendInput,
+    ) -> Result<s2_common::types::stream::AppendInput, EncryptionError> {
+        encryption::encrypt_append_input(input, self.stream_alg, self.directive.as_ref(), &self.aad)
+    }
+
+    fn decrypt_batch(&self, batch: ReadBatch) -> Result<ReadBatch, EncryptionError> {
+        encryption::decrypt_read_batch(batch, self.directive.as_ref(), &self.aad)
+    }
 }
 
 fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceError> {
@@ -189,20 +251,7 @@ pub async fn read(
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
-    let directive = parse_s2_encryption_header(&headers)
-        .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-
-    let config = backend
-        .get_stream_config(basin.clone(), stream.clone())
-        .await?;
-
-    // On reads, EncryptionRequired is OK — return opaque bytes without decryption.
-    let decrypt_directive =
-        match check_encryption_directive(config.encryption_algorithm, directive.as_ref()) {
-            Ok(checked) => checked.cloned(),
-            Err(EncryptionError::EncryptionRequired(_)) => None,
-            Err(e) => return Err(ServiceError::Validation(ValidationError(e.to_string()))),
-        };
+    let enc = EncryptionContext::resolve_for_read(&backend, &headers, &basin, &stream).await?;
 
     let start: ReadStart = start.try_into()?;
     match request {
@@ -215,8 +264,7 @@ pub async fn read(
                 .read(basin.clone(), stream.clone(), start, end)
                 .await?;
             let batch = merge_read_session(session, end.wait).await?;
-            let batch = decrypt_read_batch(batch, decrypt_directive.as_ref(), &basin, &stream)
-                .map_err(ReadError::Encryption)?;
+            let batch = enc.decrypt_batch(batch).map_err(ReadError::Encryption)?;
             match response_mime {
                 JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
                     format, &batch,
@@ -247,7 +295,7 @@ pub async fn read(
                             yield v1t::stream::sse::ping_event();
                         },
                         Ok(ReadSessionOutput::Batch(batch)) => {
-                            let batch = match decrypt_read_batch(batch, decrypt_directive.as_ref(), &basin, &stream) {
+                            let batch = match enc.decrypt_batch(batch) {
                                 Ok(batch) => batch,
                                 Err(err) => {
                                     let (_, body) = ServiceError::from(ReadError::Encryption(err)).to_response().to_parts();
@@ -295,9 +343,7 @@ pub async fn read(
                         tail: Some(tail.into()),
                     }),
                     Ok(ReadSessionOutput::Batch(batch)) => {
-                        let batch =
-                            decrypt_read_batch(batch, decrypt_directive.as_ref(), &basin, &stream)
-                                .map_err(ReadError::Encryption)?;
+                        let batch = enc.decrypt_batch(batch).map_err(ReadError::Encryption)?;
                         Ok(v1t::stream::proto::ReadBatch::from(batch))
                     }
                     Err(e) => Err(e),
@@ -356,44 +402,6 @@ async fn merge_read_session(
     Ok(acc)
 }
 
-fn decrypt_read_batch(
-    batch: ReadBatch,
-    directive: Option<&EncryptionDirective>,
-    basin: &BasinName,
-    stream: &StreamName,
-) -> Result<ReadBatch, EncryptionError> {
-    let Some(EncryptionDirective::Key { key, .. }) = directive else {
-        return Ok(batch);
-    };
-    let aad = format!("{basin}/{stream}");
-    let records: Vec<SequencedRecord> = batch
-        .records
-        .into_inner()
-        .into_iter()
-        .map(|sr| {
-            let Record::Envelope(ref env) = sr.record else {
-                return Ok(sr);
-            };
-            match decrypt_record(env.body(), key, aad.as_bytes())? {
-                None => Ok(sr),
-                Some(plaintext) => {
-                    let (headers, body) = decode_record_plaintext(plaintext)?;
-                    let record = Record::try_from_parts(headers, body)
-                        .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
-                    Ok(SequencedRecord {
-                        position: sr.position,
-                        record,
-                    })
-                }
-            }
-        })
-        .collect::<Result<_, EncryptionError>>()?;
-    Ok(ReadBatch {
-        records: Metered::from(records),
-        tail: batch.tail,
-    })
-}
-
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct AppendArgs {
@@ -438,29 +446,16 @@ pub async fn append(
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
-    let directive = parse_s2_encryption_header(&headers)
-        .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-
-    let config = backend
-        .get_stream_config(basin.clone(), stream.clone())
-        .await?;
-
-    check_encryption_directive(config.encryption_algorithm, directive.as_ref())
-        .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
+    let enc = EncryptionContext::resolve_for_append(&backend, &headers, &basin, &stream).await?;
 
     match request {
         v1t::stream::AppendRequest::Unary {
             input,
             response_mime,
         } => {
-            let input = encrypt_append_input(
-                input,
-                config.encryption_algorithm,
-                directive.as_ref(),
-                &basin,
-                &stream,
-            )
-            .map_err(crate::backend::error::AppendError::Encryption)?;
+            let input = enc
+                .encrypt_input(input)
+                .map_err(crate::backend::error::AppendError::Encryption)?;
             let ack = backend.append(basin, stream, input).await?;
             match response_mime {
                 JsonOrProto::Json => {
@@ -479,25 +474,20 @@ pub async fn append(
         } => {
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
-            let stream_alg = config.encryption_algorithm;
-            let enc_basin = basin.clone();
-            let enc_stream = stream.clone();
             let inputs = async_stream::stream! {
                 tokio::pin!(inputs);
                 let mut err_tx = Some(err_tx);
                 while let Some(input) = inputs.next().await {
                     match input {
-                        Ok(input) => {
-                            match encrypt_append_input(input, stream_alg, directive.as_ref(), &enc_basin, &enc_stream) {
-                                Ok(encrypted) => yield encrypted,
-                                Err(e) => {
-                                    if let Some(tx) = err_tx.take() {
-                                        let _ = tx.send(ServiceError::Append(e.into()));
-                                    }
-                                    break;
+                        Ok(input) => match enc.encrypt_input(input) {
+                            Ok(encrypted) => yield encrypted,
+                            Err(e) => {
+                                if let Some(tx) = err_tx.take() {
+                                    let _ = tx.send(ServiceError::Append(e.into()));
                                 }
+                                break;
                             }
-                        }
+                        },
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e.into());
@@ -535,51 +525,4 @@ pub async fn append(
                 .expect("valid response builder"))
         }
     }
-}
-
-fn encrypt_append_input(
-    input: AppendInput,
-    stream_alg: Option<EncryptionAlgorithm>,
-    directive: Option<&EncryptionDirective>,
-    basin: &BasinName,
-    stream: &StreamName,
-) -> Result<AppendInput, EncryptionError> {
-    let Some(EncryptionDirective::Key { alg, key }) = directive else {
-        return Ok(input);
-    };
-    if stream_alg.is_none() {
-        return Ok(input);
-    }
-    let aad = format!("{basin}/{stream}");
-    let mut encrypted_records = Vec::with_capacity(input.records.len());
-    for record in input.records.into_iter() {
-        let AppendRecordParts { timestamp, record } = record.into();
-        let encrypted = match &*record {
-            Record::Envelope(env) => {
-                let plaintext =
-                    encode_record_plaintext(env.headers().to_vec(), env.body().clone())?;
-                let enc_body = encrypt_record(&plaintext, *alg, key, aad.as_bytes())?;
-                let enc_record = Record::try_from_parts(vec![], enc_body)
-                    .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
-                Metered::from(enc_record)
-            }
-            Record::Command(_) => record,
-        };
-        encrypted_records.push(
-            AppendRecordParts {
-                timestamp,
-                record: encrypted,
-            }
-            .try_into()
-            .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_string()))?,
-        );
-    }
-    let records: AppendRecordBatch = encrypted_records
-        .try_into()
-        .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_string()))?;
-    Ok(AppendInput {
-        records,
-        match_seq_num: input.match_seq_num,
-        fencing_token: input.fencing_token,
-    })
 }

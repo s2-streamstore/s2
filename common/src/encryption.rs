@@ -87,12 +87,6 @@ pub enum EncryptionError {
     EncodingFailed(String),
 }
 
-/// Parse the `S2-Encryption` header value.
-///
-/// Returns:
-/// - `Ok(None)` if the header is absent.
-/// - `Ok(Some(directive))` on a valid header.
-/// - `Err` if the header is present but malformed.
 pub fn parse_s2_encryption_header(
     headers: &HeaderMap,
 ) -> Result<Option<EncryptionDirective>, EncryptionError> {
@@ -105,12 +99,10 @@ pub fn parse_s2_encryption_header(
         .to_str()
         .map_err(|_| EncryptionError::MalformedHeader("header is not valid UTF-8".to_owned()))?;
 
-    // "attest" → client-side encryption, server passes through.
     if s.trim() == "attest" {
         return Ok(Some(EncryptionDirective::Attest));
     }
 
-    // "alg=<name>; key=<64 hex chars>"
     let (alg_part, key_part) = s.split_once(';').ok_or_else(|| {
         EncryptionError::MalformedHeader(format!("expected 'alg=...; key=...', got {s:?}"))
     })?;
@@ -161,19 +153,11 @@ pub fn parse_s2_encryption_header(
     }))
 }
 
-/// Validate the directive against the stream's configured encryption algorithm.
-///
-/// Returns:
-/// - `Ok(None)` if the stream has no encryption configured (pass-through).
-/// - `Ok(Some(directive))` if encryption should proceed.
-/// - `Err(EncryptionRequired)` if the stream requires encryption but none was provided.
-/// - `Err(AlgorithmMismatch)` if the algorithms differ.
 pub fn check_encryption_directive<'a>(
     stream_alg: Option<EncryptionAlgorithm>,
     directive: Option<&'a EncryptionDirective>,
 ) -> Result<Option<&'a EncryptionDirective>, EncryptionError> {
     let Some(required_alg) = stream_alg else {
-        // Stream has no encryption: ignore any directive.
         return Ok(None);
     };
 
@@ -192,7 +176,6 @@ pub fn check_encryption_directive<'a>(
     }
 }
 
-/// Encode headers + body as `EnvelopeRecord` bytes (the plaintext input to encryption).
 pub fn encode_record_plaintext(
     headers: Vec<Header>,
     body: Bytes,
@@ -202,16 +185,12 @@ pub fn encode_record_plaintext(
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
-/// Decode `EnvelopeRecord` bytes back to `(headers, body)` after decryption.
 pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), EncryptionError> {
     EnvelopeRecord::try_from(bytes)
         .map(|r| r.into_parts())
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
-/// Encrypt a record.
-///
-/// Output layout: `[alg_id][random_nonce][ciphertext][tag]` as contiguous `Bytes`.
 pub fn encrypt_record(
     plaintext: &[u8],
     alg: EncryptionAlgorithm,
@@ -240,7 +219,6 @@ pub fn encrypt_record(
                 EncryptionError::EncodingFailed("invalid AES key length".to_owned())
             })?;
             let nonce_generic = aes_gcm::Nonce::from_slice(&nonce);
-            // aes-gcm appends the 16-byte tag to the ciphertext automatically.
             let ciphertext_with_tag = cipher
                 .encrypt(
                     nonce_generic,
@@ -264,12 +242,6 @@ pub fn encrypt_record(
     }
 }
 
-/// Decrypt a record body.
-///
-/// Returns:
-/// - `Ok(Some(plaintext))` on success.
-/// - `Ok(None)` if the first byte is not a known `alg_id` (unencrypted pass-through).
-/// - `Err` on auth tag failure, truncation, or other error.
 pub fn decrypt_record(
     body: &[u8],
     key: &EncryptionKey,
@@ -324,9 +296,93 @@ pub fn decrypt_record(
                 .map_err(|_| EncryptionError::DecryptionFailed)?;
             Ok(Some(Bytes::from(plaintext)))
         }
-        // Unknown first byte: not encrypted by S2, pass through.
         _ => Ok(None),
     }
+}
+
+pub fn encrypt_append_input(
+    input: crate::types::stream::AppendInput,
+    stream_alg: Option<EncryptionAlgorithm>,
+    directive: Option<&EncryptionDirective>,
+    aad: &[u8],
+) -> Result<crate::types::stream::AppendInput, EncryptionError> {
+    let Some(EncryptionDirective::Key { alg, key }) = directive else {
+        return Ok(input);
+    };
+    if stream_alg.is_none() {
+        return Ok(input);
+    }
+    let mut encrypted_records = Vec::with_capacity(input.records.len());
+    for record in input.records.into_iter() {
+        let crate::types::stream::AppendRecordParts { timestamp, record } = record.into();
+        let encrypted = match &*record {
+            crate::record::Record::Envelope(env) => {
+                let plaintext =
+                    encode_record_plaintext(env.headers().to_vec(), env.body().clone())?;
+                let enc_body = encrypt_record(&plaintext, *alg, key, aad)?;
+                let enc_record = crate::record::Record::try_from_parts(vec![], enc_body)
+                    .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
+                crate::record::Metered::from(enc_record)
+            }
+            crate::record::Record::Command(_) => record,
+        };
+        encrypted_records.push(
+            crate::types::stream::AppendRecordParts {
+                timestamp,
+                record: encrypted,
+            }
+            .try_into()
+            .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_string()))?,
+        );
+    }
+    let records: crate::types::stream::AppendRecordBatch = encrypted_records
+        .try_into()
+        .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_string()))?;
+    Ok(crate::types::stream::AppendInput {
+        records,
+        match_seq_num: input.match_seq_num,
+        fencing_token: input.fencing_token,
+    })
+}
+
+pub fn decrypt_read_batch(
+    batch: crate::types::stream::ReadBatch,
+    directive: Option<&EncryptionDirective>,
+    aad: &[u8],
+) -> Result<crate::types::stream::ReadBatch, EncryptionError> {
+    let Some(EncryptionDirective::Key { key, .. }) = directive else {
+        return Ok(batch);
+    };
+    let records: Vec<crate::record::SequencedRecord> = batch
+        .records
+        .into_inner()
+        .into_iter()
+        .map(|sr| {
+            let crate::record::Record::Envelope(ref env) = sr.record else {
+                return Ok(sr);
+            };
+            match decrypt_record(env.body(), key, aad)? {
+                None => Ok(sr),
+                Some(plaintext) => {
+                    let (headers, body) = decode_record_plaintext(plaintext)?;
+                    let record = crate::record::Record::try_from_parts(headers, body)
+                        .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
+                    Ok(crate::record::SequencedRecord {
+                        position: sr.position,
+                        record,
+                    })
+                }
+            }
+        })
+        .collect::<Result<_, EncryptionError>>()?;
+    Ok(crate::types::stream::ReadBatch {
+        records: crate::record::Metered::from(records),
+        tail: batch.tail,
+    })
+}
+
+pub fn stream_aad(basin: &impl std::fmt::Display, stream: &impl std::fmt::Display) -> String {
+    format!("{basin}/{stream}")
 }
 
 #[cfg(test)]
