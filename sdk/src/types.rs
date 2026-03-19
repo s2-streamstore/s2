@@ -1122,6 +1122,7 @@ impl ListAllBasinsInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 /// Current state of a basin.
 pub enum BasinState {
     /// Active
