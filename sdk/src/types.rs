@@ -1126,8 +1126,6 @@ impl ListAllBasinsInput {
 pub enum BasinState {
     /// Active
     Active,
-    /// Creating
-    Creating,
     /// Deleting
     Deleting,
 }
@@ -1136,7 +1134,6 @@ impl From<api::basin::BasinState> for BasinState {
     fn from(value: api::basin::BasinState) -> Self {
         match value {
             api::basin::BasinState::Active => BasinState::Active,
-            api::basin::BasinState::Creating => BasinState::Creating,
             api::basin::BasinState::Deleting => BasinState::Deleting,
         }
     }

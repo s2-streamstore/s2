@@ -202,7 +202,6 @@ pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAft
 #[derive(Debug, Clone, Copy)]
 pub enum BasinState {
     Active,
-    Creating,
     Deleting,
 }
 

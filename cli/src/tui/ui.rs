@@ -53,7 +53,6 @@ const BORDER_DIM: Color = GRAY_850;
 const BORDER_TITLE: Color = GRAY_900;
 
 const BADGE_ACTIVE: Color = Color::Rgb(22, 101, 52);
-const BADGE_PENDING: Color = Color::Rgb(113, 63, 18);
 const BADGE_DANGER: Color = Color::Rgb(127, 29, 29);
 
 const STAT_MIN: Color = Color::Rgb(96, 165, 250);
@@ -2471,7 +2470,6 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
 
         let (state_text, state_bg) = match basin.state {
             s2_sdk::types::BasinState::Active => ("Active", BADGE_ACTIVE),
-            s2_sdk::types::BasinState::Creating => ("Creating", BADGE_PENDING),
             s2_sdk::types::BasinState::Deleting => ("Deleting", BADGE_DANGER),
         };
 

@@ -9,8 +9,9 @@ use s2_common::{
         resources::{CreateMode, ListItemsRequestParts, RequestToken},
     },
 };
-use s2_lite::backend::error::{
-    CreateBasinError, DeleteBasinError, GetBasinConfigError, ReconfigureBasinError,
+use s2_lite::backend::{
+    CreatedOrReconfigured,
+    error::{CreateBasinError, DeleteBasinError, GetBasinConfigError, ReconfigureBasinError},
 };
 
 use super::common::*;
@@ -26,7 +27,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
 
     let token1: RequestToken = "token-1".parse().unwrap();
 
-    backend
+    let created = backend
         .create_basin(
             basin_name.clone(),
             config.clone(),
@@ -34,8 +35,12 @@ async fn test_create_basin_idempotency_respects_request_token() {
         )
         .await
         .expect("Failed to create basin");
+    assert!(matches!(
+        created,
+        CreatedOrReconfigured::Created(ref info) if matches!(info.state, BasinState::Active)
+    ));
 
-    backend
+    let idempotent = backend
         .create_basin(
             basin_name.clone(),
             config.clone(),
@@ -43,6 +48,10 @@ async fn test_create_basin_idempotency_respects_request_token() {
         )
         .await
         .expect("Idempotent create should succeed with same request token");
+    assert!(matches!(
+        idempotent,
+        CreatedOrReconfigured::Created(ref info) if matches!(info.state, BasinState::Active)
+    ));
 
     let different_token: RequestToken = "token-2".parse().unwrap();
     let different_token_result = backend

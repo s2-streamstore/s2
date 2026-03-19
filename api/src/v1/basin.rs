@@ -96,8 +96,6 @@ impl From<types::basin::BasinScope> for BasinScope {
 pub enum BasinState {
     /// Basin is active.
     Active,
-    /// Basin is being created.
-    Creating,
     /// Basin is being deleted.
     Deleting,
 }
@@ -106,7 +104,6 @@ impl From<types::basin::BasinState> for BasinState {
     fn from(value: types::basin::BasinState) -> Self {
         match value {
             types::basin::BasinState::Active => Self::Active,
-            types::basin::BasinState::Creating => Self::Creating,
             types::basin::BasinState::Deleting => Self::Deleting,
         }
     }

@@ -248,7 +248,6 @@ async fn run() -> Result<(), CliError> {
             let info = ops::create_basin(&s2, args).await?;
 
             let message = match info.state {
-                BasinState::Creating => "✓ Basin creation requested".yellow().bold(),
                 BasinState::Active => "✓ Basin created".green().bold(),
                 BasinState::Deleting => "Basin is being deleted".red().bold(),
             };
@@ -627,7 +626,6 @@ async fn run() -> Result<(), CliError> {
 fn format_basin_state(state: BasinState) -> colored::ColoredString {
     match state {
         BasinState::Active => "active".green(),
-        BasinState::Creating => "creating".yellow(),
         BasinState::Deleting => "deleting".red(),
     }
 }
