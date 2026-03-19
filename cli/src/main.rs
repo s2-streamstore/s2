@@ -250,7 +250,6 @@ async fn run() -> Result<(), CliError> {
             let message = match info.state {
                 BasinState::Active => "✓ Basin created".green().bold(),
                 BasinState::Deleting => "Basin is being deleted".red().bold(),
-                _ => "Basin state is unknown".yellow().bold(),
             };
             eprintln!("{message}");
         }
@@ -628,7 +627,6 @@ fn format_basin_state(state: BasinState) -> colored::ColoredString {
     match state {
         BasinState::Active => "active".green(),
         BasinState::Deleting => "deleting".red(),
-        _ => "unknown".yellow(),
     }
 }
 
