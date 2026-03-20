@@ -7,8 +7,12 @@
 //! ## Wire format (body of stored EnvelopeRecord)
 //!
 //! ```text
-//! [alg_id: 1 byte] [nonce] [ciphertext] [tag]
+//! [version: 1 byte] [alg_id: 1 byte] [nonce] [ciphertext] [tag]
 //! ```
+//!
+//! | version | Description                                      |
+//! |---------|--------------------------------------------------|
+//! | 0x01    | Initial versioned format. AAD = base ‖ alg ‖ seq_num_le |
 //!
 //! | alg_id | Algorithm   | Nonce  | Tag  |
 //! |--------|-------------|--------|------|
@@ -29,6 +33,10 @@ use crate::record::{Encodable as _, EnvelopeRecord, Header};
 pub use crate::types::config::EncryptionAlgorithm;
 
 pub const S2_ENCRYPTION_HEADER: &str = "s2-encryption";
+
+/// Ciphertext envelope version. Stored as the first byte of the encrypted record body.
+/// Authenticated via AAD so tampering is detected.
+const CIPHERTEXT_V1: u8 = 0x01;
 
 const ALG_ID_AEGIS256: u8 = 0x01;
 const ALG_ID_AES256GCM: u8 = 0x02;
@@ -83,6 +91,8 @@ pub enum EncryptionError {
     EncryptionRequired(EncryptionAlgorithm),
     #[error("Encryption key provided but stream is plaintext")]
     EncryptionNotExpected,
+    #[error("Unsupported ciphertext version: {0:#04x}")]
+    UnsupportedVersion(u8),
     #[error("Decryption failed")]
     DecryptionFailed,
     #[error("Record encoding error: {0}")]
@@ -195,15 +205,15 @@ pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), Enc
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
-/// Build the effective AAD by appending the algorithm ID byte and seq_num to the
-/// caller-provided base AAD. This binds the algorithm tag and stream position into
-/// the AEAD authentication, so flipping the stored alg_id byte or reordering records
-/// within a stream is detected as an authentication failure.
+/// Build the effective AAD for V1 envelope format. The alg_id and seq_num are mixed
+/// into the AAD so the AEAD tag binds the ciphertext to its algorithm and stream
+/// position. The version byte is not included -- it's already gated by the dispatch
+/// in `decrypt_record`, so a version flip is caught before AAD construction.
 ///
-/// Layout: `[base_aad | alg_id: 1 byte | seq_num: 8 bytes LE]`
-fn effective_aad(aad: &[u8], alg_id: u8, seq_num: crate::record::SeqNum) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(aad.len() + 1 + 8);
-    buf.extend_from_slice(aad);
+/// Layout: `[base_aad | alg_id | seq_num: 8 bytes LE]`
+fn effective_aad_v1(base: &[u8], alg_id: u8, seq_num: crate::record::SeqNum) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(base.len() + 1 + 8);
+    buf.extend_from_slice(base);
     buf.push(alg_id);
     buf.extend_from_slice(&seq_num.to_le_bytes());
     buf
@@ -218,15 +228,16 @@ pub fn encrypt_record(
 ) -> Result<Bytes, EncryptionError> {
     match alg {
         EncryptionAlgorithm::Aegis256 => {
-            let full_aad = effective_aad(aad, ALG_ID_AEGIS256, seq_num);
+            let full_aad = effective_aad_v1(aad, ALG_ID_AEGIS256, seq_num);
             let nonce: [u8; NONCE_BYTES_AEGIS256] = random();
             let (ciphertext, tag) =
                 Aegis256::<TAG_BYTES_AEGIS256>::new(&key.expose_secret().0, &nonce)
                     .encrypt(plaintext, &full_aad);
 
             let mut out = BytesMut::with_capacity(
-                1 + NONCE_BYTES_AEGIS256 + ciphertext.len() + TAG_BYTES_AEGIS256,
+                2 + NONCE_BYTES_AEGIS256 + ciphertext.len() + TAG_BYTES_AEGIS256,
             );
+            out.put_u8(CIPHERTEXT_V1);
             out.put_u8(ALG_ID_AEGIS256);
             out.put_slice(&nonce);
             out.put_slice(&ciphertext);
@@ -234,7 +245,7 @@ pub fn encrypt_record(
             Ok(out.freeze())
         }
         EncryptionAlgorithm::Aes256Gcm => {
-            let full_aad = effective_aad(aad, ALG_ID_AES256GCM, seq_num);
+            let full_aad = effective_aad_v1(aad, ALG_ID_AES256GCM, seq_num);
             let nonce: [u8; NONCE_BYTES_AES256GCM] = random();
             let cipher = Aes256Gcm::new_from_slice(&key.expose_secret().0).map_err(|_| {
                 EncryptionError::EncodingFailed("invalid AES key length".to_owned())
@@ -251,7 +262,8 @@ pub fn encrypt_record(
                 .map_err(|_| EncryptionError::DecryptionFailed)?;
 
             let mut out =
-                BytesMut::with_capacity(1 + NONCE_BYTES_AES256GCM + ciphertext_with_tag.len());
+                BytesMut::with_capacity(2 + NONCE_BYTES_AES256GCM + ciphertext_with_tag.len());
+            out.put_u8(CIPHERTEXT_V1);
             out.put_u8(ALG_ID_AES256GCM);
             out.put_slice(&nonce);
             out.put_slice(&ciphertext_with_tag);
@@ -269,15 +281,30 @@ pub fn decrypt_record(
     aad: &[u8],
     seq_num: crate::record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
+    let (&version, after_version) = body
+        .split_first()
+        .ok_or(EncryptionError::DecryptionFailed)?;
+
+    match version {
+        CIPHERTEXT_V1 => decrypt_record_v1(after_version, key, aad, seq_num),
+        v => Err(EncryptionError::UnsupportedVersion(v)),
+    }
+}
+
+fn decrypt_record_v1(
+    body: &[u8],
+    key: &EncryptionKey,
+    aad: &[u8],
+    seq_num: crate::record::SeqNum,
+) -> Result<Bytes, EncryptionError> {
     let (&alg_id, rest) = body
         .split_first()
         .ok_or(EncryptionError::DecryptionFailed)?;
 
-    let full_aad = effective_aad(aad, alg_id, seq_num);
+    let full_aad = effective_aad_v1(aad, alg_id, seq_num);
 
     match alg_id {
         ALG_ID_AEGIS256 => {
-            // Layout after alg_id: [nonce:32][ciphertext:n][tag:32]
             if rest.len() < NONCE_BYTES_AEGIS256 + TAG_BYTES_AEGIS256 {
                 return Err(EncryptionError::DecryptionFailed);
             }
@@ -294,7 +321,6 @@ pub fn decrypt_record(
             Ok(Bytes::from(plaintext))
         }
         ALG_ID_AES256GCM => {
-            // Layout after alg_id: [nonce:12][ciphertext+tag:n+16]
             if rest.len() < NONCE_BYTES_AES256GCM + TAG_BYTES_AES256GCM {
                 return Err(EncryptionError::DecryptionFailed);
             }
@@ -447,17 +473,21 @@ mod tests {
         let key = make_key_fn();
         let ciphertext =
             encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ).unwrap();
-        let truncated = &ciphertext[..3];
+        // Truncate to 4 bytes -- version + alg_id + 2 nonce bytes, too short.
+        let truncated = &ciphertext[..4];
         let result = decrypt_record(truncated, &key, AAD, SEQ);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
-    fn unknown_first_byte_fails() {
-        let body = b"\x00some opaque bytes";
+    fn unsupported_version_fails() {
         let key = make_key_fn();
+        let body = b"\xFFsome opaque bytes";
         let result = decrypt_record(body, &key, AAD, SEQ);
-        assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
+        assert!(matches!(
+            result,
+            Err(EncryptionError::UnsupportedVersion(0xFF))
+        ));
     }
 
     #[test]
@@ -468,6 +498,16 @@ mod tests {
     }
 
     #[test]
+    fn version_byte_present() {
+        let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
+        let key = make_key_fn();
+        let ciphertext =
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ).unwrap();
+        assert_eq!(ciphertext[0], CIPHERTEXT_V1);
+        assert_eq!(ciphertext[1], ALG_ID_AEGIS256);
+    }
+
+    #[test]
     fn alg_id_flip_detected() {
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
@@ -475,10 +515,29 @@ mod tests {
             encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ)
                 .unwrap()
                 .to_vec();
-        assert_eq!(ciphertext[0], ALG_ID_AEGIS256);
-        ciphertext[0] = ALG_ID_AES256GCM;
+        assert_eq!(ciphertext[0], CIPHERTEXT_V1);
+        assert_eq!(ciphertext[1], ALG_ID_AEGIS256);
+        // Flip alg_id (byte 1), keep version intact.
+        ciphertext[1] = ALG_ID_AES256GCM;
         let result = decrypt_record(&ciphertext, &key, AAD, SEQ);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
+    }
+
+    #[test]
+    fn version_flip_detected() {
+        let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
+        let key = make_key_fn();
+        let mut ciphertext =
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ)
+                .unwrap()
+                .to_vec();
+        // Flip version byte to a hypothetical v2.
+        ciphertext[0] = 0x02;
+        let result = decrypt_record(&ciphertext, &key, AAD, SEQ);
+        assert!(matches!(
+            result,
+            Err(EncryptionError::UnsupportedVersion(0x02))
+        ));
     }
 
     #[test]
