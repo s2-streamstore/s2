@@ -56,9 +56,9 @@ uuid = { workspace = true, features = ["v4"] }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
 
 [dev-dependencies]
-assert_cmd = "2.1"
+assert_cmd = "2.2"
 predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }
 serial_test = "3.4"
-tempfile = "3.26"
+tempfile = "3.27"
