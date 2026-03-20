@@ -224,11 +224,19 @@ async fn run() -> Result<(), CliError> {
 
                 let (basins, _) = ops::list_basins(&s2, list_basins_args).await?;
                 for basin_info in basins {
-                    println!(
-                        "s2://{} {}",
-                        basin_info.name,
-                        basin_info.created_at.to_string().green(),
-                    );
+                    let basin_uri = format!("s2://{}", basin_info.name);
+                    let basin_uri = if basin_info.deleted_at.is_some() {
+                        basin_uri.red()
+                    } else {
+                        basin_uri.normal()
+                    };
+                    let created_at = basin_info.created_at.to_string();
+                    let created_at = if basin_info.deleted_at.is_some() {
+                        created_at.red()
+                    } else {
+                        created_at.green()
+                    };
+                    println!("{} {}", basin_uri, created_at);
                 }
             }
         }
@@ -236,7 +244,12 @@ async fn run() -> Result<(), CliError> {
         Command::ListBasins(args) => {
             let (basins, _) = ops::list_basins(&s2, args).await?;
             for basin_info in basins {
-                println!("s2://{}", basin_info.name);
+                let basin_uri = format!("s2://{}", basin_info.name);
+                if basin_info.deleted_at.is_some() {
+                    println!("{}", basin_uri.red());
+                } else {
+                    println!("{basin_uri}");
+                }
             }
         }
 
