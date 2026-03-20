@@ -196,11 +196,10 @@ async fn run() -> Result<(), CliError> {
 
                 let (streams, _) = ops::list_streams(&s2, list_streams_args).await?;
                 for stream_info in streams {
-                    println!(
-                        "s2://{}/{} {}",
-                        basin,
-                        stream_info.name,
-                        stream_info.created_at.to_string().green(),
+                    print_listing_with_created_at(
+                        format!("s2://{}/{}", basin, stream_info.name),
+                        stream_info.created_at.to_string(),
+                        stream_info.deleted_at.is_some(),
                     );
                 }
             } else {
@@ -224,19 +223,11 @@ async fn run() -> Result<(), CliError> {
 
                 let (basins, _) = ops::list_basins(&s2, list_basins_args).await?;
                 for basin_info in basins {
-                    let basin_uri = format!("s2://{}", basin_info.name);
-                    let basin_uri = if basin_info.deleted_at.is_some() {
-                        basin_uri.red()
-                    } else {
-                        basin_uri.normal()
-                    };
-                    let created_at = basin_info.created_at.to_string();
-                    let created_at = if basin_info.deleted_at.is_some() {
-                        created_at.red()
-                    } else {
-                        created_at.green()
-                    };
-                    println!("{} {}", basin_uri, created_at);
+                    print_listing_with_created_at(
+                        format!("s2://{}", basin_info.name),
+                        basin_info.created_at.to_string(),
+                        basin_info.deleted_at.is_some(),
+                    );
                 }
             }
         }
@@ -244,12 +235,10 @@ async fn run() -> Result<(), CliError> {
         Command::ListBasins(args) => {
             let (basins, _) = ops::list_basins(&s2, args).await?;
             for basin_info in basins {
-                let basin_uri = format!("s2://{}", basin_info.name);
-                if basin_info.deleted_at.is_some() {
-                    println!("{}", basin_uri.red());
-                } else {
-                    println!("{basin_uri}");
-                }
+                print_listing_uri(
+                    format!("s2://{}", basin_info.name),
+                    basin_info.deleted_at.is_some(),
+                );
             }
         }
 
@@ -315,7 +304,10 @@ async fn run() -> Result<(), CliError> {
             let basin_name = args.uri.basin.clone();
             let (streams, _) = ops::list_streams(&s2, args).await?;
             for stream_info in streams {
-                println!("s2://{}/{}", basin_name, stream_info.name);
+                print_listing_uri(
+                    format!("s2://{}/{}", basin_name, stream_info.name),
+                    stream_info.deleted_at.is_some(),
+                );
             }
         }
 
@@ -629,6 +621,38 @@ async fn run() -> Result<(), CliError> {
 
 fn format_position(seq_num: u64, timestamp: u64) -> String {
     format!("{seq_num} @ {timestamp}")
+}
+
+fn print_listing_uri(uri: String, is_deleting: bool) {
+    let uri = format_listing_uri(uri, is_deleting);
+    if is_deleting {
+        println!("{} {}", uri, deletion_marker());
+    } else {
+        println!("{uri}");
+    }
+}
+
+fn print_listing_with_created_at(uri: String, created_at: String, is_deleting: bool) {
+    let uri = format_listing_uri(uri, is_deleting);
+    let created_at = if is_deleting {
+        created_at.red()
+    } else {
+        created_at.green()
+    };
+
+    if is_deleting {
+        println!("{} {} {}", uri, created_at, deletion_marker());
+    } else {
+        println!("{} {}", uri, created_at);
+    }
+}
+
+fn format_listing_uri(uri: String, is_deleting: bool) -> colored::ColoredString {
+    if is_deleting { uri.red() } else { uri.normal() }
+}
+
+fn deletion_marker() -> colored::ColoredString {
+    "[deleting]".red().bold()
 }
 
 async fn write_record(
