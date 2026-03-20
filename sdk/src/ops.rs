@@ -12,14 +12,52 @@ use crate::{
     session::{self, AppendSession, AppendSessionConfig},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
-        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput,
-        ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
+        BasinNameStartAfter, CreateBasinInput, CreateStreamInput, DeleteBasinInput,
+        DeleteStreamInput, GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput,
+        IssueAccessTokenInput, ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
+        ListAllStreamsInput, ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
         ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo,
-        StreamName, StreamPosition, Streaming,
+        StreamName, StreamNameStartAfter, StreamPosition, Streaming,
     },
 };
+
+fn filter_basin_infos(values: Vec<BasinInfo>, include_deleted: bool) -> Vec<BasinInfo> {
+    if include_deleted {
+        values
+    } else {
+        values
+            .into_iter()
+            .filter(|info| info.deleted_at.is_none())
+            .collect()
+    }
+}
+
+fn basin_page_values_and_start_after(
+    values: Vec<BasinInfo>,
+    include_deleted: bool,
+) -> (Vec<BasinInfo>, Option<BasinNameStartAfter>) {
+    let start_after = values.last().map(|info| info.name.clone().into());
+    (filter_basin_infos(values, include_deleted), start_after)
+}
+
+fn filter_stream_infos(values: Vec<StreamInfo>, include_deleted: bool) -> Vec<StreamInfo> {
+    if include_deleted {
+        values
+    } else {
+        values
+            .into_iter()
+            .filter(|info| info.deleted_at.is_none())
+            .collect()
+    }
+}
+
+fn stream_page_values_and_start_after(
+    values: Vec<StreamInfo>,
+    include_deleted: bool,
+) -> (Vec<StreamInfo>, Option<StreamNameStartAfter>) {
+    let start_after = values.last().map(|info| info.name.clone().into());
+    (filter_stream_infos(values, include_deleted), start_after)
+}
 
 #[derive(Debug, Clone)]
 /// An S2 account.
@@ -59,15 +97,50 @@ impl S2 {
     ///
     /// See [`list_all_basins`](crate::S2::list_all_basins) for automatic pagination.
     pub async fn list_basins(&self, input: ListBasinsInput) -> Result<Page<BasinInfo>, S2Error> {
-        let response = self.client.list_basins(input.into()).await?;
-        Ok(Page::new(
-            response
+        let ListBasinsInput {
+            prefix,
+            mut start_after,
+            limit,
+            include_deleted,
+        } = input;
+        let page_limit = limit.unwrap_or(1000);
+        if page_limit == 0 {
+            return Ok(Page::new(Vec::new(), false));
+        }
+
+        let mut values = Vec::with_capacity(page_limit);
+        loop {
+            let response = self
+                .client
+                .list_basins(
+                    ListBasinsInput::new()
+                        .with_prefix(prefix.clone())
+                        .with_start_after(start_after.clone())
+                        .with_limit(page_limit - values.len())
+                        .into(),
+                )
+                .await?;
+            let raw_values: Vec<BasinInfo> = response
                 .basins
                 .into_iter()
                 .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
-            response.has_more,
-        ))
+                .collect::<Result<Vec<_>, _>>()?;
+            let (page_values, next_start_after) =
+                basin_page_values_and_start_after(raw_values, include_deleted);
+            values.extend(page_values);
+
+            if values.len() == page_limit {
+                return Ok(Page::new(values, response.has_more));
+            }
+
+            if response.has_more
+                && let Some(next_start_after) = next_start_after
+            {
+                start_after = next_start_after;
+            } else {
+                return Ok(Page::new(values, false));
+            }
+        }
     }
 
     /// List all basins, paginating automatically.
@@ -78,16 +151,14 @@ impl S2 {
         let include_deleted = input.include_deleted;
         let mut input = ListBasinsInput::new()
             .with_prefix(prefix)
-            .with_start_after(start_after);
+            .with_start_after(start_after)
+            .with_include_deleted(include_deleted);
         Box::pin(async_stream::try_stream! {
             loop {
                 let page = s2.list_basins(input.clone()).await?;
-
                 let start_after = page.values.last().map(|info| info.name.clone().into());
+
                 for info in page.values {
-                    if !include_deleted && info.deleted_at.is_some() {
-                        continue;
-                    }
                     yield info;
                 }
 
@@ -274,15 +345,50 @@ impl S2Basin {
     ///
     /// See [`list_all_streams`](crate::S2Basin::list_all_streams) for automatic pagination.
     pub async fn list_streams(&self, input: ListStreamsInput) -> Result<Page<StreamInfo>, S2Error> {
-        let response = self.client.list_streams(input.into()).await?;
-        Ok(Page::new(
-            response
+        let ListStreamsInput {
+            prefix,
+            mut start_after,
+            limit,
+            include_deleted,
+        } = input;
+        let page_limit = limit.unwrap_or(1000);
+        if page_limit == 0 {
+            return Ok(Page::new(Vec::new(), false));
+        }
+
+        let mut values = Vec::with_capacity(page_limit);
+        loop {
+            let response = self
+                .client
+                .list_streams(
+                    ListStreamsInput::new()
+                        .with_prefix(prefix.clone())
+                        .with_start_after(start_after.clone())
+                        .with_limit(page_limit - values.len())
+                        .into(),
+                )
+                .await?;
+            let raw_values: Vec<StreamInfo> = response
                 .streams
                 .into_iter()
                 .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
-            response.has_more,
-        ))
+                .collect::<Result<Vec<_>, _>>()?;
+            let (page_values, next_start_after) =
+                stream_page_values_and_start_after(raw_values, include_deleted);
+            values.extend(page_values);
+
+            if values.len() == page_limit {
+                return Ok(Page::new(values, response.has_more));
+            }
+
+            if response.has_more
+                && let Some(next_start_after) = next_start_after
+            {
+                start_after = next_start_after;
+            } else {
+                return Ok(Page::new(values, false));
+            }
+        }
     }
 
     /// List all streams, paginating automatically.
@@ -293,16 +399,14 @@ impl S2Basin {
         let include_deleted = input.include_deleted;
         let mut input = ListStreamsInput::new()
             .with_prefix(prefix)
-            .with_start_after(start_after);
+            .with_start_after(start_after)
+            .with_include_deleted(include_deleted);
         Box::pin(async_stream::try_stream! {
             loop {
                 let page = basin.list_streams(input.clone()).await?;
-
                 let start_after = page.values.last().map(|info| info.name.clone().into());
+
                 for info in page.values {
-                    if !include_deleted && info.deleted_at.is_some() {
-                        continue;
-                    }
                     yield info;
                 }
 
@@ -375,6 +479,59 @@ impl S2Basin {
             .reconfigure_stream(input.name, input.config.into())
             .await?;
         Ok(config.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::OffsetDateTime;
+
+    use super::{basin_page_values_and_start_after, stream_page_values_and_start_after};
+    use crate::types::{BasinInfo, BasinName, S2DateTime, StreamInfo, StreamName};
+
+    fn timestamp() -> S2DateTime {
+        OffsetDateTime::UNIX_EPOCH
+            .try_into()
+            .expect("unix epoch is valid RFC3339")
+    }
+
+    #[test]
+    fn basin_pagination_cursor_uses_last_raw_item() {
+        let basin_name: BasinName = "basin-0001".parse().expect("valid basin name");
+        let (values, start_after) = basin_page_values_and_start_after(
+            vec![BasinInfo {
+                name: basin_name.clone(),
+                scope: None,
+                created_at: timestamp(),
+                deleted_at: Some(timestamp()),
+            }],
+            false,
+        );
+
+        assert!(values.is_empty());
+        assert_eq!(
+            start_after,
+            Some(basin_name.as_ref().parse().expect("valid start after"))
+        );
+    }
+
+    #[test]
+    fn stream_pagination_cursor_uses_last_raw_item() {
+        let stream_name: StreamName = "events".parse().expect("valid stream name");
+        let (values, start_after) = stream_page_values_and_start_after(
+            vec![StreamInfo {
+                name: stream_name.clone(),
+                created_at: timestamp(),
+                deleted_at: Some(timestamp()),
+            }],
+            false,
+        );
+
+        assert!(values.is_empty());
+        assert_eq!(
+            start_after,
+            Some(stream_name.as_ref().parse().expect("valid start after"))
+        );
     }
 }
 

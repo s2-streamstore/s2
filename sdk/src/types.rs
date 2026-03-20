@@ -1032,6 +1032,10 @@ pub struct ListBasinsInput {
     ///
     /// Defaults to `1000`.
     pub limit: Option<usize>,
+    /// Whether to include basins that are being deleted.
+    ///
+    /// Defaults to `false`.
+    pub include_deleted: bool,
 }
 
 impl ListBasinsInput {
@@ -1058,6 +1062,14 @@ impl ListBasinsInput {
     pub fn with_limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
+            ..self
+        }
+    }
+
+    /// Set whether to include basins that are being deleted.
+    pub fn with_include_deleted(self, include_deleted: bool) -> Self {
+        Self {
+            include_deleted,
             ..self
         }
     }
@@ -2498,6 +2510,10 @@ pub struct ListStreamsInput {
     ///
     /// Defaults to `1000`.
     pub limit: Option<usize>,
+    /// Whether to include streams that are being deleted.
+    ///
+    /// Defaults to `false`.
+    pub include_deleted: bool,
 }
 
 impl ListStreamsInput {
@@ -2524,6 +2540,14 @@ impl ListStreamsInput {
     pub fn with_limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
+            ..self
+        }
+    }
+
+    /// Set whether to include streams that are being deleted.
+    pub fn with_include_deleted(self, include_deleted: bool) -> Self {
+        Self {
+            include_deleted,
             ..self
         }
     }

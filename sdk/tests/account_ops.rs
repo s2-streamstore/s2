@@ -38,15 +38,27 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         .await?;
 
     let page = s2
-        .list_basins(ListBasinsInput::new().with_prefix(basin_name.into()))
+        .list_basins(ListBasinsInput::new().with_prefix(basin_name.clone().into()))
+        .await?;
+
+    assert!(page.values.is_empty());
+
+    let page = s2
+        .list_basins(
+            ListBasinsInput::new()
+                .with_prefix(basin_name.clone().into())
+                .with_include_deleted(true),
+        )
         .await?;
 
     assert_matches!(
         page.values.as_slice(),
-        [] | [BasinInfo {
+        [BasinInfo {
+            name,
+            scope,
             deleted_at: Some(_),
             ..
-        }]
+        }] if name == &basin_info.name && scope == &basin_info.scope
     );
 
     Ok(())
