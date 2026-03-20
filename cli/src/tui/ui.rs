@@ -2366,9 +2366,9 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
 
     let header_area = chunks[2];
     let total_width = header_area.width as usize;
-    let created_col = 24;
     let state_col = 12;
-    let name_col = total_width.saturating_sub(created_col + state_col + 4);
+    let scope_col = 16;
+    let name_col = total_width.saturating_sub(state_col + scope_col + 4);
 
     let header = Line::from(vec![
         Span::styled(
@@ -2379,7 +2379,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
             format!("{:<width$}", "State", width = state_col),
             Style::default().fg(TEXT_MUTED),
         ),
-        Span::styled("Created", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Scope", Style::default().fg(TEXT_MUTED)),
     ]);
     f.render_widget(
         Paragraph::new(header),
@@ -2473,7 +2473,13 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
         } else {
             ("Active", BADGE_ACTIVE)
         };
-        let created = basin.created_at.to_string();
+        let scope = basin
+            .scope
+            .as_ref()
+            .map(|s| match s {
+                s2_sdk::types::BasinScope::AwsUsEast1 => "aws:us-east-1",
+            })
+            .unwrap_or("—");
 
         let prefix = if is_selected { "▸ " } else { "  " };
         let name_style = if is_selected {
@@ -2501,10 +2507,10 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
             Rect::new(badge_x, y, state_col as u16, 1),
         );
 
-        let created_x = badge_x + state_col as u16;
+        let scope_x = badge_x + state_col as u16;
         f.render_widget(
-            Paragraph::new(Span::styled(created, Style::default().fg(TEXT_MUTED))),
-            Rect::new(created_x, y, created_col as u16, 1),
+            Paragraph::new(Span::styled(scope, Style::default().fg(TEXT_MUTED))),
+            Rect::new(scope_x, y, scope_col as u16, 1),
         );
     }
 }
