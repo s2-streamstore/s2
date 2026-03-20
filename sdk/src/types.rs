@@ -534,6 +534,15 @@ impl From<StorageClass> for api::config::StorageClass {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Encryption algorithm for stream records.
+pub enum EncryptionAlgorithm {
+    /// AEGIS-256 authenticated encryption.
+    Aegis256,
+    /// AES-256-GCM authenticated encryption (NIST-compliant).
+    Aes256Gcm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Retention policy for records in a stream.
 pub enum RetentionPolicy {
     /// Age in seconds. Records older than this age are automatically trimmed.
@@ -705,6 +714,10 @@ pub struct StreamConfig {
     ///
     /// See [`DeleteOnEmptyConfig`] for defaults.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
+    /// Encryption algorithm for this stream. Immutable after creation.
+    ///
+    /// Defaults to `None` (plaintext).
+    pub encryption_algorithm: Option<EncryptionAlgorithm>,
 }
 
 impl StreamConfig {
@@ -744,6 +757,14 @@ impl StreamConfig {
             ..self
         }
     }
+
+    /// Set the encryption algorithm for the stream. Immutable after creation.
+    pub fn with_encryption_algorithm(self, alg: EncryptionAlgorithm) -> Self {
+        Self {
+            encryption_algorithm: Some(alg),
+            ..self
+        }
+    }
 }
 
 impl From<api::config::StreamConfig> for StreamConfig {
@@ -753,18 +774,34 @@ impl From<api::config::StreamConfig> for StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
+            encryption_algorithm: value.encryption_algorithm.as_deref().and_then(|s| {
+                use s2_common::types::config::EncryptionAlgorithm as E;
+                match E::parse_api_str(s)? {
+                    E::Aegis256 => Some(EncryptionAlgorithm::Aegis256),
+                    E::Aes256Gcm => Some(EncryptionAlgorithm::Aes256Gcm),
+                    E::None => Option::None,
+                }
+            }),
         }
     }
 }
 
 impl From<StreamConfig> for api::config::StreamConfig {
     fn from(value: StreamConfig) -> Self {
+        use s2_common::types::config::EncryptionAlgorithm as E;
         Self {
             storage_class: value.storage_class.map(Into::into),
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption_algorithm: None,
+            encryption_algorithm: value.encryption_algorithm.map(|a| {
+                match a {
+                    EncryptionAlgorithm::Aegis256 => E::Aegis256,
+                    EncryptionAlgorithm::Aes256Gcm => E::Aes256Gcm,
+                }
+                .as_api_str()
+                .to_owned()
+            }),
         }
     }
 }
@@ -785,6 +822,9 @@ pub struct BasinConfig {
     ///
     /// Defaults to `false`.
     pub create_stream_on_read: bool,
+    /// Allowlist of encryption algorithms permitted for streams in this basin.
+    /// Empty means all algorithms (including plaintext) are allowed.
+    pub allowed_encryption_algorithms: Vec<EncryptionAlgorithm>,
 }
 
 impl BasinConfig {
@@ -821,21 +861,43 @@ impl BasinConfig {
 
 impl From<api::config::BasinConfig> for BasinConfig {
     fn from(value: api::config::BasinConfig) -> Self {
+        use s2_common::types::config::EncryptionAlgorithm as E;
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
+            allowed_encryption_algorithms: value
+                .allowed_encryption_algorithms
+                .iter()
+                .filter_map(|s| match E::parse_api_str(s)? {
+                    E::Aegis256 => Some(EncryptionAlgorithm::Aegis256),
+                    E::Aes256Gcm => Some(EncryptionAlgorithm::Aes256Gcm),
+                    E::None => Option::None,
+                })
+                .collect(),
         }
     }
 }
 
 impl From<BasinConfig> for api::config::BasinConfig {
     fn from(value: BasinConfig) -> Self {
+        use s2_common::types::config::EncryptionAlgorithm as E;
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
-            allowed_encryption_algorithms: vec![],
+            allowed_encryption_algorithms: value
+                .allowed_encryption_algorithms
+                .into_iter()
+                .map(|a| {
+                    match a {
+                        EncryptionAlgorithm::Aegis256 => E::Aegis256,
+                        EncryptionAlgorithm::Aes256Gcm => E::Aes256Gcm,
+                    }
+                    .as_api_str()
+                    .to_owned()
+                })
+                .collect(),
         }
     }
 }
@@ -1310,6 +1372,7 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
+            encryption_algorithm: None,
         }
     }
 }

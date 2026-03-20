@@ -47,6 +47,27 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
+impl EncryptionAlgorithm {
+    /// Wire-format string used in JSON API and `S2-Encryption` header.
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Aegis256 => "aegis-256",
+            Self::Aes256Gcm => "aes-256-gcm",
+        }
+    }
+
+    /// Parse from wire-format string. Returns `None` for unrecognised values.
+    pub fn parse_api_str(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(Self::None),
+            "aegis-256" => Some(Self::Aegis256),
+            "aes-256-gcm" => Some(Self::Aes256Gcm),
+            _ => Option::None,
+        }
+    }
+}
+
 #[derive(
     Debug,
     Default,

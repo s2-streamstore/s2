@@ -123,14 +123,13 @@ pub fn parse_s2_encryption_header(
         })?
         .trim();
 
-    let alg = match alg_str {
-        "aegis-256" => EncryptionAlgorithm::Aegis256,
-        "aes-256-gcm" => EncryptionAlgorithm::Aes256Gcm,
-        other => {
+    let alg = match EncryptionAlgorithm::parse_api_str(alg_str) {
+        Some(EncryptionAlgorithm::None) | None => {
             return Err(EncryptionError::MalformedHeader(format!(
-                "unknown algorithm {other:?}; expected 'aegis-256' or 'aes-256-gcm'"
+                "unknown algorithm {alg_str:?}; expected 'aegis-256' or 'aes-256-gcm'"
             )));
         }
+        Some(alg) => alg,
     };
 
     if key_hex.len() != 64 {

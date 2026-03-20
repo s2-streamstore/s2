@@ -217,12 +217,21 @@ pub async fn create_or_reconfigure_stream(
         config: JsonOpt(config),
     }: CreateOrReconfigureArgs,
 ) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
-    let config: StreamReconfiguration = config
-        .map(TryInto::try_into)
-        .transpose()?
-        .unwrap_or_default();
+    let (encryption, config): (_, StreamReconfiguration) = match config {
+        Some(mut api_config) => {
+            let enc = api_config.take_encryption_algorithm()?;
+            (enc, api_config.try_into()?)
+        }
+        None => (None, StreamReconfiguration::default()),
+    };
     let info = backend
-        .create_stream(basin, stream, config, None, CreateMode::CreateOrReconfigure)
+        .create_stream(
+            basin,
+            stream,
+            config,
+            encryption,
+            CreateMode::CreateOrReconfigure,
+        )
         .await?;
     let status = if info.is_created() {
         StatusCode::CREATED
