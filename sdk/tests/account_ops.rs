@@ -16,7 +16,8 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         .await?;
 
     assert_eq!(basin_info.name, basin_name);
-    assert_eq!(basin_info.state, BasinState::Active);
+    assert!(time::OffsetDateTime::from(basin_info.created_at) <= time::OffsetDateTime::now_utc());
+    assert!(basin_info.deleted_at.is_none());
 
     let page = s2
         .list_basins(ListBasinsInput::new().with_prefix(basin_name.clone().into()))
@@ -35,7 +36,7 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
     assert_matches!(
         page.values.as_slice(),
         [] | [BasinInfo {
-            state: BasinState::Deleting,
+            deleted_at: Some(_),
             ..
         }]
     );

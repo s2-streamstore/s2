@@ -1,7 +1,7 @@
 use s2_common::{
     maybe::Maybe,
     types::{
-        basin::{BasinNamePrefix, BasinNameStartAfter, BasinState, ListBasinsRequest},
+        basin::{BasinNamePrefix, BasinNameStartAfter, ListBasinsRequest},
         config::{
             BasinConfig, BasinReconfiguration, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
@@ -37,7 +37,8 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Failed to create basin");
     assert!(matches!(
         created,
-        CreatedOrReconfigured::Created(ref info) if matches!(info.state, BasinState::Active)
+        CreatedOrReconfigured::Created(ref info) if info.deleted_at.is_none()
+            && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 
     let idempotent = backend
@@ -50,7 +51,8 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Idempotent create should succeed with same request token");
     assert!(matches!(
         idempotent,
-        CreatedOrReconfigured::Created(ref info) if matches!(info.state, BasinState::Active)
+        CreatedOrReconfigured::Created(ref info) if info.deleted_at.is_none()
+            && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 
     let different_token: RequestToken = "token-2".parse().unwrap();
@@ -286,7 +288,7 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
         .iter()
         .find(|info| info.name == basin_name)
         .expect("Deleted basin should appear in listing");
-    assert!(matches!(info.state, BasinState::Deleting));
+    assert!(info.deleted_at.is_some());
 
     let reconfigure_result = backend
         .reconfigure_basin(basin_name.clone(), BasinReconfiguration::default())

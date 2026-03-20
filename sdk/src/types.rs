@@ -1121,25 +1121,7 @@ impl ListAllBasinsInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Current state of a basin.
-pub enum BasinState {
-    /// Active
-    Active,
-    /// Deleting
-    Deleting,
-}
-
-impl From<api::basin::BasinState> for BasinState {
-    fn from(value: api::basin::BasinState) -> Self {
-        match value {
-            api::basin::BasinState::Active => BasinState::Active,
-            api::basin::BasinState::Deleting => BasinState::Deleting,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 /// Basin information.
 pub struct BasinInfo {
@@ -1147,17 +1129,22 @@ pub struct BasinInfo {
     pub name: BasinName,
     /// Scope of the basin.
     pub scope: Option<BasinScope>,
-    /// Current state of the basin.
-    pub state: BasinState,
+    /// Creation time.
+    pub created_at: S2DateTime,
+    /// Deletion time if the basin is being deleted.
+    pub deleted_at: Option<S2DateTime>,
 }
 
-impl From<api::basin::BasinInfo> for BasinInfo {
-    fn from(value: api::basin::BasinInfo) -> Self {
-        Self {
+impl TryFrom<api::basin::BasinInfo> for BasinInfo {
+    type Error = ValidationError;
+
+    fn try_from(value: api::basin::BasinInfo) -> Result<Self, Self::Error> {
+        Ok(Self {
             name: value.name,
             scope: value.scope.map(Into::into),
-            state: value.state.into(),
-        }
+            created_at: value.created_at.try_into()?,
+            deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
+        })
     }
 }
 

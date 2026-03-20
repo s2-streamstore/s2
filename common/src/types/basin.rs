@@ -1,6 +1,7 @@
 use std::{marker::PhantomData, ops::Deref, str::FromStr};
 
 use compact_str::{CompactString, ToCompactString};
+use time::OffsetDateTime;
 
 use super::{
     ValidationError,
@@ -199,12 +200,6 @@ impl crate::http::ParseableHeader for BasinName {
 
 pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAfter>;
 
-#[derive(Debug, Clone, Copy)]
-pub enum BasinState {
-    Active,
-    Deleting,
-}
-
 #[derive(Debug, strum::Display, Clone, Copy, PartialEq, Eq)]
 pub enum BasinScope {
     #[strum(serialize = "aws:us-east-1")]
@@ -215,7 +210,8 @@ pub enum BasinScope {
 pub struct BasinInfo {
     pub name: BasinName,
     pub scope: Option<BasinScope>,
-    pub state: BasinState,
+    pub created_at: OffsetDateTime,
+    pub deleted_at: Option<OffsetDateTime>,
 }
 
 #[cfg(test)]

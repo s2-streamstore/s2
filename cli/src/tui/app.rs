@@ -12,7 +12,7 @@ use chrono::{Datelike, NaiveDate};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, prelude::Backend};
 use s2_sdk::types::{
-    AccessTokenId, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName, BasinState, StreamInfo,
+    AccessTokenId, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName, StreamInfo,
     StreamMetricSet, StreamName, StreamPosition, TimeRange,
 };
 use tokio::sync::mpsc;
@@ -3739,7 +3739,7 @@ impl App {
                     })
                     .collect();
                 if let Some(basin) = filtered.get(state.selected) {
-                    if basin.state == BasinState::Deleting {
+                    if basin.deleted_at.is_some() {
                         self.message = Some(StatusMessage {
                             text: "Basin is already being deleted".to_string(),
                             level: MessageLevel::Info,

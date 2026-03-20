@@ -32,9 +32,9 @@ use record_format::{
 use s2_sdk::{
     S2,
     types::{
-        AppendRetryPolicy, BasinState, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
-        MeteredBytes, Metric, RetentionPolicy, RetryConfig, StreamConfig as SdkStreamConfig,
-        StreamName, TimestampingConfig, TimestampingMode,
+        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput, MeteredBytes,
+        Metric, RetentionPolicy, RetryConfig, StreamConfig as SdkStreamConfig, StreamName,
+        TimestampingConfig, TimestampingMode,
     },
 };
 use strum::VariantNames;
@@ -225,9 +225,9 @@ async fn run() -> Result<(), CliError> {
                 let (basins, _) = ops::list_basins(&s2, list_basins_args).await?;
                 for basin_info in basins {
                     println!(
-                        "{} {}",
+                        "s2://{} {}",
                         basin_info.name,
-                        format_basin_state(basin_info.state)
+                        basin_info.created_at.to_string().green(),
                     );
                 }
             }
@@ -236,22 +236,13 @@ async fn run() -> Result<(), CliError> {
         Command::ListBasins(args) => {
             let (basins, _) = ops::list_basins(&s2, args).await?;
             for basin_info in basins {
-                println!(
-                    "{} {}",
-                    basin_info.name,
-                    format_basin_state(basin_info.state)
-                );
+                println!("s2://{}", basin_info.name);
             }
         }
 
         Command::CreateBasin(args) => {
-            let info = ops::create_basin(&s2, args).await?;
-
-            let message = match info.state {
-                BasinState::Active => "✓ Basin created".green().bold(),
-                BasinState::Deleting => "Basin is being deleted".red().bold(),
-            };
-            eprintln!("{message}");
+            let _info = ops::create_basin(&s2, args).await?;
+            eprintln!("{}", "✓ Basin created".green().bold());
         }
 
         Command::DeleteBasin { basin } => {
@@ -621,13 +612,6 @@ async fn run() -> Result<(), CliError> {
     .await;
 
     result.map_err(|err| err.with_token_source(token_source))
-}
-
-fn format_basin_state(state: BasinState) -> colored::ColoredString {
-    match state {
-        BasinState::Active => "active".green(),
-        BasinState::Deleting => "deleting".red(),
-    }
 }
 
 fn format_position(seq_num: u64, timestamp: u64) -> String {
