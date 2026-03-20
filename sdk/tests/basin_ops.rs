@@ -505,7 +505,7 @@ async fn list_all_streams_iterates_with_prefix(basin: &SharedS2Basin) -> Result<
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_all_streams_include_deleted_by_default(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_all_streams_include_deleted(basin: &SharedS2Basin) -> Result<(), S2Error> {
     let prefix = format!("iter-del-{}", uuid());
     let stream_name: StreamName = format!("{}-0001", prefix)
         .parse()
@@ -519,7 +519,9 @@ async fn list_all_streams_include_deleted_by_default(basin: &SharedS2Basin) -> R
         .await?;
 
     let mut stream = basin.list_all_streams(
-        ListAllStreamsInput::new().with_prefix(prefix.parse().expect("valid prefix")),
+        ListAllStreamsInput::new()
+            .with_prefix(prefix.parse().expect("valid prefix"))
+            .with_include_deleted(true),
     );
 
     let mut found = None;

@@ -1088,7 +1088,7 @@ pub struct ListAllBasinsInput {
     pub start_after: BasinNameStartAfter,
     /// Whether to include basins that are being deleted.
     ///
-    /// Defaults to `true`.
+    /// Defaults to `false`.
     pub include_deleted: bool,
 }
 
@@ -1097,7 +1097,7 @@ impl Default for ListAllBasinsInput {
         Self {
             prefix: BasinNamePrefix::default(),
             start_after: BasinNameStartAfter::default(),
-            include_deleted: true,
+            include_deleted: false,
         }
     }
 }
@@ -2564,7 +2564,7 @@ pub struct ListAllStreamsInput {
     pub start_after: StreamNameStartAfter,
     /// Whether to include streams that are being deleted.
     ///
-    /// Defaults to `true`.
+    /// Defaults to `false`.
     pub include_deleted: bool,
 }
 
@@ -2573,7 +2573,7 @@ impl Default for ListAllStreamsInput {
         Self {
             prefix: StreamNamePrefix::default(),
             start_after: StreamNameStartAfter::default(),
-            include_deleted: true,
+            include_deleted: false,
         }
     }
 }
