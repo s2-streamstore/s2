@@ -63,7 +63,7 @@ pub async fn list_basins(
 
         Ok((page.values, page.has_more))
     } else {
-        let mut input = ListAllBasinsInput::new();
+        let mut input = ListAllBasinsInput::new().with_include_deleted(true);
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
