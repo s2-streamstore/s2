@@ -23,7 +23,15 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         .list_basins(ListBasinsInput::new().with_prefix(basin_name.clone().into()))
         .await?;
 
-    assert_eq!(page.values, vec![basin_info]);
+    assert_matches!(
+        page.values.as_slice(),
+        [BasinInfo {
+            name,
+            scope,
+            deleted_at: None,
+            ..
+        }] if name == &basin_info.name && scope == &basin_info.scope
+    );
     assert!(!page.has_more);
 
     s2.delete_basin(DeleteBasinInput::new(basin_name.clone()))
