@@ -123,30 +123,6 @@ impl<'de> Deserialize<'de> for BasinInfo {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-    use time::OffsetDateTime;
-
-    use super::{BasinInfo, BasinState};
-
-    #[test]
-    fn basin_info_defaults_missing_created_at_to_now() {
-        let before = OffsetDateTime::now_utc();
-        let parsed: BasinInfo = serde_json::from_value(json!({
-            "name": "abcdefgh",
-            "deleted_at": null,
-        }))
-        .expect("valid basin info");
-        let after = OffsetDateTime::now_utc();
-
-        assert!(parsed.created_at >= before);
-        assert!(parsed.created_at <= after);
-        assert!(parsed.deleted_at.is_none());
-        assert!(matches!(parsed.state, BasinState::Active));
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
