@@ -2468,11 +2468,11 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
         let max_name_len = name_col.saturating_sub(2);
         let display_name = truncate_str(&name, max_name_len, "…");
 
-        let (state_text, state_bg) = match basin.state {
-            s2_sdk::types::BasinState::Active => ("Active", BADGE_ACTIVE),
-            s2_sdk::types::BasinState::Deleting => ("Deleting", BADGE_DANGER),
+        let (state_text, state_bg) = if basin.deleted_at.is_some() {
+            ("Deleting", BADGE_DANGER)
+        } else {
+            ("Active", BADGE_ACTIVE)
         };
-
         let scope = basin
             .scope
             .as_ref()

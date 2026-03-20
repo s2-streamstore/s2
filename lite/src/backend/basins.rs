@@ -1,7 +1,7 @@
 use s2_common::{
     bash::Bash,
     types::{
-        basin::{BasinInfo, BasinName, BasinState, ListBasinsRequest},
+        basin::{BasinInfo, BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
         resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
         stream::StreamNameStartAfter,
@@ -58,15 +58,11 @@ impl Backend {
                 break;
             }
             let meta = kv::basin_meta::deser_value(kv.value)?;
-            let state = if meta.deleted_at.is_some() {
-                BasinState::Deleting
-            } else {
-                BasinState::Active
-            };
             basins.push(BasinInfo {
                 name: basin,
                 scope: None,
-                state,
+                created_at: meta.created_at,
+                deleted_at: meta.deleted_at,
             });
         }
         Ok(Page::new(basins, has_more))
@@ -106,7 +102,8 @@ impl Backend {
                         Ok(CreatedOrReconfigured::Created(BasinInfo {
                             name: basin,
                             scope: None,
-                            state: BasinState::Active,
+                            created_at: existing_meta.created_at,
+                            deleted_at: None,
                         }))
                     } else {
                         Err(BasinAlreadyExistsError { basin }.into())
@@ -149,7 +146,8 @@ impl Backend {
         let info = BasinInfo {
             name: basin,
             scope: None,
-            state: BasinState::Active,
+            created_at,
+            deleted_at: None,
         };
 
         Ok(if is_reconfigure {

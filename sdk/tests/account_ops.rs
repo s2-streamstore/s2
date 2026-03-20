@@ -16,29 +16,46 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         .await?;
 
     assert_eq!(basin_info.name, basin_name);
-    assert_eq!(basin_info.state, BasinState::Active);
+    assert!(time::OffsetDateTime::from(basin_info.created_at) <= time::OffsetDateTime::now_utc());
+    assert!(basin_info.deleted_at.is_none());
 
     let page = s2
         .list_basins(ListBasinsInput::new().with_prefix(basin_name.clone().into()))
         .await?;
 
-    assert_eq!(page.values, vec![basin_info]);
+    assert_matches!(
+        page.values.as_slice(),
+        [BasinInfo {
+            name,
+            scope,
+            deleted_at: None,
+            ..
+        }] if name == &basin_info.name && scope == &basin_info.scope
+    );
     assert!(!page.has_more);
 
     s2.delete_basin(DeleteBasinInput::new(basin_name.clone()))
         .await?;
 
     let page = s2
-        .list_basins(ListBasinsInput::new().with_prefix(basin_name.into()))
+        .list_basins(ListBasinsInput::new().with_prefix(basin_name.clone().into()))
         .await?;
 
-    assert_matches!(
-        page.values.as_slice(),
-        [] | [BasinInfo {
-            state: BasinState::Deleting,
-            ..
-        }]
-    );
+    match page.values.as_slice() {
+        [] => {}
+        [
+            BasinInfo {
+                name,
+                scope,
+                deleted_at: Some(_),
+                ..
+            },
+        ] => {
+            assert_eq!(name, &basin_info.name);
+            assert_eq!(scope, &basin_info.scope);
+        }
+        values => panic!("unexpected basin listing after delete: {values:?}"),
+    }
 
     Ok(())
 }

@@ -3,6 +3,7 @@ use s2_common::types::{
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
 };
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use super::config::{BasinConfig, BasinReconfiguration};
 
@@ -41,26 +42,89 @@ pub struct ListBasinsResponse {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
     /// Basin scope.
     pub scope: Option<BasinScope>,
-    /// Basin state.
+    /// Creation time in RFC 3339 format.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Deletion time in RFC 3339 format, if the basin is being deleted.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub deleted_at: Option<OffsetDateTime>,
+    /// Deprecated basin state inferred from `deleted_at`.
+    #[cfg_attr(feature = "utoipa", schema(ignore))]
     pub state: BasinState,
 }
 
 impl From<types::basin::BasinInfo> for BasinInfo {
     fn from(value: types::basin::BasinInfo) -> Self {
-        let types::basin::BasinInfo { name, scope, state } = value;
+        let types::basin::BasinInfo {
+            name,
+            scope,
+            created_at,
+            deleted_at,
+        } = value;
 
         Self {
             name,
             scope: scope.map(Into::into),
-            state: state.into(),
+            created_at,
+            deleted_at,
+            state: basin_state_for_deleted_at(deleted_at.as_ref()),
         }
+    }
+}
+
+fn basin_state_for_deleted_at(deleted_at: Option<&OffsetDateTime>) -> BasinState {
+    if deleted_at.is_some() {
+        BasinState::Deleting
+    } else {
+        BasinState::Active
+    }
+}
+
+#[derive(Deserialize)]
+struct BasinInfoSerde {
+    name: BasinName,
+    scope: Option<BasinScope>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    created_at: Option<OffsetDateTime>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    deleted_at: Option<OffsetDateTime>,
+    state: Option<BasinState>,
+}
+
+impl<'de> Deserialize<'de> for BasinInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let BasinInfoSerde {
+            name,
+            scope,
+            created_at,
+            deleted_at,
+            state,
+        } = BasinInfoSerde::deserialize(deserializer)?;
+        let created_at = created_at.unwrap_or_else(OffsetDateTime::now_utc);
+        let deleted_at = match (deleted_at, state) {
+            (Some(deleted_at), _) => Some(deleted_at),
+            (None, Some(BasinState::Deleting)) => Some(OffsetDateTime::now_utc()),
+            (None, _) => None,
+        };
+        let state = basin_state_for_deleted_at(deleted_at.as_ref());
+
+        Ok(Self {
+            name,
+            scope,
+            created_at,
+            deleted_at,
+            state,
+        })
     }
 }
 
@@ -98,15 +162,6 @@ pub enum BasinState {
     Active,
     /// Basin is being deleted.
     Deleting,
-}
-
-impl From<types::basin::BasinState> for BasinState {
-    fn from(value: types::basin::BasinState) -> Self {
-        match value {
-            types::basin::BasinState::Active => Self::Active,
-            types::basin::BasinState::Deleting => Self::Deleting,
-        }
-    }
 }
 
 #[rustfmt::skip]

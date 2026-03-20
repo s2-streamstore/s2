@@ -60,10 +60,9 @@ pub async fn list_basins(
             .list_basins(input)
             .await
             .map_err(|e| CliError::op(OpKind::ListBasins, e))?;
-
         Ok((page.values, page.has_more))
     } else {
-        let mut input = ListAllBasinsInput::new();
+        let mut input = ListAllBasinsInput::new().with_include_deleted(true);
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -329,10 +328,9 @@ pub async fn list_streams(
             .list_streams(input)
             .await
             .map_err(|e| CliError::op(OpKind::ListStreams, e))?;
-
         Ok((page.values, page.has_more))
     } else {
-        let mut input = ListAllStreamsInput::new();
+        let mut input = ListAllStreamsInput::new().with_include_deleted(true);
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }

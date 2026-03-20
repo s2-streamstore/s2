@@ -12,7 +12,7 @@ use crate::{
     session::{self, AppendSession, AppendSessionConfig},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        BasinState, CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
+        CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
         GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
         ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput,
         ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
@@ -64,8 +64,8 @@ impl S2 {
             response
                 .basins
                 .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>(),
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             response.has_more,
         ))
     }
@@ -82,10 +82,10 @@ impl S2 {
         Box::pin(async_stream::try_stream! {
             loop {
                 let page = s2.list_basins(input.clone()).await?;
-
                 let start_after = page.values.last().map(|info| info.name.clone().into());
+
                 for info in page.values {
-                    if !include_deleted && info.state == BasinState::Deleting {
+                    if !include_deleted && info.deleted_at.is_some() {
                         continue;
                     }
                     yield info;
@@ -104,7 +104,7 @@ impl S2 {
     pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, S2Error> {
         let (request, idempotency_token) = input.into();
         let info = self.client.create_basin(request, idempotency_token).await?;
-        Ok(info.into())
+        Ok(info.try_into()?)
     }
 
     /// Create or reconfigure a basin.
@@ -125,7 +125,7 @@ impl S2 {
             .client
             .create_or_reconfigure_basin(name, request)
             .await?;
-        let info = info.into();
+        let info = info.try_into()?;
         Ok(if was_created {
             CreateOrReconfigured::Created(info)
         } else {
@@ -297,8 +297,8 @@ impl S2Basin {
         Box::pin(async_stream::try_stream! {
             loop {
                 let page = basin.list_streams(input.clone()).await?;
-
                 let start_after = page.values.last().map(|info| info.name.clone().into());
+
                 for info in page.values {
                     if !include_deleted && info.deleted_at.is_some() {
                         continue;

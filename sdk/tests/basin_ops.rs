@@ -25,18 +25,24 @@ async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), S2Error> {
     assert!(!page.has_more);
 
     basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
+        .delete_stream(DeleteStreamInput::new(stream_name.clone()))
         .await?;
 
     let page = basin.list_streams(ListStreamsInput::new()).await?;
 
-    assert_matches!(
-        page.values.as_slice(),
-        [] | [StreamInfo {
-            deleted_at: Some(_),
-            ..
-        }]
-    );
+    match page.values.as_slice() {
+        [] => {}
+        [
+            StreamInfo {
+                name,
+                deleted_at: Some(_),
+                ..
+            },
+        ] => {
+            assert_eq!(name, &stream_name);
+        }
+        values => panic!("unexpected stream listing after delete: {values:?}"),
+    }
 
     Ok(())
 }

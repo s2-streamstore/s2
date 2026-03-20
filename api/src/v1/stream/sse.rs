@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
 
 use s2_common::{http::ParseableHeader, types};
 use serde::Serialize;
@@ -126,7 +126,8 @@ pub enum ReadEvent {
     },
 }
 
-fn elapsed_since_epoch() -> Duration {
+#[cfg(feature = "axum")]
+fn elapsed_since_epoch() -> std::time::Duration {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .expect("healthy clock")
