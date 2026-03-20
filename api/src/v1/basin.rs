@@ -111,7 +111,12 @@ impl<'de> Deserialize<'de> for BasinInfo {
             state,
         } = BasinInfoSerde::deserialize(deserializer)?;
         let created_at = created_at.unwrap_or_else(OffsetDateTime::now_utc);
-        let state = state.unwrap_or_else(|| basin_state_for_deleted_at(deleted_at.as_ref()));
+        let deleted_at = match (deleted_at, state) {
+            (Some(deleted_at), _) => Some(deleted_at),
+            (None, Some(BasinState::Deleting)) => Some(OffsetDateTime::now_utc()),
+            (None, _) => None,
+        };
+        let state = basin_state_for_deleted_at(deleted_at.as_ref());
 
         Ok(Self {
             name,
