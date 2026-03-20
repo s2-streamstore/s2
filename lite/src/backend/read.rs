@@ -489,7 +489,7 @@ mod tests {
             fencing_token: None,
         };
         let ack = backend
-            .append(basin.clone(), stream.clone(), input)
+            .append(basin.clone(), stream.clone(), input, None)
             .await
             .unwrap();
         assert!(ack.end.seq_num > 0);
@@ -655,7 +655,7 @@ mod tests {
                 fencing_token: None,
             };
             let ack = backend
-                .append(basin.clone(), stream.clone(), input)
+                .append(basin.clone(), stream.clone(), input, None)
                 .await
                 .unwrap();
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
@@ -725,7 +725,7 @@ mod tests {
             fencing_token: None,
         };
         backend
-            .append(basin.clone(), stream.clone(), initial_input)
+            .append(basin.clone(), stream.clone(), initial_input, None)
             .await
             .unwrap();
 
@@ -780,7 +780,10 @@ mod tests {
             match_seq_num: None,
             fencing_token: None,
         };
-        backend.append(basin, stream, follow_input).await.unwrap();
+        backend
+            .append(basin, stream, follow_input, None)
+            .await
+            .unwrap();
 
         let next = session
             .as_mut()

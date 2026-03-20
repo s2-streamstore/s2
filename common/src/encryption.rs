@@ -81,6 +81,8 @@ pub enum EncryptionError {
     },
     #[error("Encryption required: stream has encryption={0:?} but no key was provided")]
     EncryptionRequired(EncryptionAlgorithm),
+    #[error("Encryption key provided but stream is plaintext")]
+    EncryptionNotExpected,
     #[error("Decryption failed")]
     DecryptionFailed,
     #[error("Record encoding error: {0}")]
@@ -157,6 +159,9 @@ pub fn check_encryption_directive<'a>(
     directive: Option<&'a EncryptionDirective>,
 ) -> Result<Option<&'a EncryptionDirective>, EncryptionError> {
     let Some(required_alg) = stream_alg else {
+        if matches!(directive, Some(EncryptionDirective::Key { .. })) {
+            return Err(EncryptionError::EncryptionNotExpected);
+        }
         return Ok(None);
     };
 
@@ -190,18 +195,34 @@ pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), Enc
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
+/// Build the effective AAD by appending the algorithm ID byte and seq_num to the
+/// caller-provided base AAD. This binds the algorithm tag and stream position into
+/// the AEAD authentication, so flipping the stored alg_id byte or reordering records
+/// within a stream is detected as an authentication failure.
+///
+/// Layout: `[base_aad | alg_id: 1 byte | seq_num: 8 bytes LE]`
+fn effective_aad(aad: &[u8], alg_id: u8, seq_num: crate::record::SeqNum) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(aad.len() + 1 + 8);
+    buf.extend_from_slice(aad);
+    buf.push(alg_id);
+    buf.extend_from_slice(&seq_num.to_le_bytes());
+    buf
+}
+
 pub fn encrypt_record(
     plaintext: &[u8],
     alg: EncryptionAlgorithm,
     key: &EncryptionKey,
     aad: &[u8],
+    seq_num: crate::record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
     match alg {
         EncryptionAlgorithm::Aegis256 => {
+            let full_aad = effective_aad(aad, ALG_ID_AEGIS256, seq_num);
             let nonce: [u8; NONCE_BYTES_AEGIS256] = random();
             let (ciphertext, tag) =
                 Aegis256::<TAG_BYTES_AEGIS256>::new(&key.expose_secret().0, &nonce)
-                    .encrypt(plaintext, aad);
+                    .encrypt(plaintext, &full_aad);
 
             let mut out = BytesMut::with_capacity(
                 1 + NONCE_BYTES_AEGIS256 + ciphertext.len() + TAG_BYTES_AEGIS256,
@@ -213,6 +234,7 @@ pub fn encrypt_record(
             Ok(out.freeze())
         }
         EncryptionAlgorithm::Aes256Gcm => {
+            let full_aad = effective_aad(aad, ALG_ID_AES256GCM, seq_num);
             let nonce: [u8; NONCE_BYTES_AES256GCM] = random();
             let cipher = Aes256Gcm::new_from_slice(&key.expose_secret().0).map_err(|_| {
                 EncryptionError::EncodingFailed("invalid AES key length".to_owned())
@@ -223,7 +245,7 @@ pub fn encrypt_record(
                     nonce_generic,
                     Payload {
                         msg: plaintext,
-                        aad,
+                        aad: &full_aad,
                     },
                 )
                 .map_err(|_| EncryptionError::DecryptionFailed)?;
@@ -245,37 +267,34 @@ pub fn decrypt_record(
     body: &[u8],
     key: &EncryptionKey,
     aad: &[u8],
-) -> Result<Option<Bytes>, EncryptionError> {
-    let alg_id = match body.first() {
-        Some(&b) => b,
-        None => return Ok(None),
-    };
+    seq_num: crate::record::SeqNum,
+) -> Result<Bytes, EncryptionError> {
+    let (&alg_id, rest) = body
+        .split_first()
+        .ok_or(EncryptionError::DecryptionFailed)?;
+
+    let full_aad = effective_aad(aad, alg_id, seq_num);
 
     match alg_id {
         ALG_ID_AEGIS256 => {
             // Layout after alg_id: [nonce:32][ciphertext:n][tag:32]
-            let rest = &body[1..];
             if rest.len() < NONCE_BYTES_AEGIS256 + TAG_BYTES_AEGIS256 {
                 return Err(EncryptionError::DecryptionFailed);
             }
             let nonce: &[u8; NONCE_BYTES_AEGIS256] =
                 rest[..NONCE_BYTES_AEGIS256].try_into().unwrap();
             let after_nonce = &rest[NONCE_BYTES_AEGIS256..];
-            if after_nonce.len() < TAG_BYTES_AEGIS256 {
-                return Err(EncryptionError::DecryptionFailed);
-            }
             let tag_offset = after_nonce.len() - TAG_BYTES_AEGIS256;
             let ciphertext = &after_nonce[..tag_offset];
             let tag: &[u8; TAG_BYTES_AEGIS256] = after_nonce[tag_offset..].try_into().unwrap();
 
             let plaintext = Aegis256::<TAG_BYTES_AEGIS256>::new(&key.expose_secret().0, nonce)
-                .decrypt(ciphertext, tag, aad)
+                .decrypt(ciphertext, tag, &full_aad)
                 .map_err(|_| EncryptionError::DecryptionFailed)?;
-            Ok(Some(Bytes::from(plaintext)))
+            Ok(Bytes::from(plaintext))
         }
         ALG_ID_AES256GCM => {
             // Layout after alg_id: [nonce:12][ciphertext+tag:n+16]
-            let rest = &body[1..];
             if rest.len() < NONCE_BYTES_AES256GCM + TAG_BYTES_AES256GCM {
                 return Err(EncryptionError::DecryptionFailed);
             }
@@ -289,59 +308,39 @@ pub fn decrypt_record(
                     nonce_generic,
                     Payload {
                         msg: ciphertext_with_tag,
-                        aad,
+                        aad: &full_aad,
                     },
                 )
                 .map_err(|_| EncryptionError::DecryptionFailed)?;
-            Ok(Some(Bytes::from(plaintext)))
+            Ok(Bytes::from(plaintext))
         }
-        _ => Ok(None),
+        _ => Err(EncryptionError::DecryptionFailed),
     }
 }
 
-pub fn encrypt_append_input(
-    input: crate::types::stream::AppendInput,
-    stream_alg: Option<EncryptionAlgorithm>,
-    directive: Option<&EncryptionDirective>,
+pub fn encrypt_sequenced_records(
+    records: Vec<crate::record::Metered<crate::record::SequencedRecord>>,
+    alg: EncryptionAlgorithm,
+    key: &EncryptionKey,
     aad: &[u8],
-) -> Result<crate::types::stream::AppendInput, EncryptionError> {
-    let Some(EncryptionDirective::Key { alg, key }) = directive else {
-        return Ok(input);
-    };
-    if stream_alg.is_none() {
-        return Ok(input);
-    }
-    let mut encrypted_records = Vec::with_capacity(input.records.len());
-    for record in input.records.into_iter() {
-        let crate::types::stream::AppendRecordParts { timestamp, record } = record.into();
-        let encrypted = match &*record {
-            crate::record::Record::Envelope(env) => {
-                let plaintext =
-                    encode_record_plaintext(env.headers().to_vec(), env.body().clone())?;
-                let enc_body = encrypt_record(&plaintext, *alg, key, aad)?;
-                let enc_record = crate::record::Record::try_from_parts(vec![], enc_body)
-                    .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
-                crate::record::Metered::from(enc_record)
-            }
-            crate::record::Record::Command(_) => record,
-        };
-        encrypted_records.push(
-            crate::types::stream::AppendRecordParts {
-                timestamp,
-                record: encrypted,
-            }
-            .try_into()
-            .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_string()))?,
-        );
-    }
-    let records: crate::types::stream::AppendRecordBatch = encrypted_records
-        .try_into()
-        .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_string()))?;
-    Ok(crate::types::stream::AppendInput {
-        records,
-        match_seq_num: input.match_seq_num,
-        fencing_token: input.fencing_token,
-    })
+) -> Result<Vec<crate::record::Metered<crate::record::SequencedRecord>>, EncryptionError> {
+    records
+        .into_iter()
+        .map(|msr| {
+            let crate::record::SequencedRecord { position, record } = msr.into_inner();
+            let encrypted = match &record {
+                crate::record::Record::Envelope(env) => {
+                    let plaintext =
+                        encode_record_plaintext(env.headers().to_vec(), env.body().clone())?;
+                    let enc_body = encrypt_record(&plaintext, alg, key, aad, position.seq_num)?;
+                    crate::record::Record::try_from_parts(vec![], enc_body)
+                        .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?
+                }
+                crate::record::Record::Command(_) => record,
+            };
+            Ok(crate::record::Metered::from(encrypted.sequenced(position)))
+        })
+        .collect()
 }
 
 pub fn decrypt_read_batch(
@@ -360,18 +359,14 @@ pub fn decrypt_read_batch(
             let crate::record::Record::Envelope(ref env) = sr.record else {
                 return Ok(sr);
             };
-            match decrypt_record(env.body(), key, aad)? {
-                None => Ok(sr),
-                Some(plaintext) => {
-                    let (headers, body) = decode_record_plaintext(plaintext)?;
-                    let record = crate::record::Record::try_from_parts(headers, body)
-                        .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
-                    Ok(crate::record::SequencedRecord {
-                        position: sr.position,
-                        record,
-                    })
-                }
-            }
+            let plaintext = decrypt_record(env.body(), key, aad, sr.position.seq_num)?;
+            let (headers, body) = decode_record_plaintext(plaintext)?;
+            let record = crate::record::Record::try_from_parts(headers, body)
+                .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
+            Ok(crate::record::SequencedRecord {
+                position: sr.position,
+                record,
+            })
         })
         .collect::<Result<_, EncryptionError>>()?;
     Ok(crate::types::stream::ReadBatch {
@@ -397,6 +392,7 @@ mod tests {
     }
 
     const AAD: &[u8] = b"test-basin/test-stream";
+    const SEQ: u64 = 42;
 
     fn roundtrip(alg: EncryptionAlgorithm) {
         let headers = vec![Header {
@@ -407,8 +403,8 @@ mod tests {
 
         let plaintext = encode_record_plaintext(headers.clone(), body.clone()).unwrap();
         let key = make_key_fn();
-        let ciphertext = encrypt_record(&plaintext, alg, &key, AAD).unwrap();
-        let decrypted = decrypt_record(&ciphertext, &key, AAD).unwrap().unwrap();
+        let ciphertext = encrypt_record(&plaintext, alg, &key, AAD, SEQ).unwrap();
+        let decrypted = decrypt_record(&ciphertext, &key, AAD, SEQ).unwrap();
         let (out_headers, out_body) = decode_record_plaintext(decrypted).unwrap();
 
         assert_eq!(out_headers, headers);
@@ -430,8 +426,8 @@ mod tests {
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD).unwrap();
-        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), AAD);
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ).unwrap();
+        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), AAD, SEQ);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
@@ -440,8 +436,8 @@ mod tests {
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aes256Gcm, &key, AAD).unwrap();
-        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), AAD);
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aes256Gcm, &key, AAD, SEQ).unwrap();
+        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), AAD, SEQ);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
@@ -450,27 +446,49 @@ mod tests {
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD).unwrap();
-        // Truncate to 3 bytes — too short to contain nonce+tag.
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ).unwrap();
         let truncated = &ciphertext[..3];
-        let result = decrypt_record(truncated, &key, AAD);
+        let result = decrypt_record(truncated, &key, AAD, SEQ);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
-    fn unknown_first_byte_passthrough() {
-        // First byte 0x00 is not a known alg_id.
+    fn unknown_first_byte_fails() {
         let body = b"\x00some opaque bytes";
         let key = make_key_fn();
-        let result = decrypt_record(body, &key, AAD).unwrap();
-        assert!(result.is_none());
+        let result = decrypt_record(body, &key, AAD, SEQ);
+        assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
-    fn empty_body_passthrough() {
+    fn empty_body_fails() {
         let key = make_key_fn();
-        let result = decrypt_record(b"", &key, AAD).unwrap();
-        assert!(result.is_none());
+        let result = decrypt_record(b"", &key, AAD, SEQ);
+        assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
+    }
+
+    #[test]
+    fn alg_id_flip_detected() {
+        let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
+        let key = make_key_fn();
+        let mut ciphertext =
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ)
+                .unwrap()
+                .to_vec();
+        assert_eq!(ciphertext[0], ALG_ID_AEGIS256);
+        ciphertext[0] = ALG_ID_AES256GCM;
+        let result = decrypt_record(&ciphertext, &key, AAD, SEQ);
+        assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
+    }
+
+    #[test]
+    fn wrong_seq_num_fails() {
+        let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
+        let key = make_key_fn();
+        let ciphertext =
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, 5).unwrap();
+        let result = decrypt_record(&ciphertext, &key, AAD, 6);
+        assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
@@ -589,13 +607,28 @@ mod tests {
     }
 
     #[test]
-    fn check_directive_no_stream_encryption() {
+    fn check_directive_key_on_plaintext_stream_rejected() {
         let key = make_key_fn();
         let directive = EncryptionDirective::Key {
             alg: EncryptionAlgorithm::Aegis256,
             key,
         };
         let result = check_encryption_directive(None, Some(&directive));
+        assert!(matches!(
+            result,
+            Err(EncryptionError::EncryptionNotExpected)
+        ));
+    }
+
+    #[test]
+    fn check_directive_attest_on_plaintext_stream_ok() {
+        let result = check_encryption_directive(None, Some(&EncryptionDirective::Attest));
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn check_directive_none_on_plaintext_stream_ok() {
+        let result = check_encryption_directive(None, None);
         assert!(result.unwrap().is_none());
     }
 }

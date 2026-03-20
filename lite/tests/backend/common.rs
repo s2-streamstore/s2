@@ -143,7 +143,7 @@ pub async fn append_payloads(
         fencing_token: None,
     };
     backend
-        .append(basin.clone(), stream.clone(), input)
+        .append(basin.clone(), stream.clone(), input, None)
         .await
         .expect("Failed to append payloads")
 }

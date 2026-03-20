@@ -102,6 +102,8 @@ pub(super) enum AppendErrorInternal {
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
+    #[error(transparent)]
+    Encryption(#[from] s2_common::encryption::EncryptionError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -168,6 +170,7 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
+            AppendErrorInternal::Encryption(e) => AppendError::Encryption(e),
         }
     }
 }

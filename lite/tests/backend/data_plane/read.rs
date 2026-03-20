@@ -168,7 +168,7 @@ async fn test_read_at_tail_without_follow_returns_unwritten() {
         fencing_token: None,
     };
     let ack = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("append");
 
@@ -270,7 +270,7 @@ async fn test_read_timestamp_range() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append records with timestamps");
 
@@ -336,7 +336,7 @@ async fn test_read_from_timestamp_includes_duplicate_timestamps() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append duplicate timestamp records");
 
@@ -542,7 +542,7 @@ async fn test_read_until_timestamp_basic() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -602,7 +602,7 @@ async fn test_read_until_timestamp_exact_boundary() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -651,7 +651,7 @@ async fn test_read_until_timestamp_before_all_records() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -693,7 +693,7 @@ async fn test_read_until_timestamp_after_all_records() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -749,7 +749,7 @@ async fn test_read_until_with_count_limit_count_wins() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -799,7 +799,7 @@ async fn test_read_until_with_count_limit_timestamp_wins() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -857,7 +857,7 @@ async fn test_read_until_with_bytes_limit_bytes_wins() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -910,7 +910,7 @@ async fn test_read_until_with_bytes_limit_timestamp_wins() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 
@@ -964,7 +964,7 @@ async fn test_read_timestamp_range_with_from_and_until() {
     };
 
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append timestamped records");
 

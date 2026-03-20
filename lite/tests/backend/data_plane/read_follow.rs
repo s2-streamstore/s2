@@ -524,7 +524,7 @@ async fn test_follow_mode_with_timestamp_until() {
         fencing_token: None,
     };
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(basin_name.clone(), stream_name.clone(), input, None)
         .await
         .expect("Failed to append initial record");
 
@@ -557,7 +557,7 @@ async fn test_follow_mode_with_timestamp_until() {
             fencing_token: None,
         };
         backend_clone
-            .append(basin_clone.clone(), stream_clone.clone(), input)
+            .append(basin_clone.clone(), stream_clone.clone(), input, None)
             .await
             .unwrap();
 
@@ -569,7 +569,7 @@ async fn test_follow_mode_with_timestamp_until() {
             fencing_token: None,
         };
         backend_clone
-            .append(basin_clone, stream_clone, input)
+            .append(basin_clone, stream_clone, input, None)
             .await
             .unwrap();
     });

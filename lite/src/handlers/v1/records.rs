@@ -24,13 +24,12 @@ use s2_common::{
     types::{
         ValidationError,
         basin::BasinName,
-        config::EncryptionAlgorithm,
         stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
     },
 };
 
 use crate::{
-    backend::{Backend, error::ReadError},
+    backend::{AppendEncryption, Backend, error::ReadError},
     handlers::v1::error::ServiceError,
 };
 
@@ -44,7 +43,6 @@ pub fn router() -> axum::Router<Backend> {
 
 struct EncryptionContext {
     aad: Vec<u8>,
-    stream_alg: Option<EncryptionAlgorithm>,
     directive: Option<EncryptionDirective>,
 }
 
@@ -64,7 +62,6 @@ impl EncryptionContext {
             .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
         Ok(Self {
             aad: stream_aad(basin, stream).into_bytes(),
-            stream_alg: config.encryption_algorithm,
             directive,
         })
     }
@@ -90,16 +87,15 @@ impl EncryptionContext {
             };
         Ok(Self {
             aad: stream_aad(basin, stream).into_bytes(),
-            stream_alg: config.encryption_algorithm,
             directive: checked,
         })
     }
 
-    fn encrypt_input(
-        &self,
-        input: s2_common::types::stream::AppendInput,
-    ) -> Result<s2_common::types::stream::AppendInput, EncryptionError> {
-        encryption::encrypt_append_input(input, self.stream_alg, self.directive.as_ref(), &self.aad)
+    fn into_append_encryption(self) -> Option<AppendEncryption> {
+        self.directive.map(|directive| AppendEncryption {
+            directive,
+            aad: self.aad,
+        })
     }
 
     fn decrypt_batch(&self, batch: ReadBatch) -> Result<ReadBatch, EncryptionError> {
@@ -447,16 +443,14 @@ pub async fn append(
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
     let enc = EncryptionContext::resolve_for_append(&backend, &headers, &basin, &stream).await?;
+    let append_enc = enc.into_append_encryption();
 
     match request {
         v1t::stream::AppendRequest::Unary {
             input,
             response_mime,
         } => {
-            let input = enc
-                .encrypt_input(input)
-                .map_err(crate::backend::error::AppendError::Encryption)?;
-            let ack = backend.append(basin, stream, input).await?;
+            let ack = backend.append(basin, stream, input, append_enc).await?;
             match response_mime {
                 JsonOrProto::Json => {
                     let ack: v1t::stream::AppendAck = ack.into();
@@ -472,22 +466,14 @@ pub async fn append(
             inputs,
             response_compression,
         } => {
-            let (err_tx, err_rx) = tokio::sync::oneshot::channel();
+            let (err_tx, err_rx) = tokio::sync::oneshot::channel::<ServiceError>();
 
             let inputs = async_stream::stream! {
                 tokio::pin!(inputs);
                 let mut err_tx = Some(err_tx);
                 while let Some(input) = inputs.next().await {
                     match input {
-                        Ok(input) => match enc.encrypt_input(input) {
-                            Ok(encrypted) => yield encrypted,
-                            Err(e) => {
-                                if let Some(tx) = err_tx.take() {
-                                    let _ = tx.send(ServiceError::Append(e.into()));
-                                }
-                                break;
-                            }
-                        },
+                        Ok(input) => yield input,
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e.into());
@@ -499,7 +485,7 @@ pub async fn append(
             };
 
             let ack_stream = backend
-                .append_session(basin, stream, inputs)
+                .append_session(basin, stream, inputs, append_enc)
                 .await?
                 .map(|res| {
                     res.map(v1t::stream::proto::AppendAck::from)

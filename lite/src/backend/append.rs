@@ -14,7 +14,7 @@ use s2_common::{
 };
 use tokio::sync::oneshot;
 
-use super::Backend;
+use super::{Backend, streamer::AppendEncryption};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
@@ -23,13 +23,18 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         input: AppendInput,
+        encryption: Option<AppendEncryption>,
     ) -> Result<AppendAck, AppendError> {
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
-        let ack = client.append_permit(input).await?.submit().await?;
+        let ack = client
+            .append_permit(input, encryption)
+            .await?
+            .submit()
+            .await?;
         Ok(ack)
     }
 
@@ -38,6 +43,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         inputs: impl Stream<Item = AppendInput>,
+        encryption: Option<AppendEncryption>,
     ) -> Result<impl Stream<Item = Result<AppendAck, AppendError>>, AppendError> {
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
@@ -52,7 +58,7 @@ impl Backend {
             loop {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
-                        permit_opt = Some(Box::pin(client.append_permit(input)));
+                        permit_opt = Some(Box::pin(client.append_permit(input, encryption.clone())));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
                         permit_opt = None;
