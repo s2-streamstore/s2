@@ -59,7 +59,7 @@ use crate::api::{ApiError, ApiErrorResponse};
 /// It can be created in either of the following ways:
 /// - Parse an RFC 3339 datetime string using [`FromStr`] or [`str::parse`].
 /// - Convert from [`time::OffsetDateTime`] using [`TryFrom`]/[`TryInto`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct S2DateTime(time::OffsetDateTime);
 
 impl TryFrom<time::OffsetDateTime> for S2DateTime {
@@ -1121,7 +1121,7 @@ impl ListAllBasinsInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 /// Basin information.
 pub struct BasinInfo {
@@ -2587,7 +2587,7 @@ impl ListAllStreamsInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 /// Stream information.
 pub struct StreamInfo {
