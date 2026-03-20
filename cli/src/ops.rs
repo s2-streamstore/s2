@@ -42,6 +42,7 @@ pub async fn list_basins(
         start_after,
         limit,
         no_auto_paginate,
+        include_deleted,
     } = args;
 
     if no_auto_paginate {
@@ -61,9 +62,18 @@ pub async fn list_basins(
             .await
             .map_err(|e| CliError::op(OpKind::ListBasins, e))?;
 
-        Ok((page.values, page.has_more))
+        let values = if include_deleted {
+            page.values
+        } else {
+            page.values
+                .into_iter()
+                .filter(|info| info.deleted_at.is_none())
+                .collect()
+        };
+
+        Ok((values, page.has_more))
     } else {
-        let mut input = ListAllBasinsInput::new().with_include_deleted(true);
+        let mut input = ListAllBasinsInput::new().with_include_deleted(include_deleted);
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -310,18 +320,26 @@ pub async fn list_streams(
     s2: &S2,
     args: ListStreamsArgs,
 ) -> Result<(Vec<StreamInfo>, bool), CliError> {
-    let prefix = args.uri.stream.or(args.prefix);
-    let basin = s2.basin(args.uri.basin);
+    let ListStreamsArgs {
+        uri,
+        prefix,
+        start_after,
+        limit,
+        no_auto_paginate,
+        include_deleted,
+    } = args;
+    let prefix = uri.stream.or(prefix);
+    let basin = s2.basin(uri.basin);
 
-    if args.no_auto_paginate {
+    if no_auto_paginate {
         let mut input = ListStreamsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
-        if let Some(s) = args.start_after {
+        if let Some(s) = start_after {
             input = input.with_start_after(s);
         }
-        if let Some(l) = args.limit {
+        if let Some(l) = limit {
             input = input.with_limit(l);
         }
 
@@ -330,19 +348,28 @@ pub async fn list_streams(
             .await
             .map_err(|e| CliError::op(OpKind::ListStreams, e))?;
 
-        Ok((page.values, page.has_more))
+        let values = if include_deleted {
+            page.values
+        } else {
+            page.values
+                .into_iter()
+                .filter(|info| info.deleted_at.is_none())
+                .collect()
+        };
+
+        Ok((values, page.has_more))
     } else {
-        let mut input = ListAllStreamsInput::new();
+        let mut input = ListAllStreamsInput::new().with_include_deleted(include_deleted);
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
-        if let Some(s) = args.start_after {
+        if let Some(s) = start_after {
             input = input.with_start_after(s);
         }
 
         let items: Vec<_> = basin
             .list_all_streams(input)
-            .take(args.limit.unwrap_or(usize::MAX))
+            .take(limit.unwrap_or(usize::MAX))
             .try_collect()
             .await
             .map_err(|e| CliError::op(OpKind::ListStreams, e))?;

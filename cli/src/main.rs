@@ -192,6 +192,7 @@ async fn run() -> Result<(), CliError> {
                         .map_err(|e| CliError::InvalidArgs(miette::miette!("{e}")))?,
                     limit: args.limit,
                     no_auto_paginate: args.no_auto_paginate,
+                    include_deleted: args.include_deleted,
                 };
 
                 let (streams, _) = ops::list_streams(&s2, list_streams_args).await?;
@@ -219,6 +220,7 @@ async fn run() -> Result<(), CliError> {
                         .map_err(|e| CliError::InvalidArgs(miette::miette!("{e}")))?,
                     limit: args.limit,
                     no_auto_paginate: args.no_auto_paginate,
+                    include_deleted: args.include_deleted,
                 };
 
                 let (basins, _) = ops::list_basins(&s2, list_basins_args).await?;

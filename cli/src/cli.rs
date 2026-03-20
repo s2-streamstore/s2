@@ -237,6 +237,10 @@ pub struct LsArgs {
     /// Returns only a single page of items instead of auto-paginating.
     #[arg(long, default_value_t = false)]
     pub no_auto_paginate: bool,
+
+    /// Include basins or streams that are being deleted.
+    #[arg(long, default_value_t = false)]
+    pub include_deleted: bool,
 }
 
 #[derive(Args, Debug)]
@@ -257,6 +261,10 @@ pub struct ListBasinsArgs {
     /// Returns only a single page of basins instead of auto-paginating.
     #[arg(long, default_value_t = false)]
     pub no_auto_paginate: bool,
+
+    /// Include basins that are being deleted.
+    #[arg(long, default_value_t = false)]
+    pub include_deleted: bool,
 }
 
 #[derive(Args, Debug)]
@@ -377,6 +385,10 @@ pub struct ListStreamsArgs {
     /// Returns only a single page of streams instead of auto-paginating.
     #[arg(long, default_value_t = false)]
     pub no_auto_paginate: bool,
+
+    /// Include streams that are being deleted.
+    #[arg(long, default_value_t = false)]
+    pub include_deleted: bool,
 }
 
 #[derive(Args, Debug)]
