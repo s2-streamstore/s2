@@ -1073,7 +1073,7 @@ impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 /// Input for [`S2::list_all_basins`](crate::S2::list_all_basins).
 pub struct ListAllBasinsInput {
     /// Filter basins whose names begin with this value.
@@ -1090,16 +1090,6 @@ pub struct ListAllBasinsInput {
     ///
     /// Defaults to `false`.
     pub include_deleted: bool,
-}
-
-impl Default for ListAllBasinsInput {
-    fn default() -> Self {
-        Self {
-            prefix: BasinNamePrefix::default(),
-            start_after: BasinNameStartAfter::default(),
-            include_deleted: false,
-        }
-    }
 }
 
 impl ListAllBasinsInput {
@@ -2549,7 +2539,7 @@ impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 /// Input for [`S2Basin::list_all_streams`](crate::S2Basin::list_all_streams).
 pub struct ListAllStreamsInput {
     /// Filter streams whose names begin with this value.
@@ -2566,16 +2556,6 @@ pub struct ListAllStreamsInput {
     ///
     /// Defaults to `false`.
     pub include_deleted: bool,
-}
-
-impl Default for ListAllStreamsInput {
-    fn default() -> Self {
-        Self {
-            prefix: StreamNamePrefix::default(),
-            start_after: StreamNameStartAfter::default(),
-            include_deleted: false,
-        }
-    }
 }
 
 impl ListAllStreamsInput {

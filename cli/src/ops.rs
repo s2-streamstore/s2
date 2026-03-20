@@ -309,25 +309,18 @@ pub async fn list_streams(
     s2: &S2,
     args: ListStreamsArgs,
 ) -> Result<(Vec<StreamInfo>, bool), CliError> {
-    let ListStreamsArgs {
-        uri,
-        prefix,
-        start_after,
-        limit,
-        no_auto_paginate,
-    } = args;
-    let prefix = uri.stream.or(prefix);
-    let basin = s2.basin(uri.basin);
+    let prefix = args.uri.stream.or(args.prefix);
+    let basin = s2.basin(args.uri.basin);
 
-    if no_auto_paginate {
+    if args.no_auto_paginate {
         let mut input = ListStreamsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
-        if let Some(s) = start_after {
+        if let Some(s) = args.start_after {
             input = input.with_start_after(s);
         }
-        if let Some(l) = limit {
+        if let Some(l) = args.limit {
             input = input.with_limit(l);
         }
 
@@ -341,13 +334,13 @@ pub async fn list_streams(
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
-        if let Some(s) = start_after {
+        if let Some(s) = args.start_after {
             input = input.with_start_after(s);
         }
 
         let items: Vec<_> = basin
             .list_all_streams(input)
-            .take(limit.unwrap_or(usize::MAX))
+            .take(args.limit.unwrap_or(usize::MAX))
             .try_collect()
             .await
             .map_err(|e| CliError::op(OpKind::ListStreams, e))?;
