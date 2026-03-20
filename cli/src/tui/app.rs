@@ -4269,7 +4269,6 @@ impl App {
                 start_after: start_after.map(|n| n.to_string().parse().unwrap()),
                 limit: Some(100),
                 no_auto_paginate: true,
-                include_deleted: true,
             };
             let event = match ops::list_basins(&s2, args).await {
                 Ok((basins, has_more)) => {
@@ -4327,7 +4326,6 @@ impl App {
                 start_after: start_after.map(|n| n.to_string().parse().unwrap()),
                 limit: Some(100),
                 no_auto_paginate: true,
-                include_deleted: true,
             };
             let event = match ops::list_streams(&s2, args).await {
                 Ok((streams, has_more)) => {
@@ -4430,7 +4428,6 @@ impl App {
                         start_after: None,
                         limit: Some(100),
                         no_auto_paginate: true,
-                        include_deleted: true,
                     };
                     if let Ok((basins, has_more)) = ops::list_basins(&s2, args).await {
                         let _ = tx_refresh.send(Event::BasinsLoaded(Ok((basins, has_more))));
@@ -4457,7 +4454,6 @@ impl App {
                         start_after: None,
                         limit: Some(100),
                         no_auto_paginate: true,
-                        include_deleted: true,
                     };
                     if let Ok((basins, has_more)) = ops::list_basins(&s2, args).await {
                         let _ = tx_refresh.send(Event::BasinsLoaded(Ok((basins, has_more))));
@@ -4511,7 +4507,6 @@ impl App {
                         start_after: None,
                         limit: Some(100),
                         no_auto_paginate: true,
-                        include_deleted: true,
                     };
                     if let Ok((streams, has_more)) = ops::list_streams(&s2, args).await {
                         let _ = tx_refresh.send(Event::StreamsLoaded(Ok((streams, has_more))));
@@ -4552,7 +4547,6 @@ impl App {
                         start_after: None,
                         limit: Some(100),
                         no_auto_paginate: true,
-                        include_deleted: true,
                     };
                     if let Ok((streams, has_more)) = ops::list_streams(&s2, args).await {
                         let _ = tx_refresh.send(Event::StreamsLoaded(Ok((streams, has_more))));
@@ -5080,7 +5074,6 @@ impl App {
                         start_after: None,
                         limit: Some(100),
                         no_auto_paginate: true,
-                        include_deleted: true,
                     };
                     if let Ok((basins, has_more)) = ops::list_basins(&s2, args).await {
                         let _ = tx_refresh.send(Event::BasinsLoaded(Ok((basins, has_more))));
@@ -5153,7 +5146,6 @@ impl App {
                         start_after: None,
                         limit: Some(100),
                         no_auto_paginate: true,
-                        include_deleted: true,
                     };
                     if let Ok((streams, has_more)) = ops::list_streams(&s2, args).await {
                         let _ = tx_refresh.send(Event::StreamsLoaded(Ok((streams, has_more))));

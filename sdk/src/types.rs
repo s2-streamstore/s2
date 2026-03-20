@@ -1032,10 +1032,6 @@ pub struct ListBasinsInput {
     ///
     /// Defaults to `1000`.
     pub limit: Option<usize>,
-    /// Whether to include basins that are being deleted.
-    ///
-    /// Defaults to `false`.
-    pub include_deleted: bool,
 }
 
 impl ListBasinsInput {
@@ -1065,14 +1061,6 @@ impl ListBasinsInput {
             ..self
         }
     }
-
-    /// Set whether to include basins that are being deleted.
-    pub fn with_include_deleted(self, include_deleted: bool) -> Self {
-        Self {
-            include_deleted,
-            ..self
-        }
-    }
 }
 
 impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
@@ -1085,7 +1073,7 @@ impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 /// Input for [`S2::list_all_basins`](crate::S2::list_all_basins).
 pub struct ListAllBasinsInput {
     /// Filter basins whose names begin with this value.
@@ -1100,8 +1088,18 @@ pub struct ListAllBasinsInput {
     pub start_after: BasinNameStartAfter,
     /// Whether to include basins that are being deleted.
     ///
-    /// Defaults to `false`.
+    /// Defaults to `true`.
     pub include_deleted: bool,
+}
+
+impl Default for ListAllBasinsInput {
+    fn default() -> Self {
+        Self {
+            prefix: BasinNamePrefix::default(),
+            start_after: BasinNameStartAfter::default(),
+            include_deleted: true,
+        }
+    }
 }
 
 impl ListAllBasinsInput {
@@ -2510,10 +2508,6 @@ pub struct ListStreamsInput {
     ///
     /// Defaults to `1000`.
     pub limit: Option<usize>,
-    /// Whether to include streams that are being deleted.
-    ///
-    /// Defaults to `false`.
-    pub include_deleted: bool,
 }
 
 impl ListStreamsInput {
@@ -2543,14 +2537,6 @@ impl ListStreamsInput {
             ..self
         }
     }
-
-    /// Set whether to include streams that are being deleted.
-    pub fn with_include_deleted(self, include_deleted: bool) -> Self {
-        Self {
-            include_deleted,
-            ..self
-        }
-    }
 }
 
 impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
@@ -2563,7 +2549,7 @@ impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 /// Input for [`S2Basin::list_all_streams`](crate::S2Basin::list_all_streams).
 pub struct ListAllStreamsInput {
     /// Filter streams whose names begin with this value.
@@ -2578,8 +2564,18 @@ pub struct ListAllStreamsInput {
     pub start_after: StreamNameStartAfter,
     /// Whether to include streams that are being deleted.
     ///
-    /// Defaults to `false`.
+    /// Defaults to `true`.
     pub include_deleted: bool,
+}
+
+impl Default for ListAllStreamsInput {
+    fn default() -> Self {
+        Self {
+            prefix: StreamNamePrefix::default(),
+            start_after: StreamNameStartAfter::default(),
+            include_deleted: true,
+        }
+    }
 }
 
 impl ListAllStreamsInput {

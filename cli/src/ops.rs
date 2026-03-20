@@ -42,11 +42,10 @@ pub async fn list_basins(
         start_after,
         limit,
         no_auto_paginate,
-        include_deleted,
     } = args;
 
     if no_auto_paginate {
-        let mut input = ListBasinsInput::new().with_include_deleted(include_deleted);
+        let mut input = ListBasinsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -63,7 +62,7 @@ pub async fn list_basins(
             .map_err(|e| CliError::op(OpKind::ListBasins, e))?;
         Ok((page.values, page.has_more))
     } else {
-        let mut input = ListAllBasinsInput::new().with_include_deleted(include_deleted);
+        let mut input = ListAllBasinsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -316,13 +315,12 @@ pub async fn list_streams(
         start_after,
         limit,
         no_auto_paginate,
-        include_deleted,
     } = args;
     let prefix = uri.stream.or(prefix);
     let basin = s2.basin(uri.basin);
 
     if no_auto_paginate {
-        let mut input = ListStreamsInput::new().with_include_deleted(include_deleted);
+        let mut input = ListStreamsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -339,7 +337,7 @@ pub async fn list_streams(
             .map_err(|e| CliError::op(OpKind::ListStreams, e))?;
         Ok((page.values, page.has_more))
     } else {
-        let mut input = ListAllStreamsInput::new().with_include_deleted(include_deleted);
+        let mut input = ListAllStreamsInput::new();
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }

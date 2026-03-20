@@ -30,20 +30,19 @@ async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), S2Error> {
 
     let page = basin.list_streams(ListStreamsInput::new()).await?;
 
-    assert!(page.values.is_empty());
-
-    let page = basin
-        .list_streams(ListStreamsInput::new().with_include_deleted(true))
-        .await?;
-
-    assert_matches!(
-        page.values.as_slice(),
-        [StreamInfo {
-            name,
-            deleted_at: Some(_),
-            ..
-        }] if name == &stream_name
-    );
+    match page.values.as_slice() {
+        [] => {}
+        [
+            StreamInfo {
+                name,
+                deleted_at: Some(_),
+                ..
+            },
+        ] => {
+            assert_eq!(name, &stream_name);
+        }
+        values => panic!("unexpected stream listing after delete: {values:?}"),
+    }
 
     Ok(())
 }
@@ -506,7 +505,7 @@ async fn list_all_streams_iterates_with_prefix(basin: &SharedS2Basin) -> Result<
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_all_streams_include_deleted(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_all_streams_include_deleted_by_default(basin: &SharedS2Basin) -> Result<(), S2Error> {
     let prefix = format!("iter-del-{}", uuid());
     let stream_name: StreamName = format!("{}-0001", prefix)
         .parse()
@@ -520,9 +519,7 @@ async fn list_all_streams_include_deleted(basin: &SharedS2Basin) -> Result<(), S
         .await?;
 
     let mut stream = basin.list_all_streams(
-        ListAllStreamsInput::new()
-            .with_prefix(prefix.parse().expect("valid prefix"))
-            .with_include_deleted(true),
+        ListAllStreamsInput::new().with_prefix(prefix.parse().expect("valid prefix")),
     );
 
     let mut found = None;
