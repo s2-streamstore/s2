@@ -200,7 +200,9 @@ impl crate::http::ParseableHeader for BasinName {
 
 pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAfter>;
 
-#[derive(Debug, strum::Display, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, strum::Display, strum::EnumString, strum::IntoStaticStr, Clone, Copy, PartialEq, Eq,
+)]
 pub enum BasinScope {
     #[strum(serialize = "aws:us-east-1")]
     AwsUsEast1,
