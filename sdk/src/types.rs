@@ -254,7 +254,7 @@ impl S2Endpoints {
             scheme: Scheme::HTTPS,
             account_authority: "aws.s2.dev".try_into().expect("valid authority"),
             basin_authority: BasinAuthority::ParentZone(
-                "b.aws.s2.dev".try_into().expect("valid authority"),
+                "b.s2.dev".try_into().expect("valid authority"),
             ),
         }
     }
