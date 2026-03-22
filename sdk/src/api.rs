@@ -9,14 +9,14 @@ use http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, InvalidHeaderValue},
 };
 use prost::{self, Message};
+#[cfg(feature = "_hidden")]
+use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
 use s2_api::v1::{
     access::{
         AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
         ListAccessTokensResponse,
     },
-    basin::{
-        BasinInfo, CreateBasinRequest, ListBasinsRequest, ListBasinsResponse,
-    },
+    basin::{BasinInfo, CreateBasinRequest, ListBasinsRequest, ListBasinsResponse},
     config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration},
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
@@ -32,13 +32,10 @@ use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 use url::Url;
-#[cfg(feature = "_hidden")]
-use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
-
-use crate::frame_signal::FrameSignal;
 
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
+    frame_signal::FrameSignal,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, RetryConfig,
@@ -51,6 +48,7 @@ const CONTENT_TYPE_PROTO: &str = "application/protobuf";
 const ACCEPT_PROTO: &str = "application/protobuf";
 const S2_REQUEST_TOKEN: &str = "s2-request-token";
 const S2_BASIN: &str = "s2-basin";
+const S2_ENCRYPTION: &str = "s2-encryption";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
 
 #[derive(Debug, Clone)]
@@ -394,7 +392,8 @@ impl BasinClient {
             .query(&start)
             .query(&end);
         if let Some(wait) = end.wait {
-            builder = builder.timeout(self.client.request_timeout + Duration::from_secs(wait.into()));
+            builder =
+                builder.timeout(self.client.request_timeout + Duration::from_secs(wait.into()));
         }
         let request = builder.build()?;
         let response = self
@@ -829,6 +828,17 @@ impl BaseClient {
             Compression::None => {}
         }
 
+        if let Some(ref enc) = config.encryption {
+            use crate::types::EncryptionConfig;
+            let header_value = match enc {
+                EncryptionConfig::Key { alg, key } => {
+                    format!("alg={}; key={}", alg.as_api_str(), key.expose_secret())
+                }
+                EncryptionConfig::Attest => "attest".to_owned(),
+            };
+            default_headers.insert(S2_ENCRYPTION, header_value.try_into()?);
+        }
+
         let client = client::Pool::new(connector);
 
         Ok(Self {
@@ -963,10 +973,7 @@ impl<'a> RequestBuilder<'a> {
                 r
             };
 
-            let response = self
-                .client
-                .execute_unary(attempt_request)
-                .await;
+            let response = self.client.execute_unary(attempt_request).await;
 
             let (err, retry_after) = match response {
                 Ok(resp) => {
@@ -1183,7 +1190,9 @@ mod tests {
         // Server errors that do NOT guarantee no mutation.
         assert!(!server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal").has_no_side_effects());
         assert!(!server_error(StatusCode::BAD_GATEWAY, "other").has_no_side_effects());
-        assert!(!server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects());
+        assert!(
+            !server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects()
+        );
     }
 
     #[test]

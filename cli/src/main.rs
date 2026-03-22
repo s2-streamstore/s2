@@ -32,9 +32,9 @@ use record_format::{
 use s2_sdk::{
     S2,
     types::{
-        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput, MeteredBytes,
-        Metric, RetentionPolicy, RetryConfig, StreamConfig as SdkStreamConfig, StreamName,
-        TimestampingConfig, TimestampingMode,
+        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
+        EncryptionConfig, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
+        StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig, TimestampingMode,
     },
 };
 use strum::VariantNames;
@@ -151,7 +151,8 @@ async fn run() -> Result<(), CliError> {
     }
 
     let cli_config = load_cli_config()?;
-    let sdk_config = sdk_config(&cli_config)?;
+    let encryption = resolve_command_encryption(&command)?;
+    let sdk_config = sdk_config(&cli_config, encryption)?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
     let token_source = access_token_source(&cli_config);
     let result: Result<(), CliError> = (async {
@@ -795,4 +796,59 @@ fn print_metrics(metrics: &[Metric]) {
             }
         }
     }
+}
+
+fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConfig>, CliError> {
+    struct EncryptionArgs<'a> {
+        key: &'a Option<String>,
+        key_file: &'a Option<std::path::PathBuf>,
+        alg: Option<types::EncryptionAlgorithm>,
+        attest: bool,
+    }
+
+    let args = match command {
+        Command::Append(a) => EncryptionArgs {
+            key: &a.encryption_key,
+            key_file: &a.encryption_key_file,
+            alg: a.encryption_algorithm,
+            attest: a.encryption_attest,
+        },
+        Command::Read(a) => EncryptionArgs {
+            key: &a.encryption_key,
+            key_file: &a.encryption_key_file,
+            alg: a.encryption_algorithm,
+            attest: a.encryption_attest,
+        },
+        _ => return Ok(None),
+    };
+
+    if args.attest {
+        return Ok(Some(EncryptionConfig::Attest));
+    }
+
+    let key = match (args.key, args.key_file) {
+        (Some(k), _) => k.clone(),
+        (_, Some(path)) => {
+            let contents = std::fs::read_to_string(path).map_err(|e| {
+                CliError::InvalidEncryptionKey(format!("cannot read key file: {e}"))
+            })?;
+            contents.lines().next().unwrap_or("").trim().to_owned()
+        }
+        _ => return Ok(None),
+    };
+
+    if key.len() != 64 {
+        return Err(CliError::InvalidEncryptionKey(format!(
+            "expected 64 hex characters, got {}",
+            key.len()
+        )));
+    }
+    hex::decode(&key).map_err(|e| CliError::InvalidEncryptionKey(e.to_string()))?;
+
+    let alg = args.alg.unwrap_or(types::EncryptionAlgorithm::Aegis256);
+
+    Ok(Some(EncryptionConfig::Key {
+        alg: alg.into(),
+        key: key.into(),
+    }))
 }

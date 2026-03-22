@@ -15,8 +15,7 @@ use s2_api::{
 use s2_common::{
     caps::RECORD_BATCH_MAX,
     encryption::{
-        self, EncryptionDirective, EncryptionError, check_encryption_directive,
-        parse_s2_encryption_header, stream_aad,
+        self, EncryptionDirective, EncryptionError, parse_s2_encryption_header, stream_aad,
     },
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
@@ -47,47 +46,16 @@ struct EncryptionContext {
 }
 
 impl EncryptionContext {
-    async fn resolve_for_append(
-        backend: &Backend,
+    fn resolve(
         headers: &http::HeaderMap,
         basin: &BasinName,
         stream: &StreamName,
     ) -> Result<Self, ServiceError> {
         let directive = parse_s2_encryption_header(headers)
-            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-        let config = backend
-            .get_stream_config(basin.clone(), stream.clone())
-            .await?;
-        check_encryption_directive(config.encryption_algorithm, directive.as_ref())
             .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
         Ok(Self {
             aad: stream_aad(basin, stream).into_bytes(),
             directive,
-        })
-    }
-
-    async fn resolve_for_read(
-        backend: &Backend,
-        headers: &http::HeaderMap,
-        basin: &BasinName,
-        stream: &StreamName,
-    ) -> Result<Self, ServiceError> {
-        let directive = parse_s2_encryption_header(headers)
-            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-        let config = backend
-            .get_stream_config(basin.clone(), stream.clone())
-            .await?;
-        let checked =
-            match check_encryption_directive(config.encryption_algorithm, directive.as_ref()) {
-                Ok(d) => d.cloned(),
-                Err(EncryptionError::EncryptionRequired(_)) => None,
-                Err(e) => {
-                    return Err(ServiceError::Validation(ValidationError(e.to_string())));
-                }
-            };
-        Ok(Self {
-            aad: stream_aad(basin, stream).into_bytes(),
-            directive: checked,
         })
     }
 
@@ -247,7 +215,7 @@ pub async fn read(
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
-    let enc = EncryptionContext::resolve_for_read(&backend, &headers, &basin, &stream).await?;
+    let enc = EncryptionContext::resolve(&headers, &basin, &stream)?;
 
     let start: ReadStart = start.try_into()?;
     match request {
@@ -442,7 +410,7 @@ pub async fn append(
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
-    let enc = EncryptionContext::resolve_for_append(&backend, &headers, &basin, &stream).await?;
+    let enc = EncryptionContext::resolve(&headers, &basin, &stream)?;
     let append_enc = enc.into_append_encryption();
 
     match request {

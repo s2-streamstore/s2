@@ -388,7 +388,6 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
                     basin.clone(),
                     stream.clone(),
                     reconfiguration,
-                    None,
                     CreateMode::CreateOrReconfigure,
                 )
                 .await

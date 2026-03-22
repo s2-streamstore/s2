@@ -35,7 +35,8 @@ pub use crate::types::config::EncryptionAlgorithm;
 pub const S2_ENCRYPTION_HEADER: &str = "s2-encryption";
 
 /// Ciphertext envelope version. Stored as the first byte of the encrypted record body.
-/// Authenticated via AAD so tampering is detected.
+/// Tampering is caught by the version dispatch in `decrypt_record` before AAD construction.
+/// N.B. shares the value `0x01` with `ALG_ID_AEGIS256` but occupies a different byte offset.
 const CIPHERTEXT_V1: u8 = 0x01;
 
 const ALG_ID_AEGIS256: u8 = 0x01;
@@ -69,7 +70,7 @@ fn make_key(bytes: [u8; 32]) -> EncryptionKey {
 /// Parsed `S2-Encryption` header directive.
 #[derive(Clone, Debug)]
 pub enum EncryptionDirective {
-    /// Client provides the key; server encrypts/decrypts.
+    /// Client provides the algorithm and key; server encrypts/decrypts.
     Key {
         alg: EncryptionAlgorithm,
         key: EncryptionKey,
@@ -82,15 +83,6 @@ pub enum EncryptionDirective {
 pub enum EncryptionError {
     #[error("Malformed S2-Encryption header: {0}")]
     MalformedHeader(String),
-    #[error("Algorithm mismatch: stream requires {expected:?}, got {got:?}")]
-    AlgorithmMismatch {
-        expected: EncryptionAlgorithm,
-        got: EncryptionAlgorithm,
-    },
-    #[error("Encryption required: stream has encryption={0:?} but no key was provided")]
-    EncryptionRequired(EncryptionAlgorithm),
-    #[error("Encryption key provided but stream is plaintext")]
-    EncryptionNotExpected,
     #[error("Unsupported ciphertext version: {0:#04x}")]
     UnsupportedVersion(u8),
     #[error("Decryption failed")]
@@ -116,33 +108,26 @@ pub fn parse_s2_encryption_header(
     }
 
     let (alg_part, key_part) = s.split_once(';').ok_or_else(|| {
-        EncryptionError::MalformedHeader(format!("expected 'alg=...; key=...', got {s:?}"))
+        EncryptionError::MalformedHeader("expected 'alg=...; key=...'".to_owned())
     })?;
 
     let alg_str = alg_part
         .trim()
         .strip_prefix("alg=")
-        .ok_or_else(|| {
-            EncryptionError::MalformedHeader(format!("expected 'alg=...', got {alg_part:?}"))
-        })?
+        .ok_or_else(|| EncryptionError::MalformedHeader("missing 'alg=' prefix".to_owned()))?
         .trim();
 
     let key_hex = key_part
         .trim()
         .strip_prefix("key=")
-        .ok_or_else(|| {
-            EncryptionError::MalformedHeader(format!("expected 'key=...', got {key_part:?}"))
-        })?
+        .ok_or_else(|| EncryptionError::MalformedHeader("missing 'key=' prefix".to_owned()))?
         .trim();
 
-    let alg = match EncryptionAlgorithm::parse_api_str(alg_str) {
-        Some(EncryptionAlgorithm::None) | None => {
-            return Err(EncryptionError::MalformedHeader(format!(
-                "unknown algorithm {alg_str:?}; expected 'aegis-256' or 'aes-256-gcm'"
-            )));
-        }
-        Some(alg) => alg,
-    };
+    let alg = EncryptionAlgorithm::parse_api_str(alg_str).ok_or_else(|| {
+        EncryptionError::MalformedHeader(format!(
+            "unknown algorithm {alg_str:?}; expected 'aegis-256' or 'aes-256-gcm'"
+        ))
+    })?;
 
     if key_hex.len() != 64 {
         return Err(EncryptionError::MalformedHeader(format!(
@@ -151,43 +136,26 @@ pub fn parse_s2_encryption_header(
         )));
     }
 
-    let key_bytes: Vec<u8> = hex::decode(key_hex)
+    let mut key_bytes: Vec<u8> = hex::decode(key_hex)
         .map_err(|e| EncryptionError::MalformedHeader(format!("key is not valid hex: {e}")))?;
 
-    let key_array: [u8; 32] = key_bytes
-        .try_into()
-        .map_err(|_| EncryptionError::MalformedHeader("key must be exactly 32 bytes".to_owned()))?;
+    let key_array: [u8; 32] = match key_bytes.as_slice().try_into() {
+        Ok(arr) => {
+            secrecy::zeroize::Zeroize::zeroize(&mut key_bytes);
+            arr
+        }
+        Err(_) => {
+            secrecy::zeroize::Zeroize::zeroize(&mut key_bytes);
+            return Err(EncryptionError::MalformedHeader(
+                "key must be exactly 32 bytes".to_owned(),
+            ));
+        }
+    };
 
     Ok(Some(EncryptionDirective::Key {
         alg,
         key: make_key(key_array),
     }))
-}
-
-pub fn check_encryption_directive<'a>(
-    stream_alg: Option<EncryptionAlgorithm>,
-    directive: Option<&'a EncryptionDirective>,
-) -> Result<Option<&'a EncryptionDirective>, EncryptionError> {
-    let Some(required_alg) = stream_alg else {
-        if matches!(directive, Some(EncryptionDirective::Key { .. })) {
-            return Err(EncryptionError::EncryptionNotExpected);
-        }
-        return Ok(None);
-    };
-
-    match directive {
-        None => Err(EncryptionError::EncryptionRequired(required_alg)),
-        Some(EncryptionDirective::Attest) => Ok(directive),
-        Some(EncryptionDirective::Key { alg, .. }) => {
-            if *alg != required_alg {
-                return Err(EncryptionError::AlgorithmMismatch {
-                    expected: required_alg,
-                    got: *alg,
-                });
-            }
-            Ok(directive)
-        }
-    }
 }
 
 pub fn encode_record_plaintext(
@@ -259,7 +227,9 @@ pub fn encrypt_record(
                         aad: &full_aad,
                     },
                 )
-                .map_err(|_| EncryptionError::DecryptionFailed)?;
+                .map_err(|_| {
+                    EncryptionError::EncodingFailed("AES-256-GCM encryption failed".to_owned())
+                })?;
 
             let mut out =
                 BytesMut::with_capacity(2 + NONCE_BYTES_AES256GCM + ciphertext_with_tag.len());
@@ -269,9 +239,6 @@ pub fn encrypt_record(
             out.put_slice(&ciphertext_with_tag);
             Ok(out.freeze())
         }
-        EncryptionAlgorithm::None => Err(EncryptionError::EncodingFailed(
-            "cannot encrypt with None algorithm".to_owned(),
-        )),
     }
 }
 
@@ -639,55 +606,5 @@ mod tests {
         );
         let result = parse_s2_encryption_header(&headers);
         assert!(matches!(result, Err(EncryptionError::MalformedHeader(_))));
-    }
-
-    #[test]
-    fn check_directive_alg_mismatch() {
-        let key = make_key_fn();
-        let directive = EncryptionDirective::Key {
-            alg: EncryptionAlgorithm::Aes256Gcm,
-            key,
-        };
-        let result =
-            check_encryption_directive(Some(EncryptionAlgorithm::Aegis256), Some(&directive));
-        assert!(matches!(
-            result,
-            Err(EncryptionError::AlgorithmMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn check_directive_required_but_absent() {
-        let result = check_encryption_directive(Some(EncryptionAlgorithm::Aegis256), None);
-        assert!(matches!(
-            result,
-            Err(EncryptionError::EncryptionRequired(_))
-        ));
-    }
-
-    #[test]
-    fn check_directive_key_on_plaintext_stream_rejected() {
-        let key = make_key_fn();
-        let directive = EncryptionDirective::Key {
-            alg: EncryptionAlgorithm::Aegis256,
-            key,
-        };
-        let result = check_encryption_directive(None, Some(&directive));
-        assert!(matches!(
-            result,
-            Err(EncryptionError::EncryptionNotExpected)
-        ));
-    }
-
-    #[test]
-    fn check_directive_attest_on_plaintext_stream_ok() {
-        let result = check_encryption_directive(None, Some(&EncryptionDirective::Attest));
-        assert!(result.unwrap().is_none());
-    }
-
-    #[test]
-    fn check_directive_none_on_plaintext_stream_ok() {
-        let result = check_encryption_directive(None, None);
-        assert!(result.unwrap().is_none());
     }
 }

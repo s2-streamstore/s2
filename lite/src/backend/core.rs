@@ -301,7 +301,6 @@ impl Backend {
                             basin.clone(),
                             stream.clone(),
                             OptionalStreamConfig::default(),
-                            None,
                             CreateMode::CreateOnly(None),
                         )
                         .await
@@ -452,7 +451,6 @@ mod tests {
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                None,
                 CreateMode::CreateOnly(None),
             )
             .await

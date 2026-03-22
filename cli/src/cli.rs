@@ -12,7 +12,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, EncryptionAlgorithm, Interval, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StorageClass, StreamConfig, StreamMatcher,
     },
@@ -464,6 +464,22 @@ pub struct AppendArgs {
     /// How long to wait for more records before flushing a batch.
     #[arg(long, default_value = "5ms")]
     pub linger: humantime::Duration,
+
+    /// Hex-encoded 32-byte encryption key. Prefer S2_ENCRYPTION_KEY env var.
+    #[arg(long, env = "S2_ENCRYPTION_KEY", hide_env_values = true)]
+    pub encryption_key: Option<String>,
+
+    /// Read encryption key from file (first line, trimmed).
+    #[arg(long, conflicts_with = "encryption_key")]
+    pub encryption_key_file: Option<PathBuf>,
+
+    /// Encryption algorithm (default: aegis-256).
+    #[arg(long, value_enum)]
+    pub encryption_algorithm: Option<EncryptionAlgorithm>,
+
+    /// Attest client-side encryption (mutually exclusive with key/algorithm).
+    #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file", "encryption_algorithm"])]
+    pub encryption_attest: bool,
 }
 
 #[derive(Args, Debug)]
@@ -515,6 +531,22 @@ pub struct ReadArgs {
     /// Use "-" to write to stdout.
     #[arg(short = 'o', long, value_parser = parse_records_output_source, default_value = "-")]
     pub output: RecordsOut,
+
+    /// Hex-encoded 32-byte encryption key. Prefer S2_ENCRYPTION_KEY env var.
+    #[arg(long, env = "S2_ENCRYPTION_KEY", hide_env_values = true)]
+    pub encryption_key: Option<String>,
+
+    /// Read encryption key from file (first line, trimmed).
+    #[arg(long, conflicts_with = "encryption_key")]
+    pub encryption_key_file: Option<PathBuf>,
+
+    /// Encryption algorithm (default: aegis-256).
+    #[arg(long, value_enum)]
+    pub encryption_algorithm: Option<EncryptionAlgorithm>,
+
+    /// Attest client-side encryption (mutually exclusive with key/algorithm).
+    #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file", "encryption_algorithm"])]
+    pub encryption_attest: bool,
 }
 
 #[derive(Args, Debug)]
