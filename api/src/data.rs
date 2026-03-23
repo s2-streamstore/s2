@@ -109,6 +109,11 @@ pub mod extract {
     ///
     /// Decouples consumers from `axum::extract::rejection::JsonRejection` so the
     /// underlying deserializer can be swapped without changing downstream code.
+    /// JSON extraction rejection type owned by s2-api.
+    ///
+    /// Every variant stores its status code and pre-rendered message so that
+    /// `body_text()`, `Display`, and `IntoResponse` all return the same
+    /// string without re-allocating.
     #[derive(Debug)]
     #[non_exhaustive]
     pub enum JsonExtractionRejection {
@@ -120,7 +125,10 @@ pub mod extract {
             status: http::StatusCode,
             message: String,
         },
-        MissingContentType,
+        MissingContentType {
+            status: http::StatusCode,
+            message: String,
+        },
         Other {
             status: http::StatusCode,
             message: String,
@@ -128,16 +136,23 @@ pub mod extract {
     }
 
     impl JsonExtractionRejection {
+        /// Return the pre-rendered error message. No allocation — returns a
+        /// clone of the already-stored `String`.
         pub fn body_text(&self) -> String {
-            self.to_string()
+            match self {
+                Self::SyntaxError { message, .. }
+                | Self::DataError { message, .. }
+                | Self::MissingContentType { message, .. }
+                | Self::Other { message, .. } => message.clone(),
+            }
         }
 
         pub fn status(&self) -> http::StatusCode {
             match self {
-                Self::SyntaxError { status, .. } => *status,
-                Self::DataError { status, .. } => *status,
-                Self::MissingContentType => http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                Self::Other { status, .. } => *status,
+                Self::SyntaxError { status, .. }
+                | Self::DataError { status, .. }
+                | Self::MissingContentType { status, .. }
+                | Self::Other { status, .. } => *status,
             }
         }
     }
@@ -145,12 +160,10 @@ pub mod extract {
     impl std::fmt::Display for JsonExtractionRejection {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                Self::SyntaxError { message, .. } => f.write_str(message),
-                Self::DataError { message, .. } => f.write_str(message),
-                Self::MissingContentType => {
-                    f.write_str("Expected request with `Content-Type: application/json`")
-                }
-                Self::Other { message, .. } => f.write_str(message),
+                Self::SyntaxError { message, .. }
+                | Self::DataError { message, .. }
+                | Self::MissingContentType { message, .. }
+                | Self::Other { message, .. } => f.write_str(message),
             }
         }
     }
@@ -159,7 +172,15 @@ pub mod extract {
 
     impl IntoResponse for JsonExtractionRejection {
         fn into_response(self) -> Response {
-            (self.status(), self.body_text()).into_response()
+            let status = self.status();
+            // Destructure to move the String — no clone.
+            let message = match self {
+                Self::SyntaxError { message, .. }
+                | Self::DataError { message, .. }
+                | Self::MissingContentType { message, .. }
+                | Self::Other { message, .. } => message,
+            };
+            (status, message).into_response()
         }
     }
 
@@ -175,7 +196,10 @@ pub mod extract {
                     status: e.status(),
                     message: e.body_text(),
                 },
-                MissingJsonContentType(_) => Self::MissingContentType,
+                MissingJsonContentType(e) => Self::MissingContentType {
+                    status: e.status(),
+                    message: e.body_text(),
+                },
                 other => Self::Other {
                     status: other.status(),
                     message: other.body_text(),
@@ -214,7 +238,10 @@ pub mod extract {
                 .as_ref()
                 .is_some_and(crate::mime::is_json)
             {
-                return Err(JsonExtractionRejection::MissingContentType);
+                return Err(JsonExtractionRejection::MissingContentType {
+                    status: http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    message: "Expected request with `Content-Type: application/json`".into(),
+                });
             }
             let bytes = Bytes::from_request(req, state).await.map_err(|e| {
                 JsonExtractionRejection::Other {
