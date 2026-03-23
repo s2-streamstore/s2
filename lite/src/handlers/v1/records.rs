@@ -442,7 +442,7 @@ pub async fn append(
 
             let input_err_stream = futures::stream::once(err_rx).filter_map(|res| async move {
                 match res {
-                    Ok(err) => Some(Err(err.into())),
+                    Ok(err) => Some(Err(err)),
                     Err(_) => None,
                 }
             });
