@@ -33,7 +33,7 @@ use enum_ordinalize::Ordinalize;
 
 use crate::maybe::Maybe;
 
-/// Encryption algorithm for record data, specified per-request via the `S2-Encryption` header.
+/// Encryption algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumString)]
 pub enum EncryptionAlgorithm {
     #[strum(serialize = "aegis-256")]

@@ -288,8 +288,6 @@ pub enum CreateStreamError {
     StreamAlreadyExists(#[from] StreamAlreadyExistsError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
-    #[error("{0}")]
-    InvalidConfig(String),
 }
 
 impl From<slatedb::Error> for CreateStreamError {
@@ -429,8 +427,6 @@ pub enum ReconfigureStreamError {
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
-    #[error("immutable field: {0}")]
-    ImmutableField(&'static str),
 }
 
 impl From<slatedb::Error> for ReconfigureStreamError {

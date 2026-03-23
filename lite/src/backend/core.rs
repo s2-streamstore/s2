@@ -311,7 +311,6 @@ impl Backend {
                             CreateStreamError::BasinDeletionPending(e) => Err(e)?,
                             CreateStreamError::StreamDeletionPending(e) => Err(e)?,
                             CreateStreamError::BasinNotFound(e) => Err(e)?,
-                            CreateStreamError::InvalidConfig(_) => {}
                             CreateStreamError::StreamAlreadyExists(_) => {}
                         }
                     }

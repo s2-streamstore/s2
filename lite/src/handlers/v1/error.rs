@@ -16,7 +16,6 @@ use crate::backend::error::{
     AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError, CreateStreamError,
     DeleteBasinError, DeleteStreamError, GetBasinConfigError, GetStreamConfigError,
     ListBasinsError, ListStreamsError, ReadError, ReconfigureBasinError, ReconfigureStreamError,
-    ReconfigureStreamError::ImmutableField,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -155,7 +154,6 @@ impl ServiceError {
                 CreateStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
-                CreateStreamError::InvalidConfig(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::GetStreamConfig(e) => match e {
                 GetStreamConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -191,7 +189,6 @@ impl ServiceError {
                 ReconfigureStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
-                ImmutableField(_) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::CheckTail(e) => match e {
                 CheckTailError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
