@@ -98,6 +98,8 @@ pub struct S2FormatHeader {
 
 #[cfg(feature = "axum")]
 pub mod extract {
+    use std::borrow::Cow;
+
     use axum::{
         extract::{FromRequest, OptionalFromRequest, Request, rejection::BytesRejection},
         response::{IntoResponse, Response},
@@ -111,19 +113,19 @@ pub mod extract {
     pub enum JsonExtractionRejection {
         SyntaxError {
             status: http::StatusCode,
-            message: String,
+            message: Cow<'static, str>,
         },
         DataError {
             status: http::StatusCode,
-            message: String,
+            message: Cow<'static, str>,
         },
         MissingContentType {
             status: http::StatusCode,
-            message: String,
+            message: Cow<'static, str>,
         },
         Other {
             status: http::StatusCode,
-            message: String,
+            message: Cow<'static, str>,
         },
     }
 
@@ -133,7 +135,7 @@ pub mod extract {
                 Self::SyntaxError { message, .. }
                 | Self::DataError { message, .. }
                 | Self::MissingContentType { message, .. }
-                | Self::Other { message, .. } => message.clone(),
+                | Self::Other { message, .. } => message.clone().into_owned(),
             }
         }
 
@@ -163,14 +165,7 @@ pub mod extract {
     impl IntoResponse for JsonExtractionRejection {
         fn into_response(self) -> Response {
             let status = self.status();
-            // Destructure to move the String — no clone.
-            let message = match self {
-                Self::SyntaxError { message, .. }
-                | Self::DataError { message, .. }
-                | Self::MissingContentType { message, .. }
-                | Self::Other { message, .. } => message,
-            };
-            (status, message).into_response()
+            (status, self.to_string()).into_response()
         }
     }
 
@@ -180,19 +175,19 @@ pub mod extract {
             match rej {
                 JsonDataError(e) => Self::DataError {
                     status: e.status(),
-                    message: e.body_text(),
+                    message: e.body_text().into(),
                 },
                 JsonSyntaxError(e) => Self::SyntaxError {
                     status: e.status(),
-                    message: e.body_text(),
+                    message: e.body_text().into(),
                 },
                 MissingJsonContentType(e) => Self::MissingContentType {
                     status: e.status(),
-                    message: e.body_text(),
+                    message: e.body_text().into(),
                 },
                 other => Self::Other {
                     status: other.status(),
-                    message: other.body_text(),
+                    message: other.body_text().into(),
                 },
             }
         }
@@ -230,13 +225,15 @@ pub mod extract {
             {
                 return Err(JsonExtractionRejection::MissingContentType {
                     status: http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    message: "Expected request with `Content-Type: application/json`".into(),
+                    message: Cow::Borrowed(
+                        "Expected request with `Content-Type: application/json`",
+                    ),
                 });
             }
             let bytes = Bytes::from_request(req, state).await.map_err(|e| {
                 JsonExtractionRejection::Other {
                     status: e.status(),
-                    message: e.body_text(),
+                    message: e.body_text().into(),
                 }
             })?;
             if bytes.is_empty() {
