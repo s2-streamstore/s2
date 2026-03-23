@@ -1,10 +1,4 @@
-//! Server-side record encryption for HIPAA/BAA compliance.
-//!
-//! The `S2-Encryption` header carries the algorithm and key for each request.
-//! The server encrypts on append and decrypts on read; the key never persists
-//! beyond the request lifetime.
-//!
-//! ## Wire format (body of stored EnvelopeRecord)
+//! # Ciphertext format
 //!
 //! ```text
 //! [version: 1 byte] [alg_id: 1 byte] [nonce] [ciphertext] [tag]
@@ -29,13 +23,14 @@ use http::HeaderMap;
 use rand::random;
 use secrecy::{CloneableSecret, ExposeSecret, SecretBox};
 
-use crate::record::{Encodable as _, EnvelopeRecord, Header};
 pub use crate::types::config::EncryptionAlgorithm;
+use crate::{
+    record::{self, Encodable as _, EnvelopeRecord, Header},
+    types,
+};
 
 pub const S2_ENCRYPTION_HEADER: &str = "s2-encryption";
 
-/// Ciphertext envelope version. Stored as the first byte of the encrypted record body.
-/// Tampering is caught by the version dispatch in `decrypt_record` before AAD construction.
 const CIPHERTEXT_V1: u8 = 0x01;
 
 const ALG_ID_AEGIS256: u8 = 0x01;
@@ -47,7 +42,6 @@ const TAG_BYTES_AEGIS256: usize = 32;
 const NONCE_BYTES_AES256GCM: usize = 12;
 const TAG_BYTES_AES256GCM: usize = 16;
 
-/// Newtype for a 32-byte encryption key that allows cloning and zeroizes on drop.
 #[derive(Clone)]
 pub struct KeyBytes(pub [u8; 32]);
 
@@ -59,22 +53,18 @@ impl secrecy::zeroize::Zeroize for KeyBytes {
 
 impl CloneableSecret for KeyBytes {}
 
-/// A cloneable, debug-redacted wrapper around a 32-byte key.
 pub type EncryptionKey = SecretBox<KeyBytes>;
 
 fn make_key(bytes: [u8; 32]) -> EncryptionKey {
     SecretBox::new(Box::new(KeyBytes(bytes)))
 }
 
-/// Parsed `S2-Encryption` header directive.
 #[derive(Clone, Debug)]
 pub enum EncryptionDirective {
-    /// Client provides the algorithm and key; server encrypts/decrypts.
     Key {
         alg: EncryptionAlgorithm,
         key: EncryptionKey,
     },
-    /// Client handles encryption itself; server passes bytes through.
     Attest,
 }
 
@@ -98,15 +88,15 @@ pub fn parse_s2_encryption_header(
         None => return Ok(None),
     };
 
-    let s = value
+    let header_str = value
         .to_str()
         .map_err(|_| EncryptionError::MalformedHeader("header is not valid UTF-8".to_owned()))?;
 
-    if s.trim() == "attest" {
+    if header_str.trim() == "attest" {
         return Ok(Some(EncryptionDirective::Attest));
     }
 
-    let (alg_part, key_part) = s.split_once(';').ok_or_else(|| {
+    let (alg_part, key_part) = header_str.split_once(';').ok_or_else(|| {
         EncryptionError::MalformedHeader("expected 'alg=...; key=...'".to_owned())
     })?;
 
@@ -180,7 +170,7 @@ pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), Enc
 /// mismatches.
 ///
 /// Layout: `[base_aad | seq_num: 8 bytes LE]`
-fn effective_aad_v1(base: &[u8], seq_num: crate::record::SeqNum) -> Vec<u8> {
+fn effective_aad_v1(base: &[u8], seq_num: record::SeqNum) -> Vec<u8> {
     let mut buf = Vec::with_capacity(base.len() + 8);
     buf.extend_from_slice(base);
     buf.extend_from_slice(&seq_num.to_le_bytes());
@@ -192,7 +182,7 @@ pub fn encrypt_record(
     alg: EncryptionAlgorithm,
     key: &EncryptionKey,
     aad: &[u8],
-    seq_num: crate::record::SeqNum,
+    seq_num: record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
     match alg {
         EncryptionAlgorithm::Aegis256 => {
@@ -246,7 +236,7 @@ pub fn decrypt_record(
     body: &[u8],
     key: &EncryptionKey,
     aad: &[u8],
-    seq_num: crate::record::SeqNum,
+    seq_num: record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
     let (&version, after_version) = body
         .split_first()
@@ -262,7 +252,7 @@ fn decrypt_record_v1(
     body: &[u8],
     key: &EncryptionKey,
     aad: &[u8],
-    seq_num: crate::record::SeqNum,
+    seq_num: record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
     let (&alg_id, rest) = body
         .split_first()
@@ -312,58 +302,58 @@ fn decrypt_record_v1(
 }
 
 pub fn encrypt_sequenced_records(
-    records: Vec<crate::record::Metered<crate::record::SequencedRecord>>,
+    records: Vec<record::Metered<record::SequencedRecord>>,
     alg: EncryptionAlgorithm,
     key: &EncryptionKey,
     aad: &[u8],
-) -> Result<Vec<crate::record::Metered<crate::record::SequencedRecord>>, EncryptionError> {
+) -> Result<Vec<record::Metered<record::SequencedRecord>>, EncryptionError> {
     records
         .into_iter()
         .map(|msr| {
-            let crate::record::SequencedRecord { position, record } = msr.into_inner();
+            let record::SequencedRecord { position, record } = msr.into_inner();
             let encrypted = match &record {
-                crate::record::Record::Envelope(env) => {
+                record::Record::Envelope(env) => {
                     let plaintext =
                         encode_record_plaintext(env.headers().to_vec(), env.body().clone())?;
                     let enc_body = encrypt_record(&plaintext, alg, key, aad, position.seq_num)?;
                     crate::record::Record::try_from_parts(vec![], enc_body)
                         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?
                 }
-                crate::record::Record::Command(_) => record,
+                record::Record::Command(_) => record,
             };
-            Ok(crate::record::Metered::from(encrypted.sequenced(position)))
+            Ok(record::Metered::from(encrypted.sequenced(position)))
         })
         .collect()
 }
 
 pub fn decrypt_read_batch(
-    batch: crate::types::stream::ReadBatch,
+    batch: types::stream::ReadBatch,
     directive: Option<&EncryptionDirective>,
     aad: &[u8],
-) -> Result<crate::types::stream::ReadBatch, EncryptionError> {
+) -> Result<types::stream::ReadBatch, EncryptionError> {
     let Some(EncryptionDirective::Key { key, .. }) = directive else {
         return Ok(batch);
     };
-    let records: Vec<crate::record::SequencedRecord> = batch
+    let records: Vec<record::SequencedRecord> = batch
         .records
         .into_inner()
         .into_iter()
         .map(|sr| {
-            let crate::record::Record::Envelope(ref env) = sr.record else {
+            let record::Record::Envelope(ref env) = sr.record else {
                 return Ok(sr);
             };
             let plaintext = decrypt_record(env.body(), key, aad, sr.position.seq_num)?;
             let (headers, body) = decode_record_plaintext(plaintext)?;
-            let record = crate::record::Record::try_from_parts(headers, body)
+            let record = record::Record::try_from_parts(headers, body)
                 .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
-            Ok(crate::record::SequencedRecord {
+            Ok(record::SequencedRecord {
                 position: sr.position,
                 record,
             })
         })
         .collect::<Result<_, EncryptionError>>()?;
-    Ok(crate::types::stream::ReadBatch {
-        records: crate::record::Metered::from(records),
+    Ok(types::stream::ReadBatch {
+        records: record::Metered::from(records),
         tail: batch.tail,
     })
 }
