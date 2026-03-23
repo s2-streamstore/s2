@@ -385,17 +385,17 @@ impl RetryConfig {
     }
 }
 
-/// Encryption configuration for the `S2-Encryption` request header.
+/// Encryption configuration.
 #[derive(Clone)]
 pub enum EncryptionConfig {
-    /// Server-side encryption with caller-provided algorithm and key.
+    /// Algorithm and key.
     Key {
         /// Encryption algorithm.
         alg: EncryptionAlgorithm,
-        /// Hex-encoded 32-byte key (64 hex characters).
+        /// Hex-encoded 32-byte key.
         key: SecretString,
     },
-    /// Client handles encryption; server passes bytes through.
+    /// Attest mode.
     Attest,
 }
 
@@ -505,8 +505,7 @@ impl S2Config {
         }
     }
 
-    /// Set the encryption configuration. This sets the `S2-Encryption` header on all requests.
-    /// The server ignores this header on non-data-path endpoints (e.g. list-basins, create-stream).
+    /// Set the encryption configuration.
     pub fn with_encryption(self, encryption: EncryptionConfig) -> Self {
         Self {
             encryption: Some(encryption),
@@ -571,12 +570,12 @@ impl From<StorageClass> for api::config::StorageClass {
     }
 }
 
-/// Encryption algorithm for stream records.
+/// Encryption algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionAlgorithm {
-    /// AEGIS-256 authenticated encryption.
+    /// AEGIS-256
     Aegis256,
-    /// AES-256-GCM authenticated encryption (NIST-compliant).
+    /// AES-256-GCM
     Aes256Gcm,
 }
 
