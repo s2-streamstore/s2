@@ -20,7 +20,7 @@ pub async fn run() -> Result<(), CliError> {
     // Load config and try to create SDK client
     // If access token is missing, we'll start with Setup screen instead of failing
     let cli_config = load_cli_config()?;
-    let s2 = match sdk_config(&cli_config, None) {
+    let s2 = match sdk_config(&cli_config) {
         Ok(sdk_cfg) => Some(s2_sdk::S2::new(sdk_cfg).map_err(CliError::SdkInit)?),
         Err(_) => None, // No access token - will show setup screen
     };

@@ -163,10 +163,7 @@ pub fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigError> {
     save_cli_config(&config)
 }
 
-pub fn sdk_config(
-    config: &CliConfig,
-    encryption: Option<sdk::types::EncryptionConfig>,
-) -> Result<S2Config, CliError> {
+pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
     let access_token = config
         .access_token
         .as_ref()
@@ -211,10 +208,6 @@ pub fn sdk_config(
     if config.ssl_no_verify == Some(true) {
         tracing::warn!("SSL certificate verification is disabled.");
         sdk_config = sdk_config.with_insecure_skip_cert_verification(true);
-    }
-
-    if let Some(enc) = encryption {
-        sdk_config = sdk_config.with_encryption(enc);
     }
 
     Ok(sdk_config)

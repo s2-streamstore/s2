@@ -151,8 +151,10 @@ async fn run() -> Result<(), CliError> {
     }
 
     let cli_config = load_cli_config()?;
-    let encryption = resolve_command_encryption(&command)?;
-    let sdk_config = sdk_config(&cli_config, encryption)?;
+    let mut sdk_config = sdk_config(&cli_config)?;
+    if let Some(enc) = resolve_command_encryption(&command)? {
+        sdk_config = sdk_config.with_encryption(enc);
+    }
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
     let token_source = access_token_source(&cli_config);
     let result: Result<(), CliError> = (async {
