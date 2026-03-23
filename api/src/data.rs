@@ -286,21 +286,18 @@ pub mod extract {
         }
     }
 
-    /// Classify a JSON deserialization error via axum's pipeline and return the
-    /// status code from our rejection type. Used in tests to verify error
-    /// classification is consistent.
-    pub fn classify_json_error<T: DeserializeOwned>(
-        json: &[u8],
-    ) -> Result<T, JsonExtractionRejection> {
-        axum::Json::<T>::from_bytes(json)
-            .map(|axum::Json(v)| v)
-            .map_err(JsonExtractionRejection::from)
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
         use crate::v1::stream::AppendInput;
+
+        fn classify_json_error<T: DeserializeOwned>(
+            json: &[u8],
+        ) -> Result<T, JsonExtractionRejection> {
+            axum::Json::<T>::from_bytes(json)
+                .map(|axum::Json(v)| v)
+                .map_err(JsonExtractionRejection::from)
+        }
 
         /// Verify that our rejection wrapper preserves axum's status code
         /// classification for a variety of invalid JSON payloads. This same

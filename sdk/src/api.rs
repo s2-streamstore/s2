@@ -1247,6 +1247,7 @@ mod tests {
 
     #[tokio::test]
     async fn dns_error_message_is_clear() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let config = crate::types::S2Config::new("test-token".to_owned())
             .with_endpoints(
                 crate::types::S2Endpoints::new(
