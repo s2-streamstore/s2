@@ -465,11 +465,11 @@ pub struct AppendArgs {
     #[arg(long, default_value = "5ms")]
     pub linger: humantime::Duration,
 
-    /// Hex-encoded 32-byte encryption key. Prefer S2_ENCRYPTION_KEY env var.
+    /// Hex-encoded 32-byte encryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
     #[arg(long, env = "S2_ENCRYPTION_KEY", hide_env_values = true)]
     pub encryption_key: Option<String>,
 
-    /// Read encryption key from file (first line, trimmed).
+    /// Read encryption key from file.
     #[arg(long, conflicts_with = "encryption_key")]
     pub encryption_key_file: Option<PathBuf>,
 
@@ -477,7 +477,7 @@ pub struct AppendArgs {
     #[arg(long, value_enum)]
     pub encryption_algorithm: Option<EncryptionAlgorithm>,
 
-    /// Attest client-side encryption (mutually exclusive with key/algorithm).
+    /// Attest client-side encryption.
     #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file", "encryption_algorithm"])]
     pub encryption_attest: bool,
 }
