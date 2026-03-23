@@ -357,6 +357,8 @@ impl BasinClient {
             .header(ACCEPT, ACCEPT_PROTO)
             .body(input.encode_to_vec())
             .build()?;
+        let mut request = request;
+        self.client.set_encryption_header(&mut request);
         let response = self
             .request(request)
             .with_append_retry_policy(append_retry_policy)
@@ -395,7 +397,8 @@ impl BasinClient {
             builder =
                 builder.timeout(self.client.request_timeout + Duration::from_secs(wait.into()));
         }
-        let request = builder.build()?;
+        let mut request = builder.build()?;
+        self.client.set_encryption_header(&mut request);
         let response = self
             .request(request)
             .error_handler(read_response_error_handler)
@@ -437,9 +440,11 @@ impl BasinClient {
             .timeout(self.client.request_timeout);
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
+        let mut request = request_builder.build()?;
+        self.client.set_encryption_header(&mut request);
         let response = self
             .client
-            .init_streaming(request_builder.build()?)
+            .init_streaming(request)
             .await?
             .into_result()
             .await?;
@@ -488,9 +493,11 @@ impl BasinClient {
             .timeout(self.client.request_timeout);
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
+        let mut request = request_builder.build()?;
+        self.client.set_encryption_header(&mut request);
         let response = self
             .client
-            .init_streaming(request_builder.build()?)
+            .init_streaming(request)
             .await?
             .into_result()
             .await?;
@@ -781,6 +788,7 @@ pub type Streaming<R> = Pin<Box<dyn Send + Stream<Item = Result<R, ApiError>>>>;
 pub struct BaseClient {
     client: Arc<dyn client::RequestExecutor>,
     default_headers: HeaderMap,
+    encryption_header: Option<HeaderValue>,
     request_timeout: Duration,
     retry_builder: RetryBackoffBuilder,
     compression: Compression,
@@ -828,26 +836,37 @@ impl BaseClient {
             Compression::None => {}
         }
 
-        if let Some(ref enc) = config.encryption {
-            use crate::types::EncryptionConfig;
-            let header_value = match enc {
-                EncryptionConfig::Key { alg, key } => {
-                    format!("alg={alg}; key={}", key.expose_secret())
-                }
-                EncryptionConfig::Attest => "attest".to_owned(),
-            };
-            default_headers.insert(S2_ENCRYPTION, header_value.try_into()?);
-        }
+        let encryption_header = config
+            .encryption
+            .as_ref()
+            .map(|enc| {
+                use crate::types::EncryptionConfig;
+                let value = match enc {
+                    EncryptionConfig::Key { alg, key } => {
+                        format!("alg={alg}; key={}", key.expose_secret())
+                    }
+                    EncryptionConfig::Attest => "attest".to_owned(),
+                };
+                value.try_into()
+            })
+            .transpose()?;
 
         let client = client::Pool::new(connector);
 
         Ok(Self {
             client: Arc::new(client),
             default_headers,
+            encryption_header,
             request_timeout: config.request_timeout,
             retry_builder: retry_builder(&config.retry),
             compression: config.compression,
         })
+    }
+
+    pub fn set_encryption_header(&self, request: &mut client::Request) {
+        if let Some(ref value) = self.encryption_header {
+            request.headers_mut().insert(S2_ENCRYPTION, value.clone());
+        }
     }
 
     pub fn get(&self, url: Url) -> client::RequestBuilder {
