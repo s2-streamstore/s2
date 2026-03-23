@@ -119,23 +119,22 @@ pub mod extract {
             status: http::StatusCode,
             message: Cow<'static, str>,
         },
-        MissingContentType {
-            status: http::StatusCode,
-            message: Cow<'static, str>,
-        },
+        MissingContentType,
         Other {
             status: http::StatusCode,
             message: Cow<'static, str>,
         },
     }
 
+    const MISSING_CONTENT_TYPE_MSG: &str = "Expected request with `Content-Type: application/json`";
+
     impl JsonExtractionRejection {
-        pub fn body_text(&self) -> String {
+        pub fn body_text(&self) -> &str {
             match self {
                 Self::SyntaxError { message, .. }
                 | Self::DataError { message, .. }
-                | Self::MissingContentType { message, .. }
-                | Self::Other { message, .. } => message.clone().into_owned(),
+                | Self::Other { message, .. } => message,
+                Self::MissingContentType => MISSING_CONTENT_TYPE_MSG,
             }
         }
 
@@ -143,20 +142,15 @@ pub mod extract {
             match self {
                 Self::SyntaxError { status, .. }
                 | Self::DataError { status, .. }
-                | Self::MissingContentType { status, .. }
                 | Self::Other { status, .. } => *status,
+                Self::MissingContentType => http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
             }
         }
     }
 
     impl std::fmt::Display for JsonExtractionRejection {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::SyntaxError { message, .. }
-                | Self::DataError { message, .. }
-                | Self::MissingContentType { message, .. }
-                | Self::Other { message, .. } => f.write_str(message),
-            }
+            f.write_str(self.body_text())
         }
     }
 
@@ -165,13 +159,15 @@ pub mod extract {
     impl IntoResponse for JsonExtractionRejection {
         fn into_response(self) -> Response {
             let status = self.status();
-            let message = match self {
+            match self {
                 Self::SyntaxError { message, .. }
                 | Self::DataError { message, .. }
-                | Self::MissingContentType { message, .. }
-                | Self::Other { message, .. } => message,
-            };
-            (status, message.into_owned()).into_response()
+                | Self::Other { message, .. } => match message {
+                    Cow::Borrowed(s) => (status, s).into_response(),
+                    Cow::Owned(s) => (status, s).into_response(),
+                },
+                Self::MissingContentType => (status, MISSING_CONTENT_TYPE_MSG).into_response(),
+            }
         }
     }
 
@@ -188,10 +184,7 @@ pub mod extract {
                     status: e.status(),
                     message: e.body_text().into(),
                 },
-                MissingJsonContentType(e) => Self::MissingContentType {
-                    status: e.status(),
-                    message: e.body_text().into(),
-                },
+                MissingJsonContentType(_) => Self::MissingContentType,
                 other => Self::Other {
                     status: other.status(),
                     message: other.body_text().into(),
@@ -230,12 +223,7 @@ pub mod extract {
                 .as_ref()
                 .is_some_and(crate::mime::is_json)
             {
-                return Err(JsonExtractionRejection::MissingContentType {
-                    status: http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    message: Cow::Borrowed(
-                        "Expected request with `Content-Type: application/json`",
-                    ),
-                });
+                return Err(JsonExtractionRejection::MissingContentType);
             }
             let bytes = Bytes::from_request(req, state).await.map_err(|e| {
                 JsonExtractionRejection::Other {
