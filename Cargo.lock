@@ -4687,7 +4687,6 @@ dependencies = [
  "dirs",
  "eyre",
  "futures",
- "hex",
  "http 1.4.0",
  "humantime",
  "indicatif",

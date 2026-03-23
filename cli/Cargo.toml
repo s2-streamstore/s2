@@ -27,7 +27,6 @@ crossterm = "0.29"
 dirs = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
-hex = { workspace = true }
 http = { workspace = true }
 humantime = { workspace = true }
 indicatif = { workspace = true }

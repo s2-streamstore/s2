@@ -837,13 +837,11 @@ fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConf
         _ => return Ok(None),
     };
 
-    if key.len() != 64 {
-        return Err(CliError::InvalidEncryptionKey(format!(
-            "expected 64 hex characters, got {}",
-            key.len()
-        )));
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(CliError::InvalidEncryptionKey(
+            "key must be exactly 64 hex characters (32 bytes)".to_owned(),
+        ));
     }
-    hex::decode(&key).map_err(|e| CliError::InvalidEncryptionKey(e.to_string()))?;
 
     let alg = args.alg.unwrap_or(types::EncryptionAlgorithm::Aegis256);
 
