@@ -105,15 +105,7 @@ pub mod extract {
     use bytes::Bytes;
     use serde::de::DeserializeOwned;
 
-    /// JSON extraction rejection type owned by s2-api.
-    ///
-    /// Decouples consumers from `axum::extract::rejection::JsonRejection` so the
-    /// underlying deserializer can be swapped without changing downstream code.
-    /// JSON extraction rejection type owned by s2-api.
-    ///
-    /// Every variant stores its status code and pre-rendered message so that
-    /// `body_text()`, `Display`, and `IntoResponse` all return the same
-    /// string without re-allocating.
+    /// Rejection type for JSON extraction, owned by s2-api.
     #[derive(Debug)]
     #[non_exhaustive]
     pub enum JsonExtractionRejection {
@@ -136,8 +128,6 @@ pub mod extract {
     }
 
     impl JsonExtractionRejection {
-        /// Return the pre-rendered error message. No allocation — returns a
-        /// clone of the already-stored `String`.
         pub fn body_text(&self) -> String {
             match self {
                 Self::SyntaxError { message, .. }
