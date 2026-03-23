@@ -162,13 +162,7 @@ pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), Enc
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
-/// Build the effective AAD for V1 envelope format. The seq_num is mixed into the AAD
-/// so the AEAD tag binds the ciphertext to its stream position, preventing reordering.
-///
-/// The version and alg_id bytes are not included -- version is gated by dispatch before
-/// AAD construction, and alg_id flips cause decryption failure due to nonce/tag size
-/// mismatches.
-///
+/// The seq_num is mixed into the AAD, so the AEAD tag binds the ciphertext to its stream position.
 /// Layout: `[base_aad | seq_num: 8 bytes LE]`
 fn effective_aad_v1(base: &[u8], seq_num: record::SeqNum) -> Vec<u8> {
     let mut buf = Vec::with_capacity(base.len() + 8);
