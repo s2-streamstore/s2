@@ -165,7 +165,13 @@ pub mod extract {
     impl IntoResponse for JsonExtractionRejection {
         fn into_response(self) -> Response {
             let status = self.status();
-            (status, self.to_string()).into_response()
+            let message = match self {
+                Self::SyntaxError { message, .. }
+                | Self::DataError { message, .. }
+                | Self::MissingContentType { message, .. }
+                | Self::Other { message, .. } => message,
+            };
+            (status, message.into_owned()).into_response()
         }
     }
 
