@@ -9,6 +9,8 @@ repository = "https://github.com/s2-streamstore/s2"
 homepage = "https://s2.dev"
 
 [workspace.dependencies]
+aegis = "0.9"
+aes-gcm = "0.10"
 async-stream = "0.3"
 async-trait = "0.1"
 aws-config = "1"
@@ -31,6 +33,7 @@ enumset = "1.1"
 eyre = "0.6"
 flate2 = "1.1"
 futures = "0.3"
+hex = "0.4"
 http = "1.4"
 humantime = "2.3"
 indexmap = "2.13"
@@ -55,6 +58,7 @@ s2-common = { path = "common", version = "0.30" }
 s2-lite = { path = "lite", version = "0.29" }
 s2-sdk = { path = "sdk", version = "0.26" }
 schemars = "1.2"
+secrecy = "0.10.3"
 serde = "1.0"
 serde_json = "1.0"
 slatedb = "0.11.2"
@@ -73,12 +77,6 @@ utoipa = "5.4"
 uuid = "1.22"
 xxhash-rust = "0.8"
 zstd = "0.13"
-
-# Encryption
-aegis = "0.9"
-aes-gcm = "0.10"
-hex = "0.4"
-secrecy = "0.10.3"
 
 [patch.crates-io]
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
