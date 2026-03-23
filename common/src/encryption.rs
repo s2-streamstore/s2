@@ -10,9 +10,9 @@
 //! [version: 1 byte] [alg_id: 1 byte] [nonce] [ciphertext] [tag]
 //! ```
 //!
-//! | version | Description                                      |
-//! |---------|--------------------------------------------------|
-//! | 0x01    | Initial versioned format. AAD = base ‖ alg ‖ seq_num_le |
+//! | version | Description                                           |
+//! |---------|-------------------------------------------------------|
+//! | 0x01    | Initial versioned format. AAD = base ‖ seq_num_le     |
 //!
 //! | alg_id | Algorithm   | Nonce  | Tag  |
 //! |--------|-------------|--------|------|
@@ -36,7 +36,6 @@ pub const S2_ENCRYPTION_HEADER: &str = "s2-encryption";
 
 /// Ciphertext envelope version. Stored as the first byte of the encrypted record body.
 /// Tampering is caught by the version dispatch in `decrypt_record` before AAD construction.
-/// N.B. shares the value `0x01` with `ALG_ID_AEGIS256` but occupies a different byte offset.
 const CIPHERTEXT_V1: u8 = 0x01;
 
 const ALG_ID_AEGIS256: u8 = 0x01;
@@ -123,7 +122,7 @@ pub fn parse_s2_encryption_header(
         .ok_or_else(|| EncryptionError::MalformedHeader("missing 'key=' prefix".to_owned()))?
         .trim();
 
-    let alg = EncryptionAlgorithm::parse_api_str(alg_str).ok_or_else(|| {
+    let alg: EncryptionAlgorithm = alg_str.parse().map_err(|_| {
         EncryptionError::MalformedHeader(format!(
             "unknown algorithm {alg_str:?}; expected 'aegis-256' or 'aes-256-gcm'"
         ))
@@ -173,16 +172,17 @@ pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), Enc
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
-/// Build the effective AAD for V1 envelope format. The alg_id and seq_num are mixed
-/// into the AAD so the AEAD tag binds the ciphertext to its algorithm and stream
-/// position. The version byte is not included -- it's already gated by the dispatch
-/// in `decrypt_record`, so a version flip is caught before AAD construction.
+/// Build the effective AAD for V1 envelope format. The seq_num is mixed into the AAD
+/// so the AEAD tag binds the ciphertext to its stream position, preventing reordering.
 ///
-/// Layout: `[base_aad | alg_id | seq_num: 8 bytes LE]`
-fn effective_aad_v1(base: &[u8], alg_id: u8, seq_num: crate::record::SeqNum) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(base.len() + 1 + 8);
+/// The version and alg_id bytes are not included -- version is gated by dispatch before
+/// AAD construction, and alg_id flips cause decryption failure due to nonce/tag size
+/// mismatches.
+///
+/// Layout: `[base_aad | seq_num: 8 bytes LE]`
+fn effective_aad_v1(base: &[u8], seq_num: crate::record::SeqNum) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(base.len() + 8);
     buf.extend_from_slice(base);
-    buf.push(alg_id);
     buf.extend_from_slice(&seq_num.to_le_bytes());
     buf
 }
@@ -196,7 +196,7 @@ pub fn encrypt_record(
 ) -> Result<Bytes, EncryptionError> {
     match alg {
         EncryptionAlgorithm::Aegis256 => {
-            let full_aad = effective_aad_v1(aad, ALG_ID_AEGIS256, seq_num);
+            let full_aad = effective_aad_v1(aad, seq_num);
             let nonce: [u8; NONCE_BYTES_AEGIS256] = random();
             let (ciphertext, tag) =
                 Aegis256::<TAG_BYTES_AEGIS256>::new(&key.expose_secret().0, &nonce)
@@ -213,7 +213,7 @@ pub fn encrypt_record(
             Ok(out.freeze())
         }
         EncryptionAlgorithm::Aes256Gcm => {
-            let full_aad = effective_aad_v1(aad, ALG_ID_AES256GCM, seq_num);
+            let full_aad = effective_aad_v1(aad, seq_num);
             let nonce: [u8; NONCE_BYTES_AES256GCM] = random();
             let cipher = Aes256Gcm::new_from_slice(&key.expose_secret().0).map_err(|_| {
                 EncryptionError::EncodingFailed("invalid AES key length".to_owned())
@@ -268,7 +268,7 @@ fn decrypt_record_v1(
         .split_first()
         .ok_or(EncryptionError::DecryptionFailed)?;
 
-    let full_aad = effective_aad_v1(aad, alg_id, seq_num);
+    let full_aad = effective_aad_v1(aad, seq_num);
 
     match alg_id {
         ALG_ID_AEGIS256 => {

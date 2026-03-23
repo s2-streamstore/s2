@@ -60,10 +60,8 @@ impl EncryptionContext {
     }
 
     fn into_append_encryption(self) -> Option<AppendEncryption> {
-        self.directive.map(|directive| AppendEncryption {
-            directive,
-            aad: self.aad,
-        })
+        self.directive
+            .map(|directive| AppendEncryption::new(directive, self.aad))
     }
 
     fn decrypt_batch(&self, batch: ReadBatch) -> Result<ReadBatch, EncryptionError> {

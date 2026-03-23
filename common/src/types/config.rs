@@ -34,29 +34,12 @@ use enum_ordinalize::Ordinalize;
 use crate::maybe::Maybe;
 
 /// Encryption algorithm for record data, specified per-request via the `S2-Encryption` header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumString)]
 pub enum EncryptionAlgorithm {
+    #[strum(serialize = "aegis-256")]
     Aegis256,
+    #[strum(serialize = "aes-256-gcm")]
     Aes256Gcm,
-}
-
-impl EncryptionAlgorithm {
-    /// Wire-format string used in JSON API and `S2-Encryption` header.
-    pub fn as_api_str(self) -> &'static str {
-        match self {
-            Self::Aegis256 => "aegis-256",
-            Self::Aes256Gcm => "aes-256-gcm",
-        }
-    }
-
-    /// Parse from wire-format string.
-    pub fn parse_api_str(s: &str) -> Option<Self> {
-        match s {
-            "aegis-256" => Some(Self::Aegis256),
-            "aes-256-gcm" => Some(Self::Aes256Gcm),
-            _ => None,
-        }
-    }
 }
 
 #[derive(

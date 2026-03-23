@@ -571,8 +571,8 @@ impl From<StorageClass> for api::config::StorageClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Encryption algorithm for stream records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionAlgorithm {
     /// AEGIS-256 authenticated encryption.
     Aegis256,
@@ -580,13 +580,12 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
-impl EncryptionAlgorithm {
-    /// Wire-format string for the `S2-Encryption` header.
-    pub fn as_api_str(self) -> &'static str {
-        match self {
+impl fmt::Display for EncryptionAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Self::Aegis256 => "aegis-256",
             Self::Aes256Gcm => "aes-256-gcm",
-        }
+        })
     }
 }
 

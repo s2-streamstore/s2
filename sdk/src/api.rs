@@ -832,7 +832,7 @@ impl BaseClient {
             use crate::types::EncryptionConfig;
             let header_value = match enc {
                 EncryptionConfig::Key { alg, key } => {
-                    format!("alg={}; key={}", alg.as_api_str(), key.expose_secret())
+                    format!("alg={alg}; key={}", key.expose_secret())
                 }
                 EncryptionConfig::Attest => "attest".to_owned(),
             };

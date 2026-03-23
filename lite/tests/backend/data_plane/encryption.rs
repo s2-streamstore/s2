@@ -31,10 +31,10 @@ fn make_append_encryption(
     basin: &s2_common::types::basin::BasinName,
     stream: &s2_common::types::stream::StreamName,
 ) -> AppendEncryption {
-    AppendEncryption {
-        directive: EncryptionDirective::Key { alg, key },
-        aad: stream_aad(basin, stream).into_bytes(),
-    }
+    AppendEncryption::new(
+        EncryptionDirective::Key { alg, key },
+        stream_aad(basin, stream).into_bytes(),
+    )
 }
 
 #[tokio::test]

@@ -494,8 +494,14 @@ impl Streamer {
 
 #[derive(Clone)]
 pub struct AppendEncryption {
-    pub directive: s2_common::encryption::EncryptionDirective,
-    pub aad: Vec<u8>,
+    directive: s2_common::encryption::EncryptionDirective,
+    aad: Vec<u8>,
+}
+
+impl AppendEncryption {
+    pub fn new(directive: s2_common::encryption::EncryptionDirective, aad: Vec<u8>) -> Self {
+        Self { directive, aad }
+    }
 }
 
 enum Message {
