@@ -175,6 +175,7 @@ pub mod extract {
         }
     }
 
+    // TODO: remove when we stop delegating to axum::Json.
     impl From<axum::extract::rejection::JsonRejection> for JsonExtractionRejection {
         fn from(rej: axum::extract::rejection::JsonRejection) -> Self {
             use axum::extract::rejection::JsonRejection::*;
