@@ -1,6 +1,5 @@
 use axum::{
-    Json,
-    extract::{FromRequest, FromRequestParts, Request, rejection::JsonRejection},
+    extract::{FromRequest, FromRequestParts, Request},
     response::{IntoResponse, Response},
 };
 use futures::StreamExt as _;
@@ -13,7 +12,10 @@ use tokio_util::{codec::FramedRead, io::StreamReader};
 
 use super::{AppendInput, AppendInputStreamError, AppendRequest, ReadRequest, proto, s2s};
 use crate::{
-    data::{Format, Proto, extract::ProtoRejection},
+    data::{
+        Format, Json, Proto,
+        extract::{JsonExtractionRejection, ProtoRejection},
+    },
     mime::JsonOrProto,
     v1::stream::sse::LastEventId,
 };
@@ -23,7 +25,7 @@ pub enum AppendRequestRejection {
     #[error(transparent)]
     HeaderRejection(#[from] HeaderRejection),
     #[error(transparent)]
-    JsonRejection(#[from] JsonRejection),
+    JsonRejection(#[from] JsonExtractionRejection),
     #[error(transparent)]
     ProtoRejection(#[from] ProtoRejection),
     #[error(transparent)]

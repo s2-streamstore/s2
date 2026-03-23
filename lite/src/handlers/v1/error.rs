@@ -1,9 +1,9 @@
 use axum::{
-    extract::rejection::{JsonRejection, PathRejection, QueryRejection},
+    extract::rejection::{PathRejection, QueryRejection},
     response::{IntoResponse, Response},
 };
 use s2_api::{
-    data::extract::ProtoRejection,
+    data::extract::{JsonExtractionRejection, ProtoRejection},
     v1::{
         self as v1t,
         error::{ErrorCode, ErrorInfo, ErrorResponse, StandardError},
@@ -27,7 +27,7 @@ pub enum ServiceError {
     #[error(transparent)]
     QueryRejection(#[from] QueryRejection),
     #[error(transparent)]
-    JsonRejection(#[from] JsonRejection),
+    JsonRejection(#[from] JsonExtractionRejection),
     #[error(transparent)]
     ProtoRejection(#[from] ProtoRejection),
     #[error(transparent)]
