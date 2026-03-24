@@ -36,8 +36,10 @@ use crate::maybe::Maybe;
 /// Encryption algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumString)]
 pub enum EncryptionAlgorithm {
+    /// AEGIS-256
     #[strum(serialize = "aegis-256")]
     Aegis256,
+    /// AES-256-GCM
     #[strum(serialize = "aes-256-gcm")]
     Aes256Gcm,
 }
