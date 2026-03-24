@@ -91,11 +91,10 @@ fn basin_state_for_deleted_at(deleted_at: Option<&OffsetDateTime>) -> BasinState
 struct BasinInfoSerde {
     name: BasinName,
     scope: Option<BasinScope>,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    created_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
     #[serde(default, with = "time::serde::rfc3339::option")]
     deleted_at: Option<OffsetDateTime>,
-    state: Option<BasinState>,
 }
 
 impl<'de> Deserialize<'de> for BasinInfo {
@@ -108,14 +107,7 @@ impl<'de> Deserialize<'de> for BasinInfo {
             scope,
             created_at,
             deleted_at,
-            state,
         } = BasinInfoSerde::deserialize(deserializer)?;
-        let created_at = created_at.unwrap_or_else(OffsetDateTime::now_utc);
-        let deleted_at = match (deleted_at, state) {
-            (Some(deleted_at), _) => Some(deleted_at),
-            (None, Some(BasinState::Deleting)) => Some(OffsetDateTime::now_utc()),
-            (None, _) => None,
-        };
         let state = basin_state_for_deleted_at(deleted_at.as_ref());
 
         Ok(Self {
