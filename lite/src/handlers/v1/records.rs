@@ -53,10 +53,12 @@ impl EncryptionContext {
     ) -> Result<Self, ServiceError> {
         let directive = parse_s2_encryption_header(headers)
             .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-        Ok(Self {
-            aad: stream_aad(basin, stream).into_bytes(),
-            directive,
-        })
+        let aad = if directive.is_some() {
+            stream_aad(basin, stream).into_bytes()
+        } else {
+            Vec::new()
+        };
+        Ok(Self { aad, directive })
     }
 
     fn into_append_encryption(self) -> Option<AppendEncryption> {

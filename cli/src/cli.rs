@@ -465,6 +465,12 @@ pub struct AppendArgs {
     #[arg(long, default_value = "5ms")]
     pub linger: humantime::Duration,
 
+    #[command(flatten)]
+    pub encryption: EncryptionArgs,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct EncryptionArgs {
     /// Hex-encoded 32-byte encryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
     #[arg(long, env = "S2_ENCRYPTION_KEY", hide_env_values = true)]
     pub encryption_key: Option<String>,
@@ -532,21 +538,8 @@ pub struct ReadArgs {
     #[arg(short = 'o', long, value_parser = parse_records_output_source, default_value = "-")]
     pub output: RecordsOut,
 
-    /// Hex-encoded 32-byte encryption key. Prefer S2_ENCRYPTION_KEY env var.
-    #[arg(long, env = "S2_ENCRYPTION_KEY", hide_env_values = true)]
-    pub encryption_key: Option<String>,
-
-    /// Read encryption key from file (first line, trimmed).
-    #[arg(long, conflicts_with = "encryption_key")]
-    pub encryption_key_file: Option<PathBuf>,
-
-    /// Encryption algorithm (default: aegis-256).
-    #[arg(long, value_enum)]
-    pub encryption_algorithm: Option<EncryptionAlgorithm>,
-
-    /// Attest client-side encryption (mutually exclusive with key/algorithm).
-    #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file", "encryption_algorithm"])]
-    pub encryption_attest: bool,
+    #[command(flatten)]
+    pub encryption: EncryptionArgs,
 }
 
 #[derive(Args, Debug)]

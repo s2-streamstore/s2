@@ -801,34 +801,20 @@ fn print_metrics(metrics: &[Metric]) {
 }
 
 fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConfig>, CliError> {
-    struct EncryptionArgs<'a> {
-        key: &'a Option<String>,
-        key_file: &'a Option<std::path::PathBuf>,
-        alg: Option<types::EncryptionAlgorithm>,
-        attest: bool,
-    }
-
     let args = match command {
-        Command::Append(a) => EncryptionArgs {
-            key: &a.encryption_key,
-            key_file: &a.encryption_key_file,
-            alg: a.encryption_algorithm,
-            attest: a.encryption_attest,
-        },
-        Command::Read(a) => EncryptionArgs {
-            key: &a.encryption_key,
-            key_file: &a.encryption_key_file,
-            alg: a.encryption_algorithm,
-            attest: a.encryption_attest,
-        },
+        Command::Append(a) => &a.encryption,
+        Command::Read(a) => &a.encryption,
         _ => return Ok(None),
     };
+    resolve_encryption(args)
+}
 
-    if args.attest {
+fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
+    if args.encryption_attest {
         return Ok(Some(EncryptionConfig::Attest));
     }
 
-    let key = match (args.key, args.key_file) {
+    let key = match (&args.encryption_key, &args.encryption_key_file) {
         (Some(k), _) => k.clone(),
         (_, Some(path)) => {
             let contents = std::fs::read_to_string(path).map_err(|e| {
@@ -845,7 +831,9 @@ fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConf
         ));
     }
 
-    let alg = args.alg.unwrap_or(types::EncryptionAlgorithm::Aegis256);
+    let alg = args
+        .encryption_algorithm
+        .unwrap_or(types::EncryptionAlgorithm::Aegis256);
 
     Ok(Some(EncryptionConfig::Key {
         alg: alg.into(),
