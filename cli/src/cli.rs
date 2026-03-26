@@ -564,6 +564,9 @@ pub struct TailArgs {
     /// Use "-" to write to stdout.
     #[arg(short = 'o', long, value_parser = parse_records_output_source, default_value = "-")]
     pub output: RecordsOut,
+
+    #[command(flatten)]
+    pub encryption: EncryptionArgs,
 }
 
 #[derive(Args, Debug)]

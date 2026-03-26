@@ -804,6 +804,7 @@ fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConf
     let args = match command {
         Command::Append(a) => &a.encryption,
         Command::Read(a) => &a.encryption,
+        Command::Tail(a) => &a.encryption,
         _ => return Ok(None),
     };
     resolve_encryption(args)
