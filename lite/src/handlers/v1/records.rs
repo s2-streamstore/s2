@@ -43,7 +43,7 @@ pub fn router() -> axum::Router<Backend> {
 }
 
 struct EncryptionContext {
-    aad: [u8; 32],
+    aad: Option<[u8; 32]>,
     directive: Option<EncryptionDirective>,
 }
 
@@ -55,21 +55,27 @@ impl EncryptionContext {
     ) -> Result<Self, ServiceError> {
         let directive = parse_s2_encryption_header(headers)
             .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-        let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+        let aad = directive
+            .as_ref()
+            .map(|_| stream_id_aad(basin.as_ref(), stream.as_ref()));
         Ok(Self { aad, directive })
+    }
+
+    fn aad(&self) -> &[u8] {
+        self.aad.as_ref().map_or(&[], |a| a.as_slice())
     }
 
     fn encrypt_input(&self, input: AppendInput) -> Result<AppendInput, EncryptionError> {
         match &self.directive {
             Some(EncryptionDirective::Key { alg, key }) => {
-                encryption::encrypt_append_input(input, *alg, key, &self.aad)
+                encryption::encrypt_append_input(input, *alg, key, self.aad())
             }
             _ => Ok(input),
         }
     }
 
     fn decrypt_batch(&self, batch: ReadBatch) -> Result<ReadBatch, EncryptionError> {
-        encryption::decrypt_read_batch(batch, self.directive.as_ref(), &self.aad)
+        encryption::decrypt_read_batch(batch, self.directive.as_ref(), self.aad())
     }
 }
 

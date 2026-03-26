@@ -4783,7 +4783,6 @@ dependencies = [
  "s2-api",
  "s2-common",
  "schemars",
- "secrecy",
  "serde",
  "serde_json",
  "slatedb",
