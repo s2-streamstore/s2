@@ -166,8 +166,6 @@ pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), Enc
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
-/// Compute stream_id AAD: BLAKE3 hash of `basin ‖ 0x00 ‖ stream ‖ 0x00`.
-/// Matches `StreamId::new(basin, stream)` in lite.
 pub fn stream_id_aad(
     basin: &(impl AsRef<[u8]> + ?Sized),
     stream: &(impl AsRef<[u8]> + ?Sized),
