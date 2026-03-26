@@ -632,6 +632,7 @@ fn timestamp_now() -> Timestamp {
         .expect("Milliseconds since Unix epoch fits into a u64")
 }
 
+#[derive(Debug)]
 pub struct AppendPermit<'a> {
     sema_permit: SemaphorePermit<'a>,
     msg_tx: &'a mpsc::UnboundedSender<Message>,
