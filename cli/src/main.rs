@@ -801,13 +801,39 @@ fn print_metrics(metrics: &[Metric]) {
 }
 
 fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConfig>, CliError> {
-    let args = match command {
-        Command::Append(a) => &a.encryption,
-        Command::Read(a) => &a.encryption,
-        Command::Tail(a) => &a.encryption,
-        _ => return Ok(None),
-    };
-    resolve_encryption(args)
+    match command {
+        Command::Append(a) => resolve_encryption(&a.encryption),
+        Command::Read(a) => resolve_decryption(&a.encryption),
+        Command::Tail(a) => resolve_decryption(&a.encryption),
+        _ => Ok(None),
+    }
+}
+
+fn resolve_key(
+    key: &Option<String>,
+    key_file: &Option<std::path::PathBuf>,
+) -> Result<Option<String>, CliError> {
+    match (key, key_file) {
+        (Some(k), _) => Ok(Some(k.clone())),
+        (_, Some(path)) => {
+            let contents = std::fs::read_to_string(path).map_err(|e| {
+                CliError::InvalidEncryptionKey(format!("cannot read key file: {e}"))
+            })?;
+            Ok(Some(
+                contents.lines().next().unwrap_or("").trim().to_owned(),
+            ))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn validate_hex_key(key: &str) -> Result<(), CliError> {
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(CliError::InvalidEncryptionKey(
+            "key must be exactly 64 hex characters (32 bytes)".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
@@ -815,28 +841,17 @@ fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionCon
         return Ok(Some(EncryptionConfig::Attest));
     }
 
-    let key = match (&args.encryption_key, &args.encryption_key_file) {
-        (Some(k), _) => k.clone(),
-        (_, Some(path)) => {
-            let contents = std::fs::read_to_string(path).map_err(|e| {
-                CliError::InvalidEncryptionKey(format!("cannot read key file: {e}"))
-            })?;
-            contents.lines().next().unwrap_or("").trim().to_owned()
-        }
-        _ if args.encryption_algorithm.is_some() => {
+    let Some(key) = resolve_key(&args.encryption_key, &args.encryption_key_file)? else {
+        if args.encryption_algorithm.is_some() {
             return Err(CliError::InvalidEncryptionKey(
                 "--encryption-algorithm requires --encryption-key or --encryption-key-file"
                     .to_owned(),
             ));
         }
-        _ => return Ok(None),
+        return Ok(None);
     };
 
-    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(CliError::InvalidEncryptionKey(
-            "key must be exactly 64 hex characters (32 bytes)".to_owned(),
-        ));
-    }
+    validate_hex_key(&key)?;
 
     let alg = args
         .encryption_algorithm
@@ -844,6 +859,23 @@ fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionCon
 
     Ok(Some(EncryptionConfig::Key {
         alg: alg.into(),
+        key: key.into(),
+    }))
+}
+
+fn resolve_decryption(args: &cli::DecryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
+    if args.encryption_attest {
+        return Ok(Some(EncryptionConfig::Attest));
+    }
+
+    let Some(key) = resolve_key(&args.encryption_key, &args.encryption_key_file)? else {
+        return Ok(None);
+    };
+
+    validate_hex_key(&key)?;
+
+    Ok(Some(EncryptionConfig::Key {
+        alg: types::EncryptionAlgorithm::Aegis256.into(),
         key: key.into(),
     }))
 }

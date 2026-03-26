@@ -488,6 +488,25 @@ pub struct EncryptionArgs {
     pub encryption_attest: bool,
 }
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct DecryptionArgs {
+    /// Hex-encoded 32-byte decryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
+    #[arg(
+        long = "encryption-key",
+        env = "S2_ENCRYPTION_KEY",
+        hide_env_values = true
+    )]
+    pub encryption_key: Option<String>,
+
+    /// Read decryption key from file.
+    #[arg(long = "encryption-key-file", conflicts_with = "encryption_key")]
+    pub encryption_key_file: Option<PathBuf>,
+
+    /// Attest client-side encryption.
+    #[arg(long = "encryption-attest", conflicts_with_all = ["encryption_key", "encryption_key_file"])]
+    pub encryption_attest: bool,
+}
+
 #[derive(Args, Debug)]
 pub struct ReadArgs {
     /// S2 URI of the format: s2://{basin}/{stream}
@@ -539,7 +558,7 @@ pub struct ReadArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption: DecryptionArgs,
 }
 
 #[derive(Args, Debug)]
@@ -566,7 +585,7 @@ pub struct TailArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption: DecryptionArgs,
 }
 
 #[derive(Args, Debug)]
