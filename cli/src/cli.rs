@@ -470,17 +470,27 @@ pub struct AppendArgs {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[group(multiple = true)]
 pub struct EncryptionArgs {
     /// Hex-encoded 32-byte encryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
-    #[arg(long, env = "S2_ENCRYPTION_KEY", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "S2_ENCRYPTION_KEY",
+        hide_env_values = true,
+        group = "encryption_key_source"
+    )]
     pub encryption_key: Option<String>,
 
     /// Read encryption key from file.
-    #[arg(long, conflicts_with = "encryption_key")]
+    #[arg(
+        long,
+        conflicts_with = "encryption_key",
+        group = "encryption_key_source"
+    )]
     pub encryption_key_file: Option<PathBuf>,
 
     /// Encryption algorithm (default: aegis-256).
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, requires = "encryption_key_source")]
     pub encryption_algorithm: Option<EncryptionAlgorithm>,
 
     /// Attest client-side encryption.

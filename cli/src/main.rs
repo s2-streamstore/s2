@@ -842,12 +842,6 @@ fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionCon
     }
 
     let Some(key) = resolve_key(&args.encryption_key, &args.encryption_key_file)? else {
-        if args.encryption_algorithm.is_some() {
-            return Err(CliError::InvalidEncryptionKey(
-                "--encryption-algorithm requires --encryption-key or --encryption-key-file"
-                    .to_owned(),
-            ));
-        }
         return Ok(None);
     };
 
