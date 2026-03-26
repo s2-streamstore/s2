@@ -822,6 +822,12 @@ fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionCon
             })?;
             contents.lines().next().unwrap_or("").trim().to_owned()
         }
+        _ if args.encryption_algorithm.is_some() => {
+            return Err(CliError::InvalidEncryptionKey(
+                "--encryption-algorithm requires --encryption-key or --encryption-key-file"
+                    .to_owned(),
+            ));
+        }
         _ => return Ok(None),
     };
 
