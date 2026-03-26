@@ -39,7 +39,7 @@ async fn test_operations_on_nonexistent_basin() {
         fencing_token: None,
     };
     let append_result = backend
-        .append(basin_name.clone(), stream_name.clone(), input, None)
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await;
     assert!(matches!(append_result, Err(AppendError::BasinNotFound(_))));
 
@@ -70,7 +70,7 @@ async fn test_concurrent_appends_to_same_stream() {
                 match_seq_num: None,
                 fencing_token: None,
             };
-            backend.append(basin_name, stream_name, input, None).await
+            backend.append(basin_name, stream_name, input).await
         });
         handles.push(handle);
     }

@@ -4,9 +4,9 @@
 //! [version: 1 byte] [alg_id: 1 byte] [nonce] [ciphertext] [tag]
 //! ```
 //!
-//! | version | Description                                           |
-//! |---------|-------------------------------------------------------|
-//! | 0x01    | Initial versioned format. AAD = base ‖ seq_num_le     |
+//! | version | Description                                      |
+//! |---------|--------------------------------------------------|
+//! | 0x01    | Initial versioned format. AAD = stream_id bytes  |
 //!
 //! | alg_id | Algorithm   | Nonce  | Tag  |
 //! |--------|-------------|--------|------|
@@ -25,8 +25,12 @@ use secrecy::{CloneableSecret, ExposeSecret, SecretBox};
 
 pub use crate::types::config::EncryptionAlgorithm;
 use crate::{
-    record::{self, Encodable as _, EnvelopeRecord, Header},
-    types,
+    bash::Bash,
+    record::{self, Encodable as _, EnvelopeRecord, Header, Metered, Record},
+    types::{
+        self,
+        stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts},
+    },
 };
 
 pub const S2_ENCRYPTION_HEADER: &str = "s2-encryption";
@@ -162,13 +166,13 @@ pub fn decode_record_plaintext(bytes: Bytes) -> Result<(Vec<Header>, Bytes), Enc
         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
 }
 
-/// The seq_num is mixed into the AAD, so the AEAD tag binds the ciphertext to its stream position.
-/// Layout: `[base_aad | seq_num: 8 bytes LE]`
-fn effective_aad_v1(base: &[u8], seq_num: record::SeqNum) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(base.len() + 8);
-    buf.extend_from_slice(base);
-    buf.extend_from_slice(&seq_num.to_le_bytes());
-    buf
+/// Compute stream_id AAD: BLAKE3 hash of `basin ‖ 0x00 ‖ stream ‖ 0x00`.
+/// Matches `StreamId::new(basin, stream)` in lite.
+pub fn stream_id_aad(
+    basin: &(impl AsRef<[u8]> + ?Sized),
+    stream: &(impl AsRef<[u8]> + ?Sized),
+) -> [u8; 32] {
+    *Bash::delimited(&[basin.as_ref(), stream.as_ref()], 0).as_bytes()
 }
 
 pub fn encrypt_record(
@@ -176,15 +180,13 @@ pub fn encrypt_record(
     alg: EncryptionAlgorithm,
     key: &EncryptionKey,
     aad: &[u8],
-    seq_num: record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
     match alg {
         EncryptionAlgorithm::Aegis256 => {
-            let full_aad = effective_aad_v1(aad, seq_num);
             let nonce: [u8; NONCE_BYTES_AEGIS256] = random();
             let (ciphertext, tag) =
                 Aegis256::<TAG_BYTES_AEGIS256>::new(&key.expose_secret().0, &nonce)
-                    .encrypt(plaintext, &full_aad);
+                    .encrypt(plaintext, aad);
 
             let mut out = BytesMut::with_capacity(
                 2 + NONCE_BYTES_AEGIS256 + ciphertext.len() + TAG_BYTES_AEGIS256,
@@ -197,7 +199,6 @@ pub fn encrypt_record(
             Ok(out.freeze())
         }
         EncryptionAlgorithm::Aes256Gcm => {
-            let full_aad = effective_aad_v1(aad, seq_num);
             let nonce: [u8; NONCE_BYTES_AES256GCM] = random();
             let cipher = Aes256Gcm::new_from_slice(&key.expose_secret().0).map_err(|_| {
                 EncryptionError::EncodingFailed("invalid AES key length".to_owned())
@@ -208,7 +209,7 @@ pub fn encrypt_record(
                     nonce_generic,
                     Payload {
                         msg: plaintext,
-                        aad: &full_aad,
+                        aad,
                     },
                 )
                 .map_err(|_| {
@@ -230,14 +231,13 @@ pub fn decrypt_record(
     body: &[u8],
     key: &EncryptionKey,
     aad: &[u8],
-    seq_num: record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
     let (&version, after_version) = body
         .split_first()
         .ok_or(EncryptionError::DecryptionFailed)?;
 
     match version {
-        CIPHERTEXT_V1 => decrypt_record_v1(after_version, key, aad, seq_num),
+        CIPHERTEXT_V1 => decrypt_record_v1(after_version, key, aad),
         v => Err(EncryptionError::UnsupportedVersion(v)),
     }
 }
@@ -246,13 +246,10 @@ fn decrypt_record_v1(
     body: &[u8],
     key: &EncryptionKey,
     aad: &[u8],
-    seq_num: record::SeqNum,
 ) -> Result<Bytes, EncryptionError> {
     let (&alg_id, rest) = body
         .split_first()
         .ok_or(EncryptionError::DecryptionFailed)?;
-
-    let full_aad = effective_aad_v1(aad, seq_num);
 
     match alg_id {
         ALG_ID_AEGIS256 => {
@@ -267,7 +264,7 @@ fn decrypt_record_v1(
             let tag: &[u8; TAG_BYTES_AEGIS256] = after_nonce[tag_offset..].try_into().unwrap();
 
             let plaintext = Aegis256::<TAG_BYTES_AEGIS256>::new(&key.expose_secret().0, nonce)
-                .decrypt(ciphertext, tag, &full_aad)
+                .decrypt(ciphertext, tag, aad)
                 .map_err(|_| EncryptionError::DecryptionFailed)?;
             Ok(Bytes::from(plaintext))
         }
@@ -285,7 +282,7 @@ fn decrypt_record_v1(
                     nonce_generic,
                     Payload {
                         msg: ciphertext_with_tag,
-                        aad: &full_aad,
+                        aad,
                     },
                 )
                 .map_err(|_| EncryptionError::DecryptionFailed)?;
@@ -295,29 +292,49 @@ fn decrypt_record_v1(
     }
 }
 
-pub fn encrypt_sequenced_records(
-    records: Vec<record::Metered<record::SequencedRecord>>,
+pub fn encrypt_append_input(
+    input: AppendInput,
     alg: EncryptionAlgorithm,
     key: &EncryptionKey,
     aad: &[u8],
-) -> Result<Vec<record::Metered<record::SequencedRecord>>, EncryptionError> {
-    records
+) -> Result<AppendInput, EncryptionError> {
+    let encrypted_records: Vec<AppendRecord> = input
+        .records
         .into_iter()
-        .map(|msr| {
-            let record::SequencedRecord { position, record } = msr.into_inner();
-            let encrypted = match &record {
-                record::Record::Envelope(env) => {
+        .map(|record| {
+            let AppendRecordParts {
+                timestamp,
+                record: metered_record,
+            } = record.into();
+            let inner_record = metered_record.into_inner();
+            let encrypted = match &inner_record {
+                Record::Envelope(env) => {
                     let plaintext =
                         encode_record_plaintext(env.headers().to_vec(), env.body().clone())?;
-                    let enc_body = encrypt_record(&plaintext, alg, key, aad, position.seq_num)?;
-                    crate::record::Record::try_from_parts(vec![], enc_body)
+                    let enc_body = encrypt_record(&plaintext, alg, key, aad)?;
+                    Record::try_from_parts(vec![], enc_body)
                         .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?
                 }
-                record::Record::Command(_) => record,
+                Record::Command(_) => inner_record,
             };
-            Ok(record::Metered::from(encrypted.sequenced(position)))
+            AppendRecordParts {
+                timestamp,
+                record: Metered::from(encrypted),
+            }
+            .try_into()
+            .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_owned()))
         })
-        .collect()
+        .collect::<Result<_, EncryptionError>>()?;
+
+    let records: AppendRecordBatch = encrypted_records
+        .try_into()
+        .map_err(|e: &str| EncryptionError::EncodingFailed(e.to_owned()))?;
+
+    Ok(AppendInput {
+        records,
+        match_seq_num: input.match_seq_num,
+        fencing_token: input.fencing_token,
+    })
 }
 
 pub fn decrypt_read_batch(
@@ -336,7 +353,7 @@ pub fn decrypt_read_batch(
             let record::Record::Envelope(ref env) = sr.record else {
                 return Ok(sr);
             };
-            let plaintext = decrypt_record(env.body(), key, aad, sr.position.seq_num)?;
+            let plaintext = decrypt_record(env.body(), key, aad)?;
             let (headers, body) = decode_record_plaintext(plaintext)?;
             let record = record::Record::try_from_parts(headers, body)
                 .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
@@ -352,10 +369,6 @@ pub fn decrypt_read_batch(
     })
 }
 
-pub fn stream_aad(basin: &impl std::fmt::Display, stream: &impl std::fmt::Display) -> String {
-    format!("{basin}/{stream}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,8 +381,9 @@ mod tests {
         make_key([0x99u8; 32])
     }
 
-    const AAD: &[u8] = b"test-basin/test-stream";
-    const SEQ: u64 = 42;
+    fn test_aad() -> [u8; 32] {
+        stream_id_aad("test-basin", "test-stream")
+    }
 
     fn roundtrip(alg: EncryptionAlgorithm) {
         let headers = vec![Header {
@@ -378,10 +392,11 @@ mod tests {
         }];
         let body = Bytes::from_static(b"secret payload");
 
+        let aad = test_aad();
         let plaintext = encode_record_plaintext(headers.clone(), body.clone()).unwrap();
         let key = make_key_fn();
-        let ciphertext = encrypt_record(&plaintext, alg, &key, AAD, SEQ).unwrap();
-        let decrypted = decrypt_record(&ciphertext, &key, AAD, SEQ).unwrap();
+        let ciphertext = encrypt_record(&plaintext, alg, &key, &aad).unwrap();
+        let decrypted = decrypt_record(&ciphertext, &key, &aad).unwrap();
         let (out_headers, out_body) = decode_record_plaintext(decrypted).unwrap();
 
         assert_eq!(out_headers, headers);
@@ -400,41 +415,44 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_aegis256() {
+        let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ).unwrap();
-        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), AAD, SEQ);
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
+        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn wrong_key_fails_aes256gcm() {
+        let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aes256Gcm, &key, AAD, SEQ).unwrap();
-        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), AAD, SEQ);
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aes256Gcm, &key, &aad).unwrap();
+        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn truncated_ciphertext_fails_no_panic() {
+        let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ).unwrap();
-        // Truncate to 4 bytes -- version + alg_id + 2 nonce bytes, too short.
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
         let truncated = &ciphertext[..4];
-        let result = decrypt_record(truncated, &key, AAD, SEQ);
+        let result = decrypt_record(truncated, &key, &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn unsupported_version_fails() {
+        let aad = test_aad();
         let key = make_key_fn();
         let body = b"\xFFsome opaque bytes";
-        let result = decrypt_record(body, &key, AAD, SEQ);
+        let result = decrypt_record(body, &key, &aad);
         assert!(matches!(
             result,
             Err(EncryptionError::UnsupportedVersion(0xFF))
@@ -443,48 +461,48 @@ mod tests {
 
     #[test]
     fn empty_body_fails() {
+        let aad = test_aad();
         let key = make_key_fn();
-        let result = decrypt_record(b"", &key, AAD, SEQ);
+        let result = decrypt_record(b"", &key, &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn version_byte_present() {
+        let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ).unwrap();
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
         assert_eq!(ciphertext[0], CIPHERTEXT_V1);
         assert_eq!(ciphertext[1], ALG_ID_AEGIS256);
     }
 
     #[test]
     fn alg_id_flip_detected() {
+        let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
-        let mut ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ)
-                .unwrap()
-                .to_vec();
+        let mut ciphertext = encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad)
+            .unwrap()
+            .to_vec();
         assert_eq!(ciphertext[0], CIPHERTEXT_V1);
         assert_eq!(ciphertext[1], ALG_ID_AEGIS256);
-        // Flip alg_id (byte 1), keep version intact.
         ciphertext[1] = ALG_ID_AES256GCM;
-        let result = decrypt_record(&ciphertext, &key, AAD, SEQ);
+        let result = decrypt_record(&ciphertext, &key, &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn version_flip_detected() {
+        let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
-        let mut ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, SEQ)
-                .unwrap()
-                .to_vec();
-        // Flip version byte to a hypothetical v2.
+        let mut ciphertext = encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad)
+            .unwrap()
+            .to_vec();
         ciphertext[0] = 0x02;
-        let result = decrypt_record(&ciphertext, &key, AAD, SEQ);
+        let result = decrypt_record(&ciphertext, &key, &aad);
         assert!(matches!(
             result,
             Err(EncryptionError::UnsupportedVersion(0x02))
@@ -492,12 +510,14 @@ mod tests {
     }
 
     #[test]
-    fn wrong_seq_num_fails() {
+    fn wrong_aad_fails() {
+        let aad = test_aad();
+        let other_aad = stream_id_aad("other-basin", "other-stream");
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
         let key = make_key_fn();
         let ciphertext =
-            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, AAD, 5).unwrap();
-        let result = decrypt_record(&ciphertext, &key, AAD, 6);
+            encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
+        let result = decrypt_record(&ciphertext, &key, &other_aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 

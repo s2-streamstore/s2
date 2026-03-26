@@ -200,23 +200,6 @@ impl Streamer {
             .unwrap_or(self.stable_pos)
     }
 
-    fn sequence_and_encrypt(
-        &self,
-        input: AppendInput,
-        encryption: Option<AppendEncryption>,
-    ) -> Result<Vec<Metered<SequencedRecord>>, AppendErrorInternal> {
-        let records = self.sequence_records(input)?;
-        match encryption {
-            Some(AppendEncryption {
-                directive: s2_common::encryption::EncryptionDirective::Key { alg, ref key },
-                ref aad,
-            }) => Ok(s2_common::encryption::encrypt_sequenced_records(
-                records, alg, key, aad,
-            )?),
-            _ => Ok(records),
-        }
-    }
-
     fn sequence_records(
         &self,
         AppendInput {
@@ -279,7 +262,6 @@ impl Streamer {
     fn handle_append(
         &mut self,
         input: AppendInput,
-        encryption: Option<AppendEncryption>,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -287,7 +269,7 @@ impl Streamer {
         let Some(ticket) = append::admit(reply_tx, session) else {
             return;
         };
-        match self.sequence_and_encrypt(input, encryption) {
+        match self.sequence_records(input) {
             Ok(sequenced_records) => {
                 let retention = self.config.retention_policy.unwrap_or_default();
                 let doe_deadline = self.maybe_doe_deadline(retention.age());
@@ -428,13 +410,12 @@ impl Streamer {
                     match msg {
                         Message::Append {
                             input,
-                            encryption,
                             session,
                             reply_tx,
                             append_type,
                         } => {
                             if self.trim_point.state.end < SeqNum::MAX {
-                                self.handle_append(input, encryption, session, reply_tx, append_type);
+                                self.handle_append(input, session, reply_tx, append_type);
                             }
                         }
                         Message::Follow {
@@ -492,22 +473,9 @@ impl Streamer {
     }
 }
 
-#[derive(Clone)]
-pub struct AppendEncryption {
-    directive: s2_common::encryption::EncryptionDirective,
-    aad: Vec<u8>,
-}
-
-impl AppendEncryption {
-    pub fn new(directive: s2_common::encryption::EncryptionDirective, aad: Vec<u8>) -> Self {
-        Self { directive, aad }
-    }
-}
-
 enum Message {
     Append {
         input: AppendInput,
-        encryption: Option<AppendEncryption>,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -595,7 +563,6 @@ impl StreamerClient {
     pub async fn append_permit(
         &self,
         input: AppendInput,
-        encryption: Option<AppendEncryption>,
     ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
@@ -615,7 +582,6 @@ impl StreamerClient {
             sema_permit,
             msg_tx: &self.msg_tx,
             input,
-            encryption,
         })
     }
 
@@ -636,7 +602,7 @@ impl StreamerClient {
             fencing_token: None,
         };
         match self
-            .append_permit(input, None)
+            .append_permit(input)
             .await?
             .submit_internal(None, AppendType::Terminal)
             .await
@@ -652,9 +618,6 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::Encryption(_) => {
-                    unreachable!("no encryption for terminal trim")
-                }
             }),
         }
     }
@@ -673,7 +636,6 @@ pub struct AppendPermit<'a> {
     sema_permit: SemaphorePermit<'a>,
     msg_tx: &'a mpsc::UnboundedSender<Message>,
     input: AppendInput,
-    encryption: Option<AppendEncryption>,
 }
 
 impl AppendPermit<'_> {
@@ -699,13 +661,11 @@ impl AppendPermit<'_> {
             sema_permit,
             msg_tx,
             input,
-            encryption,
         } = self;
         let (reply_tx, reply_rx) = oneshot::channel();
         msg_tx
             .send(Message::Append {
                 input,
-                encryption,
                 session,
                 reply_tx,
                 append_type,
@@ -1129,13 +1089,13 @@ mod tests {
         let mut follow_rx = streamer.follow_tx.subscribe();
 
         let (tx1, mut rx1) = oneshot::channel();
-        streamer.handle_append(append_input(b"p0"), None, None, tx1, AppendType::Regular);
+        streamer.handle_append(append_input(b"p0"), None, tx1, AppendType::Regular);
 
         let (tx2, mut rx2) = oneshot::channel();
-        streamer.handle_append(append_input(b"p1"), None, None, tx2, AppendType::Regular);
+        streamer.handle_append(append_input(b"p1"), None, tx2, AppendType::Regular);
 
         let (tx3, mut rx3) = oneshot::channel();
-        streamer.handle_append(append_input(b"p2"), None, None, tx3, AppendType::Regular);
+        streamer.handle_append(append_input(b"p2"), None, tx3, AppendType::Regular);
 
         let mut db_seqs = Vec::new();
         while let Some(fut) = streamer.db_writes_pending.pop_front() {
@@ -1221,7 +1181,6 @@ mod tests {
             let payload = format!("jump-{i}");
             streamer.handle_append(
                 append_input(payload.as_bytes()),
-                None,
                 None,
                 tx,
                 AppendType::Regular,

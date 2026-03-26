@@ -15,7 +15,7 @@ use s2_api::{
 use s2_common::{
     caps::RECORD_BATCH_MAX,
     encryption::{
-        self, EncryptionDirective, EncryptionError, parse_s2_encryption_header, stream_aad,
+        self, EncryptionDirective, EncryptionError, parse_s2_encryption_header, stream_id_aad,
     },
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
@@ -23,12 +23,14 @@ use s2_common::{
     types::{
         ValidationError,
         basin::BasinName,
-        stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
+        stream::{
+            AppendInput, ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
+        },
     },
 };
 
 use crate::{
-    backend::{AppendEncryption, Backend, error::ReadError},
+    backend::{Backend, error::ReadError},
     handlers::v1::error::ServiceError,
 };
 
@@ -41,7 +43,7 @@ pub fn router() -> axum::Router<Backend> {
 }
 
 struct EncryptionContext {
-    aad: Vec<u8>,
+    aad: [u8; 32],
     directive: Option<EncryptionDirective>,
 }
 
@@ -53,17 +55,17 @@ impl EncryptionContext {
     ) -> Result<Self, ServiceError> {
         let directive = parse_s2_encryption_header(headers)
             .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-        let aad = if directive.is_some() {
-            stream_aad(basin, stream).into_bytes()
-        } else {
-            Vec::new()
-        };
+        let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
         Ok(Self { aad, directive })
     }
 
-    fn into_append_encryption(self) -> Option<AppendEncryption> {
-        self.directive
-            .map(|directive| AppendEncryption::new(directive, self.aad))
+    fn encrypt_input(&self, input: AppendInput) -> Result<AppendInput, EncryptionError> {
+        match &self.directive {
+            Some(EncryptionDirective::Key { alg, key }) => {
+                encryption::encrypt_append_input(input, *alg, key, &self.aad)
+            }
+            _ => Ok(input),
+        }
     }
 
     fn decrypt_batch(&self, batch: ReadBatch) -> Result<ReadBatch, EncryptionError> {
@@ -411,14 +413,16 @@ pub async fn append(
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
     let enc = EncryptionContext::resolve(&headers, &basin, &stream)?;
-    let append_enc = enc.into_append_encryption();
 
     match request {
         v1t::stream::AppendRequest::Unary {
             input,
             response_mime,
         } => {
-            let ack = backend.append(basin, stream, input, append_enc).await?;
+            let input = enc
+                .encrypt_input(input)
+                .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
+            let ack = backend.append(basin, stream, input).await?;
             match response_mime {
                 JsonOrProto::Json => {
                     let ack: v1t::stream::AppendAck = ack.into();
@@ -441,7 +445,15 @@ pub async fn append(
                 let mut err_tx = Some(err_tx);
                 while let Some(input) = inputs.next().await {
                     match input {
-                        Ok(input) => yield input,
+                        Ok(input) => match enc.encrypt_input(input) {
+                            Ok(encrypted) => yield encrypted,
+                            Err(e) => {
+                                if let Some(tx) = err_tx.take() {
+                                    let _ = tx.send(ServiceError::Validation(ValidationError(e.to_string())));
+                                }
+                                break;
+                            }
+                        },
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e.into());
@@ -453,7 +465,7 @@ pub async fn append(
             };
 
             let ack_stream = backend
-                .append_session(basin, stream, inputs, append_enc)
+                .append_session(basin, stream, inputs)
                 .await?
                 .map(|res| {
                     res.map(v1t::stream::proto::AppendAck::from)
