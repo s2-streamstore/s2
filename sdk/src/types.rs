@@ -388,10 +388,10 @@ impl RetryConfig {
 /// Encryption configuration.
 #[derive(Clone)]
 pub enum EncryptionConfig {
-    /// Algorithm and key.
+    /// Algorithm and key for encryption, or key-only for decryption.
     Key {
-        /// Encryption algorithm.
-        alg: EncryptionAlgorithm,
+        /// Encryption algorithm. Required for appends, ignored for reads        
+        alg: Option<EncryptionAlgorithm>,
         /// Hex-encoded 32-byte key.
         key: SecretString,
     },

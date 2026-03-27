@@ -852,7 +852,7 @@ fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionCon
         .unwrap_or(types::EncryptionAlgorithm::Aegis256);
 
     Ok(Some(EncryptionConfig::Key {
-        alg: alg.into(),
+        alg: Some(alg.into()),
         key: key.into(),
     }))
 }
@@ -869,7 +869,7 @@ fn resolve_decryption(args: &cli::DecryptionArgs) -> Result<Option<EncryptionCon
     validate_hex_key(&key)?;
 
     Ok(Some(EncryptionConfig::Key {
-        alg: types::EncryptionAlgorithm::Aegis256.into(),
+        alg: None,
         key: key.into(),
     }))
 }

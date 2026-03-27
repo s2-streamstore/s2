@@ -68,7 +68,12 @@ impl EncryptionContext {
     fn encrypt_input(&self, input: AppendInput) -> Result<AppendInput, EncryptionError> {
         match &self.directive {
             Some(EncryptionDirective::Key { alg, key }) => {
-                encryption::encrypt_append_input(input, *alg, key, self.aad())
+                let alg = alg.ok_or_else(|| {
+                    EncryptionError::MalformedHeader(
+                        "encryption algorithm required for append".to_owned(),
+                    )
+                })?;
+                encryption::encrypt_append_input(input, alg, key, self.aad())
             }
             _ => Ok(input),
         }

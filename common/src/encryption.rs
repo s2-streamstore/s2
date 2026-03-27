@@ -66,10 +66,12 @@ fn make_key(bytes: [u8; 32]) -> EncryptionKey {
 /// Parsed `s2-encryption` request directive.
 #[derive(Clone, Debug)]
 pub enum EncryptionDirective {
-    /// Encrypt and decrypt record bodies with the provided AEAD algorithm and key.
+    /// Encrypt/decrypt record bodies with the provided key.
+    /// Algorithm is required for encryption (appends), optional for decryption
+    /// (reads auto-detect from the ciphertext envelope).
     Key {
-        /// AEAD algorithm to use.
-        alg: EncryptionAlgorithm,
+        /// AEAD algorithm. Required for appends, ignored for reads.
+        alg: Option<EncryptionAlgorithm>,
         /// 32-byte symmetric key.
         key: EncryptionKey,
     },
@@ -140,17 +142,18 @@ impl FromStr for EncryptionDirective {
             }
         }
 
-        let alg_str = alg_str.ok_or_else(|| {
-            EncryptionError::MalformedHeader("missing 'alg=' parameter".to_owned())
-        })?;
         let key_hex = key_hex.ok_or_else(|| {
             EncryptionError::MalformedHeader("missing 'key=' parameter".to_owned())
         })?;
-        let alg: EncryptionAlgorithm = alg_str.parse().map_err(|_| {
-            EncryptionError::MalformedHeader(format!(
-                "unknown algorithm {alg_str:?}; expected 'aegis-256' or 'aes-256-gcm'"
-            ))
-        })?;
+        let alg = alg_str
+            .map(|s| {
+                s.parse::<EncryptionAlgorithm>().map_err(|_| {
+                    EncryptionError::MalformedHeader(format!(
+                        "unknown algorithm {s:?}; expected 'aegis-256' or 'aes-256-gcm'"
+                    ))
+                })
+            })
+            .transpose()?;
         let key = parse_encryption_key(key_hex)?;
         Ok(Self::Key { alg, key })
     }
@@ -572,7 +575,7 @@ mod tests {
         assert!(matches!(
             directive,
             EncryptionDirective::Key {
-                alg: EncryptionAlgorithm::Aegis256,
+                alg: Some(EncryptionAlgorithm::Aegis256),
                 ..
             }
         ));
@@ -591,7 +594,7 @@ mod tests {
         assert!(matches!(
             directive,
             EncryptionDirective::Key {
-                alg: EncryptionAlgorithm::Aes256Gcm,
+                alg: Some(EncryptionAlgorithm::Aes256Gcm),
                 ..
             }
         ));
@@ -610,9 +613,25 @@ mod tests {
         assert!(matches!(
             directive,
             EncryptionDirective::Key {
-                alg: EncryptionAlgorithm::Aes256Gcm,
+                alg: Some(EncryptionAlgorithm::Aes256Gcm),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parse_header_key_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            S2_ENCRYPTION_HEADER,
+            http::HeaderValue::from_static(
+                "key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+            ),
+        );
+        let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
+        assert!(matches!(
+            directive,
+            EncryptionDirective::Key { alg: None, .. }
         ));
     }
 

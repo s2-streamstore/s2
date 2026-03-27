@@ -842,8 +842,14 @@ impl BaseClient {
             .map(|enc| {
                 use crate::types::EncryptionConfig;
                 let value = match enc {
-                    EncryptionConfig::Key { alg, key } => {
+                    EncryptionConfig::Key {
+                        alg: Some(alg),
+                        key,
+                    } => {
                         format!("alg={alg}; key={}", key.expose_secret())
+                    }
+                    EncryptionConfig::Key { alg: None, key } => {
+                        format!("key={}", key.expose_secret())
                     }
                     EncryptionConfig::Attest => "attest".to_owned(),
                 };
