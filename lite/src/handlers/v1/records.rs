@@ -169,7 +169,6 @@ pub async fn check_tail(
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct ReadArgs {
-    headers: http::HeaderMap,
     #[from_request(via(Header))]
     basin: BasinName,
     #[from_request(via(Path))]
@@ -214,8 +213,8 @@ pub struct ReadArgs {
 ))]
 pub async fn read(
     State(backend): State<Backend>,
+    headers: http::HeaderMap,
     ReadArgs {
-        headers,
         basin,
         stream,
         start,
@@ -377,7 +376,6 @@ async fn merge_read_session(
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
 pub struct AppendArgs {
-    headers: http::HeaderMap,
     #[from_request(via(Header))]
     basin: BasinName,
     #[from_request(via(Path))]
@@ -411,8 +409,8 @@ pub struct AppendArgs {
 ))]
 pub async fn append(
     State(backend): State<Backend>,
+    headers: http::HeaderMap,
     AppendArgs {
-        headers,
         basin,
         stream,
         request,

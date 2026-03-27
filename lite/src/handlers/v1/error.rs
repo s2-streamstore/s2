@@ -64,12 +64,6 @@ pub enum ServiceError {
     NotImplemented,
 }
 
-impl From<std::convert::Infallible> for ServiceError {
-    fn from(never: std::convert::Infallible) -> Self {
-        match never {}
-    }
-}
-
 impl From<AppendRequestRejection> for ServiceError {
     fn from(value: AppendRequestRejection) -> Self {
         match value {
