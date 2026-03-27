@@ -837,39 +837,44 @@ fn validate_hex_key(key: &str) -> Result<(), CliError> {
 }
 
 fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    if args.encryption_attest {
-        return Ok(Some(EncryptionConfig::Attest));
-    }
-
-    let Some(key) = resolve_key(&args.encryption_key, &args.encryption_key_file)? else {
-        return Ok(None);
-    };
-
-    validate_hex_key(&key)?;
-
     let alg = args
         .encryption_algorithm
         .unwrap_or(types::EncryptionAlgorithm::Aegis256);
-
-    Ok(Some(EncryptionConfig::Key {
-        alg: Some(alg.into()),
-        key: key.into(),
-    }))
+    resolve_encryption_config(
+        args.encryption_attest,
+        &args.encryption_key,
+        &args.encryption_key_file,
+        Some(alg.into()),
+    )
 }
 
 fn resolve_decryption(args: &cli::DecryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    if args.encryption_attest {
+    resolve_encryption_config(
+        args.encryption_attest,
+        &args.encryption_key,
+        &args.encryption_key_file,
+        None,
+    )
+}
+
+fn resolve_encryption_config(
+    attest: bool,
+    key: &Option<String>,
+    key_file: &Option<std::path::PathBuf>,
+    alg: Option<s2_sdk::types::EncryptionAlgorithm>,
+) -> Result<Option<EncryptionConfig>, CliError> {
+    if attest {
         return Ok(Some(EncryptionConfig::Attest));
     }
 
-    let Some(key) = resolve_key(&args.encryption_key, &args.encryption_key_file)? else {
+    let Some(key) = resolve_key(key, key_file)? else {
         return Ok(None);
     };
 
     validate_hex_key(&key)?;
 
     Ok(Some(EncryptionConfig::Key {
-        alg: None,
+        alg,
         key: key.into(),
     }))
 }

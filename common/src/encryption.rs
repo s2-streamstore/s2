@@ -412,11 +412,11 @@ pub fn decrypt_read_batch(
 mod tests {
     use super::*;
 
-    fn make_key_fn() -> EncryptionKey {
+    fn test_key() -> EncryptionKey {
         make_key([0x42u8; 32])
     }
 
-    fn make_wrong_key_fn() -> EncryptionKey {
+    fn wrong_test_key() -> EncryptionKey {
         make_key([0x99u8; 32])
     }
 
@@ -433,7 +433,7 @@ mod tests {
 
         let aad = test_aad();
         let plaintext = encode_record_plaintext(headers.clone(), body.clone()).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let ciphertext = encrypt_record(&plaintext, alg, &key, &aad).unwrap();
         let decrypted = decrypt_record(&ciphertext, &key, &aad).unwrap();
         let (out_headers, out_body) = decode_record_plaintext(decrypted).unwrap();
@@ -456,10 +456,10 @@ mod tests {
     fn wrong_key_fails_aegis256() {
         let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let ciphertext =
             encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
-        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), &aad);
+        let result = decrypt_record(&ciphertext, &wrong_test_key(), &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
@@ -467,10 +467,10 @@ mod tests {
     fn wrong_key_fails_aes256gcm() {
         let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let ciphertext =
             encrypt_record(&plaintext, EncryptionAlgorithm::Aes256Gcm, &key, &aad).unwrap();
-        let result = decrypt_record(&ciphertext, &make_wrong_key_fn(), &aad);
+        let result = decrypt_record(&ciphertext, &wrong_test_key(), &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
@@ -478,7 +478,7 @@ mod tests {
     fn truncated_ciphertext_fails_no_panic() {
         let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let ciphertext =
             encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
         let truncated = &ciphertext[..4];
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn unsupported_version_fails() {
         let aad = test_aad();
-        let key = make_key_fn();
+        let key = test_key();
         let body = b"\xFFsome opaque bytes";
         let result = decrypt_record(body, &key, &aad);
         assert!(matches!(
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn empty_body_fails() {
         let aad = test_aad();
-        let key = make_key_fn();
+        let key = test_key();
         let result = decrypt_record(b"", &key, &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
@@ -510,7 +510,7 @@ mod tests {
     fn version_byte_present() {
         let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let ciphertext =
             encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
         assert_eq!(ciphertext[0], CIPHERTEXT_V1);
@@ -521,7 +521,7 @@ mod tests {
     fn alg_id_flip_detected() {
         let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let mut ciphertext = encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad)
             .unwrap()
             .to_vec();
@@ -536,7 +536,7 @@ mod tests {
     fn version_flip_detected() {
         let aad = test_aad();
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let mut ciphertext = encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad)
             .unwrap()
             .to_vec();
@@ -553,7 +553,7 @@ mod tests {
         let aad = test_aad();
         let other_aad = stream_id_aad("other-basin", "other-stream");
         let plaintext = encode_record_plaintext(vec![], Bytes::from_static(b"data")).unwrap();
-        let key = make_key_fn();
+        let key = test_key();
         let ciphertext =
             encrypt_record(&plaintext, EncryptionAlgorithm::Aegis256, &key, &aad).unwrap();
         let result = decrypt_record(&ciphertext, &key, &other_aad);
