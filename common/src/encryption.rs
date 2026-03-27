@@ -1,17 +1,17 @@
-//! # Ciphertext format
+//! # Record encryption format
+//!
+//! AAD = stream_id bytes
 //!
 //! ```text
 //! [version: 1 byte] [alg_id: 1 byte] [nonce] [ciphertext] [tag]
 //! ```
 //!
-//! | version | Description                                      |
-//! |---------|--------------------------------------------------|
-//! | 0x01    | Initial versioned format. AAD = stream_id bytes  |
-//!
 //! | alg_id | Algorithm   | Nonce  | Tag  |
 //! |--------|-------------|--------|------|
 //! | 0x01   | AEGIS-256   | 32 B   | 32 B |
 //! | 0x02   | AES-256-GCM | 12 B   | 16 B |
+
+use core::str::FromStr;
 
 use aegis::aegis256::Aegis256;
 use aes_gcm::{
@@ -19,7 +19,7 @@ use aes_gcm::{
     aead::{Aead, Payload},
 };
 use bytes::{BufMut, Bytes, BytesMut};
-use http::HeaderMap;
+use http::{HeaderMap, HeaderValue};
 use rand::random;
 use secrecy::{CloneableSecret, ExposeSecret, SecretBox};
 
@@ -63,12 +63,17 @@ fn make_key(bytes: [u8; 32]) -> EncryptionKey {
     SecretBox::new(Box::new(KeyBytes(bytes)))
 }
 
+/// Parsed `s2-encryption` request directive.
 #[derive(Clone, Debug)]
 pub enum EncryptionDirective {
+    /// Encrypt and decrypt record bodies with the provided AEAD algorithm and key.
     Key {
+        /// AEAD algorithm to use.
         alg: EncryptionAlgorithm,
+        /// 32-byte symmetric key.
         key: EncryptionKey,
     },
+    /// Use attestation-based encryption mode instead of a caller-supplied key.
     Attest,
 }
 
@@ -84,44 +89,83 @@ pub enum EncryptionError {
     EncodingFailed(String),
 }
 
+impl TryFrom<&HeaderValue> for EncryptionDirective {
+    type Error = EncryptionError;
+
+    fn try_from(value: &HeaderValue) -> Result<Self, Self::Error> {
+        value
+            .to_str()
+            .map_err(|_| EncryptionError::MalformedHeader("header is not valid UTF-8".to_owned()))?
+            .parse()
+    }
+}
+
+impl FromStr for EncryptionDirective {
+    type Err = EncryptionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s == "attest" {
+            return Ok(Self::Attest);
+        }
+
+        let mut alg_str = None;
+        let mut key_hex = None;
+        for part in s.split(';') {
+            let (name, value) = part.split_once('=').ok_or_else(|| {
+                EncryptionError::MalformedHeader("expected 'alg=...; key=...'".to_owned())
+            })?;
+            let name = name.trim();
+            let value = value.trim();
+            match name {
+                "alg" => {
+                    if alg_str.replace(value).is_some() {
+                        return Err(EncryptionError::MalformedHeader(
+                            "duplicate 'alg=' parameter".to_owned(),
+                        ));
+                    }
+                }
+                "key" => {
+                    if key_hex.replace(value).is_some() {
+                        return Err(EncryptionError::MalformedHeader(
+                            "duplicate 'key=' parameter".to_owned(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(EncryptionError::MalformedHeader(format!(
+                        "unknown parameter {name:?}; expected 'alg' or 'key'"
+                    )));
+                }
+            }
+        }
+
+        let alg_str = alg_str.ok_or_else(|| {
+            EncryptionError::MalformedHeader("missing 'alg=' parameter".to_owned())
+        })?;
+        let key_hex = key_hex.ok_or_else(|| {
+            EncryptionError::MalformedHeader("missing 'key=' parameter".to_owned())
+        })?;
+        let alg: EncryptionAlgorithm = alg_str.parse().map_err(|_| {
+            EncryptionError::MalformedHeader(format!(
+                "unknown algorithm {alg_str:?}; expected 'aegis-256' or 'aes-256-gcm'"
+            ))
+        })?;
+        let key = parse_encryption_key(key_hex)?;
+        Ok(Self::Key { alg, key })
+    }
+}
+
 pub fn parse_s2_encryption_header(
     headers: &HeaderMap,
 ) -> Result<Option<EncryptionDirective>, EncryptionError> {
-    let value = match headers.get(S2_ENCRYPTION_HEADER) {
-        Some(v) => v,
-        None => return Ok(None),
-    };
+    headers
+        .get(S2_ENCRYPTION_HEADER)
+        .map(EncryptionDirective::try_from)
+        .transpose()
+}
 
-    let header_str = value
-        .to_str()
-        .map_err(|_| EncryptionError::MalformedHeader("header is not valid UTF-8".to_owned()))?;
-
-    if header_str.trim() == "attest" {
-        return Ok(Some(EncryptionDirective::Attest));
-    }
-
-    let (alg_part, key_part) = header_str.split_once(';').ok_or_else(|| {
-        EncryptionError::MalformedHeader("expected 'alg=...; key=...'".to_owned())
-    })?;
-
-    let alg_str = alg_part
-        .trim()
-        .strip_prefix("alg=")
-        .ok_or_else(|| EncryptionError::MalformedHeader("missing 'alg=' prefix".to_owned()))?
-        .trim();
-
-    let key_hex = key_part
-        .trim()
-        .strip_prefix("key=")
-        .ok_or_else(|| EncryptionError::MalformedHeader("missing 'key=' prefix".to_owned()))?
-        .trim();
-
-    let alg: EncryptionAlgorithm = alg_str.parse().map_err(|_| {
-        EncryptionError::MalformedHeader(format!(
-            "unknown algorithm {alg_str:?}; expected 'aegis-256' or 'aes-256-gcm'"
-        ))
-    })?;
-
+fn parse_encryption_key(key_hex: &str) -> Result<EncryptionKey, EncryptionError> {
     if key_hex.len() != 64 {
         return Err(EncryptionError::MalformedHeader(format!(
             "key must be 64 hex characters (32 bytes), got {} characters",
@@ -144,11 +188,7 @@ pub fn parse_s2_encryption_header(
             ));
         }
     };
-
-    Ok(Some(EncryptionDirective::Key {
-        alg,
-        key: make_key(key_array),
-    }))
+    Ok(make_key(key_array))
 }
 
 pub fn encode_record_plaintext(
@@ -545,6 +585,25 @@ mod tests {
             S2_ENCRYPTION_HEADER,
             http::HeaderValue::from_static(
                 "alg=aes-256-gcm; key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+            ),
+        );
+        let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
+        assert!(matches!(
+            directive,
+            EncryptionDirective::Key {
+                alg: EncryptionAlgorithm::Aes256Gcm,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_header_valid_reordered_params() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            S2_ENCRYPTION_HEADER,
+            http::HeaderValue::from_static(
+                "key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20; alg=aes-256-gcm",
             ),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
