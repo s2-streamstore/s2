@@ -66,16 +66,14 @@ fn make_key(bytes: [u8; 32]) -> EncryptionKey {
 /// Parsed `s2-encryption` request directive.
 #[derive(Clone, Debug)]
 pub enum EncryptionDirective {
-    /// Encrypt/decrypt record bodies with the provided key.
-    /// Algorithm is required for encryption (appends), optional for decryption
-    /// (reads auto-detect from the ciphertext envelope).
+    /// Algorithm and key for encryption, or key-only for decryption.
     Key {
-        /// AEAD algorithm. Required for appends, ignored for reads.
+        /// Encryption algorithm. Required for appends, ignored for reads.
         alg: Option<EncryptionAlgorithm>,
-        /// 32-byte symmetric key.
+        /// Hex-encoded 32-byte key.
         key: EncryptionKey,
     },
-    /// Use attestation-based encryption mode instead of a caller-supplied key.
+    /// Attest mode.
     Attest,
 }
 

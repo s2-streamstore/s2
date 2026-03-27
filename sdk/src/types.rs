@@ -390,7 +390,7 @@ impl RetryConfig {
 pub enum EncryptionConfig {
     /// Algorithm and key for encryption, or key-only for decryption.
     Key {
-        /// Encryption algorithm. Required for appends, ignored for reads        
+        /// Encryption algorithm. Required for appends, ignored for reads.        
         alg: Option<EncryptionAlgorithm>,
         /// Hex-encoded 32-byte key.
         key: SecretString,
