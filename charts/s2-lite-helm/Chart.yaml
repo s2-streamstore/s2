@@ -2,7 +2,7 @@ apiVersion: v2
 name: s2-lite-helm
 description: Self-hostable S2 streaming datastore using SlateDB on object storage
 type: application
-version: 0.1.18
+version: 0.1.19
 appVersion: "0.29.27"
 keywords:
   - s2
