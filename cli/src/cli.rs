@@ -472,7 +472,7 @@ pub struct AppendArgs {
 #[derive(Args, Debug, Clone, Default)]
 #[group(multiple = true)]
 pub struct EncryptionArgs {
-    /// Hex-encoded 32-byte encryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
+    /// Base64-encoded 32-byte encryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
     #[arg(
         long,
         env = "S2_ENCRYPTION_KEY",
@@ -500,7 +500,7 @@ pub struct EncryptionArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DecryptionArgs {
-    /// Hex-encoded 32-byte decryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
+    /// Base64-encoded 32-byte decryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
     #[arg(
         long = "encryption-key",
         env = "S2_ENCRYPTION_KEY",

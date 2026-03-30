@@ -827,11 +827,15 @@ fn resolve_key(
     }
 }
 
-fn validate_hex_key(key: &str) -> Result<(), CliError> {
-    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(CliError::InvalidEncryptionKey(
-            "key must be exactly 64 hex characters (32 bytes)".to_owned(),
-        ));
+fn validate_base64_key(key: &str) -> Result<(), CliError> {
+    use base64ct::{Base64, Encoding};
+    let bytes = Base64::decode_vec(key)
+        .map_err(|_| CliError::InvalidEncryptionKey("key is not valid base64".to_owned()))?;
+    if bytes.len() != 32 {
+        return Err(CliError::InvalidEncryptionKey(format!(
+            "key must be exactly 32 bytes, got {} bytes",
+            bytes.len()
+        )));
     }
     Ok(())
 }
@@ -871,7 +875,7 @@ fn resolve_encryption_config(
         return Ok(None);
     };
 
-    validate_hex_key(&key)?;
+    validate_base64_key(&key)?;
 
     Ok(Some(EncryptionConfig::Key {
         alg,

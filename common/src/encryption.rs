@@ -70,7 +70,7 @@ pub enum EncryptionDirective {
     Key {
         /// Encryption algorithm. Required for appends, ignored for reads.
         alg: Option<EncryptionAlgorithm>,
-        /// Hex-encoded 32-byte key.
+        /// Base64-encoded 32-byte key.
         key: EncryptionKey,
     },
     /// Attest mode.
@@ -110,7 +110,7 @@ impl FromStr for EncryptionDirective {
         }
 
         let mut alg_str = None;
-        let mut key_hex = None;
+        let mut key_b64 = None;
         for part in s.split(';') {
             let (name, value) = part.split_once('=').ok_or_else(|| {
                 EncryptionError::MalformedHeader("expected 'alg=...; key=...'".to_owned())
@@ -126,7 +126,7 @@ impl FromStr for EncryptionDirective {
                     }
                 }
                 "key" => {
-                    if key_hex.replace(value).is_some() {
+                    if key_b64.replace(value).is_some() {
                         return Err(EncryptionError::MalformedHeader(
                             "duplicate 'key=' parameter".to_owned(),
                         ));
@@ -140,7 +140,7 @@ impl FromStr for EncryptionDirective {
             }
         }
 
-        let key_hex = key_hex.ok_or_else(|| {
+        let key_b64 = key_b64.ok_or_else(|| {
             EncryptionError::MalformedHeader("missing 'key=' parameter".to_owned())
         })?;
         let alg = alg_str
@@ -152,7 +152,7 @@ impl FromStr for EncryptionDirective {
                 })
             })
             .transpose()?;
-        let key = parse_encryption_key(key_hex)?;
+        let key = parse_encryption_key(key_b64)?;
         Ok(Self::Key { alg, key })
     }
 }
@@ -166,16 +166,11 @@ pub fn parse_s2_encryption_header(
         .transpose()
 }
 
-fn parse_encryption_key(key_hex: &str) -> Result<EncryptionKey, EncryptionError> {
-    if key_hex.len() != 64 {
-        return Err(EncryptionError::MalformedHeader(format!(
-            "key must be 64 hex characters (32 bytes), got {} characters",
-            key_hex.len()
-        )));
-    }
+fn parse_encryption_key(key_b64: &str) -> Result<EncryptionKey, EncryptionError> {
+    use base64ct::{Base64, Encoding};
 
-    let mut key_bytes: Vec<u8> = hex::decode(key_hex)
-        .map_err(|e| EncryptionError::MalformedHeader(format!("key is not valid hex: {e}")))?;
+    let mut key_bytes: Vec<u8> = Base64::decode_vec(key_b64)
+        .map_err(|e| EncryptionError::MalformedHeader(format!("key is not valid base64: {e}")))?;
 
     let key_array: [u8; 32] = match key_bytes.as_slice().try_into() {
         Ok(arr) => {
@@ -183,10 +178,11 @@ fn parse_encryption_key(key_hex: &str) -> Result<EncryptionKey, EncryptionError>
             arr
         }
         Err(_) => {
+            let len = key_bytes.len();
             secrecy::zeroize::Zeroize::zeroize(&mut key_bytes);
-            return Err(EncryptionError::MalformedHeader(
-                "key must be exactly 32 bytes".to_owned(),
-            ));
+            return Err(EncryptionError::MalformedHeader(format!(
+                "key must be exactly 32 bytes, got {len} bytes"
+            )));
         }
     };
     Ok(make_key(key_array))
@@ -566,7 +562,7 @@ mod tests {
         headers.insert(
             S2_ENCRYPTION_HEADER,
             http::HeaderValue::from_static(
-                "alg=aegis-256; key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+                "alg=aegis-256; key=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
             ),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
@@ -585,7 +581,7 @@ mod tests {
         headers.insert(
             S2_ENCRYPTION_HEADER,
             http::HeaderValue::from_static(
-                "alg=aes-256-gcm; key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+                "alg=aes-256-gcm; key=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
             ),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
@@ -604,7 +600,7 @@ mod tests {
         headers.insert(
             S2_ENCRYPTION_HEADER,
             http::HeaderValue::from_static(
-                "key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20; alg=aes-256-gcm",
+                "key=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=; alg=aes-256-gcm",
             ),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
@@ -622,9 +618,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             S2_ENCRYPTION_HEADER,
-            http::HeaderValue::from_static(
-                "key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-            ),
+            http::HeaderValue::from_static("key=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
         assert!(matches!(
@@ -665,22 +659,21 @@ mod tests {
     #[test]
     fn parse_header_wrong_key_length() {
         let mut headers = HeaderMap::new();
+        // "deadbeef" decodes to 4 bytes, not 32
         headers.insert(
             S2_ENCRYPTION_HEADER,
-            http::HeaderValue::from_static("alg=aegis-256; key=deadbeef"),
+            http::HeaderValue::from_static("alg=aegis-256; key=3q2+7w=="),
         );
         let result = parse_s2_encryption_header(&headers);
         assert!(matches!(result, Err(EncryptionError::MalformedHeader(_))));
     }
 
     #[test]
-    fn parse_header_invalid_hex() {
+    fn parse_header_invalid_base64() {
         let mut headers = HeaderMap::new();
         headers.insert(
             S2_ENCRYPTION_HEADER,
-            http::HeaderValue::from_static(
-                "alg=aegis-256; key=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-            ),
+            http::HeaderValue::from_static("alg=aegis-256; key=not-valid-base64!!!"),
         );
         let result = parse_s2_encryption_header(&headers);
         assert!(matches!(result, Err(EncryptionError::MalformedHeader(_))));

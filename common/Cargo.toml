@@ -24,7 +24,7 @@ clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
 enum-ordinalize = { workspace = true }
 enumset = { workspace = true }
-hex = { workspace = true }
+base64ct = { workspace = true, features = ["alloc"] }
 http = { workspace = true }
 rand = { workspace = true }
 rkyv = { workspace = true, optional = true }

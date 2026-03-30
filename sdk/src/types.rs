@@ -392,7 +392,7 @@ pub enum EncryptionConfig {
     Key {
         /// Encryption algorithm. Required for appends, ignored for reads.        
         alg: Option<EncryptionAlgorithm>,
-        /// Hex-encoded 32-byte key.
+        /// Base64-encoded 32-byte key.
         key: SecretString,
     },
     /// Attest mode.
