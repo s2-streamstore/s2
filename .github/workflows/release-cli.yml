@@ -16,7 +16,7 @@ env:
 
 jobs:
   update_helm_chart:
-    needs: create_manifest
+    needs: [create_manifest]
     runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub token
@@ -79,7 +79,7 @@ jobs:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - os: ubuntu-22.04
@@ -169,10 +169,11 @@ jobs:
           if-no-files-found: error
 
   build_images:
+    needs: build_binaries
     name: Build ${{ matrix.arch }} Docker image
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - arch: x86-64
@@ -251,7 +252,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64
 
   upload_release_artifacts:
-    needs: build_binaries
+    needs: [build_binaries, create_manifest]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
