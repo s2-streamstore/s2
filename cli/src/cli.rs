@@ -477,7 +477,8 @@ pub struct EncryptionArgs {
         long,
         env = "S2_ENCRYPTION_KEY",
         hide_env_values = true,
-        group = "encryption_key_source"
+        group = "encryption_key_source",
+        requires = "encryption_algorithm"
     )]
     pub encryption_key: Option<String>,
 
@@ -485,7 +486,8 @@ pub struct EncryptionArgs {
     #[arg(
         long,
         conflicts_with = "encryption_key",
-        group = "encryption_key_source"
+        group = "encryption_key_source",
+        requires = "encryption_algorithm"
     )]
     pub encryption_key_file: Option<PathBuf>,
 

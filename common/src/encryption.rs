@@ -70,7 +70,7 @@ pub enum EncryptionDirective {
     Key {
         /// Encryption algorithm. Required for appends, ignored for reads.
         alg: Option<EncryptionAlgorithm>,
-        /// Base64-encoded 32-byte key.
+        /// Decoded 32-byte encryption key.
         key: EncryptionKey,
     },
     /// Attest mode.
