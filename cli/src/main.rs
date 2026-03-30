@@ -841,24 +841,22 @@ fn validate_base64_key(key: &str) -> Result<(), CliError> {
 }
 
 fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    let alg = args
-        .encryption_algorithm
-        .unwrap_or(types::EncryptionAlgorithm::Aegis256);
+    let has_key = args.encryption_key.is_some() || args.encryption_key_file.is_some();
+    if has_key && args.encryption_algorithm.is_none() {
+        return Err(CliError::InvalidEncryptionKey(
+            "--encryption-algorithm is required when encrypting".to_owned(),
+        ));
+    }
     resolve_encryption_config(
         args.encryption_attest,
         &args.encryption_key,
         &args.encryption_key_file,
-        Some(alg.into()),
+        args.encryption_algorithm.map(Into::into),
     )
 }
 
 fn resolve_decryption(args: &cli::DecryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    resolve_encryption_config(
-        args.encryption_attest,
-        &args.encryption_key,
-        &args.encryption_key_file,
-        None,
-    )
+    resolve_encryption_config(false, &args.encryption_key, &args.encryption_key_file, None)
 }
 
 fn resolve_encryption_config(

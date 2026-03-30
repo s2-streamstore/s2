@@ -489,7 +489,7 @@ pub struct EncryptionArgs {
     )]
     pub encryption_key_file: Option<PathBuf>,
 
-    /// Encryption algorithm (default: aegis-256).
+    /// Encryption algorithm.
     #[arg(long, value_enum, requires = "encryption_key_source")]
     pub encryption_algorithm: Option<EncryptionAlgorithm>,
 
@@ -511,10 +511,6 @@ pub struct DecryptionArgs {
     /// Read decryption key from file.
     #[arg(long = "encryption-key-file", conflicts_with = "encryption_key")]
     pub encryption_key_file: Option<PathBuf>,
-
-    /// Attest client-side encryption.
-    #[arg(long = "encryption-attest", conflicts_with_all = ["encryption_key", "encryption_key_file"])]
-    pub encryption_attest: bool,
 }
 
 #[derive(Args, Debug)]
