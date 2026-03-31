@@ -96,6 +96,14 @@ struct InFlightAppend {
     records: Vec<Metered<StoredSequencedRecord>>,
 }
 
+struct DbSubmitAppendOptions {
+    retention: RetentionPolicy,
+    doe_deadline: Option<DeleteOnEmptyEntry>,
+    write_timestamp_secs: kv::timestamp::TimestampSecs,
+    fencing_token: Option<FencingToken>,
+    trim_point: Option<RangeTo<SeqNum>>,
+}
+
 pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
@@ -311,16 +319,20 @@ impl Streamer {
                     db_submit_append(
                         self.db.clone(),
                         self.stream_id,
-                        retention,
-                        doe_deadline,
-                        write_timestamp_secs,
                         sequenced_records,
-                        self.fencing_token
-                            .is_applied_in(&seq_num_range)
-                            .then(|| self.fencing_token.state.clone()),
-                        self.trim_point
-                            .is_applied_in(&seq_num_range)
-                            .then_some(self.trim_point.state),
+                        DbSubmitAppendOptions {
+                            retention,
+                            doe_deadline,
+                            write_timestamp_secs,
+                            fencing_token: self
+                                .fencing_token
+                                .is_applied_in(&seq_num_range)
+                                .then(|| self.fencing_token.state.clone()),
+                            trim_point: self
+                                .trim_point
+                                .is_applied_in(&seq_num_range)
+                                .then_some(self.trim_point.state),
+                        },
                     )
                     .boxed(),
                 );
@@ -884,13 +896,16 @@ fn sequenced_records(
 async fn db_submit_append(
     db: slatedb::Db,
     stream_id: StreamId,
-    retention: RetentionPolicy,
-    doe_deadline: Option<DeleteOnEmptyEntry>,
-    write_timestamp_secs: kv::timestamp::TimestampSecs,
     records: Vec<Metered<StoredSequencedRecord>>,
-    fencing_token: Option<FencingToken>,
-    trim_point: Option<RangeTo<SeqNum>>,
+    options: DbSubmitAppendOptions,
 ) -> Result<InFlightAppend, slatedb::Error> {
+    let DbSubmitAppendOptions {
+        retention,
+        doe_deadline,
+        write_timestamp_secs,
+        fencing_token,
+        trim_point,
+    } = options;
     let ttl = match retention {
         RetentionPolicy::Age(age) => Ttl::ExpireAfter(age.as_millis() as u64),
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
