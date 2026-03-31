@@ -386,7 +386,7 @@ impl RetryConfig {
 }
 
 /// Encryption configuration.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum EncryptionConfig {
     /// Algorithm and key for encryption, or key-only for decryption.
     Key {
@@ -397,19 +397,6 @@ pub enum EncryptionConfig {
     },
     /// Attest mode.
     Attest,
-}
-
-impl fmt::Debug for EncryptionConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Key { alg, .. } => f
-                .debug_struct("Key")
-                .field("alg", alg)
-                .field("key", &"[REDACTED]")
-                .finish(),
-            Self::Attest => write!(f, "Attest"),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
