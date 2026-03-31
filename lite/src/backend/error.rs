@@ -343,6 +343,20 @@ impl From<slatedb::Error> for DeleteStreamError {
     }
 }
 
+impl From<AppendErrorInternal> for DeleteStreamError {
+    fn from(err: AppendErrorInternal) -> Self {
+        match err {
+            AppendErrorInternal::Storage(e) => Self::Storage(e),
+            AppendErrorInternal::StreamerMissingInActionError(e) => {
+                Self::StreamerMissingInActionError(e)
+            }
+            AppendErrorInternal::RequestDroppedError(e) => Self::RequestDroppedError(e),
+            AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
+            AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BasinDeletionError {
     #[error(transparent)]
