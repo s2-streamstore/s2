@@ -313,7 +313,9 @@ impl TryFrom<Bytes> for Metered<Record> {
         let magic_byte = MagicByte::try_from(buf.get_u8())
             .map_err(|msg| InternalRecordError::InvalidValue("MagicByte", msg))?;
 
-        let metered_size = buf.get_uint(magic_byte.metered_size_varlen as usize) as usize;
+        let metered_size =
+            buf.try_get_uint(magic_byte.metered_size_varlen as usize)
+                .map_err(|_| InternalRecordError::Truncated("MeteredSize"))? as usize;
 
         Ok(Self {
             size: metered_size,
