@@ -313,7 +313,9 @@ impl TryFrom<Bytes> for Metered<Record> {
         let magic_byte = MagicByte::try_from(buf.get_u8())
             .map_err(|msg| InternalRecordError::InvalidValue("MagicByte", msg))?;
 
-        let metered_size = buf.get_uint(magic_byte.metered_size_varlen as usize) as usize;
+        let metered_size =
+            buf.try_get_uint(magic_byte.metered_size_varlen as usize)
+                .map_err(|_| InternalRecordError::Truncated("MeteredSize"))? as usize;
 
         Ok(Self {
             size: metered_size,
@@ -492,6 +494,16 @@ mod test {
     fn magic_byte_parsing(#[case] as_u8: u8, #[case] magic_byte: MagicByte) {
         assert_eq!(MagicByte::try_from(as_u8).unwrap(), magic_byte);
         assert_eq!(u8::from(magic_byte), as_u8);
+    }
+
+    #[test]
+    fn metered_record_truncated_after_magic_byte_returns_error() {
+        // Magic byte: Envelope (0b0000_0010), metered_size_varlen = 1 → expects 1 more byte.
+        let truncated = Bytes::from_static(&[0b0000_0010]);
+        assert_eq!(
+            Metered::<Record>::try_from(truncated),
+            Err(InternalRecordError::Truncated("MeteredSize"))
+        );
     }
 
     #[test]
