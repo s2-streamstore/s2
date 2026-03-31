@@ -497,6 +497,16 @@ mod test {
     }
 
     #[test]
+    fn metered_record_truncated_after_magic_byte_returns_error() {
+        // Magic byte: Envelope (0b0000_0010), metered_size_varlen = 1 → expects 1 more byte.
+        let truncated = Bytes::from_static(&[0b0000_0010]);
+        assert_eq!(
+            Metered::<Record>::try_from(truncated),
+            Err(InternalRecordError::Truncated("MeteredSize"))
+        );
+    }
+
+    #[test]
     fn test_read_varint() {
         let data = [0u8, 0, 0, 1, 0, 0, 0];
 
