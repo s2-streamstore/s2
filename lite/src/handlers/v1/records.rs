@@ -66,17 +66,13 @@ impl EncryptionContext {
     }
 
     fn encrypt_input(&self, input: AppendInput) -> Result<AppendInput, EncryptionError> {
-        match &self.directive {
-            Some(EncryptionDirective::Key { alg, key }) => {
-                let alg = alg.ok_or_else(|| {
-                    EncryptionError::MalformedHeader(
-                        "encryption algorithm required for append".to_owned(),
-                    )
-                })?;
-                encryption::encrypt_append_input(input, alg, key, self.aad())
-            }
-            _ => Ok(input),
-        }
+        let Some(directive) = &self.directive else {
+            return Ok(input);
+        };
+        let alg = directive.algorithm().ok_or_else(|| {
+            EncryptionError::MalformedHeader("encryption algorithm required for append".to_owned())
+        })?;
+        encryption::encrypt_append_input(input, alg, directive.key(), self.aad())
     }
 
     fn decrypt_batch(&self, batch: ReadBatch) -> Result<ReadBatch, EncryptionError> {

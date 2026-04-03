@@ -842,7 +842,6 @@ fn validate_base64_key(key: &str) -> Result<(), CliError> {
 
 fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
     resolve_encryption_config(
-        args.encryption_attest,
         &args.encryption_key,
         &args.encryption_key_file,
         args.encryption_algorithm.map(Into::into),
@@ -850,27 +849,23 @@ fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionCon
 }
 
 fn resolve_decryption(args: &cli::DecryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    resolve_encryption_config(false, &args.encryption_key, &args.encryption_key_file, None)
+    resolve_encryption_config(&args.encryption_key, &args.encryption_key_file, None)
 }
 
 fn resolve_encryption_config(
-    attest: bool,
     key: &Option<String>,
     key_file: &Option<std::path::PathBuf>,
     alg: Option<s2_sdk::types::EncryptionAlgorithm>,
 ) -> Result<Option<EncryptionConfig>, CliError> {
-    if attest {
-        return Ok(Some(EncryptionConfig::Attest));
-    }
-
     let Some(key) = resolve_key(key, key_file)? else {
         return Ok(None);
     };
 
     validate_base64_key(&key)?;
 
-    Ok(Some(EncryptionConfig::Key {
-        alg,
-        key: key.into(),
-    }))
+    let config = match alg {
+        Some(alg) => EncryptionConfig::new(key).with_algorithm(alg),
+        None => EncryptionConfig::new(key),
+    };
+    Ok(Some(config))
 }

@@ -494,10 +494,6 @@ pub struct EncryptionArgs {
     /// Encryption algorithm.
     #[arg(long, value_enum, requires = "encryption_key_source")]
     pub encryption_algorithm: Option<EncryptionAlgorithm>,
-
-    /// Attest client-side encryption.
-    #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file", "encryption_algorithm"])]
-    pub encryption_attest: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]

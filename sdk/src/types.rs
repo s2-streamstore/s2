@@ -387,16 +387,36 @@ impl RetryConfig {
 
 /// Encryption configuration.
 #[derive(Debug, Clone)]
-pub enum EncryptionConfig {
-    /// Algorithm and key for encryption, or key-only for decryption.
-    Key {
-        /// Encryption algorithm. Required for appends, ignored for reads.        
-        alg: Option<EncryptionAlgorithm>,
-        /// Base64-encoded 32-byte key.
-        key: SecretString,
-    },
-    /// Attest mode.
-    Attest,
+pub struct EncryptionConfig {
+    alg: Option<EncryptionAlgorithm>,
+    key: SecretString,
+}
+
+impl EncryptionConfig {
+    /// Create a new encryption configuration with the given base64-encoded 32-byte key.
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            alg: None,
+            key: key.into().into(),
+        }
+    }
+
+    /// Set the encryption algorithm. Required for appends, ignored for reads.
+    pub fn with_algorithm(self, alg: EncryptionAlgorithm) -> Self {
+        Self {
+            alg: Some(alg),
+            ..self
+        }
+    }
+
+    /// Get the configured encryption algorithm.
+    pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
+        self.alg
+    }
+
+    pub(crate) fn key(&self) -> &SecretString {
+        &self.key
+    }
 }
 
 #[derive(Debug, Clone)]

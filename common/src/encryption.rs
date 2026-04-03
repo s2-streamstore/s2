@@ -65,16 +65,21 @@ fn make_key(bytes: [u8; 32]) -> EncryptionKey {
 
 /// Parsed `s2-encryption` request directive.
 #[derive(Clone, Debug)]
-pub enum EncryptionDirective {
-    /// Algorithm and key for encryption, or key-only for decryption.
-    Key {
-        /// Encryption algorithm. Required for appends, ignored for reads.
-        alg: Option<EncryptionAlgorithm>,
-        /// Decoded 32-byte encryption key.
-        key: EncryptionKey,
-    },
-    /// Attest mode.
-    Attest,
+pub struct EncryptionDirective {
+    alg: Option<EncryptionAlgorithm>,
+    key: EncryptionKey,
+}
+
+impl EncryptionDirective {
+    /// Encryption algorithm. Required for appends, ignored for reads.
+    pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
+        self.alg
+    }
+
+    /// Decoded 32-byte encryption key.
+    pub fn key(&self) -> &EncryptionKey {
+        &self.key
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -105,9 +110,6 @@ impl FromStr for EncryptionDirective {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        if s == "attest" {
-            return Ok(Self::Attest);
-        }
 
         let mut alg_str = None;
         let mut key_b64 = None;
@@ -153,7 +155,7 @@ impl FromStr for EncryptionDirective {
             })
             .transpose()?;
         let key = parse_encryption_key(key_b64)?;
-        Ok(Self::Key { alg, key })
+        Ok(Self { alg, key })
     }
 }
 
@@ -377,9 +379,10 @@ pub fn decrypt_read_batch(
     directive: Option<&EncryptionDirective>,
     aad: &[u8],
 ) -> Result<types::stream::ReadBatch, EncryptionError> {
-    let Some(EncryptionDirective::Key { key, .. }) = directive else {
+    let Some(directive) = directive else {
         return Ok(batch);
     };
+    let key = directive.key();
     let records: Vec<record::SequencedRecord> = batch
         .records
         .into_inner()
@@ -566,13 +569,7 @@ mod tests {
             ),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
-        assert!(matches!(
-            directive,
-            EncryptionDirective::Key {
-                alg: Some(EncryptionAlgorithm::Aegis256),
-                ..
-            }
-        ));
+        assert_eq!(directive.algorithm(), Some(EncryptionAlgorithm::Aegis256));
     }
 
     #[test]
@@ -585,13 +582,7 @@ mod tests {
             ),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
-        assert!(matches!(
-            directive,
-            EncryptionDirective::Key {
-                alg: Some(EncryptionAlgorithm::Aes256Gcm),
-                ..
-            }
-        ));
+        assert_eq!(directive.algorithm(), Some(EncryptionAlgorithm::Aes256Gcm));
     }
 
     #[test]
@@ -604,13 +595,7 @@ mod tests {
             ),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
-        assert!(matches!(
-            directive,
-            EncryptionDirective::Key {
-                alg: Some(EncryptionAlgorithm::Aes256Gcm),
-                ..
-            }
-        ));
+        assert_eq!(directive.algorithm(), Some(EncryptionAlgorithm::Aes256Gcm));
     }
 
     #[test]
@@ -621,21 +606,7 @@ mod tests {
             http::HeaderValue::from_static("key=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="),
         );
         let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
-        assert!(matches!(
-            directive,
-            EncryptionDirective::Key { alg: None, .. }
-        ));
-    }
-
-    #[test]
-    fn parse_header_attest() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            S2_ENCRYPTION_HEADER,
-            http::HeaderValue::from_static("attest"),
-        );
-        let directive = parse_s2_encryption_header(&headers).unwrap().unwrap();
-        assert!(matches!(directive, EncryptionDirective::Attest));
+        assert_eq!(directive.algorithm(), None);
     }
 
     #[test]
