@@ -11,6 +11,7 @@ use http::{
 use prost::{self, Message};
 #[cfg(feature = "_hidden")]
 use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
+use s2_common::encryption::S2_ENCRYPTION_HEADER;
 use s2_api::v1::{
     access::{
         AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
@@ -38,8 +39,8 @@ use crate::{
     frame_signal::FrameSignal,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
-        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, RetryConfig,
-        S2Config, S2Endpoints, StreamName,
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression,
+        EncryptionConfig, RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
 
@@ -48,7 +49,6 @@ const CONTENT_TYPE_PROTO: &str = "application/protobuf";
 const ACCEPT_PROTO: &str = "application/protobuf";
 const S2_REQUEST_TOKEN: &str = "s2-request-token";
 const S2_BASIN: &str = "s2-basin";
-const S2_ENCRYPTION: &str = "s2-encryption";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
 
 #[derive(Debug, Clone)]
@@ -346,6 +346,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         input: AppendInput,
+        encryption: Option<&EncryptionConfig>,
         append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
         let url = self
@@ -358,7 +359,7 @@ impl BasinClient {
             .body(input.encode_to_vec())
             .build()?;
         let mut request = request;
-        self.client.set_encryption_header(&mut request);
+        set_encryption_header(&mut request, encryption);
         let response = self
             .request(request)
             .with_append_retry_policy(append_retry_policy)
@@ -384,6 +385,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
+        encryption: Option<&EncryptionConfig>,
     ) -> Result<ReadBatch, ApiError> {
         let url = self
             .base_url
@@ -398,7 +400,7 @@ impl BasinClient {
                 builder.timeout(self.client.request_timeout + Duration::from_secs(wait.into()));
         }
         let mut request = builder.build()?;
-        self.client.set_encryption_header(&mut request);
+        set_encryption_header(&mut request, encryption);
         let response = self
             .request(request)
             .error_handler(read_response_error_handler)
@@ -411,6 +413,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         inputs: I,
+        encryption: Option<&EncryptionConfig>,
         frame_signal: Option<FrameSignal>,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
@@ -441,7 +444,7 @@ impl BasinClient {
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
         let mut request = request_builder.build()?;
-        self.client.set_encryption_header(&mut request);
+        set_encryption_header(&mut request, encryption);
         let response = self
             .client
             .init_streaming(request)
@@ -479,6 +482,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
+        encryption: Option<&EncryptionConfig>,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self
             .base_url
@@ -494,7 +498,7 @@ impl BasinClient {
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
         let mut request = request_builder.build()?;
-        self.client.set_encryption_header(&mut request);
+        set_encryption_header(&mut request, encryption);
         let response = self
             .client
             .init_streaming(request)
@@ -788,7 +792,6 @@ pub type Streaming<R> = Pin<Box<dyn Send + Stream<Item = Result<R, ApiError>>>>;
 pub struct BaseClient {
     client: Arc<dyn client::RequestExecutor>,
     default_headers: HeaderMap,
-    encryption_header: Option<HeaderValue>,
     request_timeout: Duration,
     retry_builder: RetryBackoffBuilder,
     compression: Compression,
@@ -836,36 +839,15 @@ impl BaseClient {
             Compression::None => {}
         }
 
-        let encryption_header = config
-            .encryption
-            .as_ref()
-            .map(|enc| {
-                let value = match enc.algorithm() {
-                    Some(alg) => {
-                        format!("alg={alg}; key={}", enc.key().expose_secret())
-                    }
-                    None => format!("key={}", enc.key().expose_secret()),
-                };
-                value.try_into()
-            })
-            .transpose()?;
-
         let client = client::Pool::new(connector);
 
         Ok(Self {
             client: Arc::new(client),
             default_headers,
-            encryption_header,
             request_timeout: config.request_timeout,
             retry_builder: retry_builder(&config.retry),
             compression: config.compression,
         })
-    }
-
-    pub fn set_encryption_header(&self, request: &mut client::Request) {
-        if let Some(ref value) = self.encryption_header {
-            request.headers_mut().insert(S2_ENCRYPTION, value.clone());
-        }
     }
 
     pub fn get(&self, url: Url) -> client::RequestBuilder {
@@ -925,6 +907,14 @@ impl BaseClient {
             frame_signal: None,
             error_handler: None,
         }
+    }
+}
+
+fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionConfig>) {
+    if let Some(encryption) = encryption {
+        request
+            .headers_mut()
+            .insert(S2_ENCRYPTION_HEADER.clone(), encryption.to_header_value());
     }
 }
 
@@ -1298,6 +1288,25 @@ mod tests {
         assert!(
             msg.contains("dns resolution"),
             "expected 'dns resolution' in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn encryption_header_is_marked_sensitive() {
+        let config = crate::types::S2Config::new("test-token".to_owned());
+        let client = BaseClient::init(&config).expect("client init");
+        let encryption = crate::types::EncryptionConfig::aegis256([1; 32]);
+        let mut request = client
+            .get("https://example.com".parse().unwrap())
+            .build()
+            .expect("request");
+        set_encryption_header(&mut request, Some(&encryption));
+        assert!(
+            request
+                .headers_mut()
+                .get(&S2_ENCRYPTION_HEADER)
+                .expect("encryption header")
+                .is_sensitive()
         );
     }
 }

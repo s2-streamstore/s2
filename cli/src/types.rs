@@ -169,33 +169,6 @@ impl StreamConfig {
     }
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum EncryptionAlgorithm {
-    #[value(name = "aegis-256")]
-    Aegis256,
-    #[value(name = "aes-256-gcm")]
-    Aes256Gcm,
-}
-
-impl From<EncryptionAlgorithm> for sdk::types::EncryptionAlgorithm {
-    fn from(alg: EncryptionAlgorithm) -> Self {
-        match alg {
-            EncryptionAlgorithm::Aegis256 => Self::Aegis256,
-            EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
-        }
-    }
-}
-
-impl From<sdk::types::EncryptionAlgorithm> for EncryptionAlgorithm {
-    fn from(alg: sdk::types::EncryptionAlgorithm) -> Self {
-        match alg {
-            sdk::types::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
-            sdk::types::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
-        }
-    }
-}
-
 #[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {

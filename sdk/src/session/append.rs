@@ -23,8 +23,8 @@ use crate::{
     frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB, S2Error, StreamName,
-        StreamPosition, ValidationError,
+        AppendAck, AppendInput, AppendRetryPolicy, EncryptionConfig, MeteredBytes, ONE_MIB,
+        S2Error, StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -171,6 +171,7 @@ impl AppendSession {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
+        encryption: Option<Arc<EncryptionConfig>>,
         config: AppendSessionConfig,
     ) -> Self {
         let buffer_size = config
@@ -184,6 +185,7 @@ impl AppendSession {
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
+            encryption,
             cmd_rx,
             retry_builder,
             buffer_size,
@@ -291,7 +293,11 @@ pub(crate) struct AppendSessionInternal {
 }
 
 impl AppendSessionInternal {
-    pub(crate) fn new(client: BasinClient, stream: StreamName) -> Self {
+    pub(crate) fn new(
+        client: BasinClient,
+        stream: StreamName,
+        encryption: Option<Arc<EncryptionConfig>>,
+    ) -> Self {
         let buffer_size = DEFAULT_CHANNEL_BUFFER_SIZE;
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
         let retry_builder = retry_builder(&client.config.retry);
@@ -299,6 +305,7 @@ impl AppendSessionInternal {
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
+            encryption,
             cmd_rx,
             retry_builder,
             buffer_size,
@@ -403,6 +410,7 @@ impl AppendPermits {
 async fn run_session_with_retry(
     client: BasinClient,
     stream: StreamName,
+    encryption: Option<Arc<EncryptionConfig>>,
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
@@ -427,7 +435,15 @@ async fn run_session_with_retry(
     let mut retry_backoff = retry_builder.build();
 
     loop {
-        let result = run_session(&client, &stream, &mut state, buffer_size, &frame_signal).await;
+        let result = run_session(
+            &client,
+            &stream,
+            encryption.as_deref(),
+            &mut state,
+            buffer_size,
+            &frame_signal,
+        )
+        .await;
 
         match result {
             Ok(()) => {
@@ -494,6 +510,7 @@ async fn run_session_with_retry(
 async fn run_session(
     client: &BasinClient,
     stream: &StreamName,
+    encryption: Option<&EncryptionConfig>,
     state: &mut SessionState,
     buffer_size: usize,
     frame_signal: &Option<FrameSignal>,
@@ -502,7 +519,14 @@ async fn run_session(
         s.reset();
     }
 
-    let (input_tx, mut acks) = connect(client, stream, buffer_size, frame_signal.clone()).await?;
+    let (input_tx, mut acks) = connect(
+        client,
+        stream,
+        encryption,
+        buffer_size,
+        frame_signal.clone(),
+    )
+    .await?;
     let ack_timeout = client.config.request_timeout;
 
     if !state.inflight_appends.is_empty() {
@@ -695,6 +719,7 @@ async fn resend(
 async fn connect(
     client: &BasinClient,
     stream: &StreamName,
+    encryption: Option<&EncryptionConfig>,
     buffer_size: usize,
     frame_signal: Option<FrameSignal>,
 ) -> Result<(mpsc::Sender<AppendInput>, Streaming<AppendAck>), AppendSessionError> {
@@ -704,6 +729,7 @@ async fn connect(
             .append_session(
                 stream,
                 ReceiverStream::new(input_rx).map(|i| i.into()),
+                encryption,
                 frame_signal,
             )
             .await?

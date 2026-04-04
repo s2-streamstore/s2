@@ -4610,7 +4610,7 @@ impl App {
                 encryption: Default::default(),
             };
 
-            match ops::read(&s2, &args).await {
+            match ops::read(&s2, &args, None).await {
                 Ok(mut batch_stream) => {
                     use futures::StreamExt;
                     while let Some(batch_result) = batch_stream.next().await {
@@ -4683,7 +4683,7 @@ impl App {
                 encryption: Default::default(),
             };
 
-            match ops::read(&s2, &args).await {
+            match ops::read(&s2, &args, None).await {
                 Ok(mut batch_stream) => {
                     use futures::StreamExt;
                     while let Some(batch_result) = batch_stream.next().await {
@@ -4862,7 +4862,7 @@ impl App {
                 None
             };
 
-            match ops::read(&s2, &args).await {
+            match ops::read(&s2, &args, None).await {
                 Ok(mut batch_stream) => {
                     use futures::StreamExt;
                     use tokio::io::AsyncWriteExt;

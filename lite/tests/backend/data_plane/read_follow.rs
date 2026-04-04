@@ -37,7 +37,7 @@ async fn test_follow_mode_wait_duration() {
 
     let start_time = tokio::time::Instant::now();
     let session = backend
-        .read(basin_name, stream_name, start, end)
+        .read(basin_name, stream_name, start, end, no_encryption())
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -83,7 +83,7 @@ async fn test_follow_mode_heartbeats() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end)
+        .read(basin_name, stream_name, start, end, no_encryption())
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -130,7 +130,13 @@ async fn test_follow_mode_receives_new_data() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -194,7 +200,13 @@ async fn test_follow_mode_with_multiple_appends() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -271,7 +283,13 @@ async fn test_follow_mode_broadcast_lag_falls_back_to_db_catchup() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -326,7 +344,13 @@ async fn test_transition_from_catchup_to_follow() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -395,7 +419,13 @@ async fn test_follow_mode_with_count_limit() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -465,7 +495,13 @@ async fn test_follow_mode_with_exact_count_limit() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -524,7 +560,12 @@ async fn test_follow_mode_with_timestamp_until() {
         fencing_token: None,
     };
     backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(
+            basin_name.clone(),
+            stream_name.clone(),
+            input,
+            no_encryption(),
+        )
         .await
         .expect("Failed to append initial record");
 
@@ -539,7 +580,13 @@ async fn test_follow_mode_with_timestamp_until() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -557,7 +604,12 @@ async fn test_follow_mode_with_timestamp_until() {
             fencing_token: None,
         };
         backend_clone
-            .append(basin_clone.clone(), stream_clone.clone(), input)
+            .append(
+                basin_clone.clone(),
+                stream_clone.clone(),
+                input,
+                no_encryption(),
+            )
             .await
             .unwrap();
 
@@ -569,7 +621,7 @@ async fn test_follow_mode_with_timestamp_until() {
             fencing_token: None,
         };
         backend_clone
-            .append(basin_clone, stream_clone, input)
+            .append(basin_clone, stream_clone, input, no_encryption())
             .await
             .unwrap();
     });

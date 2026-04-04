@@ -29,7 +29,13 @@ async fn test_operations_on_nonexistent_basin() {
     };
 
     let read_result = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await;
     assert!(matches!(read_result, Err(ReadError::BasinNotFound(_))));
 
@@ -39,7 +45,12 @@ async fn test_operations_on_nonexistent_basin() {
         fencing_token: None,
     };
     let append_result = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(
+            basin_name.clone(),
+            stream_name.clone(),
+            input,
+            no_encryption(),
+        )
         .await;
     assert!(matches!(append_result, Err(AppendError::BasinNotFound(_))));
 
@@ -70,7 +81,9 @@ async fn test_concurrent_appends_to_same_stream() {
                 match_seq_num: None,
                 fencing_token: None,
             };
-            backend.append(basin_name, stream_name, input).await
+            backend
+                .append(basin_name, stream_name, input, no_encryption())
+                .await
         });
         handles.push(handle);
     }
@@ -101,7 +114,7 @@ async fn test_concurrent_appends_to_same_stream() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end)
+        .read(basin_name, stream_name, start, end, no_encryption())
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -150,7 +163,13 @@ async fn test_read_while_appending() {
     };
 
     let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            no_encryption(),
+        )
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -251,7 +270,9 @@ async fn test_concurrent_reads_same_stream() {
                 until: ReadUntil::Unbounded,
                 wait: Some(Duration::ZERO),
             };
-            let session = backend.read(basin_name, stream_name, start, end).await?;
+            let session = backend
+                .read(basin_name, stream_name, start, end, no_encryption())
+                .await?;
             let mut session = Box::pin(session);
             let records = collect_records(&mut session).await;
             Ok::<usize, ReadError>(records.len())

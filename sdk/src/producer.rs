@@ -21,8 +21,8 @@ use crate::{
     batching::{AppendInputs, AppendRecordBatches, BatchingConfig},
     session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
     types::{
-        AppendAck, AppendRecord, FencingToken, MeteredBytes, ONE_MIB, S2Error, StreamName,
-        ValidationError,
+        AppendAck, AppendRecord, EncryptionConfig, FencingToken, MeteredBytes, ONE_MIB, S2Error,
+        StreamName, ValidationError,
     },
 };
 
@@ -141,10 +141,15 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub(crate) fn new(client: BasinClient, stream: StreamName, config: ProducerConfig) -> Self {
+    pub(crate) fn new(
+        client: BasinClient,
+        stream: StreamName,
+        encryption: Option<Arc<EncryptionConfig>>,
+        config: ProducerConfig,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(RECORD_BATCH_MAX.count);
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
-        let session = AppendSessionInternal::new(client, stream);
+        let session = AppendSessionInternal::new(client, stream, encryption);
         let terminal_err = Arc::new(OnceLock::new());
         let _handle = AbortOnDropHandle::new(tokio::spawn(Self::run(
             session,

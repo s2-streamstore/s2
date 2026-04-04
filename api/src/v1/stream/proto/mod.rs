@@ -81,7 +81,7 @@ impl From<types::stream::AppendAck> for AppendAck {
 
 impl From<record::SequencedRecord> for SequencedRecord {
     fn from(
-        record::SequencedRecord {
+        record::Sequenced {
             position: record::StreamPosition { seq_num, timestamp },
             record,
         }: record::SequencedRecord,

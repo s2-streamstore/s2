@@ -19,6 +19,10 @@ use http::{
 use rand::RngExt;
 use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::caps::RECORD_BATCH_MAX;
+/// Encryption algorithm.
+pub use s2_common::encryption::EncryptionAlgorithm;
+/// Encryption configuration for stream operations.
+pub use s2_common::encryption::EncryptionConfig;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.
@@ -385,40 +389,6 @@ impl RetryConfig {
     }
 }
 
-/// Encryption configuration.
-#[derive(Debug, Clone)]
-pub struct EncryptionConfig {
-    alg: Option<EncryptionAlgorithm>,
-    key: SecretString,
-}
-
-impl EncryptionConfig {
-    /// Create a new encryption configuration with the given base64-encoded 32-byte key.
-    pub fn new(key: impl Into<String>) -> Self {
-        Self {
-            alg: None,
-            key: key.into().into(),
-        }
-    }
-
-    /// Set the encryption algorithm. Required for appends, ignored for reads.
-    pub fn with_algorithm(self, alg: EncryptionAlgorithm) -> Self {
-        Self {
-            alg: Some(alg),
-            ..self
-        }
-    }
-
-    /// Get the configured encryption algorithm.
-    pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
-        self.alg
-    }
-
-    pub(crate) fn key(&self) -> &SecretString {
-        &self.key
-    }
-}
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Configuration for [`S2`](crate::S2).
@@ -431,7 +401,6 @@ pub struct S2Config {
     pub(crate) compression: Compression,
     pub(crate) user_agent: HeaderValue,
     pub(crate) insecure_skip_cert_verification: bool,
-    pub(crate) encryption: Option<EncryptionConfig>,
 }
 
 impl S2Config {
@@ -448,7 +417,6 @@ impl S2Config {
                 .parse()
                 .expect("valid user agent"),
             insecure_skip_cert_verification: false,
-            encryption: None,
         }
     }
 
@@ -512,14 +480,6 @@ impl S2Config {
         }
     }
 
-    /// Set the encryption configuration.
-    pub fn with_encryption(self, encryption: EncryptionConfig) -> Self {
-        Self {
-            encryption: Some(encryption),
-            ..self
-        }
-    }
-
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
     pub fn with_user_agent(self, user_agent: impl Into<String>) -> Result<Self, ValidationError> {
@@ -574,24 +534,6 @@ impl From<StorageClass> for api::config::StorageClass {
             StorageClass::Standard => api::config::StorageClass::Standard,
             StorageClass::Express => api::config::StorageClass::Express,
         }
-    }
-}
-
-/// Encryption algorithm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EncryptionAlgorithm {
-    /// AEGIS-256
-    Aegis256,
-    /// AES-256-GCM
-    Aes256Gcm,
-}
-
-impl fmt::Display for EncryptionAlgorithm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Aegis256 => "aegis-256",
-            Self::Aes256Gcm => "aes-256-gcm",
-        })
     }
 }
 

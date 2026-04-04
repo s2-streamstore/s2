@@ -66,10 +66,6 @@ pub enum CliError {
     ))]
     OperationWithTokenSource(OpKind, #[source] S2Error, TokenSource),
 
-    #[error("Invalid encryption key: {0}")]
-    #[diagnostic(help("Key must be a base64-encoded 32-byte value."))]
-    InvalidEncryptionKey(String),
-
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
     LiteServer(String),

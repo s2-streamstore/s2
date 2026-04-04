@@ -7,10 +7,13 @@ use std::{
 
 use axum_server::tls_rustls::RustlsConfig;
 use bytesize::ByteSize;
+use http::header::AUTHORIZATION;
+use s2_common::encryption::S2_ENCRYPTION_HEADER;
 use slatedb::object_store;
 use tokio::time::Instant;
 use tower_http::{
     cors::CorsLayer,
+    sensitive_headers::SetSensitiveRequestHeadersLayer,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::info;
@@ -152,12 +155,18 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         init::apply(&backend, spec).await?;
     }
 
-    let mut app = handlers::router().with_state(backend).layer(
-        TraceLayer::new_for_http()
-            .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
-            .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
-            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-    );
+    let mut app = handlers::router()
+        .with_state(backend)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+                .on_request(DefaultOnRequest::new().level(tracing::Level::DEBUG))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        )
+        .layer(SetSensitiveRequestHeadersLayer::new([
+            AUTHORIZATION,
+            S2_ENCRYPTION_HEADER.clone(),
+        ]));
 
     if !args.no_cors {
         app = app.layer(CorsLayer::very_permissive());

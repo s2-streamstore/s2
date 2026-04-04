@@ -4,6 +4,7 @@ mod basins;
 pub mod bgtasks;
 mod core;
 mod durability_notifier;
+mod protection;
 mod read;
 mod store;
 mod streamer;

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use s2_common::{
+    encryption::EncryptionConfig,
     record::{CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp},
     types::{
         basin::BasinName,
@@ -143,7 +144,7 @@ pub async fn append_payloads(
         fencing_token: None,
     };
     backend
-        .append(basin.clone(), stream.clone(), input)
+        .append(basin.clone(), stream.clone(), input, no_encryption())
         .await
         .expect("Failed to append payloads")
 }
@@ -158,6 +159,10 @@ pub async fn append_repeat(
     for _ in 0..count {
         append_payloads(backend, basin, stream, &[payload]).await;
     }
+}
+
+pub fn no_encryption() -> EncryptionConfig {
+    EncryptionConfig::None
 }
 
 pub async fn collect_records<S>(session: &mut Pin<Box<S>>) -> Vec<SequencedRecord>

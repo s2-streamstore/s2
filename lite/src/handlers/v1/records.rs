@@ -14,18 +14,14 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
-    encryption::{
-        self, EncryptionDirective, EncryptionError, parse_s2_encryption_header, stream_id_aad,
-    },
-    http::extract::Header,
+    encryption::EncryptionConfig,
+    http::extract::{Header, HeaderOpt},
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
     types::{
         ValidationError,
         basin::BasinName,
-        stream::{
-            AppendInput, ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
-        },
+        stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
     },
 };
 
@@ -40,44 +36,6 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::streams::records::CHECK_TAIL, get(check_tail))
         .route(super::paths::streams::records::READ, get(read))
         .route(super::paths::streams::records::APPEND, post(append))
-}
-
-struct EncryptionContext {
-    aad: Option<[u8; 32]>,
-    directive: Option<EncryptionDirective>,
-}
-
-impl EncryptionContext {
-    fn resolve(
-        headers: &http::HeaderMap,
-        basin: &BasinName,
-        stream: &StreamName,
-    ) -> Result<Self, ServiceError> {
-        let directive = parse_s2_encryption_header(headers)
-            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-        let aad = directive
-            .as_ref()
-            .map(|_| stream_id_aad(basin.as_ref(), stream.as_ref()));
-        Ok(Self { aad, directive })
-    }
-
-    fn aad(&self) -> &[u8] {
-        self.aad.as_ref().map_or(&[], |a| a.as_slice())
-    }
-
-    fn encrypt_input(&self, input: AppendInput) -> Result<AppendInput, EncryptionError> {
-        let Some(directive) = &self.directive else {
-            return Ok(input);
-        };
-        let alg = directive.algorithm().ok_or_else(|| {
-            EncryptionError::MalformedHeader("encryption algorithm required for append".to_owned())
-        })?;
-        encryption::encrypt_append_input(input, alg, directive.key(), self.aad())
-    }
-
-    fn decrypt_batch(&self, batch: ReadBatch) -> Result<ReadBatch, EncryptionError> {
-        encryption::decrypt_read_batch(batch, self.directive.as_ref(), self.aad())
-    }
 }
 
 fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceError> {
@@ -174,6 +132,7 @@ pub struct ReadArgs {
     basin: BasinName,
     #[from_request(via(Path))]
     stream: StreamName,
+    encryption: HeaderOpt<EncryptionConfig>,
     #[from_request(via(Query))]
     start: v1t::stream::ReadStart,
     #[from_request(via(Query))]
@@ -214,18 +173,17 @@ pub struct ReadArgs {
 ))]
 pub async fn read(
     State(backend): State<Backend>,
-    headers: http::HeaderMap,
     ReadArgs {
         basin,
         stream,
+        encryption: HeaderOpt(encryption),
         start,
         end,
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
-    let enc = EncryptionContext::resolve(&headers, &basin, &stream)?;
-
     let start: ReadStart = start.try_into()?;
+    let encryption = encryption.unwrap_or_default();
     match request {
         v1t::stream::ReadRequest::Unary {
             format,
@@ -233,10 +191,9 @@ pub async fn read(
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend
-                .read(basin.clone(), stream.clone(), start, end)
+                .read(basin.clone(), stream.clone(), start, end, encryption)
                 .await?;
             let batch = merge_read_session(session, end.wait).await?;
-            let batch = enc.decrypt_batch(batch).map_err(ReadError::Encryption)?;
             match response_mime {
                 JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
                     format, &batch,
@@ -255,7 +212,7 @@ pub async fn read(
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend
-                .read(basin.clone(), stream.clone(), start, end)
+                .read(basin.clone(), stream.clone(), start, end, encryption)
                 .await?;
             let events = async_stream::stream! {
                 let mut processed = CountOrBytes::ZERO;
@@ -267,15 +224,6 @@ pub async fn read(
                             yield v1t::stream::sse::ping_event();
                         },
                         Ok(ReadSessionOutput::Batch(batch)) => {
-                            let batch = match enc.decrypt_batch(batch) {
-                                Ok(batch) => batch,
-                                Err(err) => {
-                                    let (_, body) = ServiceError::from(ReadError::Encryption(err)).to_response().to_parts();
-                                    yield v1t::stream::sse::error_event(body);
-                                    errored = true;
-                                    break;
-                                }
-                            };
                             let Some(last_record) = batch.records.last() else {
                                 continue;
                             };
@@ -307,7 +255,7 @@ pub async fn read(
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let s2s_stream = backend
-                .read(basin.clone(), stream.clone(), start, end)
+                .read(basin.clone(), stream.clone(), start, end, encryption)
                 .await?
                 .map(move |msg| match msg {
                     Ok(ReadSessionOutput::Heartbeat(tail)) => Ok(v1t::stream::proto::ReadBatch {
@@ -315,7 +263,6 @@ pub async fn read(
                         tail: Some(tail.into()),
                     }),
                     Ok(ReadSessionOutput::Batch(batch)) => {
-                        let batch = enc.decrypt_batch(batch).map_err(ReadError::Encryption)?;
                         Ok(v1t::stream::proto::ReadBatch::from(batch))
                     }
                     Err(e) => Err(e),
@@ -381,6 +328,7 @@ pub struct AppendArgs {
     basin: BasinName,
     #[from_request(via(Path))]
     stream: StreamName,
+    encryption: HeaderOpt<EncryptionConfig>,
     request: v1t::stream::AppendRequest,
 }
 
@@ -410,24 +358,20 @@ pub struct AppendArgs {
 ))]
 pub async fn append(
     State(backend): State<Backend>,
-    headers: http::HeaderMap,
     AppendArgs {
         basin,
         stream,
+        encryption: HeaderOpt(encryption),
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
-    let enc = EncryptionContext::resolve(&headers, &basin, &stream)?;
-
+    let encryption = encryption.unwrap_or_default();
     match request {
         v1t::stream::AppendRequest::Unary {
             input,
             response_mime,
         } => {
-            let input = enc
-                .encrypt_input(input)
-                .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))?;
-            let ack = backend.append(basin, stream, input).await?;
+            let ack = backend.append(basin, stream, input, encryption).await?;
             match response_mime {
                 JsonOrProto::Json => {
                     let ack: v1t::stream::AppendAck = ack.into();
@@ -450,15 +394,7 @@ pub async fn append(
                 let mut err_tx = Some(err_tx);
                 while let Some(input) = inputs.next().await {
                     match input {
-                        Ok(input) => match enc.encrypt_input(input) {
-                            Ok(encrypted) => yield encrypted,
-                            Err(e) => {
-                                if let Some(tx) = err_tx.take() {
-                                    let _ = tx.send(ServiceError::Validation(ValidationError(e.to_string())));
-                                }
-                                break;
-                            }
-                        },
+                        Ok(input) => yield input,
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e.into());
@@ -470,7 +406,7 @@ pub async fn append(
             };
 
             let ack_stream = backend
-                .append_session(basin, stream, inputs)
+                .append_session(basin, stream, inputs, encryption)
                 .await?
                 .map(|res| {
                     res.map(v1t::stream::proto::AppendAck::from)

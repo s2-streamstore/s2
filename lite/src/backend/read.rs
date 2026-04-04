@@ -1,13 +1,17 @@
 use std::time::Duration;
 
-use futures::Stream;
+use futures::{Stream, StreamExt as _};
 use s2_common::{
     caps,
+    encryption::EncryptionConfig,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize as _, SeqNum, SequencedRecord, StreamPosition, Timestamp},
+    record::{
+        Metered, MeteredSize as _, SeqNum, Sequenced, StoredReadBatch, StoredRecord,
+        StreamPosition, Timestamp, decrypt_read_batch,
+    },
     types::{
         basin::BasinName,
-        stream::{ReadBatch, ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
+        stream::{ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
@@ -21,6 +25,11 @@ use crate::backend::{
     kv,
     stream_id::StreamId,
 };
+
+enum StoredReadSessionOutput {
+    Heartbeat(StreamPosition),
+    Batch(StoredReadBatch),
+}
 
 impl Backend {
     async fn read_start_seq_num(
@@ -86,7 +95,28 @@ impl Backend {
         stream: StreamName,
         start: ReadStart,
         end: ReadEnd,
+        encryption: EncryptionConfig,
     ) -> Result<impl Stream<Item = Result<ReadSessionOutput, ReadError>> + 'static, ReadError> {
+        let aad = super::protection::stream_id_aad(&basin, &stream);
+        let session = self.read_stored(basin, stream, start, end).await?;
+        Ok(session.map(move |output| match output {
+            Ok(StoredReadSessionOutput::Heartbeat(tail)) => Ok(ReadSessionOutput::Heartbeat(tail)),
+            Ok(StoredReadSessionOutput::Batch(batch)) => {
+                let batch = decrypt_read_batch(batch, &encryption, &aad)?;
+                Ok(ReadSessionOutput::Batch(batch))
+            }
+            Err(err) => Err(err),
+        }))
+    }
+
+    async fn read_stored(
+        &self,
+        basin: BasinName,
+        stream: StreamName,
+        start: ReadStart,
+        end: ReadEnd,
+    ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
+    {
         let client = self
             .streamer_client_with_auto_create::<ReadError>(&basin, &stream, |config| {
                 config.create_stream_on_read
@@ -163,7 +193,7 @@ impl Backend {
                                     .map_or(usize::MAX, |n| n.saturating_sub(records.len()))
                                     .min(caps::RECORD_BATCH_MAX.count),
                             );
-                            yield state.on_batch(ReadBatch {
+                            yield state.on_batch(StoredReadBatch {
                                 records: std::mem::replace(&mut records, new_records_buf),
                                 tail: None,
                             });
@@ -173,7 +203,7 @@ impl Backend {
                     }
 
                     if !records.is_empty() {
-                        yield state.on_batch(ReadBatch {
+                        yield state.on_batch(StoredReadBatch {
                             records,
                             tail: None,
                         });
@@ -192,7 +222,7 @@ impl Backend {
                             if state.wait_deadline_expired() {
                                 break;
                             }
-                            yield ReadSessionOutput::Heartbeat(state.tail);
+                            yield StoredReadSessionOutput::Heartbeat(state.tail);
                             while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                                 tokio::select! {
                                     biased;
@@ -203,7 +233,7 @@ impl Backend {
                                                 let tail = super::streamer::next_pos(&records);
                                                 let allowed_count = count_allowed_records(limit, end.until, &records);
                                                 if allowed_count > 0 {
-                                                    yield state.on_batch(ReadBatch {
+                                                    yield state.on_batch(StoredReadBatch {
                                                         records: records.drain(..allowed_count).collect(),
                                                         tail: Some(tail),
                                                     });
@@ -223,7 +253,7 @@ impl Backend {
                                         }
                                     }
                                     _ = new_heartbeat_sleep() => {
-                                        yield ReadSessionOutput::Heartbeat(state.tail);
+                                        yield StoredReadSessionOutput::Heartbeat(state.tail);
                                         Ok(())
                                     }
                                     _ = wait_sleep_until(state.wait_deadline) => {
@@ -314,7 +344,7 @@ impl ReadSessionState {
             .is_some_and(|deadline| deadline <= Instant::now())
     }
 
-    fn on_batch(&mut self, batch: ReadBatch) -> ReadSessionOutput {
+    fn on_batch(&mut self, batch: StoredReadBatch) -> StoredReadSessionOutput {
         if let Some(tail) = batch.tail {
             self.tail = tail;
         }
@@ -329,14 +359,14 @@ impl ReadSessionState {
         self.start_seq_num = last_record.position.seq_num + 1;
         self.limit = limit.remaining(count, bytes);
         self.reset_wait_deadline();
-        ReadSessionOutput::Batch(batch)
+        StoredReadSessionOutput::Batch(batch)
     }
 }
 
 fn count_allowed_records(
     limit: ReadLimit,
     until: ReadUntil,
-    records: &[Metered<SequencedRecord>],
+    records: &[Metered<Sequenced<StoredRecord>>],
 ) -> usize {
     let mut acc_size = 0;
     let mut acc_count = 0;
@@ -378,6 +408,7 @@ mod tests {
     use bytesize::ByteSize;
     use futures::StreamExt;
     use s2_common::{
+        encryption::EncryptionConfig,
         read_extent::{ReadLimit, ReadUntil},
         types::{
             basin::BasinName,
@@ -488,7 +519,7 @@ mod tests {
             fencing_token: None,
         };
         let ack = backend
-            .append(basin.clone(), stream.clone(), input)
+            .append(basin.clone(), stream.clone(), input, EncryptionConfig::None)
             .await
             .unwrap();
         assert!(ack.end.seq_num > 0);
@@ -514,7 +545,10 @@ mod tests {
             until: ReadUntil::Unbounded,
             wait: None,
         };
-        let session = backend.read(basin, stream, start, end).await.unwrap();
+        let session = backend
+            .read(basin, stream, start, end, EncryptionConfig::None)
+            .await
+            .unwrap();
         let records: Vec<_> = tokio::time::timeout(
             Duration::from_secs(2),
             futures::StreamExt::collect::<Vec<_>>(session),
@@ -561,7 +595,10 @@ mod tests {
             wait: Some(wait),
         };
 
-        let session = backend.read(basin, stream, start, end).await.unwrap();
+        let session = backend
+            .read(basin, stream, start, end, EncryptionConfig::None)
+            .await
+            .unwrap();
         let started = Instant::now();
         let outputs = tokio::time::timeout(Duration::from_millis(150), session.collect::<Vec<_>>())
             .await
@@ -616,7 +653,13 @@ mod tests {
             wait: Some(wait),
         };
         let session = backend
-            .read(basin.clone(), stream.clone(), start, end)
+            .read(
+                basin.clone(),
+                stream.clone(),
+                start,
+                end,
+                EncryptionConfig::None,
+            )
             .await
             .unwrap();
         let mut session = Box::pin(session);
@@ -652,7 +695,7 @@ mod tests {
                 fencing_token: None,
             };
             let ack = backend
-                .append(basin.clone(), stream.clone(), input)
+                .append(basin.clone(), stream.clone(), input, EncryptionConfig::None)
                 .await
                 .unwrap();
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
@@ -721,7 +764,12 @@ mod tests {
             fencing_token: None,
         };
         backend
-            .append(basin.clone(), stream.clone(), initial_input)
+            .append(
+                basin.clone(),
+                stream.clone(),
+                initial_input,
+                EncryptionConfig::None,
+            )
             .await
             .unwrap();
 
@@ -735,7 +783,13 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .read(basin.clone(), stream.clone(), start, end)
+            .read(
+                basin.clone(),
+                stream.clone(),
+                start,
+                end,
+                EncryptionConfig::None,
+            )
             .await
             .unwrap();
         let mut session = Box::pin(session);
@@ -776,7 +830,10 @@ mod tests {
             match_seq_num: None,
             fencing_token: None,
         };
-        backend.append(basin, stream, follow_input).await.unwrap();
+        backend
+            .append(basin, stream, follow_input, EncryptionConfig::None)
+            .await
+            .unwrap();
 
         let next = session
             .as_mut()

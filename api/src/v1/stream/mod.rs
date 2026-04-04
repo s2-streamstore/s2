@@ -288,7 +288,7 @@ pub struct SequencedRecord {
 impl SequencedRecord {
     pub fn encode(
         format: Format,
-        record::SequencedRecord {
+        record::Sequenced {
             position: record::StreamPosition { seq_num, timestamp },
             record,
         }: record::SequencedRecord,

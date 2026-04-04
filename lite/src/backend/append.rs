@@ -6,6 +6,7 @@ use std::{
 
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
+    encryption::EncryptionConfig,
     record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
@@ -15,7 +16,10 @@ use s2_common::{
 use tokio::sync::oneshot;
 
 use super::Backend;
-use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
+use crate::backend::{
+    error::{AppendError, AppendErrorInternal, StorageError},
+    streamer::AppendProtection,
+};
 
 impl Backend {
     pub async fn append(
@@ -23,13 +27,22 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         input: AppendInput,
+        encryption: EncryptionConfig,
     ) -> Result<AppendAck, AppendError> {
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
-        let ack = client.append_permit(input).await?.submit().await?;
+        let protection = AppendProtection::new(
+            encryption,
+            super::protection::stream_id_aad(&basin, &stream),
+        );
+        let ack = client
+            .append_permit_with_protection(input, protection)
+            .await?
+            .submit()
+            .await?;
         Ok(ack)
     }
 
@@ -38,12 +51,17 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         inputs: impl Stream<Item = AppendInput>,
+        encryption: EncryptionConfig,
     ) -> Result<impl Stream<Item = Result<AppendAck, AppendError>>, AppendError> {
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
+        let protection = AppendProtection::new(
+            encryption,
+            super::protection::stream_id_aad(&basin, &stream),
+        );
         let session = SessionHandle::new();
         Ok(async_stream::stream! {
             tokio::pin!(inputs);
@@ -52,7 +70,9 @@ impl Backend {
             loop {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
-                        permit_opt = Some(Box::pin(client.append_permit(input)));
+                        permit_opt = Some(Box::pin(
+                            client.append_permit_with_protection(input, protection.clone()),
+                        ));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
                         permit_opt = None;

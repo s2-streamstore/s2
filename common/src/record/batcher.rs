@@ -65,7 +65,7 @@ where
         while self.buffered_error.is_none() {
             match self.record_iterator.next() {
                 Some(Ok((position, data))) => {
-                    let record = match Metered::try_from(data) {
+                    let record = match Metered::<crate::record::Record>::try_from(data) {
                         Ok(record) => record.sequenced(position),
                         Err(err) => {
                             self.buffered_error = Some(err);
@@ -168,7 +168,8 @@ mod tests {
         caps,
         read_extent::{ReadLimit, ReadUntil},
         record::{
-            CommandRecord, Encodable, MeteredSize, Record, SeqNum, SequencedRecord, Timestamp,
+            CommandRecord, Encodable, MeteredSize, Record, SeqNum, Sequenced, SequencedRecord,
+            StoredRecord, Timestamp,
         },
     };
 
@@ -182,8 +183,13 @@ mod tests {
     ) -> impl Iterator<Item = Result<(StreamPosition, Bytes), InternalRecordError>> {
         records
             .into_iter()
-            .map(|SequencedRecord { position, record }| {
-                (position, Metered::from(record).as_ref().to_bytes())
+            .map(|Sequenced { position, record }| {
+                (
+                    position,
+                    Metered::from(StoredRecord::from(record))
+                        .as_ref()
+                        .to_bytes(),
+                )
             })
             .map(Ok)
     }

@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
-use s2_common::record::{Encodable, Metered, Record, StreamPosition};
+use s2_common::record::{Encodable, Metered, StoredRecord, StreamPosition};
 
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
 use crate::backend::stream_id::StreamId;
@@ -33,11 +33,11 @@ pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, StreamPosition), Deseria
     ))
 }
 
-pub fn ser_value(record: Metered<&Record>) -> Bytes {
+pub fn ser_value(record: impl Encodable) -> Bytes {
     record.to_bytes()
 }
 
-pub fn deser_value(bytes: Bytes) -> Result<Metered<Record>, DeserializationError> {
+pub fn deser_value(bytes: Bytes) -> Result<Metered<StoredRecord>, DeserializationError> {
     Metered::try_from(bytes).map_err(|e| invalid_value_err("record", e))
 }
 
@@ -79,7 +79,7 @@ mod tests {
             header_value in prop::collection::vec(any::<u8>(), 0..50),
             body in prop::collection::vec(any::<u8>(), 0..200),
         ) {
-            use s2_common::record::{Header, MeteredSize, Record};
+            use s2_common::record::{Header, MeteredSize, Record, StoredRecord};
 
             let header_name = Bytes::from(header_name);
             let header_value = Bytes::from(header_value);
@@ -94,8 +94,12 @@ mod tests {
             let metered_record: s2_common::record::Metered<Record> = record.into();
             let original_size = metered_record.metered_size();
 
-            let bytes = super::ser_value(metered_record.as_ref());
+            let bytes = super::ser_value(
+                s2_common::record::Metered::from(StoredRecord::from(metered_record.into_inner())).as_ref()
+            );
             let decoded = super::deser_value(bytes).unwrap();
+            let decoded: s2_common::record::Metered<s2_common::record::Record> =
+                super::ser_value(decoded.as_ref()).try_into().unwrap();
 
             prop_assert_eq!(original_size, decoded.metered_size());
             let (decoded_headers, decoded_body) = decoded.into_inner().into_parts();

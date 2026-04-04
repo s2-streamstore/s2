@@ -151,10 +151,8 @@ async fn run() -> Result<(), CliError> {
     }
 
     let cli_config = load_cli_config()?;
-    let mut sdk_config = sdk_config(&cli_config)?;
-    if let Some(enc) = resolve_command_encryption(&command)? {
-        sdk_config = sdk_config.with_encryption(enc);
-    }
+    let sdk_config = sdk_config(&cli_config)?;
+    let command_encryption = resolve_command_encryption(&command)?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
     let token_source = access_token_source(&cli_config);
     let result: Result<(), CliError> = (async {
@@ -384,6 +382,7 @@ async fn run() -> Result<(), CliError> {
                 &s2,
                 record_stream,
                 args.uri,
+                command_encryption.as_ref(),
                 args.fencing_token,
                 args.match_seq_num,
                 *args.linger,
@@ -426,7 +425,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Read(args) => {
-            let mut batches = ops::read(&s2, &args).await?;
+            let mut batches = ops::read(&s2, &args, command_encryption.as_ref()).await?;
             let mut writer = args
                 .output
                 .writer()
@@ -488,7 +487,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Tail(args) => {
-            let mut records = ops::tail(&s2, &args).await?;
+            let mut records = ops::tail(&s2, &args, command_encryption.as_ref()).await?;
             let mut writer = args
                 .output
                 .writer()
@@ -803,69 +802,71 @@ fn print_metrics(metrics: &[Metric]) {
 fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConfig>, CliError> {
     match command {
         Command::Append(a) => resolve_encryption(&a.encryption),
-        Command::Read(a) => resolve_decryption(&a.encryption),
-        Command::Tail(a) => resolve_decryption(&a.encryption),
+        Command::Read(a) => resolve_encryption(&a.encryption),
+        Command::Tail(a) => resolve_encryption(&a.encryption),
         _ => Ok(None),
     }
 }
 
-fn resolve_key(
-    key: &Option<String>,
-    key_file: &Option<std::path::PathBuf>,
+fn invalid_encryption_args(message: impl Into<String>) -> CliError {
+    CliError::InvalidArgs(miette::miette!("{}", message.into()))
+}
+
+fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
+    let Some(spec) = resolve_encryption_spec(&args.encryption, &args.encryption_file)? else {
+        return Ok(None);
+    };
+    Ok(Some(parse_encryption_config(&spec)?))
+}
+
+fn resolve_encryption_spec(
+    encryption: &Option<String>,
+    encryption_file: &Option<std::path::PathBuf>,
 ) -> Result<Option<String>, CliError> {
-    match (key, key_file) {
-        (Some(k), _) => Ok(Some(k.clone())),
+    match (encryption, encryption_file) {
+        (Some(spec), _) => Ok(Some(spec.clone())),
         (_, Some(path)) => {
             let contents = std::fs::read_to_string(path).map_err(|e| {
-                CliError::InvalidEncryptionKey(format!("cannot read key file: {e}"))
+                invalid_encryption_args(format!("cannot read encryption spec file: {e}"))
             })?;
-            Ok(Some(
-                contents.lines().next().unwrap_or("").trim().to_owned(),
-            ))
+            Ok(Some(contents.trim().to_owned()))
         }
         _ => Ok(None),
     }
 }
 
-fn validate_base64_key(key: &str) -> Result<(), CliError> {
-    use base64ct::{Base64, Encoding};
-    let bytes = Base64::decode_vec(key)
-        .map_err(|_| CliError::InvalidEncryptionKey("key is not valid base64".to_owned()))?;
-    if bytes.len() != 32 {
-        return Err(CliError::InvalidEncryptionKey(format!(
-            "key must be exactly 32 bytes, got {} bytes",
-            bytes.len()
-        )));
+fn parse_encryption_config(spec: &str) -> Result<EncryptionConfig, CliError> {
+    spec.parse::<EncryptionConfig>()
+        .map_err(|e| invalid_encryption_args(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY_B64: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
+
+    #[test]
+    fn parse_encryption_config_none() {
+        let config = parse_encryption_config("none").unwrap();
+        assert!(matches!(config, EncryptionConfig::None));
     }
-    Ok(())
-}
 
-fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    resolve_encryption_config(
-        &args.encryption_key,
-        &args.encryption_key_file,
-        args.encryption_algorithm.map(Into::into),
-    )
-}
+    #[test]
+    fn parse_encryption_config_aegis() {
+        let config = parse_encryption_config(&format!("aegis-256; {KEY_B64}")).unwrap();
+        assert!(matches!(config, EncryptionConfig::Aegis256(_)));
+    }
 
-fn resolve_decryption(args: &cli::DecryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    resolve_encryption_config(&args.encryption_key, &args.encryption_key_file, None)
-}
+    #[test]
+    fn parse_encryption_config_rejects_key_without_algorithm() {
+        let err = parse_encryption_config(KEY_B64).unwrap_err();
+        assert!(matches!(err, CliError::InvalidArgs(_)));
+    }
 
-fn resolve_encryption_config(
-    key: &Option<String>,
-    key_file: &Option<std::path::PathBuf>,
-    alg: Option<s2_sdk::types::EncryptionAlgorithm>,
-) -> Result<Option<EncryptionConfig>, CliError> {
-    let Some(key) = resolve_key(key, key_file)? else {
-        return Ok(None);
-    };
-
-    validate_base64_key(&key)?;
-
-    let config = match alg {
-        Some(alg) => EncryptionConfig::new(key).with_algorithm(alg),
-        None => EncryptionConfig::new(key),
-    };
-    Ok(Some(config))
+    #[test]
+    fn parse_encryption_config_rejects_invalid_key() {
+        let err = parse_encryption_config("aes-256-gcm; not-valid-base64").unwrap_err();
+        assert!(matches!(err, CliError::InvalidArgs(_)));
+    }
 }

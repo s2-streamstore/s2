@@ -12,7 +12,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, EncryptionAlgorithm, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StorageClass, StreamConfig, StreamMatcher,
     },
@@ -470,45 +470,26 @@ pub struct AppendArgs {
 }
 
 #[derive(Args, Debug, Clone, Default)]
-#[group(multiple = true)]
 pub struct EncryptionArgs {
-    /// Base64-encoded 32-byte encryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
+    /// Encryption spec. Use `none` or `<alg>; <base64-key>`.
+    /// Alternatively, set `S2_ENCRYPTION`.
     #[arg(
         long,
-        env = "S2_ENCRYPTION_KEY",
+        env = "S2_ENCRYPTION",
         hide_env_values = true,
-        group = "encryption_key_source",
-        requires = "encryption_algorithm"
+        value_name = "SPEC",
+        group = "encryption_source"
     )]
-    pub encryption_key: Option<String>,
+    pub encryption: Option<String>,
 
-    /// Read encryption key from file.
+    /// Read an encryption spec from file.
     #[arg(
         long,
-        conflicts_with = "encryption_key",
-        group = "encryption_key_source",
-        requires = "encryption_algorithm"
+        conflicts_with = "encryption",
+        value_name = "FILE",
+        group = "encryption_source"
     )]
-    pub encryption_key_file: Option<PathBuf>,
-
-    /// Encryption algorithm.
-    #[arg(long, value_enum, requires = "encryption_key_source")]
-    pub encryption_algorithm: Option<EncryptionAlgorithm>,
-}
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct DecryptionArgs {
-    /// Base64-encoded 32-byte decryption key. Alternatively, set S2_ENCRYPTION_KEY env var.
-    #[arg(
-        long = "encryption-key",
-        env = "S2_ENCRYPTION_KEY",
-        hide_env_values = true
-    )]
-    pub encryption_key: Option<String>,
-
-    /// Read decryption key from file.
-    #[arg(long = "encryption-key-file", conflicts_with = "encryption_key")]
-    pub encryption_key_file: Option<PathBuf>,
+    pub encryption_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -562,7 +543,7 @@ pub struct ReadArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: DecryptionArgs,
+    pub encryption: EncryptionArgs,
 }
 
 #[derive(Args, Debug)]
@@ -589,7 +570,7 @@ pub struct TailArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: DecryptionArgs,
+    pub encryption: EncryptionArgs,
 }
 
 #[derive(Args, Debug)]

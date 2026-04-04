@@ -1,18 +1,22 @@
 mod batcher;
 mod command;
+mod encrypted;
 mod envelope;
 mod fencing;
 mod metering;
+mod protection;
 
 pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
+pub use encrypted::{EncryptedRecord, EncryptedRecordError};
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
 use envelope::HeaderValidationError;
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
 pub use metering::{Metered, MeteredSize};
+pub use protection::{decrypt_read_batch, to_stored_records};
 
 use crate::deep_size::DeepSize;
 
@@ -81,6 +85,7 @@ impl DeepSize for Header {
 pub enum RecordType {
     Command = 1,
     Envelope = 2,
+    EncryptedEnvelope = 3,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -109,19 +114,6 @@ pub fn try_metered_size(record_bytes: &[u8]) -> Result<u32, &'static str> {
             .get(1..1 + magic_byte.metered_size_varlen as usize)
             .ok_or("byte range doesn't include bytes for metered size")?,
     ))
-}
-
-impl MeteredSize for Record {
-    fn metered_size(&self) -> usize {
-        8 + (match self {
-            Record::Command(command) => 2 + command.op().to_id().len() + command.payload().len(),
-            Record::Envelope(envelope) => {
-                (2 * envelope.headers().len())
-                    + envelope.headers().deep_size()
-                    + envelope.body().len()
-            }
-        })
-    }
 }
 
 impl TryFrom<u8> for MagicByte {
@@ -163,6 +155,19 @@ impl DeepSize for Record {
     }
 }
 
+impl MeteredSize for Record {
+    fn metered_size(&self) -> usize {
+        8 + match self {
+            Self::Command(command) => 2 + command.op().to_id().len() + command.payload().len(),
+            Self::Envelope(envelope) => {
+                (2 * envelope.headers().len())
+                    + envelope.headers().deep_size()
+                    + envelope.body().len()
+            }
+        }
+    }
+}
+
 impl Record {
     pub fn try_from_parts(headers: Vec<Header>, body: Bytes) -> Result<Self, PublicRecordError> {
         if headers.len() == 1 {
@@ -180,7 +185,7 @@ impl Record {
     }
 
     pub fn sequenced(self, position: StreamPosition) -> SequencedRecord {
-        SequencedRecord {
+        Sequenced {
             position,
             record: self,
         }
@@ -201,6 +206,75 @@ impl Record {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum StoredRecord {
+    Plaintext(Record),
+    Encrypted {
+        metered_size: usize,
+        record: EncryptedRecord,
+    },
+}
+
+impl StoredRecord {
+    pub(crate) fn encrypted(record: EncryptedRecord, metered_size: usize) -> Self {
+        Self::Encrypted {
+            metered_size,
+            record,
+        }
+    }
+
+    fn record_type(&self) -> RecordType {
+        match self {
+            Self::Plaintext(Record::Command(_)) => RecordType::Command,
+            Self::Plaintext(Record::Envelope(_)) => RecordType::Envelope,
+            Self::Encrypted { .. } => RecordType::EncryptedEnvelope,
+        }
+    }
+
+    fn encode_body_size(&self) -> usize {
+        match self {
+            Self::Plaintext(Record::Command(record)) => record.encoded_size(),
+            Self::Plaintext(Record::Envelope(record)) => record.encoded_size(),
+            Self::Encrypted { record, .. } => record.encoded_size(),
+        }
+    }
+
+    fn encode_body_into(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Plaintext(Record::Command(record)) => record.encode_into(buf),
+            Self::Plaintext(Record::Envelope(record)) => record.encode_into(buf),
+            Self::Encrypted { record, .. } => record.encode_into(buf),
+        }
+    }
+}
+
+impl DeepSize for StoredRecord {
+    fn deep_size(&self) -> usize {
+        match self {
+            Self::Plaintext(record) => record.deep_size(),
+            Self::Encrypted {
+                metered_size,
+                record,
+            } => metered_size.deep_size() + record.deep_size(),
+        }
+    }
+}
+
+impl MeteredSize for StoredRecord {
+    fn metered_size(&self) -> usize {
+        match self {
+            Self::Plaintext(record) => record.metered_size(),
+            Self::Encrypted { metered_size, .. } => *metered_size,
+        }
+    }
+}
+
+impl From<Record> for StoredRecord {
+    fn from(value: Record) -> Self {
+        Self::Plaintext(value)
+    }
+}
+
 pub fn decode_if_command_record(
     record: &[u8],
 ) -> Result<Option<CommandRecord>, InternalRecordError> {
@@ -217,7 +291,7 @@ pub fn decode_if_command_record(
             }
             Ok(Some(CommandRecord::try_from(&record[offset..])?))
         }
-        RecordType::Envelope => Ok(None),
+        RecordType::Envelope | RecordType::EncryptedEnvelope => Ok(None),
     }
 }
 
@@ -235,13 +309,9 @@ pub trait Encodable {
     fn encode_into(&self, buf: &mut impl BufMut);
 }
 
-impl Encodable for Metered<&Record> {
+impl Encodable for Metered<&StoredRecord> {
     fn encoded_size(&self) -> usize {
-        1 + self.magic_byte().metered_size_varlen as usize
-            + match &**self {
-                Record::Command(r) => r.encoded_size(),
-                Record::Envelope(r) => r.encoded_size(),
-            }
+        1 + self.magic_byte().metered_size_varlen as usize + self.inner.encode_body_size()
     }
 
     fn encode_into(&self, buf: &mut impl BufMut) {
@@ -251,59 +321,67 @@ impl Encodable for Metered<&Record> {
             self.metered_size() as u64,
             magic_byte.metered_size_varlen as usize,
         );
-        match &**self {
-            Record::Command(r) => r.encode_into(buf),
-            Record::Envelope(r) => r.encode_into(buf),
-        }
+        self.inner.encode_body_into(buf);
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SequencedRecord {
+pub struct Sequenced<T> {
     pub position: StreamPosition,
-    pub record: Record,
+    pub record: T,
 }
 
-impl MeteredSize for SequencedRecord {
+pub type SequencedRecord = Sequenced<Record>;
+pub type StoredSequencedRecord = Sequenced<StoredRecord>;
+
+impl<T> MeteredSize for Sequenced<T>
+where
+    T: MeteredSize,
+{
     fn metered_size(&self) -> usize {
         self.record.metered_size()
     }
 }
 
-impl DeepSize for SequencedRecord {
+impl<T> DeepSize for Sequenced<T>
+where
+    T: DeepSize,
+{
     fn deep_size(&self) -> usize {
         self.position.deep_size() + self.record.deep_size()
     }
 }
 
-impl Metered<Record> {
-    pub fn sequenced(self, position: StreamPosition) -> Metered<SequencedRecord> {
+impl<T> Metered<T>
+where
+    T: MeteredSize,
+{
+    pub fn sequenced(self, position: StreamPosition) -> Metered<Sequenced<T>> {
         Metered {
-            size: self.metered_size(),
-            inner: self.inner.sequenced(position),
+            size: self.size,
+            inner: Sequenced {
+                position,
+                record: self.inner,
+            },
         }
     }
 }
 
-impl Metered<&Record> {
+impl Metered<&StoredRecord> {
     fn magic_byte(&self) -> MagicByte {
         let metered_size = self.metered_size();
         let metered_size_varlen = 8 - (metered_size.leading_zeros() / 8) as u8;
         if metered_size_varlen > 3 {
             panic!("illegal metered size varlen {metered_size} for record")
         }
-        let record_type = match self.inner {
-            Record::Command(_) => RecordType::Command,
-            Record::Envelope(_) => RecordType::Envelope,
-        };
         MagicByte {
-            record_type,
+            record_type: self.inner.record_type(),
             metered_size_varlen,
         }
     }
 }
 
-impl TryFrom<Bytes> for Metered<Record> {
+impl TryFrom<Bytes> for Metered<StoredRecord> {
     type Error = InternalRecordError;
 
     fn try_from(mut buf: Bytes) -> Result<Self, Self::Error> {
@@ -320,17 +398,58 @@ impl TryFrom<Bytes> for Metered<Record> {
         Ok(Self {
             size: metered_size,
             inner: match magic_byte.record_type {
-                RecordType::Command => Record::Command(CommandRecord::try_from(buf.as_ref())?),
-                RecordType::Envelope => Record::Envelope(EnvelopeRecord::try_from(buf)?),
+                RecordType::Command => {
+                    StoredRecord::Plaintext(Record::Command(CommandRecord::try_from(buf.as_ref())?))
+                }
+                RecordType::Envelope => {
+                    StoredRecord::Plaintext(Record::Envelope(EnvelopeRecord::try_from(buf)?))
+                }
+                RecordType::EncryptedEnvelope => StoredRecord::encrypted(
+                    EncryptedRecord::try_from(buf).map_err(|err| match err {
+                        EncryptedRecordError::Truncated => {
+                            InternalRecordError::Truncated("EncryptedRecord")
+                        }
+                        EncryptedRecordError::InvalidSuiteId(_) => {
+                            InternalRecordError::InvalidValue(
+                                "EncryptedRecord",
+                                "invalid ciphertext suite id",
+                            )
+                        }
+                        EncryptedRecordError::InvalidLayout => InternalRecordError::InvalidValue(
+                            "EncryptedRecord",
+                            "invalid ciphertext layout",
+                        ),
+                    })?,
+                    metered_size,
+                ),
             },
         })
     }
 }
 
-impl Metered<SequencedRecord> {
-    pub fn parts(&self) -> (StreamPosition, Metered<&Record>) {
+impl TryFrom<Bytes> for Metered<Record> {
+    type Error = InternalRecordError;
+
+    fn try_from(buf: Bytes) -> Result<Self, Self::Error> {
+        let stored = Metered::<StoredRecord>::try_from(buf)?;
+        let size = stored.size;
+        let inner = match stored.inner {
+            StoredRecord::Plaintext(record) => record,
+            StoredRecord::Encrypted { .. } => {
+                return Err(InternalRecordError::InvalidValue(
+                    "RecordType",
+                    "encrypted envelope requires decryption",
+                ));
+            }
+        };
+        Ok(Self { size, inner })
+    }
+}
+
+impl<T> Metered<Sequenced<T>> {
+    pub fn parts(&self) -> (StreamPosition, Metered<&T>) {
         (
-            self.position,
+            self.inner.position,
             Metered {
                 size: self.size,
                 inner: &self.inner.record,
@@ -338,14 +457,30 @@ impl Metered<SequencedRecord> {
         )
     }
 
-    pub fn into_parts(self) -> (StreamPosition, Metered<Record>) {
+    pub fn into_parts(self) -> (StreamPosition, Metered<T>) {
         (
-            self.position,
+            self.inner.position,
             Metered {
                 size: self.size,
                 inner: self.inner.record,
             },
         )
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct StoredReadBatch {
+    pub records: Metered<Vec<StoredSequencedRecord>>,
+    pub tail: Option<StreamPosition>,
+}
+
+impl std::fmt::Debug for StoredReadBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredReadBatch")
+            .field("num_records", &self.records.len())
+            .field("metered_size", &self.records.metered_size())
+            .field("tail", &self.tail)
+            .finish()
     }
 }
 
@@ -387,7 +522,9 @@ mod test {
         ) {
             let record = Record::try_from_parts(headers, body).unwrap();
             let metered_record: Metered<Record> = record.clone().into();
-            let encoded_record = metered_record.as_ref().to_bytes();
+            let encoded_record = Metered::from(StoredRecord::from(record.clone()))
+                .as_ref()
+                .to_bytes();
             let decoded_record = Metered::try_from(encoded_record).unwrap();
             prop_assert_eq!(&decoded_record, &metered_record);
             let sequenced = decoded_record.sequenced(StreamPosition { seq_num, timestamp });
@@ -404,10 +541,30 @@ mod test {
             body in bytes_strategy(true),
         ) {
             let record = Record::try_from_parts(headers.clone(), body.clone()).unwrap();
-            let encoded_record = Metered::from(&record).to_bytes();
+            let encoded_record = Metered::from(StoredRecord::from(record.clone()))
+                .as_ref()
+                .to_bytes();
             assert_eq!(record.metered_size(), try_metered_size(encoded_record.as_ref()).unwrap() as usize);
         }
     );
+
+    #[test]
+    fn roundtrip_encrypted_stored_record() {
+        let record = StoredRecord::encrypted(
+            EncryptedRecord::try_from_parts(
+                crate::types::config::EncryptionAlgorithm::Aes256Gcm,
+                Bytes::from_static(b"0123456789ab"),
+                Bytes::from_static(b"ciphertext"),
+                Bytes::from_static(b"0123456789abcdef"),
+            )
+            .unwrap(),
+            123,
+        );
+        let metered_record: Metered<StoredRecord> = record.clone().into();
+        let encoded_record = metered_record.as_ref().to_bytes();
+        let decoded_record = Metered::try_from(encoded_record).unwrap();
+        assert_eq!(decoded_record, metered_record);
+    }
 
     #[test]
     fn empty_header_name_solo() {
@@ -464,7 +621,7 @@ mod test {
                 assert_eq!(cmd.op().to_id(), op);
                 assert_eq!(cmd.payload().as_ref(), payload);
             }
-            Record::Envelope(e) => panic!("Command expected, got Envelope: {e:?}"),
+            other => panic!("Command expected, got {other:?}"),
         }
         let sequenced_record = record.sequenced(StreamPosition {
             seq_num: 42,
@@ -488,6 +645,7 @@ mod test {
     #[rstest]
     #[case(0b0000_0010, MagicByte { record_type: RecordType::Envelope, metered_size_varlen: 1})]
     #[case(0b0001_0010, MagicByte { record_type: RecordType::Envelope, metered_size_varlen: 3})]
+    #[case(0b0000_0011, MagicByte { record_type: RecordType::EncryptedEnvelope, metered_size_varlen: 1})]
     #[case(0b0000_1001, MagicByte { record_type: RecordType::Command, metered_size_varlen: 2})]
     #[should_panic(expected = "invalid record type ordinal")]
     #[case(0b0000_1101, MagicByte { record_type: RecordType::Command, metered_size_varlen: 2})]

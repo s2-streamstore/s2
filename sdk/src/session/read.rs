@@ -1,4 +1,4 @@
-use std::{pin::Pin, time::Duration};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use async_stream::{stream, try_stream};
 use futures::StreamExt;
@@ -9,7 +9,7 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
-    types::{MeteredBytes, ReadBatch, S2Error, StreamName},
+    types::{EncryptionConfig, MeteredBytes, ReadBatch, S2Error, StreamName},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,7 @@ pub type Streaming<R> = Pin<Box<dyn Send + futures::Stream<Item = Result<R, Read
 pub async fn read_session(
     client: BasinClient,
     name: StreamName,
+    encryption: Option<Arc<EncryptionConfig>>,
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
@@ -56,6 +57,7 @@ pub async fn read_session(
         match session_inner(
             client.clone(),
             name.clone(),
+            encryption.clone(),
             start.clone(),
             end.clone(),
             ignore_command_records,
@@ -84,6 +86,7 @@ pub async fn read_session(
                 match session_inner(
                     client.clone(),
                     name.clone(),
+                    encryption.clone(),
                     start.clone(),
                     end.clone(),
                     ignore_command_records,
@@ -150,11 +153,14 @@ pub async fn read_session(
 async fn session_inner(
     client: BasinClient,
     name: StreamName,
+    encryption: Option<Arc<EncryptionConfig>>,
     start: ReadStart,
     end: ReadEnd,
     ignore_command_records: bool,
 ) -> Result<Streaming<ReadBatch>, ReadSessionError> {
-    let mut batches = client.read_session(&name, start, end).await?;
+    let mut batches = client
+        .read_session(&name, start, end, encryption.as_deref())
+        .await?;
     Ok(Box::pin(try_stream! {
         loop {
             match timeout(Duration::from_secs(20), batches.next()).await {

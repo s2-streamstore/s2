@@ -260,7 +260,9 @@ async fn test_reconfigure_stream_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend.append(basin_name, stream_name, input).await;
+    let result = backend
+        .append(basin_name, stream_name, input, no_encryption())
+        .await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -303,7 +305,9 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend.append(basin_name, stream_name, input).await;
+    let result = backend
+        .append(basin_name, stream_name, input, no_encryption())
+        .await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -430,7 +434,12 @@ async fn test_delete_stream_blocks_data_operations() {
         fencing_token: None,
     };
     let append_result = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
+        .append(
+            basin_name.clone(),
+            stream_name.clone(),
+            input,
+            no_encryption(),
+        )
         .await;
     assert!(matches!(
         append_result,
@@ -442,7 +451,9 @@ async fn test_delete_stream_blocks_data_operations() {
         clamp: false,
     };
     let end = ReadEnd::default();
-    let read_result = backend.read(basin_name, stream_name, start, end).await;
+    let read_result = backend
+        .read(basin_name, stream_name, start, end, no_encryption())
+        .await;
     assert!(matches!(
         read_result,
         Err(ReadError::StreamDeletionPending(_))
