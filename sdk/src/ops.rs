@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use futures::StreamExt;
 
 #[cfg(feature = "_hidden")]
@@ -388,14 +386,14 @@ impl S2Basin {
 pub struct S2Stream {
     client: BasinClient,
     name: StreamName,
-    encryption: Option<Arc<EncryptionConfig>>,
+    encryption: Option<EncryptionConfig>,
 }
 
 impl S2Stream {
     /// Set the encryption configuration for this stream handle.
     pub fn with_encryption(self, encryption: EncryptionConfig) -> Self {
         Self {
-            encryption: Some(Arc::new(encryption)),
+            encryption: Some(encryption),
             ..self
         }
     }
@@ -413,7 +411,7 @@ impl S2Stream {
             .append(
                 &self.name,
                 input.into(),
-                self.encryption.as_deref(),
+                self.encryption.as_ref(),
                 self.client.config.retry.append_retry_policy,
             )
             .await?;
@@ -428,7 +426,7 @@ impl S2Stream {
                 &self.name,
                 input.start.into(),
                 input.stop.into(),
-                self.encryption.as_deref(),
+                self.encryption.as_ref(),
             )
             .await?;
         Ok(ReadBatch::from_api(batch, input.ignore_command_records))

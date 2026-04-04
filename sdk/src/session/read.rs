@@ -1,4 +1,4 @@
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{pin::Pin, time::Duration};
 
 use async_stream::{stream, try_stream};
 use futures::StreamExt;
@@ -43,7 +43,7 @@ pub type Streaming<R> = Pin<Box<dyn Send + futures::Stream<Item = Result<R, Read
 pub async fn read_session(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<Arc<EncryptionConfig>>,
+    encryption: Option<EncryptionConfig>,
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
@@ -153,13 +153,13 @@ pub async fn read_session(
 async fn session_inner(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<Arc<EncryptionConfig>>,
+    encryption: Option<EncryptionConfig>,
     start: ReadStart,
     end: ReadEnd,
     ignore_command_records: bool,
 ) -> Result<Streaming<ReadBatch>, ReadSessionError> {
     let mut batches = client
-        .read_session(&name, start, end, encryption.as_deref())
+        .read_session(&name, start, end, encryption.as_ref())
         .await?;
     Ok(Box::pin(try_stream! {
         loop {

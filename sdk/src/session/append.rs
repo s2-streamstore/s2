@@ -171,7 +171,7 @@ impl AppendSession {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        encryption: Option<Arc<EncryptionConfig>>,
+        encryption: Option<EncryptionConfig>,
         config: AppendSessionConfig,
     ) -> Self {
         let buffer_size = config
@@ -296,7 +296,7 @@ impl AppendSessionInternal {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        encryption: Option<Arc<EncryptionConfig>>,
+        encryption: Option<EncryptionConfig>,
     ) -> Self {
         let buffer_size = DEFAULT_CHANNEL_BUFFER_SIZE;
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
@@ -410,7 +410,7 @@ impl AppendPermits {
 async fn run_session_with_retry(
     client: BasinClient,
     stream: StreamName,
-    encryption: Option<Arc<EncryptionConfig>>,
+    encryption: Option<EncryptionConfig>,
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
@@ -438,7 +438,7 @@ async fn run_session_with_retry(
         let result = run_session(
             &client,
             &stream,
-            encryption.as_deref(),
+            encryption.as_ref(),
             &mut state,
             buffer_size,
             &frame_signal,
