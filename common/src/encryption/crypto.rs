@@ -137,23 +137,23 @@ mod tests {
         Encodable as _, EncryptedRecord, EncryptedRecordError, EnvelopeRecord, Header,
     };
 
-    fn test_aegis256_encryption() -> EncryptionConfig {
+    fn aegis256_encryption() -> EncryptionConfig {
         EncryptionConfig::Aegis256(Aegis256Key(make_key([0x42u8; 32])))
     }
 
-    fn test_aes256gcm_encryption() -> EncryptionConfig {
+    fn aes256gcm_encryption() -> EncryptionConfig {
         EncryptionConfig::Aes256Gcm(Aes256GcmKey(make_key([0x42u8; 32])))
     }
 
-    fn wrong_aegis256_encryption() -> EncryptionConfig {
+    fn other_aegis256_encryption() -> EncryptionConfig {
         EncryptionConfig::Aegis256(Aegis256Key(make_key([0x99u8; 32])))
     }
 
-    fn wrong_aes256gcm_encryption() -> EncryptionConfig {
+    fn other_aes256gcm_encryption() -> EncryptionConfig {
         EncryptionConfig::Aes256Gcm(Aes256GcmKey(make_key([0x99u8; 32])))
     }
 
-    fn test_aad() -> [u8; 32] {
+    fn aad() -> [u8; 32] {
         [0xA5; 32]
     }
 
@@ -174,11 +174,11 @@ mod tests {
         }];
         let body = Bytes::from_static(b"secret payload");
 
-        let aad = test_aad();
+        let aad = aad();
         let plaintext = encode_payload(headers.clone(), body.clone());
         let encryption = match alg {
-            EncryptionAlgorithm::Aegis256 => test_aegis256_encryption(),
-            EncryptionAlgorithm::Aes256Gcm => test_aes256gcm_encryption(),
+            EncryptionAlgorithm::Aegis256 => aegis256_encryption(),
+            EncryptionAlgorithm::Aes256Gcm => aes256gcm_encryption(),
         };
         let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
         let decrypted = decrypt_payload(&ciphertext, &encryption, &aad).unwrap();
@@ -200,30 +200,30 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_aegis256() {
-        let aad = test_aad();
+        let aad = aad();
         let plaintext = encode_payload(vec![], Bytes::from_static(b"data"));
-        let encryption = test_aegis256_encryption();
+        let encryption = aegis256_encryption();
         let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
-        let result = decrypt_payload(&ciphertext, &wrong_aegis256_encryption(), &aad);
+        let result = decrypt_payload(&ciphertext, &other_aegis256_encryption(), &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn wrong_key_fails_aes256gcm() {
-        let aad = test_aad();
+        let aad = aad();
         let plaintext = encode_payload(vec![], Bytes::from_static(b"data"));
-        let encryption = test_aes256gcm_encryption();
+        let encryption = aes256gcm_encryption();
         let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
-        let result = decrypt_payload(&ciphertext, &wrong_aes256gcm_encryption(), &aad);
+        let result = decrypt_payload(&ciphertext, &other_aes256gcm_encryption(), &aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn truncated_ciphertext_fails_no_panic() {
-        let aad = test_aad();
+        let aad = aad();
         let plaintext = encode_payload(vec![], Bytes::from_static(b"data"));
-        let append_encryption = test_aegis256_encryption();
-        let ciphertext = encrypt_payload(&plaintext, &append_encryption, &aad).unwrap();
+        let encryption = aegis256_encryption();
+        let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
         let truncated = ciphertext.to_bytes().slice(..4);
         let result = EncryptedRecord::try_from(truncated);
         assert!(matches!(result, Err(EncryptedRecordError::Truncated)));
@@ -247,9 +247,9 @@ mod tests {
 
     #[test]
     fn suite_id_byte_present() {
-        let aad = test_aad();
+        let aad = aad();
         let plaintext = encode_payload(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_payload(&plaintext, &test_aegis256_encryption(), &aad).unwrap();
+        let ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad).unwrap();
         let encoded = ciphertext.to_bytes();
         assert_eq!(ciphertext.algorithm(), EncryptionAlgorithm::Aegis256);
         assert_eq!(encoded[0], 0x01);
@@ -257,16 +257,16 @@ mod tests {
 
     #[test]
     fn suite_id_flip_detected() {
-        let aad = test_aad();
+        let aad = aad();
         let plaintext = encode_payload(vec![], Bytes::from_static(b"data"));
-        let mut ciphertext = encrypt_payload(&plaintext, &test_aegis256_encryption(), &aad)
+        let mut ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad)
             .unwrap()
             .to_bytes()
             .to_vec();
         assert_eq!(ciphertext[0], 0x01);
         ciphertext[0] = 0x02;
         let ciphertext = EncryptedRecord::try_from(Bytes::from(ciphertext)).unwrap();
-        let result = decrypt_payload(&ciphertext, &test_aegis256_encryption(), &aad);
+        let result = decrypt_payload(&ciphertext, &aegis256_encryption(), &aad);
         assert!(matches!(
             result,
             Err(EncryptionError::AlgorithmMismatch {
@@ -278,9 +278,9 @@ mod tests {
 
     #[test]
     fn invalid_suite_flip_detected() {
-        let aad = test_aad();
+        let aad = aad();
         let plaintext = encode_payload(vec![], Bytes::from_static(b"data"));
-        let mut ciphertext = encrypt_payload(&plaintext, &test_aegis256_encryption(), &aad)
+        let mut ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad)
             .unwrap()
             .to_bytes()
             .to_vec();
@@ -294,11 +294,11 @@ mod tests {
 
     #[test]
     fn wrong_aad_fails() {
-        let aad = test_aad();
+        let aad = aad();
         let other_aad = [0x5A; 32];
         let plaintext = encode_payload(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_payload(&plaintext, &test_aegis256_encryption(), &aad).unwrap();
-        let result = decrypt_payload(&ciphertext, &test_aegis256_encryption(), &other_aad);
+        let ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad).unwrap();
+        let result = decrypt_payload(&ciphertext, &aegis256_encryption(), &other_aad);
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 }

@@ -92,13 +92,13 @@ mod tests {
         record::{EnvelopeRecord, Header, Sequenced, StoredReadBatch, StreamPosition},
     };
 
-    fn test_aegis256_encryption() -> EncryptionConfig {
+    fn aegis256_encryption() -> EncryptionConfig {
         "aegis-256; QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
             .parse::<EncryptionConfig>()
             .unwrap()
     }
 
-    fn test_aad() -> [u8; 32] {
+    fn aad() -> [u8; 32] {
         [0xA5; 32]
     }
 
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn to_stored_records_marks_encrypted_envelopes() {
-        let aad = test_aad();
+        let aad = aad();
         let input = make_sequenced_records(vec![make_plaintext_envelope(
             vec![Header {
                 name: Bytes::from_static(b"x-test"),
@@ -164,7 +164,7 @@ mod tests {
             Bytes::from_static(b"secret payload"),
         )]);
 
-        let encrypted = to_stored_records(input, &test_aegis256_encryption(), &aad).unwrap();
+        let encrypted = to_stored_records(input, &aegis256_encryption(), &aad).unwrap();
         let (_, record) = encrypted.into_iter().next().unwrap().into_parts();
         let record = record.into_inner();
 
@@ -179,14 +179,14 @@ mod tests {
 
     #[test]
     fn decrypt_read_batch_preserves_plaintext_and_decrypts_encrypted_records() {
-        let aad = test_aad();
+        let aad = aad();
         let batch = make_stored_read_batch(vec![
             StoredRecord::Plaintext(Record::Envelope(
                 EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"legacy-plaintext"))
                     .unwrap(),
             )),
             make_encrypted_stored_record(
-                &test_aegis256_encryption(),
+                &aegis256_encryption(),
                 vec![Header {
                     name: Bytes::from_static(b"x-test"),
                     value: Bytes::from_static(b"hello"),
@@ -196,7 +196,7 @@ mod tests {
             ),
         ]);
 
-        let decrypted = decrypt_read_batch(batch, &test_aegis256_encryption(), &aad).unwrap();
+        let decrypted = decrypt_read_batch(batch, &aegis256_encryption(), &aad).unwrap();
         let records = decrypted.records.into_inner();
 
         let Record::Envelope(first) = &records[0].record else {
@@ -215,9 +215,9 @@ mod tests {
 
     #[test]
     fn decrypt_read_batch_none_rejects_encrypted_records() {
-        let aad = test_aad();
+        let aad = aad();
         let batch = make_stored_read_batch(vec![make_encrypted_stored_record(
-            &test_aegis256_encryption(),
+            &aegis256_encryption(),
             vec![],
             Bytes::from_static(b"secret payload"),
             &aad,

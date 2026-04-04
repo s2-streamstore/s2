@@ -115,9 +115,11 @@ mod tests {
 
     use super::*;
 
+    const KEY_B64: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
+
     #[test]
     fn parse_header_valid_aegis() {
-        let config = "aegis-256; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+        let config = format!("aegis-256; {KEY_B64}")
             .parse::<EncryptionConfig>()
             .unwrap();
         assert!(matches!(config, EncryptionConfig::Aegis256(_)));
@@ -125,7 +127,7 @@ mod tests {
 
     #[test]
     fn parse_header_valid_aes() {
-        let config = "aes-256-gcm; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+        let config = format!("aes-256-gcm; {KEY_B64}")
             .parse::<EncryptionConfig>()
             .unwrap();
         assert!(matches!(config, EncryptionConfig::Aes256Gcm(_)));
@@ -133,7 +135,7 @@ mod tests {
 
     #[test]
     fn parse_header_valid_with_whitespace() {
-        let config = " aes-256-gcm ; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA= "
+        let config = format!(" aes-256-gcm ; {KEY_B64} ")
             .parse::<EncryptionConfig>()
             .unwrap();
         assert!(matches!(config, EncryptionConfig::Aes256Gcm(_)));
@@ -176,14 +178,13 @@ mod tests {
 
     #[test]
     fn parse_header_unknown_algorithm_fails() {
-        let result = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=".parse::<EncryptionConfig>();
+        let result = KEY_B64.parse::<EncryptionConfig>();
         assert!(matches!(result, Err(EncryptionError::MalformedHeader(_))));
     }
 
     #[test]
     fn parse_header_none_with_key_fails() {
-        let result =
-            "none; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=".parse::<EncryptionConfig>();
+        let result = format!("none; {KEY_B64}").parse::<EncryptionConfig>();
         assert!(matches!(result, Err(EncryptionError::MalformedHeader(_))));
     }
 
