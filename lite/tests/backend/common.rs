@@ -144,7 +144,7 @@ pub async fn append_payloads(
         fencing_token: None,
     };
     backend
-        .append(basin.clone(), stream.clone(), input, no_encryption())
+        .append(basin.clone(), stream.clone(), input, EncryptionConfig::None)
         .await
         .expect("Failed to append payloads")
 }
@@ -159,10 +159,6 @@ pub async fn append_repeat(
     for _ in 0..count {
         append_payloads(backend, basin, stream, &[payload]).await;
     }
-}
-
-pub fn no_encryption() -> EncryptionConfig {
-    EncryptionConfig::None
 }
 
 pub async fn collect_records<S>(session: &mut Pin<Box<S>>) -> Vec<SequencedRecord>

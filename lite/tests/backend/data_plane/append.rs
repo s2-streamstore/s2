@@ -3,6 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
+    encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
     record::FencingToken,
     types::{
@@ -70,7 +71,7 @@ async fn test_append_fencing_token_conditions() {
             basin_name.clone(),
             stream_name.clone(),
             matching_input,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Expected append to succeed with matching fencing token");
@@ -94,7 +95,7 @@ async fn test_append_fencing_token_conditions() {
             basin_name.clone(),
             stream_name.clone(),
             command_input,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Expected fencing command to succeed");
@@ -113,7 +114,7 @@ async fn test_append_fencing_token_conditions() {
             basin_name.clone(),
             stream_name.clone(),
             mismatched_input,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await;
 
@@ -135,7 +136,12 @@ async fn test_append_fencing_token_conditions() {
     };
 
     let refreshed_ack = backend
-        .append(basin_name, stream_name, refreshed_input, no_encryption())
+        .append(
+            basin_name,
+            stream_name,
+            refreshed_input,
+            EncryptionConfig::None,
+        )
         .await
         .expect("Expected append to succeed with updated fencing token");
 
@@ -167,7 +173,7 @@ async fn test_append_requires_timestamp() {
             basin_name.clone(),
             stream_name.clone(),
             missing_timestamp,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await;
 
@@ -183,7 +189,12 @@ async fn test_append_requires_timestamp() {
     };
 
     let ack = backend
-        .append(basin_name, stream_name, with_timestamp, no_encryption())
+        .append(
+            basin_name,
+            stream_name,
+            with_timestamp,
+            EncryptionConfig::None,
+        )
         .await
         .expect("Expected append to succeed when timestamp is provided");
 
@@ -207,7 +218,7 @@ async fn test_append_with_seq_num_match() {
             basin_name.clone(),
             stream_name.clone(),
             input,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to append with matching seq_num");
@@ -225,7 +236,7 @@ async fn test_append_with_seq_num_match() {
             basin_name.clone(),
             stream_name.clone(),
             input2,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to append with matching seq_num");
@@ -253,7 +264,7 @@ async fn test_append_with_seq_num_mismatch() {
             basin_name.clone(),
             stream_name.clone(),
             input,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to append first record");
@@ -269,7 +280,7 @@ async fn test_append_with_seq_num_mismatch() {
             basin_name.clone(),
             stream_name.clone(),
             input2,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await;
 
@@ -314,7 +325,7 @@ async fn test_append_session_basic() {
             basin_name.clone(),
             stream_name.clone(),
             inputs,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create append session");
@@ -369,7 +380,7 @@ async fn test_append_session_auto_create_stream() {
             basin_name.clone(),
             stream_name.clone(),
             inputs,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create append session");
@@ -409,7 +420,7 @@ async fn test_append_session_empty() {
             basin_name.clone(),
             stream_name.clone(),
             inputs,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create append session");
@@ -460,7 +471,7 @@ async fn test_append_session_multiple_records_per_batch() {
             basin_name.clone(),
             stream_name.clone(),
             inputs,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create append session");
@@ -499,7 +510,7 @@ async fn test_append_session_multiple_records_per_batch() {
     };
 
     let read_session = backend
-        .read(basin_name, stream_name, start, end, no_encryption())
+        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
         .await
         .expect("Failed to create read session");
     let mut read_session = Box::pin(read_session);
@@ -535,7 +546,7 @@ async fn test_append_session_with_seq_num_conditions() {
             basin_name.clone(),
             stream_name.clone(),
             inputs,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create append session");
@@ -574,7 +585,7 @@ async fn test_append_session_seq_num_mismatch() {
     }]);
 
     let session = backend
-        .append_session(basin_name, stream_name, inputs, no_encryption())
+        .append_session(basin_name, stream_name, inputs, EncryptionConfig::None)
         .await
         .expect("Failed to create append session");
     tokio::pin!(session);
@@ -608,7 +619,7 @@ async fn test_append_session_with_fencing_token() {
     ]);
 
     let session = backend
-        .append_session(basin_name, stream_name, inputs, no_encryption())
+        .append_session(basin_name, stream_name, inputs, EncryptionConfig::None)
         .await
         .expect("Failed to create append session");
     tokio::pin!(session);
@@ -652,7 +663,7 @@ async fn test_append_session_large_batches() {
             basin_name.clone(),
             stream_name.clone(),
             inputs,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create append session");
@@ -702,7 +713,7 @@ async fn test_append_session_pipeline_preserves_ack_tail_and_read_order() {
             basin_name.clone(),
             stream_name.clone(),
             inputs,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create append session");
@@ -745,7 +756,7 @@ async fn test_append_session_pipeline_preserves_ack_tail_and_read_order() {
         wait: Some(Duration::ZERO),
     };
     let read_session = backend
-        .read(basin_name, stream_name, start, end, no_encryption())
+        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
         .await
         .expect("Failed to create read session");
     let mut read_session = Box::pin(read_session);

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
+    encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
     types::{
         config::{OptionalStreamConfig, RetentionPolicy, StorageClass, StreamReconfiguration},
@@ -34,7 +35,7 @@ async fn test_operations_on_nonexistent_basin() {
             stream_name.clone(),
             start,
             end,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await;
     assert!(matches!(read_result, Err(ReadError::BasinNotFound(_))));
@@ -49,7 +50,7 @@ async fn test_operations_on_nonexistent_basin() {
             basin_name.clone(),
             stream_name.clone(),
             input,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await;
     assert!(matches!(append_result, Err(AppendError::BasinNotFound(_))));
@@ -82,7 +83,7 @@ async fn test_concurrent_appends_to_same_stream() {
                 fencing_token: None,
             };
             backend
-                .append(basin_name, stream_name, input, no_encryption())
+                .append(basin_name, stream_name, input, EncryptionConfig::None)
                 .await
         });
         handles.push(handle);
@@ -114,7 +115,7 @@ async fn test_concurrent_appends_to_same_stream() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, no_encryption())
+        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -168,7 +169,7 @@ async fn test_read_while_appending() {
             stream_name.clone(),
             start,
             end,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create read session");
@@ -271,7 +272,7 @@ async fn test_concurrent_reads_same_stream() {
                 wait: Some(Duration::ZERO),
             };
             let session = backend
-                .read(basin_name, stream_name, start, end, no_encryption())
+                .read(basin_name, stream_name, start, end, EncryptionConfig::None)
                 .await?;
             let mut session = Box::pin(session);
             let records = collect_records(&mut session).await;

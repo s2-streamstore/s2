@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
+    encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
     record::StreamPosition,
     types::{
@@ -78,7 +79,7 @@ async fn test_auto_create_stream_on_read() {
             stream_name.clone(),
             start,
             end,
-            no_encryption(),
+            EncryptionConfig::None,
         )
         .await
         .expect("Failed to create read session");
@@ -111,7 +112,7 @@ async fn test_auto_create_disabled_append_fails() {
     };
 
     let result = backend
-        .append(basin_name, stream_name, input, no_encryption())
+        .append(basin_name, stream_name, input, EncryptionConfig::None)
         .await;
 
     assert!(matches!(result, Err(AppendError::StreamNotFound(_))));
@@ -134,7 +135,7 @@ async fn test_auto_create_disabled_read_fails() {
     let end = ReadEnd::default();
 
     let result = backend
-        .read(basin_name, stream_name, start, end, no_encryption())
+        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
         .await;
 
     assert!(matches!(result, Err(ReadError::StreamNotFound(_))));
@@ -191,7 +192,7 @@ async fn test_auto_create_race_condition_append() {
                         basin_name.clone(),
                         stream_name.clone(),
                         input.clone(),
-                        no_encryption(),
+                        EncryptionConfig::None,
                     )
                     .await
                 {
@@ -205,7 +206,7 @@ async fn test_auto_create_race_condition_append() {
                 }
             }
             backend
-                .append(basin_name, stream_name, input, no_encryption())
+                .append(basin_name, stream_name, input, EncryptionConfig::None)
                 .await
         });
         handles.push(handle);
@@ -270,7 +271,7 @@ async fn test_auto_create_race_condition_read() {
                         stream_name.clone(),
                         start,
                         end,
-                        no_encryption(),
+                        EncryptionConfig::None,
                     )
                     .await
                 {
@@ -286,7 +287,7 @@ async fn test_auto_create_race_condition_read() {
                 }
             }
             match backend
-                .read(basin_name, stream_name, start, end, no_encryption())
+                .read(basin_name, stream_name, start, end, EncryptionConfig::None)
                 .await
             {
                 Ok(session) => {
