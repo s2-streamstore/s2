@@ -163,33 +163,6 @@ enum AppendType {
     Terminal,
 }
 
-#[derive(Clone)]
-pub(crate) enum AppendProtection {
-    None,
-    Encrypted {
-        encryption: Arc<EncryptionConfig>,
-        aad: [u8; 32],
-    },
-}
-
-impl std::fmt::Debug for AppendProtection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppendProtection").finish_non_exhaustive()
-    }
-}
-
-impl AppendProtection {
-    pub(crate) fn new(encryption: EncryptionConfig, aad: [u8; 32]) -> Self {
-        match encryption {
-            EncryptionConfig::None => Self::None,
-            encryption => Self::Encrypted {
-                encryption: Arc::new(encryption),
-                aad,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct CommandState<T> {
     applied_point: RangeTo<SeqNum>,
@@ -290,7 +263,7 @@ impl Streamer {
     fn handle_append(
         &mut self,
         input: AppendInput,
-        protection: AppendProtection,
+        encryption: EncryptionConfig,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -314,13 +287,11 @@ impl Streamer {
                         self.apply_command(sr.position.seq_num, cmd, append_type);
                     }
                 }
-                let (encryption, aad) = match &protection {
-                    AppendProtection::None => (&EncryptionConfig::None, &[][..]),
-                    AppendProtection::Encrypted { encryption, aad } => {
-                        (encryption.as_ref(), aad.as_slice())
-                    }
-                };
-                let stored_records = match to_stored_records(sequenced_records, encryption, aad) {
+                let stored_records = match to_stored_records(
+                    sequenced_records,
+                    &encryption,
+                    self.stream_id.as_bytes(),
+                ) {
                     Ok(records) => records,
                     Err(err) => {
                         self.pending_appends
@@ -453,7 +424,7 @@ impl Streamer {
                     match msg {
                         Message::Append {
                             input,
-                            protection,
+                            encryption,
                             session,
                             reply_tx,
                             append_type,
@@ -461,7 +432,7 @@ impl Streamer {
                             if self.trim_point.state.end < SeqNum::MAX {
                                 self.handle_append(
                                     input,
-                                    protection,
+                                    encryption,
                                     session,
                                     reply_tx,
                                     append_type,
@@ -526,7 +497,7 @@ impl Streamer {
 enum Message {
     Append {
         input: AppendInput,
-        protection: AppendProtection,
+        encryption: EncryptionConfig,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -614,15 +585,7 @@ impl StreamerClient {
     pub async fn append_permit(
         &self,
         input: AppendInput,
-    ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
-        self.append_permit_with_protection(input, AppendProtection::None)
-            .await
-    }
-
-    pub async fn append_permit_with_protection(
-        &self,
-        input: AppendInput,
-        protection: AppendProtection,
+        encryption: EncryptionConfig,
     ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
@@ -642,7 +605,7 @@ impl StreamerClient {
             sema_permit,
             msg_tx: &self.msg_tx,
             input,
-            protection,
+            encryption,
         })
     }
 
@@ -663,7 +626,7 @@ impl StreamerClient {
             fencing_token: None,
         };
         match self
-            .append_permit(input)
+            .append_permit(input, EncryptionConfig::None)
             .await?
             .submit_internal(None, AppendType::Terminal)
             .await
@@ -699,7 +662,7 @@ pub struct AppendPermit<'a> {
     sema_permit: SemaphorePermit<'a>,
     msg_tx: &'a mpsc::UnboundedSender<Message>,
     input: AppendInput,
-    protection: AppendProtection,
+    encryption: EncryptionConfig,
 }
 
 impl AppendPermit<'_> {
@@ -725,13 +688,13 @@ impl AppendPermit<'_> {
             sema_permit,
             msg_tx,
             input,
-            protection,
+            encryption,
         } = self;
         let (reply_tx, reply_rx) = oneshot::channel();
         msg_tx
             .send(Message::Append {
                 input,
-                protection,
+                encryption,
                 session,
                 reply_tx,
                 append_type,
@@ -1151,7 +1114,7 @@ mod tests {
         let (tx1, mut rx1) = oneshot::channel();
         streamer.handle_append(
             append_input(b"p0"),
-            AppendProtection::None,
+            EncryptionConfig::None,
             None,
             tx1,
             AppendType::Regular,
@@ -1160,7 +1123,7 @@ mod tests {
         let (tx2, mut rx2) = oneshot::channel();
         streamer.handle_append(
             append_input(b"p1"),
-            AppendProtection::None,
+            EncryptionConfig::None,
             None,
             tx2,
             AppendType::Regular,
@@ -1169,7 +1132,7 @@ mod tests {
         let (tx3, mut rx3) = oneshot::channel();
         streamer.handle_append(
             append_input(b"p2"),
-            AppendProtection::None,
+            EncryptionConfig::None,
             None,
             tx3,
             AppendType::Regular,
@@ -1259,7 +1222,7 @@ mod tests {
             let payload = format!("jump-{i}");
             streamer.handle_append(
                 append_input(payload.as_bytes()),
-                AppendProtection::None,
+                EncryptionConfig::None,
                 None,
                 tx,
                 AppendType::Regular,

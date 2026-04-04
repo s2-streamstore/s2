@@ -16,10 +16,7 @@ use s2_common::{
 use tokio::sync::oneshot;
 
 use super::Backend;
-use crate::backend::{
-    error::{AppendError, AppendErrorInternal, StorageError},
-    streamer::AppendProtection,
-};
+use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
     pub async fn append(
@@ -34,12 +31,8 @@ impl Backend {
                 config.create_stream_on_append
             })
             .await?;
-        let protection = AppendProtection::new(
-            encryption,
-            super::protection::stream_id_aad(&basin, &stream),
-        );
         let ack = client
-            .append_permit_with_protection(input, protection)
+            .append_permit(input, encryption)
             .await?
             .submit()
             .await?;
@@ -58,10 +51,6 @@ impl Backend {
                 config.create_stream_on_append
             })
             .await?;
-        let protection = AppendProtection::new(
-            encryption,
-            super::protection::stream_id_aad(&basin, &stream),
-        );
         let session = SessionHandle::new();
         Ok(async_stream::stream! {
             tokio::pin!(inputs);
@@ -71,7 +60,7 @@ impl Backend {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
                         permit_opt = Some(Box::pin(
-                            client.append_permit_with_protection(input, protection.clone()),
+                            client.append_permit(input, encryption.clone()),
                         ));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {

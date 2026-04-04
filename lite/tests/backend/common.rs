@@ -47,6 +47,10 @@ pub fn test_stream_name(suffix: &str) -> StreamName {
     format!("test-stream-{}", suffix).parse().unwrap()
 }
 
+pub fn aegis256_encryption() -> EncryptionConfig {
+    EncryptionConfig::aegis256([0x42; 32])
+}
+
 pub fn create_test_record(body: Bytes) -> AppendRecord {
     create_test_record_with_optional_timestamp(body, None)
 }
@@ -134,6 +138,17 @@ pub async fn append_payloads(
     stream: &StreamName,
     payloads: &[&[u8]],
 ) -> s2_common::types::stream::AppendAck {
+    let encryption = EncryptionConfig::None;
+    append_payloads_with_encryption(backend, basin, stream, payloads, &encryption).await
+}
+
+pub async fn append_payloads_with_encryption(
+    backend: &Backend,
+    basin: &BasinName,
+    stream: &StreamName,
+    payloads: &[&[u8]],
+    encryption: &EncryptionConfig,
+) -> s2_common::types::stream::AppendAck {
     let bodies = payloads
         .iter()
         .map(|bytes| Bytes::copy_from_slice(bytes))
@@ -144,7 +159,7 @@ pub async fn append_payloads(
         fencing_token: None,
     };
     backend
-        .append(basin.clone(), stream.clone(), input, EncryptionConfig::None)
+        .append(basin.clone(), stream.clone(), input, encryption.clone())
         .await
         .expect("Failed to append payloads")
 }

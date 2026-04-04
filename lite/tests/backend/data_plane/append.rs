@@ -353,6 +353,81 @@ async fn test_append_session_basic() {
 }
 
 #[tokio::test]
+async fn test_append_session_basic_with_encryption() {
+    let encryption = aegis256_encryption();
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "append-session-basic-encrypted",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let inputs = futures::stream::iter(vec![
+        AppendInput {
+            records: create_test_record_batch(vec![Bytes::from_static(b"batch 1")]),
+            match_seq_num: None,
+            fencing_token: None,
+        },
+        AppendInput {
+            records: create_test_record_batch(vec![Bytes::from_static(b"batch 2")]),
+            match_seq_num: None,
+            fencing_token: None,
+        },
+        AppendInput {
+            records: create_test_record_batch(vec![Bytes::from_static(b"batch 3")]),
+            match_seq_num: None,
+            fencing_token: None,
+        },
+    ]);
+
+    let session = backend
+        .clone()
+        .append_session(
+            basin_name.clone(),
+            stream_name.clone(),
+            inputs,
+            encryption.clone(),
+        )
+        .await
+        .expect("Failed to create encrypted append session");
+    tokio::pin!(session);
+
+    let mut acks = Vec::new();
+    while let Some(result) = session.next().await {
+        acks.push(result.expect("Encrypted append should succeed"));
+    }
+
+    assert_eq!(acks.len(), 3);
+    assert_eq!(acks[0].start.seq_num, 0);
+    assert_eq!(acks[1].start.seq_num, 1);
+    assert_eq!(acks[2].start.seq_num, 2);
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::ZERO),
+    };
+    let read_session = backend
+        .read(basin_name, stream_name, start, end, encryption)
+        .await
+        .expect("Failed to create encrypted read session");
+    let mut read_session = Box::pin(read_session);
+    let records = collect_records(&mut read_session).await;
+    assert_eq!(
+        envelope_bodies(&records),
+        vec![
+            b"batch 1".to_vec(),
+            b"batch 2".to_vec(),
+            b"batch 3".to_vec()
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_append_session_auto_create_stream() {
     let backend = create_backend().await;
     let basin_config = BasinConfig {

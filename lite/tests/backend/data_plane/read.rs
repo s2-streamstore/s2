@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::{EncryptionConfig, EncryptionError},
     read_extent::{ReadLimit, ReadUntil},
     record::{MeteredSize, StreamPosition},
     types::{
@@ -83,6 +83,75 @@ async fn test_read_from_beginning() {
     let records = collect_records(&mut session).await;
 
     assert_eq!(records.len(), 5);
+}
+
+#[tokio::test]
+async fn test_read_encrypted_roundtrip() {
+    let encryption = aegis256_encryption();
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-encrypted-roundtrip",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads_with_encryption(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"secret-1", b"secret-2"],
+        &encryption,
+    )
+    .await;
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::ZERO),
+    };
+
+    let read_session = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            encryption.clone(),
+        )
+        .await
+        .expect("Failed to create encrypted read session");
+    let mut read_session = Box::pin(read_session);
+    let records = collect_records(&mut read_session).await;
+    assert_eq!(
+        envelope_bodies(&records),
+        vec![b"secret-1".to_vec(), b"secret-2".to_vec()]
+    );
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::ZERO),
+    };
+    let read_session = backend
+        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
+        .await
+        .expect("Failed to create plaintext read session");
+    let mut read_session = Box::pin(read_session);
+    let first = read_session.next().await;
+    assert!(matches!(
+        first,
+        Some(Err(ReadError::Encryption(
+            EncryptionError::UnexpectedEncryptedRecord
+        )))
+    ));
 }
 
 #[tokio::test]

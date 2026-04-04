@@ -183,6 +183,102 @@ async fn test_follow_mode_receives_new_data() {
 }
 
 #[tokio::test]
+async fn test_follow_mode_receives_new_encrypted_data() {
+    let encryption = aegis256_encryption();
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-new-encrypted-data",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads_with_encryption(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"initial"],
+        &encryption,
+    )
+    .await;
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::from_secs(3)),
+    };
+
+    let session = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            start,
+            end,
+            encryption.clone(),
+        )
+        .await
+        .expect("Failed to create encrypted read session");
+    let mut session = Box::pin(session);
+
+    let backend_clone = backend.clone();
+    let basin_clone = basin_name.clone();
+    let stream_clone = stream_name.clone();
+    let encryption_clone = encryption.clone();
+
+    let append_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        append_payloads_with_encryption(
+            &backend_clone,
+            &basin_clone,
+            &stream_clone,
+            &[b"follow-1"],
+            &encryption_clone,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        append_payloads_with_encryption(
+            &backend_clone,
+            &basin_clone,
+            &stream_clone,
+            &[b"follow-2"],
+            &encryption_clone,
+        )
+        .await;
+    });
+
+    let mut all_records = Vec::new();
+    let timeout = Duration::from_secs(4);
+    let start_time = tokio::time::Instant::now();
+
+    while start_time.elapsed() < timeout && all_records.len() < 3 {
+        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
+            Ok(Some(Ok(ReadSessionOutput::Batch(batch)))) => {
+                all_records.extend(batch.records.iter().cloned());
+            }
+            Ok(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    append_handle.await.unwrap();
+
+    let bodies = envelope_bodies(&all_records);
+    assert_eq!(
+        bodies,
+        vec![
+            b"initial".to_vec(),
+            b"follow-1".to_vec(),
+            b"follow-2".to_vec()
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_follow_mode_with_multiple_appends() {
     let (backend, basin_name, stream_name) =
         setup_backend_with_stream("follow-multiple", "stream", OptionalStreamConfig::default())

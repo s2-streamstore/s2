@@ -97,7 +97,7 @@ impl Backend {
         end: ReadEnd,
         encryption: EncryptionConfig,
     ) -> Result<impl Stream<Item = Result<ReadSessionOutput, ReadError>> + 'static, ReadError> {
-        let aad = super::protection::stream_id_aad(&basin, &stream);
+        let aad: [u8; StreamId::LEN] = StreamId::new(&basin, &stream).into();
         let session = self.read_stored(basin, stream, start, end).await?;
         Ok(session.map(move |output| match output {
             Ok(StoredReadSessionOutput::Heartbeat(tail)) => Ok(ReadSessionOutput::Heartbeat(tail)),
