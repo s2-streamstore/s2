@@ -140,7 +140,7 @@ mod tests {
     }
 
     fn make_sequenced_records(records: Vec<Record>) -> Vec<Metered<Sequenced<Record>>> {
-        let records = records
+        records
             .into_iter()
             .enumerate()
             .map(|(i, record)| {
@@ -149,8 +149,7 @@ mod tests {
                     timestamp: i as u64 + 10,
                 })
             })
-            .collect::<Vec<_>>();
-        records
+            .collect::<Vec<_>>()
     }
 
     #[test]

@@ -491,6 +491,53 @@ mod test {
 
     use super::*;
 
+    struct LegacyPlaintextFrame<'a> {
+        record: &'a Record,
+    }
+
+    impl LegacyPlaintextFrame<'_> {
+        fn magic_byte(&self) -> MagicByte {
+            let metered_size = self.record.metered_size();
+            let metered_size_varlen = 8 - (metered_size.leading_zeros() / 8) as u8;
+            assert!(metered_size_varlen <= 3);
+
+            MagicByte {
+                record_type: match self.record {
+                    Record::Command(_) => RecordType::Command,
+                    Record::Envelope(_) => RecordType::Envelope,
+                },
+                metered_size_varlen,
+            }
+        }
+    }
+
+    impl Encodable for LegacyPlaintextFrame<'_> {
+        fn encoded_size(&self) -> usize {
+            let body_size = match self.record {
+                Record::Command(record) => record.encoded_size(),
+                Record::Envelope(record) => record.encoded_size(),
+            };
+            1 + self.magic_byte().metered_size_varlen as usize + body_size
+        }
+
+        fn encode_into(&self, buf: &mut impl BufMut) {
+            let magic_byte = self.magic_byte();
+            buf.put_u8(magic_byte.into());
+            buf.put_uint(
+                self.record.metered_size() as u64,
+                magic_byte.metered_size_varlen as usize,
+            );
+            match self.record {
+                Record::Command(record) => record.encode_into(buf),
+                Record::Envelope(record) => record.encode_into(buf),
+            }
+        }
+    }
+
+    fn legacy_plaintext_bytes(record: &Record) -> Bytes {
+        LegacyPlaintextFrame { record }.to_bytes()
+    }
+
     fn bytes_strategy(allow_empty: bool) -> impl Strategy<Value = Bytes> {
         prop_oneof![
             prop::collection::vec(any::<u8>(), (if allow_empty { 0 } else { 1 })..10)
@@ -525,6 +572,8 @@ mod test {
             let encoded_record = Metered::from(StoredRecord::from(record.clone()))
                 .as_ref()
                 .to_bytes();
+            let legacy_record = legacy_plaintext_bytes(&record);
+            prop_assert_eq!(encoded_record.as_ref(), legacy_record.as_ref());
             let decoded_record = Metered::try_from(encoded_record).unwrap();
             prop_assert_eq!(&decoded_record, &metered_record);
             let sequenced = decoded_record.sequenced(StreamPosition { seq_num, timestamp });
@@ -623,7 +672,14 @@ mod test {
             }
             other => panic!("Command expected, got {other:?}"),
         }
-        let sequenced_record = record.sequenced(StreamPosition {
+        let encoded_record = Metered::from(StoredRecord::from(record.clone()))
+            .as_ref()
+            .to_bytes();
+        assert_eq!(
+            encoded_record.as_ref(),
+            legacy_plaintext_bytes(&record).as_ref()
+        );
+        let sequenced_record = record.clone().sequenced(StreamPosition {
             seq_num: 42,
             timestamp: 100_000,
         });
