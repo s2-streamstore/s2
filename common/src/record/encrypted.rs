@@ -18,7 +18,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use super::Encodable;
 use crate::{deep_size::DeepSize, types::config::EncryptionAlgorithm};
 
-const PREFIX_LEN: usize = 1;
+const SUITE_ID_LEN: usize = 1;
 
 const SUITE_ID_AEGIS256_V1: u8 = 0x01;
 const SUITE_ID_AES256GCM_V1: u8 = 0x02;
@@ -57,7 +57,7 @@ impl EncryptedRecord {
         }
 
         let mut bytes =
-            BytesMut::with_capacity(PREFIX_LEN + nonce.len() + ciphertext.len() + tag.len());
+            BytesMut::with_capacity(SUITE_ID_LEN + nonce.len() + ciphertext.len() + tag.len());
         bytes.put_u8(suite_id(algorithm));
         bytes.put_slice(nonce);
         bytes.put_slice(ciphertext);
@@ -90,7 +90,7 @@ impl EncryptedRecord {
     }
 
     fn nonce_range(&self) -> std::ops::Range<usize> {
-        let start = PREFIX_LEN;
+        let start = SUITE_ID_LEN;
         let end = start + self.algorithm.nonce_len();
         start..end
     }
@@ -157,14 +157,14 @@ impl TryFrom<Bytes> for EncryptedRecord {
     type Error = EncryptedRecordError;
 
     fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
-        if bytes.len() < PREFIX_LEN {
+        if bytes.len() < SUITE_ID_LEN {
             return Err(EncryptedRecordError::Truncated);
         }
 
         let algorithm = parse_suite_id(bytes[0])?;
         let nonce_len = algorithm.nonce_len();
         let tag_len = algorithm.tag_len();
-        if bytes.len() < PREFIX_LEN + nonce_len + tag_len {
+        if bytes.len() < SUITE_ID_LEN + nonce_len + tag_len {
             return Err(EncryptedRecordError::Truncated);
         }
 
