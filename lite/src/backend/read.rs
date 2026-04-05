@@ -6,8 +6,8 @@ use s2_common::{
     encryption::EncryptionConfig,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{
-        Metered, MeteredSize as _, SeqNum, Sequenced, StoredReadBatch, StoredRecord,
-        StreamPosition, Timestamp, decrypt_read_batch,
+        Metered, MeteredSize as _, SeqNum, StoredReadBatch, StoredSequencedRecord, StreamPosition,
+        Timestamp, decrypt_read_batch,
     },
     types::{
         basin::BasinName,
@@ -366,7 +366,7 @@ impl ReadSessionState {
 fn count_allowed_records(
     limit: ReadLimit,
     until: ReadUntil,
-    records: &[Metered<Sequenced<StoredRecord>>],
+    records: &[Metered<StoredSequencedRecord>],
 ) -> usize {
     let mut acc_size = 0;
     let mut acc_count = 0;

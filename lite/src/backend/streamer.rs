@@ -16,7 +16,7 @@ use s2_common::{
     encryption::EncryptionConfig,
     record::{
         CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
-        Sequenced, StoredRecord, StreamPosition, Timestamp, to_stored_records,
+        SequencedRecord, StoredSequencedRecord, StreamPosition, Timestamp, to_stored_records,
     },
     types::{
         config::{
@@ -86,7 +86,7 @@ struct DeleteOnEmptyDeadline {
 #[derive(Debug)]
 struct InFlightAppend {
     db_seq: u64,
-    records: Vec<Metered<Sequenced<StoredRecord>>>,
+    records: Vec<Metered<StoredSequencedRecord>>,
 }
 
 pub(super) struct Spawner {
@@ -188,7 +188,7 @@ struct Streamer {
     inflight_appends: VecDeque<InFlightAppend>,
     pending_appends: append::PendingAppends,
     stable_pos: StreamPosition,
-    follow_tx: broadcast::Sender<Vec<Metered<Sequenced<StoredRecord>>>>,
+    follow_tx: broadcast::Sender<Vec<Metered<StoredSequencedRecord>>>,
     active_followers: usize,
     durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
@@ -208,7 +208,7 @@ impl Streamer {
             match_seq_num,
             fencing_token,
         }: AppendInput,
-    ) -> Result<Vec<Metered<Sequenced<Record>>>, AppendErrorInternal> {
+    ) -> Result<Vec<Metered<SequencedRecord>>, AppendErrorInternal> {
         if let Some(provided_token) = fencing_token
             && provided_token != self.fencing_token.state
         {
@@ -518,13 +518,13 @@ enum Message {
 
 pub(super) struct FollowReceiver {
     _guard: FollowGuard,
-    rx: broadcast::Receiver<Vec<Metered<Sequenced<StoredRecord>>>>,
+    rx: broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>,
 }
 
 impl FollowReceiver {
     pub async fn recv(
         &mut self,
-    ) -> Result<Vec<Metered<Sequenced<StoredRecord>>>, broadcast::error::RecvError> {
+    ) -> Result<Vec<Metered<StoredSequencedRecord>>, broadcast::error::RecvError> {
         self.rx.recv().await
     }
 }
@@ -707,14 +707,14 @@ impl AppendPermit<'_> {
     }
 }
 
-fn pos_span(records: &[Metered<Sequenced<StoredRecord>>]) -> (StreamPosition, StreamPosition) {
+fn pos_span(records: &[Metered<StoredSequencedRecord>]) -> (StreamPosition, StreamPosition) {
     (
         records.first().expect("non-empty").position,
         next_pos(records),
     )
 }
 
-pub fn next_pos(records: &[Metered<Sequenced<StoredRecord>>]) -> StreamPosition {
+pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
     let last_pos = records.last().expect("non-empty").position;
     StreamPosition {
         seq_num: last_pos.seq_num + 1,
@@ -727,7 +727,7 @@ fn sequenced_records(
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
-) -> Result<Vec<Metered<Sequenced<Record>>>, AppendErrorInternal> {
+) -> Result<Vec<Metered<SequencedRecord>>, AppendErrorInternal> {
     let mode = config.mode.unwrap_or_default();
     let uncapped = config.uncapped.unwrap_or_default();
     let mut sequenced_records = Vec::with_capacity(batch.len());
@@ -763,7 +763,7 @@ async fn db_submit_append(
     stream_id: StreamId,
     retention: RetentionPolicy,
     doe_deadline: Option<DeleteOnEmptyDeadline>,
-    records: Vec<Metered<Sequenced<StoredRecord>>>,
+    records: Vec<Metered<StoredSequencedRecord>>,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
 ) -> Result<InFlightAppend, slatedb::Error> {

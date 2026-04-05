@@ -14,8 +14,8 @@
 //! metering, limits, or accounting.
 
 use super::{
-    Encodable as _, EnvelopeRecord, Metered, MeteredSize, Record, Sequenced, StoredReadBatch,
-    StoredRecord,
+    Encodable as _, EnvelopeRecord, Metered, MeteredSize, Record, SequencedRecord, StoredReadBatch,
+    StoredRecord, StoredSequencedRecord,
 };
 use crate::{
     encryption::{self, EncryptionConfig, EncryptionError},
@@ -23,10 +23,10 @@ use crate::{
 };
 
 pub fn to_stored_records(
-    records: Vec<Metered<Sequenced<Record>>>,
+    records: Vec<Metered<SequencedRecord>>,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> Result<Vec<Metered<Sequenced<StoredRecord>>>, EncryptionError> {
+) -> Result<Vec<Metered<StoredSequencedRecord>>, EncryptionError> {
     records
         .into_iter()
         .map(|record| {
@@ -53,7 +53,7 @@ pub fn decrypt_read_batch(
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<types::stream::ReadBatch, EncryptionError> {
-    let records: Vec<super::Sequenced<Record>> = batch
+    let records: Vec<super::SequencedRecord> = batch
         .records
         .into_inner()
         .into_iter()
@@ -89,7 +89,7 @@ mod tests {
     use super::*;
     use crate::{
         encryption::EncryptionConfig,
-        record::{EnvelopeRecord, Header, Sequenced, StoredReadBatch, StreamPosition},
+        record::{EnvelopeRecord, Header, StoredReadBatch, StreamPosition},
     };
 
     fn aegis256_encryption() -> EncryptionConfig {
@@ -139,7 +139,7 @@ mod tests {
         }
     }
 
-    fn make_sequenced_records(records: Vec<Record>) -> Vec<Metered<Sequenced<Record>>> {
+    fn make_sequenced_records(records: Vec<Record>) -> Vec<Metered<SequencedRecord>> {
         records
             .into_iter()
             .enumerate()
