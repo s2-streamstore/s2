@@ -248,15 +248,24 @@ impl std::fmt::Debug for AppendRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppendRequest::Unary {
-                encryption: _,
+                encryption,
                 input,
                 response_mime: response,
             } => f
                 .debug_struct("AppendRequest::Unary")
+                .field("encryption", encryption)
                 .field("input", input)
                 .field("response", response)
                 .finish(),
-            AppendRequest::S2s { .. } => f.debug_struct("AppendRequest::S2s").finish(),
+            AppendRequest::S2s {
+                encryption,
+                response_compression,
+                ..
+            } => f
+                .debug_struct("AppendRequest::S2s")
+                .field("encryption", encryption)
+                .field("response_compression", response_compression)
+                .finish(),
         }
     }
 }
