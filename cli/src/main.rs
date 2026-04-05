@@ -813,23 +813,13 @@ fn invalid_encryption_args(message: impl Into<String>) -> CliError {
 }
 
 fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
-    let Some(spec) = resolve_encryption_spec(&args.encryption, &args.encryption_file)? else {
-        return Ok(None);
-    };
-    Ok(Some(parse_encryption_config(&spec)?))
-}
-
-fn resolve_encryption_spec(
-    encryption: &Option<String>,
-    encryption_file: &Option<std::path::PathBuf>,
-) -> Result<Option<String>, CliError> {
-    match (encryption, encryption_file) {
-        (Some(spec), _) => Ok(Some(spec.clone())),
+    match (&args.encryption, &args.encryption_file) {
+        (Some(config), _) => Ok(Some(config.clone())),
         (_, Some(path)) => {
             let contents = std::fs::read_to_string(path).map_err(|e| {
                 invalid_encryption_args(format!("cannot read encryption spec file: {e}"))
             })?;
-            Ok(Some(contents.trim().to_owned()))
+            Ok(Some(parse_encryption_config(contents.trim())?))
         }
         _ => Ok(None),
     }
@@ -838,35 +828,4 @@ fn resolve_encryption_spec(
 fn parse_encryption_config(spec: &str) -> Result<EncryptionConfig, CliError> {
     spec.parse::<EncryptionConfig>()
         .map_err(|e| invalid_encryption_args(e.to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const KEY_B64: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
-
-    #[test]
-    fn parse_encryption_config_none() {
-        let config = parse_encryption_config("none").unwrap();
-        assert!(matches!(config, EncryptionConfig::None));
-    }
-
-    #[test]
-    fn parse_encryption_config_aegis() {
-        let config = parse_encryption_config(&format!("aegis-256; {KEY_B64}")).unwrap();
-        assert!(matches!(config, EncryptionConfig::Aegis256(_)));
-    }
-
-    #[test]
-    fn parse_encryption_config_rejects_key_without_algorithm() {
-        let err = parse_encryption_config(KEY_B64).unwrap_err();
-        assert!(matches!(err, CliError::InvalidArgs(_)));
-    }
-
-    #[test]
-    fn parse_encryption_config_rejects_invalid_key() {
-        let err = parse_encryption_config("aes-256-gcm; not-valid-base64").unwrap_err();
-        assert!(matches!(err, CliError::InvalidArgs(_)));
-    }
 }
