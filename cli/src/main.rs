@@ -801,24 +801,17 @@ fn print_metrics(metrics: &[Metric]) {
     }
 }
 
-fn invalid_encryption_args(message: impl Into<String>) -> CliError {
-    CliError::InvalidArgs(miette::miette!("{}", message.into()))
-}
-
 fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
     match (&args.encryption, &args.encryption_file) {
         (Some(config), _) => Ok(Some(config.clone())),
         (_, Some(path)) => {
             let contents = std::fs::read_to_string(path).map_err(|e| {
-                invalid_encryption_args(format!("cannot read encryption spec file: {e}"))
+                CliError::InvalidArgs(miette::miette!("cannot read encryption spec file: {e}"))
             })?;
-            Ok(Some(parse_encryption_config(contents.trim())?))
+            Ok(Some(contents.trim().parse::<EncryptionConfig>().map_err(
+                |e| CliError::InvalidArgs(miette::miette!("{e}")),
+            )?))
         }
         _ => Ok(None),
     }
-}
-
-fn parse_encryption_config(spec: &str) -> Result<EncryptionConfig, CliError> {
-    spec.parse::<EncryptionConfig>()
-        .map_err(|e| invalid_encryption_args(e.to_string()))
 }
