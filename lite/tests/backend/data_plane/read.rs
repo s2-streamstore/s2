@@ -3,9 +3,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
-    encryption::{EncryptionConfig, EncryptionError},
+    encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
-    record::{MeteredSize, StreamPosition},
+    record::{MeteredSize, RecordEncryptionError, StreamPosition},
     types::{
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
         stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
@@ -149,7 +149,7 @@ async fn test_read_encrypted_roundtrip() {
     assert!(matches!(
         first,
         Some(Err(ReadError::Encryption(
-            EncryptionError::UnexpectedEncryptedRecord
+            RecordEncryptionError::UnexpectedEncryptedRecord
         )))
     ));
 }

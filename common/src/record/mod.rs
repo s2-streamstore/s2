@@ -9,7 +9,10 @@ pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
-pub use encrypted::{EncryptedRecord, EncryptedRecordError, decrypt_read_batch, to_stored_records};
+pub use encrypted::{
+    EncryptedRecord, EncryptedRecordError, RecordEncryptionError, decrypt_read_batch,
+    to_stored_records,
+};
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
 use envelope::HeaderValidationError;

@@ -33,7 +33,7 @@ impl Aegis256Key {
         Self(Arc::new(SecretBox::new(Box::new(key))))
     }
 
-    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionError> {
+    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionConfigError> {
         parse_encryption_key::<32>(key_b64).map(Self)
     }
 
@@ -50,7 +50,7 @@ impl Aes256GcmKey {
         Self(Arc::new(SecretBox::new(Box::new(key))))
     }
 
-    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionError> {
+    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionConfigError> {
         parse_encryption_key::<32>(key_b64).map(Self)
     }
 
@@ -60,22 +60,9 @@ impl Aes256GcmKey {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum EncryptionError {
+pub enum EncryptionConfigError {
     #[error("Invalid encryption config: {0}")]
     InvalidConfig(String),
-    #[error("Ciphertext algorithm mismatch: expected {expected}, actual {actual}")]
-    AlgorithmMismatch {
-        expected: EncryptionAlgorithm,
-        actual: EncryptionAlgorithm,
-    },
-    #[error("Encrypted record encountered without decryption")]
-    UnexpectedEncryptedRecord,
-    #[error("Encryption failed")]
-    EncryptFailed,
-    #[error("Decryption failed")]
-    DecryptionFailed,
-    #[error("Invalid decrypted record: {0}")]
-    InvalidDecryptedRecord(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -111,7 +98,7 @@ impl EncryptionConfig {
 }
 
 impl FromStr for EncryptionConfig {
-    type Err = EncryptionError;
+    type Err = EncryptionConfigError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
@@ -119,13 +106,13 @@ impl FromStr for EncryptionConfig {
         let alg_str = parts.next().unwrap_or_default().trim();
         let key_b64 = parts.next().map(str::trim);
         if parts.next().is_some() {
-            return Err(EncryptionError::InvalidConfig(
+            return Err(EncryptionConfigError::InvalidConfig(
                 "expected '<alg>; <key>' or 'plain'".to_owned(),
             ));
         }
 
         if alg_str.is_empty() {
-            return Err(EncryptionError::InvalidConfig(
+            return Err(EncryptionConfigError::InvalidConfig(
                 "missing algorithm".to_owned(),
             ));
         }
@@ -133,21 +120,21 @@ impl FromStr for EncryptionConfig {
         let key_b64 = key_b64.filter(|key| !key.is_empty());
         match (parse_algorithm(alg_str)?, key_b64) {
             (None, None) => Ok(Self::Plain),
-            (None, Some(_)) => Err(EncryptionError::InvalidConfig(
+            (None, Some(_)) => Err(EncryptionConfigError::InvalidConfig(
                 "key is not allowed when algorithm is 'plain'".to_owned(),
             )),
             (Some(EncryptionAlgorithm::Aegis256), Some(key_b64)) => {
                 Ok(Self::Aegis256(Aegis256Key::from_base64(key_b64)?))
             }
-            (Some(EncryptionAlgorithm::Aegis256), None) => Err(EncryptionError::InvalidConfig(
-                "missing key for 'aegis-256'".to_owned(),
-            )),
+            (Some(EncryptionAlgorithm::Aegis256), None) => Err(
+                EncryptionConfigError::InvalidConfig("missing key for 'aegis-256'".to_owned()),
+            ),
             (Some(EncryptionAlgorithm::Aes256Gcm), Some(key_b64)) => {
                 Ok(Self::Aes256Gcm(Aes256GcmKey::from_base64(key_b64)?))
             }
-            (Some(EncryptionAlgorithm::Aes256Gcm), None) => Err(EncryptionError::InvalidConfig(
-                "missing key for 'aes-256-gcm'".to_owned(),
-            )),
+            (Some(EncryptionAlgorithm::Aes256Gcm), None) => Err(
+                EncryptionConfigError::InvalidConfig("missing key for 'aes-256-gcm'".to_owned()),
+            ),
         }
     }
 }
@@ -160,7 +147,7 @@ impl ParseableHeader for EncryptionConfig {
 
 fn parse_encryption_key<const N: usize>(
     key_b64: &str,
-) -> Result<EncryptionKey<N>, EncryptionError> {
+) -> Result<EncryptionKey<N>, EncryptionConfigError> {
     use base64ct::{Base64, Encoding};
     use secrecy::zeroize::Zeroize;
 
@@ -169,7 +156,7 @@ fn parse_encryption_key<const N: usize>(
         Ok(decoded) => decoded,
         Err(e) => {
             key.as_mut().zeroize();
-            return Err(EncryptionError::InvalidConfig(format!(
+            return Err(EncryptionConfigError::InvalidConfig(format!(
                 "key is not valid base64: {e}"
             )));
         }
@@ -178,7 +165,7 @@ fn parse_encryption_key<const N: usize>(
     if decoded.len() != N {
         let len = decoded.len();
         key.as_mut().zeroize();
-        return Err(EncryptionError::InvalidConfig(format!(
+        return Err(EncryptionConfigError::InvalidConfig(format!(
             "key must be exactly {N} bytes, got {len} bytes"
         )));
     }
@@ -198,7 +185,7 @@ fn header_value_for_key(algorithm: EncryptionAlgorithm, key: &[u8; 32]) -> Heade
     HeaderValue::from_bytes(&value).expect("encryption header value should be ASCII")
 }
 
-fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, EncryptionError> {
+fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, EncryptionConfigError> {
     if alg_str == "plain" {
         Ok(None)
     } else {
@@ -206,7 +193,7 @@ fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, Encrypt
             .parse::<EncryptionAlgorithm>()
             .map(Some)
             .map_err(|_| {
-                EncryptionError::InvalidConfig(format!(
+                EncryptionConfigError::InvalidConfig(format!(
                     "unknown algorithm {alg_str:?}; expected 'plain', 'aegis-256', or 'aes-256-gcm'"
                 ))
             })
@@ -265,31 +252,46 @@ mod tests {
     #[test]
     fn parse_header_malformed_no_semicolon() {
         let result = "aegis-256".parse::<EncryptionConfig>();
-        assert!(matches!(result, Err(EncryptionError::InvalidConfig(_))));
+        assert!(matches!(
+            result,
+            Err(EncryptionConfigError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn parse_header_wrong_key_length() {
         let result = "aegis-256; 3q2+7w==".parse::<EncryptionConfig>();
-        assert!(matches!(result, Err(EncryptionError::InvalidConfig(_))));
+        assert!(matches!(
+            result,
+            Err(EncryptionConfigError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn parse_header_invalid_base64() {
         let result = "aegis-256; not-valid-base64!!!".parse::<EncryptionConfig>();
-        assert!(matches!(result, Err(EncryptionError::InvalidConfig(_))));
+        assert!(matches!(
+            result,
+            Err(EncryptionConfigError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn parse_header_unknown_algorithm_fails() {
         let result = KEY_B64.parse::<EncryptionConfig>();
-        assert!(matches!(result, Err(EncryptionError::InvalidConfig(_))));
+        assert!(matches!(
+            result,
+            Err(EncryptionConfigError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn parse_header_plain_with_key_fails() {
         let result = format!("plain; {KEY_B64}").parse::<EncryptionConfig>();
-        assert!(matches!(result, Err(EncryptionError::InvalidConfig(_))));
+        assert!(matches!(
+            result,
+            Err(EncryptionConfigError::InvalidConfig(_))
+        ));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    record::{FencingToken, SeqNum, StreamPosition},
+    record::{FencingToken, RecordEncryptionError, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
 
@@ -103,7 +103,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    Encryption(#[from] s2_common::encryption::EncryptionError),
+    Encryption(#[from] RecordEncryptionError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -157,7 +157,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    Encryption(#[from] s2_common::encryption::EncryptionError),
+    Encryption(#[from] RecordEncryptionError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -231,7 +231,7 @@ pub enum ReadError {
     #[error(transparent)]
     Unwritten(#[from] UnwrittenError),
     #[error(transparent)]
-    Encryption(#[from] s2_common::encryption::EncryptionError),
+    Encryption(#[from] RecordEncryptionError),
 }
 
 impl From<StreamerError> for ReadError {
