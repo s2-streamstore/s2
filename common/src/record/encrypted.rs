@@ -219,9 +219,9 @@ pub(crate) fn encrypt_payload(
     aad: &[u8],
 ) -> Result<EncryptedRecord, EncryptionError> {
     match encryption {
-        EncryptionConfig::Plain => Err(EncryptionError::EncodingFailed(
-            "cannot encrypt with 'alg=plain'".to_owned(),
-        )),
+        EncryptionConfig::Plain => {
+            unreachable!("plain encryption should be handled before encrypt_payload")
+        }
         EncryptionConfig::Aegis256(key) => encrypt_payload_with_algorithm(
             plaintext,
             EncryptionAlgorithm::Aegis256,
@@ -254,9 +254,8 @@ pub(crate) fn decrypt_payload(
             Ok(Bytes::from(plaintext))
         }
         (EncryptionConfig::Aes256Gcm(key), EncryptionAlgorithm::Aes256Gcm) => {
-            let cipher = Aes256Gcm::new_from_slice(key.secret()).map_err(|_| {
-                EncryptionError::EncodingFailed("invalid AES key length".to_owned())
-            })?;
+            let cipher = Aes256Gcm::new_from_slice(key.secret())
+                .expect("AES-256-GCM key length should be valid");
             let nonce_generic = aes_gcm::Nonce::from_slice(record.nonce());
             let plaintext = cipher
                 .decrypt(
@@ -325,7 +324,7 @@ pub fn decrypt_read_batch(
                 } => {
                     let plaintext = decrypt_payload(&encrypted, encryption, aad)?;
                     let envelope = EnvelopeRecord::try_from(plaintext)
-                        .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
+                        .map_err(|e| EncryptionError::InvalidDecryptedRecord(e.to_string()))?;
                     Ok(Sequenced {
                         position: sr.position,
                         record: Record::Envelope(envelope),
@@ -367,15 +366,13 @@ fn encrypt_payload_with_algorithm(
         EncryptionAlgorithm::Aes256Gcm => {
             let tag = Aes256Gcm::new(key.into())
                 .encrypt_in_place_detached(nonce.into(), aad, payload)
-                .map_err(|_| {
-                    EncryptionError::EncodingFailed("AES-256-GCM encryption failed".to_owned())
-                })?;
+                .map_err(|_| EncryptionError::EncryptFailed)?;
             bytes.put_slice(tag.as_ref());
         }
     }
 
-    EncryptedRecord::try_from(bytes.freeze())
-        .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))
+    Ok(EncryptedRecord::try_from(bytes.freeze())
+        .expect("framed ciphertext should be a valid encrypted record"))
 }
 
 #[cfg(test)]
