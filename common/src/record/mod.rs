@@ -597,16 +597,13 @@ mod test {
 
     #[test]
     fn roundtrip_encrypted_stored_record() {
-        let record = StoredRecord::encrypted(
-            EncryptedRecord::try_from_parts(
-                crate::encryption::EncryptionAlgorithm::Aes256Gcm,
-                Bytes::from_static(b"0123456789ab"),
-                Bytes::from_static(b"ciphertext"),
-                Bytes::from_static(b"0123456789abcdef"),
-            )
-            .unwrap(),
-            123,
-        );
+        let mut encoded = BytesMut::with_capacity(1 + 12 + 10 + 16);
+        encoded.put_u8(0x02);
+        encoded.put_slice(b"0123456789ab");
+        encoded.put_slice(b"ciphertext");
+        encoded.put_slice(b"0123456789abcdef");
+        let record =
+            StoredRecord::encrypted(EncryptedRecord::try_from(encoded.freeze()).unwrap(), 123);
         let metered_record: Metered<StoredRecord> = record.clone().into();
         let encoded_record = metered_record.as_ref().to_bytes();
         let decoded_record = Metered::try_from(encoded_record).unwrap();

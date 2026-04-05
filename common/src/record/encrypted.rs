@@ -67,34 +67,11 @@ pub struct EncryptedRecord {
 }
 
 impl EncryptedRecord {
-    #[cfg(test)]
-    pub(crate) fn try_from_parts(
-        algorithm: EncryptionAlgorithm,
-        nonce: impl AsRef<[u8]>,
-        ciphertext: impl AsRef<[u8]>,
-        tag: impl AsRef<[u8]>,
-    ) -> Result<Self, EncryptedRecordError> {
-        let nonce = nonce.as_ref();
-        let ciphertext = ciphertext.as_ref();
-        let tag = tag.as_ref();
-
-        let expected_nonce_len = algorithm.nonce_len();
-        let expected_tag_len = algorithm.tag_len();
-        if nonce.len() != expected_nonce_len || tag.len() != expected_tag_len {
-            return Err(EncryptedRecordError::InvalidLayout);
-        }
-
-        let mut bytes =
-            BytesMut::with_capacity(SUITE_ID_LEN + nonce.len() + ciphertext.len() + tag.len());
-        bytes.put_u8(algorithm.suite_id());
-        bytes.put_slice(nonce);
-        bytes.put_slice(ciphertext);
-        bytes.put_slice(tag);
-
-        Ok(Self {
-            encoded: bytes.freeze(),
-            algorithm,
-        })
+    fn new(encoded: Bytes, algorithm: EncryptionAlgorithm) -> Self {
+        debug_assert!(!encoded.is_empty());
+        debug_assert_eq!(encoded[0], algorithm.suite_id());
+        debug_assert!(encoded.len() >= SUITE_ID_LEN + algorithm.nonce_len() + algorithm.tag_len());
+        Self { encoded, algorithm }
     }
 
     pub(crate) fn algorithm(&self) -> EncryptionAlgorithm {
@@ -194,46 +171,19 @@ impl Encodable for EncryptedRecord {
 impl TryFrom<Bytes> for EncryptedRecord {
     type Error = EncryptedRecordError;
 
-    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
-        if bytes.len() < SUITE_ID_LEN {
+    fn try_from(encoded: Bytes) -> Result<Self, Self::Error> {
+        if encoded.len() < SUITE_ID_LEN {
             return Err(EncryptedRecordError::Truncated);
         }
 
-        let algorithm = EncryptionAlgorithm::try_from_suite_id(bytes[0])?;
+        let algorithm = EncryptionAlgorithm::try_from_suite_id(encoded[0])?;
         let nonce_len = algorithm.nonce_len();
         let tag_len = algorithm.tag_len();
-        if bytes.len() < SUITE_ID_LEN + nonce_len + tag_len {
+        if encoded.len() < SUITE_ID_LEN + nonce_len + tag_len {
             return Err(EncryptedRecordError::Truncated);
         }
 
-        Ok(Self {
-            encoded: bytes,
-            algorithm,
-        })
-    }
-}
-
-pub(crate) fn encrypt_payload(
-    plaintext: &(impl Encodable + ?Sized),
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> Result<EncryptedRecord, EncryptionError> {
-    match encryption {
-        EncryptionConfig::Plain => {
-            unreachable!("plain encryption should be handled before encrypt_payload")
-        }
-        EncryptionConfig::Aegis256(key) => encrypt_payload_with_algorithm(
-            plaintext,
-            EncryptionAlgorithm::Aegis256,
-            key.secret(),
-            aad,
-        ),
-        EncryptionConfig::Aes256Gcm(key) => encrypt_payload_with_algorithm(
-            plaintext,
-            EncryptionAlgorithm::Aes256Gcm,
-            key.secret(),
-            aad,
-        ),
+        Ok(Self::new(encoded, algorithm))
     }
 }
 
@@ -294,8 +244,22 @@ pub fn to_stored_records(
                 (record @ Record::Envelope(_), EncryptionConfig::Plain) => {
                     StoredRecord::Plaintext(record)
                 }
-                (Record::Envelope(envelope), encryption) => {
-                    let encrypted = encrypt_payload(&envelope, encryption, aad)?;
+                (Record::Envelope(envelope), EncryptionConfig::Aegis256(key)) => {
+                    let encrypted = encrypt_payload_with_algorithm(
+                        &envelope,
+                        EncryptionAlgorithm::Aegis256,
+                        key.secret(),
+                        aad,
+                    )?;
+                    StoredRecord::encrypted(encrypted, metered_size)
+                }
+                (Record::Envelope(envelope), EncryptionConfig::Aes256Gcm(key)) => {
+                    let encrypted = encrypt_payload_with_algorithm(
+                        &envelope,
+                        EncryptionAlgorithm::Aes256Gcm,
+                        key.secret(),
+                        aad,
+                    )?;
                     StoredRecord::encrypted(encrypted, metered_size)
                 }
             };
@@ -348,31 +312,30 @@ fn encrypt_payload_with_algorithm(
     aad: &[u8],
 ) -> Result<EncryptedRecord, EncryptionError> {
     let payload_start = SUITE_ID_LEN + alg.nonce_len();
-    let mut bytes =
+    let mut encoded =
         BytesMut::with_capacity(payload_start + plaintext.encoded_size() + alg.tag_len());
-    bytes.put_u8(alg.suite_id());
-    alg.put_random_nonce(&mut bytes);
-    plaintext.encode_into(&mut bytes);
+    encoded.put_u8(alg.suite_id());
+    alg.put_random_nonce(&mut encoded);
+    plaintext.encode_into(&mut encoded);
 
-    let (prefix, payload) = bytes.split_at_mut(payload_start);
+    let (prefix, payload) = encoded.split_at_mut(payload_start);
     let nonce = &prefix[SUITE_ID_LEN..];
 
     match alg {
         EncryptionAlgorithm::Aegis256 => {
             let tag = Aegis256::<16>::new(key.try_into().unwrap(), nonce.try_into().unwrap())
                 .encrypt_in_place(payload, aad);
-            bytes.put_slice(tag.as_ref());
+            encoded.put_slice(tag.as_ref());
         }
         EncryptionAlgorithm::Aes256Gcm => {
             let tag = Aes256Gcm::new(key.into())
                 .encrypt_in_place_detached(nonce.into(), aad, payload)
                 .map_err(|_| EncryptionError::EncryptFailed)?;
-            bytes.put_slice(tag.as_ref());
+            encoded.put_slice(tag.as_ref());
         }
     }
 
-    Ok(EncryptedRecord::try_from(bytes.freeze())
-        .expect("framed ciphertext should be a valid encrypted record"))
+    Ok(EncryptedRecord::new(encoded.freeze(), alg))
 }
 
 #[cfg(test)]
@@ -382,20 +345,52 @@ mod tests {
     use super::*;
     use crate::record::{Header, StreamPosition};
 
-    fn aegis256_encryption() -> EncryptionConfig {
-        EncryptionConfig::aegis256([0x42u8; 32])
+    const TEST_KEY: [u8; 32] = [0x42; 32];
+    const OTHER_TEST_KEY: [u8; 32] = [0x99; 32];
+
+    fn test_encryption(alg: EncryptionAlgorithm) -> EncryptionConfig {
+        match alg {
+            EncryptionAlgorithm::Aegis256 => EncryptionConfig::aegis256(TEST_KEY),
+            EncryptionAlgorithm::Aes256Gcm => EncryptionConfig::aes256_gcm(TEST_KEY),
+        }
     }
 
-    fn aes256gcm_encryption() -> EncryptionConfig {
-        EncryptionConfig::aes256_gcm([0x42u8; 32])
+    fn other_test_encryption(alg: EncryptionAlgorithm) -> EncryptionConfig {
+        match alg {
+            EncryptionAlgorithm::Aegis256 => EncryptionConfig::aegis256(OTHER_TEST_KEY),
+            EncryptionAlgorithm::Aes256Gcm => EncryptionConfig::aes256_gcm(OTHER_TEST_KEY),
+        }
     }
 
-    fn other_aegis256_encryption() -> EncryptionConfig {
-        EncryptionConfig::aegis256([0x99u8; 32])
+    fn encrypt_test_payload(
+        plaintext: &(impl Encodable + ?Sized),
+        alg: EncryptionAlgorithm,
+        aad: &[u8],
+    ) -> EncryptedRecord {
+        encrypt_payload_with_algorithm(plaintext, alg, &TEST_KEY, aad).unwrap()
     }
 
-    fn other_aes256gcm_encryption() -> EncryptionConfig {
-        EncryptionConfig::aes256_gcm([0x99u8; 32])
+    fn make_encrypted_record(
+        algorithm: EncryptionAlgorithm,
+        nonce: impl AsRef<[u8]>,
+        ciphertext: impl AsRef<[u8]>,
+        tag: impl AsRef<[u8]>,
+    ) -> EncryptedRecord {
+        let nonce = nonce.as_ref();
+        let ciphertext = ciphertext.as_ref();
+        let tag = tag.as_ref();
+
+        assert_eq!(nonce.len(), algorithm.nonce_len());
+        assert_eq!(tag.len(), algorithm.tag_len());
+
+        let mut encoded =
+            BytesMut::with_capacity(SUITE_ID_LEN + nonce.len() + ciphertext.len() + tag.len());
+        encoded.put_u8(algorithm.suite_id());
+        encoded.put_slice(nonce);
+        encoded.put_slice(ciphertext);
+        encoded.put_slice(tag);
+
+        EncryptedRecord::new(encoded.freeze(), algorithm)
     }
 
     fn aad() -> [u8; 32] {
@@ -418,7 +413,25 @@ mod tests {
     ) -> StoredRecord {
         let metered_size = make_plaintext_envelope(headers.clone(), body.clone()).metered_size();
         let plaintext = make_envelope(headers, body);
-        let encrypted = encrypt_payload(&plaintext, encryption, aad).unwrap();
+        let encrypted = match encryption {
+            EncryptionConfig::Plain => {
+                unreachable!("plain encryption should not produce ciphertext")
+            }
+            EncryptionConfig::Aegis256(key) => encrypt_payload_with_algorithm(
+                &plaintext,
+                EncryptionAlgorithm::Aegis256,
+                key.secret(),
+                aad,
+            )
+            .unwrap(),
+            EncryptionConfig::Aes256Gcm(key) => encrypt_payload_with_algorithm(
+                &plaintext,
+                EncryptionAlgorithm::Aes256Gcm,
+                key.secret(),
+                aad,
+            )
+            .unwrap(),
+        };
         StoredRecord::encrypted(encrypted, metered_size)
     }
 
@@ -463,11 +476,8 @@ mod tests {
 
         let aad = aad();
         let plaintext = make_envelope(headers.clone(), body.clone());
-        let encryption = match alg {
-            EncryptionAlgorithm::Aegis256 => aegis256_encryption(),
-            EncryptionAlgorithm::Aes256Gcm => aes256gcm_encryption(),
-        };
-        let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
+        let encryption = test_encryption(alg);
+        let ciphertext = encrypt_test_payload(&plaintext, alg, &aad);
         let decrypted = decrypt_payload(&ciphertext, &encryption, &aad).unwrap();
         let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
 
@@ -489,9 +499,12 @@ mod tests {
     fn wrong_key_fails_aegis256() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let encryption = aegis256_encryption();
-        let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
-        let result = decrypt_payload(&ciphertext, &other_aegis256_encryption(), &aad);
+        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
+        let result = decrypt_payload(
+            &ciphertext,
+            &other_test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad,
+        );
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
@@ -499,9 +512,12 @@ mod tests {
     fn wrong_key_fails_aes256gcm() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let encryption = aes256gcm_encryption();
-        let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
-        let result = decrypt_payload(&ciphertext, &other_aes256gcm_encryption(), &aad);
+        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aes256Gcm, &aad);
+        let result = decrypt_payload(
+            &ciphertext,
+            &other_test_encryption(EncryptionAlgorithm::Aes256Gcm),
+            &aad,
+        );
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
@@ -509,8 +525,7 @@ mod tests {
     fn truncated_ciphertext_fails_no_panic() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let encryption = aegis256_encryption();
-        let ciphertext = encrypt_payload(&plaintext, &encryption, &aad).unwrap();
+        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let truncated = ciphertext.to_bytes().slice(..4);
         let result = EncryptedRecord::try_from(truncated);
         assert!(matches!(result, Err(EncryptedRecordError::Truncated)));
@@ -536,7 +551,7 @@ mod tests {
     fn suite_id_byte_present() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad).unwrap();
+        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let encoded = ciphertext.to_bytes();
         assert_eq!(ciphertext.algorithm(), EncryptionAlgorithm::Aegis256);
         assert_eq!(encoded[0], 0x01);
@@ -546,14 +561,17 @@ mod tests {
     fn suite_id_flip_detected() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let mut ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad)
-            .unwrap()
+        let mut ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad)
             .to_bytes()
             .to_vec();
         assert_eq!(ciphertext[0], 0x01);
         ciphertext[0] = 0x02;
         let ciphertext = EncryptedRecord::try_from(Bytes::from(ciphertext)).unwrap();
-        let result = decrypt_payload(&ciphertext, &aegis256_encryption(), &aad);
+        let result = decrypt_payload(
+            &ciphertext,
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad,
+        );
         assert!(matches!(
             result,
             Err(EncryptionError::AlgorithmMismatch {
@@ -567,8 +585,7 @@ mod tests {
     fn invalid_suite_flip_detected() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let mut ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad)
-            .unwrap()
+        let mut ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad)
             .to_bytes()
             .to_vec();
         ciphertext[0] = 0xFF;
@@ -584,20 +601,23 @@ mod tests {
         let aad = aad();
         let other_aad = [0x5A; 32];
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_payload(&plaintext, &aegis256_encryption(), &aad).unwrap();
-        let result = decrypt_payload(&ciphertext, &aegis256_encryption(), &other_aad);
+        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
+        let result = decrypt_payload(
+            &ciphertext,
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &other_aad,
+        );
         assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
     }
 
     #[test]
     fn roundtrip_aes256gcm_record() {
-        let record = EncryptedRecord::try_from_parts(
+        let record = make_encrypted_record(
             EncryptionAlgorithm::Aes256Gcm,
             Bytes::from_static(b"0123456789ab"),
             Bytes::from_static(b"ciphertext"),
             Bytes::from_static(b"0123456789abcdef"),
-        )
-        .unwrap();
+        );
 
         let bytes = record.to_bytes();
         let decoded = EncryptedRecord::try_from(bytes).unwrap();
@@ -633,7 +653,9 @@ mod tests {
             Bytes::from_static(b"secret payload"),
         )]);
 
-        let encrypted = to_stored_records(input, &aegis256_encryption(), &aad).unwrap();
+        let encrypted =
+            to_stored_records(input, &test_encryption(EncryptionAlgorithm::Aegis256), &aad)
+                .unwrap();
         let (_, record) = encrypted.into_iter().next().unwrap().into_parts();
         let record = record.into_inner();
 
@@ -655,7 +677,7 @@ mod tests {
                     .unwrap(),
             )),
             make_encrypted_stored_record(
-                &aegis256_encryption(),
+                &test_encryption(EncryptionAlgorithm::Aegis256),
                 vec![Header {
                     name: Bytes::from_static(b"x-test"),
                     value: Bytes::from_static(b"hello"),
@@ -665,7 +687,9 @@ mod tests {
             ),
         ]);
 
-        let decrypted = decrypt_read_batch(batch, &aegis256_encryption(), &aad).unwrap();
+        let decrypted =
+            decrypt_read_batch(batch, &test_encryption(EncryptionAlgorithm::Aegis256), &aad)
+                .unwrap();
         let records = decrypted.records.into_inner();
 
         let Record::Envelope(first) = &records[0].record else {
@@ -686,7 +710,7 @@ mod tests {
     fn decrypt_read_batch_plain_rejects_encrypted_records() {
         let aad = aad();
         let batch = make_stored_read_batch(vec![make_encrypted_stored_record(
-            &aegis256_encryption(),
+            &test_encryption(EncryptionAlgorithm::Aegis256),
             vec![],
             Bytes::from_static(b"secret payload"),
             &aad,
