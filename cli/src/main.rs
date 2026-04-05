@@ -152,7 +152,6 @@ async fn run() -> Result<(), CliError> {
 
     let cli_config = load_cli_config()?;
     let sdk_config = sdk_config(&cli_config)?;
-    let command_encryption = resolve_command_encryption(&command)?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
     let token_source = access_token_source(&cli_config);
     let result: Result<(), CliError> = (async {
@@ -364,6 +363,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Append(args) => {
+            let encryption = resolve_encryption(&args.encryption)?;
             let records_in = args
                 .input
                 .reader()
@@ -382,7 +382,7 @@ async fn run() -> Result<(), CliError> {
                 &s2,
                 record_stream,
                 args.uri,
-                command_encryption.as_ref(),
+                encryption.as_ref(),
                 args.fencing_token,
                 args.match_seq_num,
                 *args.linger,
@@ -425,7 +425,8 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Read(args) => {
-            let mut batches = ops::read(&s2, &args, command_encryption.as_ref()).await?;
+            let encryption = resolve_encryption(&args.encryption)?;
+            let mut batches = ops::read(&s2, &args, encryption.as_ref()).await?;
             let mut writer = args
                 .output
                 .writer()
@@ -487,7 +488,8 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Tail(args) => {
-            let mut records = ops::tail(&s2, &args, command_encryption.as_ref()).await?;
+            let encryption = resolve_encryption(&args.encryption)?;
+            let mut records = ops::tail(&s2, &args, encryption.as_ref()).await?;
             let mut writer = args
                 .output
                 .writer()
@@ -796,15 +798,6 @@ fn print_metrics(metrics: &[Metric]) {
                 }
             }
         }
-    }
-}
-
-fn resolve_command_encryption(command: &Command) -> Result<Option<EncryptionConfig>, CliError> {
-    match command {
-        Command::Append(a) => resolve_encryption(&a.encryption),
-        Command::Read(a) => resolve_encryption(&a.encryption),
-        Command::Tail(a) => resolve_encryption(&a.encryption),
-        _ => Ok(None),
     }
 }
 
