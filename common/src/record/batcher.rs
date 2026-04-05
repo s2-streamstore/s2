@@ -6,7 +6,7 @@ use super::InternalRecordError;
 use crate::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize, SequencedRecord, StreamPosition},
+    record::{Metered, MeteredSize, Record, SequencedRecord, StreamPosition},
 };
 
 #[derive(Debug)]
@@ -65,13 +65,14 @@ where
         while self.buffered_error.is_none() {
             match self.record_iterator.next() {
                 Some(Ok((position, data))) => {
-                    let record = match Metered::<crate::record::Record>::try_from(data) {
-                        Ok(record) => record.sequenced(position),
+                    let record: Metered<Record> = match data.try_into() {
+                        Ok(record) => record,
                         Err(err) => {
                             self.buffered_error = Some(err);
                             break;
                         }
                     };
+                    let record = record.sequenced(position);
 
                     if remaining_limit.deny(
                         self.buffered_records.len() + 1,

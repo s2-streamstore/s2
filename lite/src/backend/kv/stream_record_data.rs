@@ -45,7 +45,7 @@ pub fn deser_value(bytes: Bytes) -> Result<Metered<StoredRecord>, Deserializatio
 mod tests {
     use bytes::Bytes;
     use proptest::prelude::*;
-    use s2_common::record::{SeqNum, StreamPosition, Timestamp};
+    use s2_common::record::{Metered, SeqNum, StreamPosition, Timestamp};
 
     use crate::backend::{kv::DeserializationError, stream_id::StreamId};
 
@@ -91,15 +91,14 @@ mod tests {
             let expected_headers = headers.clone();
             let expected_body = body.clone();
             let record = Record::try_from_parts(headers.clone(), body).unwrap();
-            let metered_record: s2_common::record::Metered<Record> = record.into();
+            let metered_record: Metered<Record> = record.into();
             let original_size = metered_record.metered_size();
 
             let bytes = super::ser_value(
-                s2_common::record::Metered::from(StoredRecord::from(metered_record.into_inner())).as_ref()
+                Metered::from(StoredRecord::from(metered_record.into_inner())).as_ref()
             );
             let decoded = super::deser_value(bytes).unwrap();
-            let decoded: s2_common::record::Metered<s2_common::record::Record> =
-                super::ser_value(decoded.as_ref()).try_into().unwrap();
+            let decoded: Metered<Record> = super::ser_value(decoded.as_ref()).try_into().unwrap();
 
             prop_assert_eq!(original_size, decoded.metered_size());
             let (decoded_headers, decoded_body) = decoded.into_inner().into_parts();

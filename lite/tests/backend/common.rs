@@ -152,7 +152,7 @@ pub async fn append_payloads_with_encryption(
     let bodies = payloads
         .iter()
         .map(|bytes| Bytes::copy_from_slice(bytes))
-        .collect::<Vec<_>>();
+        .collect();
     let input = AppendInput {
         records: create_test_record_batch(bodies),
         match_seq_num: None,

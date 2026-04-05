@@ -389,13 +389,13 @@ async fn test_read_timestamp_range() {
         .expect("Failed to create read session");
 
     let mut session = Box::pin(session);
-    let records = loop {
+    let records: Vec<_> = loop {
         let output = tokio::time::timeout(Duration::from_secs(1), session.as_mut().next())
             .await
             .expect("Timed out waiting for read output");
         match output {
             Some(Ok(ReadSessionOutput::Batch(batch))) => {
-                break batch.records.iter().cloned().collect::<Vec<_>>();
+                break batch.records.iter().cloned().collect();
             }
             Some(Ok(ReadSessionOutput::Heartbeat(_))) => continue,
             Some(Err(e)) => panic!("Read error: {:?}", e),

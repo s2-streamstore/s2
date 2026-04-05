@@ -14,8 +14,8 @@
 //! metering, limits, or accounting.
 
 use super::{
-    Encodable as _, EnvelopeRecord, Metered, MeteredSize, Record, SequencedRecord, StoredReadBatch,
-    StoredRecord, StoredSequencedRecord,
+    Encodable as _, EnvelopeRecord, Metered, MeteredSize, Record, Sequenced, SequencedRecord,
+    StoredReadBatch, StoredRecord, StoredSequencedRecord,
 };
 use crate::{
     encryption::{self, EncryptionConfig, EncryptionError},
@@ -53,28 +53,31 @@ pub fn decrypt_read_batch(
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<types::stream::ReadBatch, EncryptionError> {
-    let records: Vec<super::SequencedRecord> = batch
+    let records: Result<Vec<_>, _> = batch
         .records
         .into_inner()
         .into_iter()
-        .map(|sr| match sr.record {
-            StoredRecord::Plaintext(record) => Ok(super::Sequenced {
-                position: sr.position,
-                record,
-            }),
-            StoredRecord::Encrypted {
-                record: encrypted, ..
-            } => {
-                let plaintext = encryption::decrypt_payload(&encrypted, encryption, aad)?;
-                let envelope = EnvelopeRecord::try_from(plaintext)
-                    .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
-                Ok(super::Sequenced {
+        .map(|sr| -> Result<_, EncryptionError> {
+            match sr.record {
+                StoredRecord::Plaintext(record) => Ok(Sequenced {
                     position: sr.position,
-                    record: Record::Envelope(envelope),
-                })
+                    record,
+                }),
+                StoredRecord::Encrypted {
+                    record: encrypted, ..
+                } => {
+                    let plaintext = encryption::decrypt_payload(&encrypted, encryption, aad)?;
+                    let envelope = EnvelopeRecord::try_from(plaintext)
+                        .map_err(|e| EncryptionError::EncodingFailed(e.to_string()))?;
+                    Ok(Sequenced {
+                        position: sr.position,
+                        record: Record::Envelope(envelope),
+                    })
+                }
             }
         })
-        .collect::<Result<_, EncryptionError>>()?;
+        .collect();
+    let records = records?;
 
     Ok(types::stream::ReadBatch {
         records: Metered::from(records),
@@ -121,7 +124,7 @@ mod tests {
     }
 
     fn make_stored_read_batch(records: Vec<StoredRecord>) -> StoredReadBatch {
-        let records = records
+        let records: Vec<_> = records
             .into_iter()
             .enumerate()
             .map(|(i, record)| {
@@ -132,7 +135,7 @@ mod tests {
                     })
                     .into_inner()
             })
-            .collect::<Vec<_>>();
+            .collect();
         StoredReadBatch {
             records: Metered::from(records),
             tail: None,
@@ -149,7 +152,7 @@ mod tests {
                     timestamp: i as u64 + 10,
                 })
             })
-            .collect::<Vec<_>>()
+            .collect()
     }
 
     #[test]

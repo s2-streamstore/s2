@@ -768,19 +768,18 @@ async fn test_append_session_pipeline_preserves_ack_tail_and_read_order() {
     )
     .await;
 
-    let expected_bodies = (0..32)
+    let expected_bodies: Vec<_> = (0..32)
         .map(|i| format!("msg-{i:02}").into_bytes())
-        .collect::<Vec<_>>();
-    let inputs = futures::stream::iter(
-        expected_bodies
-            .iter()
-            .map(|body| AppendInput {
-                records: create_test_record_batch(vec![Bytes::copy_from_slice(body)]),
-                match_seq_num: None,
-                fencing_token: None,
-            })
-            .collect::<Vec<_>>(),
-    );
+        .collect();
+    let inputs: Vec<_> = expected_bodies
+        .iter()
+        .map(|body| AppendInput {
+            records: create_test_record_batch(vec![Bytes::copy_from_slice(body)]),
+            match_seq_num: None,
+            fencing_token: None,
+        })
+        .collect();
+    let inputs = futures::stream::iter(inputs);
 
     let session = backend
         .clone()
