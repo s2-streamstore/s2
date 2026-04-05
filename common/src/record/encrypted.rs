@@ -245,8 +245,8 @@ pub(crate) fn decrypt_payload(
     match (encryption, record.algorithm()) {
         (EncryptionConfig::None, _) => Err(EncryptionError::UnexpectedEncryptedRecord),
         (EncryptionConfig::Aegis256(key), EncryptionAlgorithm::Aegis256) => {
-            let nonce: &[u8; 32] = record.nonce().try_into().unwrap();
-            let tag: &[u8; 16] = record.tag().try_into().unwrap();
+            let nonce = record.nonce().try_into().unwrap();
+            let tag = record.tag().try_into().unwrap();
 
             let plaintext = Aegis256::<16>::new(key.secret(), nonce)
                 .decrypt(record.ciphertext(), tag, aad)
@@ -345,7 +345,7 @@ pub fn decrypt_read_batch(
 fn encrypt_payload_with_algorithm(
     plaintext: &(impl Encodable + ?Sized),
     alg: EncryptionAlgorithm,
-    key: &[u8; 32],
+    key: &[u8],
     aad: &[u8],
 ) -> Result<EncryptedRecord, EncryptionError> {
     let payload_start = SUITE_ID_LEN + alg.nonce_len();
@@ -360,17 +360,13 @@ fn encrypt_payload_with_algorithm(
 
     match alg {
         EncryptionAlgorithm::Aegis256 => {
-            let nonce: &[u8; 32] = nonce.try_into().unwrap();
-            let tag = Aegis256::<16>::new(key, nonce).encrypt_in_place(payload, aad);
+            let tag = Aegis256::<16>::new(key.try_into().unwrap(), nonce.try_into().unwrap())
+                .encrypt_in_place(payload, aad);
             bytes.put_slice(tag.as_ref());
         }
         EncryptionAlgorithm::Aes256Gcm => {
-            let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| {
-                EncryptionError::EncodingFailed("invalid AES key length".to_owned())
-            })?;
-            let nonce_generic = aes_gcm::Nonce::from_slice(nonce);
-            let tag = cipher
-                .encrypt_in_place_detached(nonce_generic, aad, payload)
+            let tag = Aes256Gcm::new(key.into())
+                .encrypt_in_place_detached(nonce.into(), aad, payload)
                 .map_err(|_| {
                     EncryptionError::EncodingFailed("AES-256-GCM encryption failed".to_owned())
                 })?;
