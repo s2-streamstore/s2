@@ -4,19 +4,17 @@ mod encrypted;
 mod envelope;
 mod fencing;
 mod metering;
-mod protection;
 
 pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
-pub use encrypted::{EncryptedRecord, EncryptedRecordError};
+pub use encrypted::{EncryptedRecord, EncryptedRecordError, decrypt_read_batch, to_stored_records};
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
 use envelope::HeaderValidationError;
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
 pub use metering::{Metered, MeteredSize};
-pub use protection::{decrypt_read_batch, to_stored_records};
 
 use crate::deep_size::DeepSize;
 
@@ -601,7 +599,7 @@ mod test {
     fn roundtrip_encrypted_stored_record() {
         let record = StoredRecord::encrypted(
             EncryptedRecord::try_from_parts(
-                crate::types::config::EncryptionAlgorithm::Aes256Gcm,
+                crate::encryption::EncryptionAlgorithm::Aes256Gcm,
                 Bytes::from_static(b"0123456789ab"),
                 Bytes::from_static(b"ciphertext"),
                 Bytes::from_static(b"0123456789abcdef"),

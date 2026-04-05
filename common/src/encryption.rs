@@ -1,12 +1,80 @@
+//! Encryption configuration, header parsing, and key parsing.
+
 use core::str::FromStr;
+use std::sync::Arc;
 
 use base64ct::Encoding;
 use http::{HeaderName, HeaderValue};
+use secrecy::{ExposeSecret, SecretBox};
+use strum::{Display, EnumString};
 
-use super::{Aegis256Key, Aes256GcmKey, EncryptionAlgorithm, EncryptionError};
 use crate::http::ParseableHeader;
 
 pub static S2_ENCRYPTION_HEADER: HeaderName = HeaderName::from_static("s2-encryption");
+
+type EncryptionKey<const N: usize> = Arc<SecretBox<[u8; N]>>;
+
+/// Encryption algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+pub enum EncryptionAlgorithm {
+    /// AEGIS-256
+    #[strum(serialize = "aegis-256")]
+    Aegis256,
+    /// AES-256-GCM
+    #[strum(serialize = "aes-256-gcm")]
+    Aes256Gcm,
+}
+
+#[derive(Debug, Clone)]
+pub struct Aegis256Key(EncryptionKey<32>);
+
+impl Aegis256Key {
+    pub fn new(key: [u8; 32]) -> Self {
+        Self(Arc::new(SecretBox::new(Box::new(key))))
+    }
+
+    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionError> {
+        parse_encryption_key::<32>(key_b64).map(Self)
+    }
+
+    pub(crate) fn secret(&self) -> &[u8; 32] {
+        self.0.as_ref().expose_secret()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Aes256GcmKey(EncryptionKey<32>);
+
+impl Aes256GcmKey {
+    pub fn new(key: [u8; 32]) -> Self {
+        Self(Arc::new(SecretBox::new(Box::new(key))))
+    }
+
+    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionError> {
+        parse_encryption_key::<32>(key_b64).map(Self)
+    }
+
+    pub(crate) fn secret(&self) -> &[u8; 32] {
+        self.0.as_ref().expose_secret()
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum EncryptionError {
+    #[error("Malformed S2-Encryption header: {0}")]
+    MalformedHeader(String),
+    #[error("Ciphertext algorithm mismatch: expected {expected}, actual {actual}")]
+    AlgorithmMismatch {
+        expected: EncryptionAlgorithm,
+        actual: EncryptionAlgorithm,
+    },
+    #[error("Encrypted record encountered without decryption")]
+    UnexpectedEncryptedRecord,
+    #[error("Decryption failed")]
+    DecryptionFailed,
+    #[error("Record encoding error: {0}")]
+    EncodingFailed(String),
+}
 
 #[derive(Debug, Clone, Default)]
 pub enum EncryptionConfig {
@@ -92,6 +160,34 @@ impl ParseableHeader for EncryptionConfig {
     fn name() -> &'static HeaderName {
         &S2_ENCRYPTION_HEADER
     }
+}
+
+fn parse_encryption_key<const N: usize>(
+    key_b64: &str,
+) -> Result<EncryptionKey<N>, EncryptionError> {
+    use base64ct::{Base64, Encoding};
+    use secrecy::zeroize::Zeroize;
+
+    let mut key = Box::new([0u8; N]);
+    let decoded = match Base64::decode(key_b64, key.as_mut()) {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            key.as_mut().zeroize();
+            return Err(EncryptionError::MalformedHeader(format!(
+                "key is not valid base64: {e}"
+            )));
+        }
+    };
+
+    if decoded.len() != N {
+        let len = decoded.len();
+        key.as_mut().zeroize();
+        return Err(EncryptionError::MalformedHeader(format!(
+            "key must be exactly {N} bytes, got {len} bytes"
+        )));
+    }
+
+    Ok(Arc::new(SecretBox::new(key)))
 }
 
 fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, EncryptionError> {
