@@ -35,7 +35,7 @@ async fn test_operations_on_nonexistent_basin() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await;
     assert!(matches!(read_result, Err(ReadError::BasinNotFound(_))));
@@ -50,7 +50,7 @@ async fn test_operations_on_nonexistent_basin() {
             basin_name.clone(),
             stream_name.clone(),
             input,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await;
     assert!(matches!(append_result, Err(AppendError::BasinNotFound(_))));
@@ -83,7 +83,7 @@ async fn test_concurrent_appends_to_same_stream() {
                 fencing_token: None,
             };
             backend
-                .append(basin_name, stream_name, input, EncryptionConfig::None)
+                .append(basin_name, stream_name, input, EncryptionConfig::Plain)
                 .await
         });
         handles.push(handle);
@@ -115,7 +115,7 @@ async fn test_concurrent_appends_to_same_stream() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
+        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -169,7 +169,7 @@ async fn test_read_while_appending() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -272,7 +272,7 @@ async fn test_concurrent_reads_same_stream() {
                 wait: Some(Duration::ZERO),
             };
             let session = backend
-                .read(basin_name, stream_name, start, end, EncryptionConfig::None)
+                .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
                 .await?;
             let mut session = Box::pin(session);
             let records = collect_records(&mut session).await;

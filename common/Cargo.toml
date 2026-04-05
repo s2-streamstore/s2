@@ -16,7 +16,7 @@ utoipa = ["dep:utoipa"]
 
 [dependencies]
 aegis = { workspace = true }
-aes-gcm = { workspace = true }
+aes-gcm = { workspace = true, features = ["zeroize"] }
 axum = { workspace = true, optional = true }
 base64ct = { workspace = true, features = ["alloc"] }
 blake3 = { workspace = true }

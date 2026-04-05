@@ -219,8 +219,8 @@ pub(crate) fn encrypt_payload(
     aad: &[u8],
 ) -> Result<EncryptedRecord, EncryptionError> {
     match encryption {
-        EncryptionConfig::None => Err(EncryptionError::EncodingFailed(
-            "cannot encrypt with 'alg=none'".to_owned(),
+        EncryptionConfig::Plain => Err(EncryptionError::EncodingFailed(
+            "cannot encrypt with 'alg=plain'".to_owned(),
         )),
         EncryptionConfig::Aegis256(key) => encrypt_payload_with_algorithm(
             plaintext,
@@ -243,7 +243,7 @@ pub(crate) fn decrypt_payload(
     aad: &[u8],
 ) -> Result<Bytes, EncryptionError> {
     match (encryption, record.algorithm()) {
-        (EncryptionConfig::None, _) => Err(EncryptionError::UnexpectedEncryptedRecord),
+        (EncryptionConfig::Plain, _) => Err(EncryptionError::UnexpectedEncryptedRecord),
         (EncryptionConfig::Aegis256(key), EncryptionAlgorithm::Aegis256) => {
             let nonce = record.nonce().try_into().unwrap();
             let tag = record.tag().try_into().unwrap();
@@ -292,7 +292,7 @@ pub fn to_stored_records(
             let metered_size = record.metered_size();
             let stored = match (record.into_inner(), encryption) {
                 (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
-                (record @ Record::Envelope(_), EncryptionConfig::None) => {
+                (record @ Record::Envelope(_), EncryptionConfig::Plain) => {
                     StoredRecord::Plaintext(record)
                 }
                 (Record::Envelope(envelope), encryption) => {
@@ -686,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_read_batch_none_rejects_encrypted_records() {
+    fn decrypt_read_batch_plain_rejects_encrypted_records() {
         let aad = aad();
         let batch = make_stored_read_batch(vec![make_encrypted_stored_record(
             &aegis256_encryption(),
@@ -695,7 +695,7 @@ mod tests {
             &aad,
         )]);
 
-        let result = decrypt_read_batch(batch, &EncryptionConfig::None, &aad);
+        let result = decrypt_read_batch(batch, &EncryptionConfig::Plain, &aad);
 
         assert!(matches!(
             result,

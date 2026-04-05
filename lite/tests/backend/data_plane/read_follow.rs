@@ -38,7 +38,7 @@ async fn test_follow_mode_wait_duration() {
 
     let start_time = tokio::time::Instant::now();
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
+        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -84,7 +84,7 @@ async fn test_follow_mode_heartbeats() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
+        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -136,7 +136,7 @@ async fn test_follow_mode_receives_new_data() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -302,7 +302,7 @@ async fn test_follow_mode_with_multiple_appends() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -385,7 +385,7 @@ async fn test_follow_mode_broadcast_lag_falls_back_to_db_catchup() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -446,7 +446,7 @@ async fn test_transition_from_catchup_to_follow() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -521,7 +521,7 @@ async fn test_follow_mode_with_count_limit() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -597,7 +597,7 @@ async fn test_follow_mode_with_exact_count_limit() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -661,7 +661,7 @@ async fn test_follow_mode_with_timestamp_until() {
             basin_name.clone(),
             stream_name.clone(),
             input,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to append initial record");
@@ -682,7 +682,7 @@ async fn test_follow_mode_with_timestamp_until() {
             stream_name.clone(),
             start,
             end,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await
         .expect("Failed to create read session");
@@ -705,7 +705,7 @@ async fn test_follow_mode_with_timestamp_until() {
                 basin_clone.clone(),
                 stream_clone.clone(),
                 input,
-                EncryptionConfig::None,
+                EncryptionConfig::Plain,
             )
             .await
             .unwrap();
@@ -718,7 +718,7 @@ async fn test_follow_mode_with_timestamp_until() {
             fencing_token: None,
         };
         backend_clone
-            .append(basin_clone, stream_clone, input, EncryptionConfig::None)
+            .append(basin_clone, stream_clone, input, EncryptionConfig::Plain)
             .await
             .unwrap();
     });

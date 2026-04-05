@@ -626,7 +626,7 @@ impl StreamerClient {
             fencing_token: None,
         };
         match self
-            .append_permit(input, EncryptionConfig::None)
+            .append_permit(input, EncryptionConfig::Plain)
             .await?
             .submit_internal(None, AppendType::Terminal)
             .await
@@ -1114,7 +1114,7 @@ mod tests {
         let (tx1, mut rx1) = oneshot::channel();
         streamer.handle_append(
             append_input(b"p0"),
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
             None,
             tx1,
             AppendType::Regular,
@@ -1123,7 +1123,7 @@ mod tests {
         let (tx2, mut rx2) = oneshot::channel();
         streamer.handle_append(
             append_input(b"p1"),
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
             None,
             tx2,
             AppendType::Regular,
@@ -1132,7 +1132,7 @@ mod tests {
         let (tx3, mut rx3) = oneshot::channel();
         streamer.handle_append(
             append_input(b"p2"),
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
             None,
             tx3,
             AppendType::Regular,
@@ -1222,7 +1222,7 @@ mod tests {
             let payload = format!("jump-{i}");
             streamer.handle_append(
                 append_input(payload.as_bytes()),
-                EncryptionConfig::None,
+                EncryptionConfig::Plain,
                 None,
                 tx,
                 AppendType::Regular,

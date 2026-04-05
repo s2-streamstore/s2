@@ -519,7 +519,12 @@ mod tests {
             fencing_token: None,
         };
         let ack = backend
-            .append(basin.clone(), stream.clone(), input, EncryptionConfig::None)
+            .append(
+                basin.clone(),
+                stream.clone(),
+                input,
+                EncryptionConfig::Plain,
+            )
             .await
             .unwrap();
         assert!(ack.end.seq_num > 0);
@@ -546,7 +551,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .read(basin, stream, start, end, EncryptionConfig::None)
+            .read(basin, stream, start, end, EncryptionConfig::Plain)
             .await
             .unwrap();
         let records: Vec<_> = tokio::time::timeout(
@@ -596,7 +601,7 @@ mod tests {
         };
 
         let session = backend
-            .read(basin, stream, start, end, EncryptionConfig::None)
+            .read(basin, stream, start, end, EncryptionConfig::Plain)
             .await
             .unwrap();
         let started = Instant::now();
@@ -658,7 +663,7 @@ mod tests {
                 stream.clone(),
                 start,
                 end,
-                EncryptionConfig::None,
+                EncryptionConfig::Plain,
             )
             .await
             .unwrap();
@@ -695,7 +700,12 @@ mod tests {
                 fencing_token: None,
             };
             let ack = backend
-                .append(basin.clone(), stream.clone(), input, EncryptionConfig::None)
+                .append(
+                    basin.clone(),
+                    stream.clone(),
+                    input,
+                    EncryptionConfig::Plain,
+                )
                 .await
                 .unwrap();
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
@@ -768,7 +778,7 @@ mod tests {
                 basin.clone(),
                 stream.clone(),
                 initial_input,
-                EncryptionConfig::None,
+                EncryptionConfig::Plain,
             )
             .await
             .unwrap();
@@ -788,7 +798,7 @@ mod tests {
                 stream.clone(),
                 start,
                 end,
-                EncryptionConfig::None,
+                EncryptionConfig::Plain,
             )
             .await
             .unwrap();
@@ -831,7 +841,7 @@ mod tests {
             fencing_token: None,
         };
         backend
-            .append(basin, stream, follow_input, EncryptionConfig::None)
+            .append(basin, stream, follow_input, EncryptionConfig::Plain)
             .await
             .unwrap();
 

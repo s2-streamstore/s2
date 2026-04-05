@@ -262,7 +262,7 @@ async fn test_reconfigure_stream_updates_active_streamer() {
         fencing_token: None,
     };
     let result = backend
-        .append(basin_name, stream_name, input, EncryptionConfig::None)
+        .append(basin_name, stream_name, input, EncryptionConfig::Plain)
         .await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
@@ -307,7 +307,7 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         fencing_token: None,
     };
     let result = backend
-        .append(basin_name, stream_name, input, EncryptionConfig::None)
+        .append(basin_name, stream_name, input, EncryptionConfig::Plain)
         .await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
@@ -439,7 +439,7 @@ async fn test_delete_stream_blocks_data_operations() {
             basin_name.clone(),
             stream_name.clone(),
             input,
-            EncryptionConfig::None,
+            EncryptionConfig::Plain,
         )
         .await;
     assert!(matches!(
@@ -453,7 +453,7 @@ async fn test_delete_stream_blocks_data_operations() {
     };
     let end = ReadEnd::default();
     let read_result = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::None)
+        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
         .await;
     assert!(matches!(
         read_result,

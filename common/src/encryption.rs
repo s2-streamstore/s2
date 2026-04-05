@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use base64ct::Encoding;
 use http::{HeaderName, HeaderValue};
-use secrecy::{ExposeSecret, SecretBox};
+use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroizing};
 use strum::{Display, EnumString};
 
 use crate::http::ParseableHeader;
@@ -79,7 +79,7 @@ pub enum EncryptionError {
 #[derive(Debug, Clone, Default)]
 pub enum EncryptionConfig {
     #[default]
-    None,
+    Plain,
     Aegis256(Aegis256Key),
     Aes256Gcm(Aes256GcmKey),
 }
@@ -94,21 +94,15 @@ impl EncryptionConfig {
     }
 
     pub fn to_header_value(&self) -> HeaderValue {
-        let value = match self {
-            Self::None => "none".to_owned(),
-            Self::Aegis256(key) => format!(
-                "{}; {}",
-                EncryptionAlgorithm::Aegis256,
-                base64ct::Base64::encode_string(key.secret())
-            ),
-            Self::Aes256Gcm(key) => format!(
-                "{}; {}",
-                EncryptionAlgorithm::Aes256Gcm,
-                base64ct::Base64::encode_string(key.secret())
-            ),
+        let mut value = match self {
+            Self::Plain => HeaderValue::from_static("plain"),
+            Self::Aegis256(key) => {
+                header_value_for_key(EncryptionAlgorithm::Aegis256, key.secret())
+            }
+            Self::Aes256Gcm(key) => {
+                header_value_for_key(EncryptionAlgorithm::Aes256Gcm, key.secret())
+            }
         };
-        let mut value =
-            HeaderValue::try_from(value).expect("encryption header value should be ASCII");
         value.set_sensitive(true);
         value
     }
@@ -124,7 +118,7 @@ impl FromStr for EncryptionConfig {
         let key_b64 = parts.next().map(str::trim);
         if parts.next().is_some() {
             return Err(EncryptionError::MalformedHeader(
-                "expected '<alg>; <key>' or 'none'".to_owned(),
+                "expected '<alg>; <key>' or 'plain'".to_owned(),
             ));
         }
 
@@ -136,9 +130,9 @@ impl FromStr for EncryptionConfig {
 
         let key_b64 = key_b64.filter(|key| !key.is_empty());
         match (parse_algorithm(alg_str)?, key_b64) {
-            (None, None) => Ok(Self::None),
+            (None, None) => Ok(Self::Plain),
             (None, Some(_)) => Err(EncryptionError::MalformedHeader(
-                "key is not allowed when algorithm is 'none'".to_owned(),
+                "key is not allowed when algorithm is 'plain'".to_owned(),
             )),
             (Some(EncryptionAlgorithm::Aegis256), Some(key_b64)) => {
                 Ok(Self::Aegis256(Aegis256Key::from_base64(key_b64)?))
@@ -190,8 +184,20 @@ fn parse_encryption_key<const N: usize>(
     Ok(Arc::new(SecretBox::new(key)))
 }
 
+fn header_value_for_key(algorithm: EncryptionAlgorithm, key: &[u8; 32]) -> HeaderValue {
+    let algorithm = algorithm.to_string();
+    let encoded_len = base64ct::Base64::encoded_len(key);
+    let mut value = Zeroizing::new(vec![0u8; algorithm.len() + 2 + encoded_len]);
+    value[..algorithm.len()].copy_from_slice(algorithm.as_bytes());
+    value[algorithm.len()..algorithm.len() + 2].copy_from_slice(b"; ");
+    base64ct::Base64::encode(key, &mut value[algorithm.len() + 2..])
+        .expect("base64 output length should match buffer");
+
+    HeaderValue::from_bytes(&value).expect("encryption header value should be ASCII")
+}
+
 fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, EncryptionError> {
-    if alg_str == "none" {
+    if alg_str == "plain" {
         Ok(None)
     } else {
         alg_str
@@ -199,7 +205,7 @@ fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, Encrypt
             .map(Some)
             .map_err(|_| {
                 EncryptionError::MalformedHeader(format!(
-                    "unknown algorithm {alg_str:?}; expected 'none', 'aegis-256', or 'aes-256-gcm'"
+                    "unknown algorithm {alg_str:?}; expected 'plain', 'aegis-256', or 'aes-256-gcm'"
                 ))
             })
     }
@@ -238,15 +244,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_header_none_without_key() {
-        let config = "none".parse::<EncryptionConfig>().unwrap();
-        assert!(matches!(config, EncryptionConfig::None));
+    fn parse_header_plain_without_key() {
+        let config = "plain".parse::<EncryptionConfig>().unwrap();
+        assert!(matches!(config, EncryptionConfig::Plain));
     }
 
     #[test]
-    fn parse_header_none_with_empty_key_slot() {
-        let config = "none; ".parse::<EncryptionConfig>().unwrap();
-        assert!(matches!(config, EncryptionConfig::None));
+    fn parse_header_plain_with_empty_key_slot() {
+        let config = "plain; ".parse::<EncryptionConfig>().unwrap();
+        assert!(matches!(config, EncryptionConfig::Plain));
     }
 
     #[test]
@@ -279,8 +285,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_header_none_with_key_fails() {
-        let result = format!("none; {KEY_B64}").parse::<EncryptionConfig>();
+    fn parse_header_plain_with_key_fails() {
+        let result = format!("plain; {KEY_B64}").parse::<EncryptionConfig>();
         assert!(matches!(result, Err(EncryptionError::MalformedHeader(_))));
     }
 
@@ -288,6 +294,6 @@ mod tests {
     fn header_value_is_sensitive() {
         let value = EncryptionConfig::aegis256([7; 32]).to_header_value();
         assert!(value.is_sensitive());
-        assert_ne!(value, HeaderValue::from_static("none"));
+        assert_ne!(value, HeaderValue::from_static("plain"));
     }
 }

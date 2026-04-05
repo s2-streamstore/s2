@@ -471,7 +471,7 @@ pub struct AppendArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct EncryptionArgs {
-    /// Encryption spec. Use `none` or `<alg>; <base64-key>`.
+    /// Encryption spec. Use `plain` or `<alg>; <base64-key>`.
     /// Alternatively, set `S2_ENCRYPTION`.
     #[arg(
         long,
