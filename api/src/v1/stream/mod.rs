@@ -11,6 +11,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use itertools::Itertools as _;
 use s2_common::{
+    encryption::EncryptionConfig,
     record,
     types::{
         self,
@@ -207,20 +208,23 @@ impl From<ReadEnd> for types::stream::ReadEnd {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ReadRequest {
     /// Unary
     Unary {
+        encryption: EncryptionConfig,
         format: Format,
         response_mime: JsonOrProto,
     },
     /// Server-Sent Events streaming response
     EventStream {
+        encryption: EncryptionConfig,
         format: Format,
         last_event_id: Option<sse::LastEventId>,
     },
     /// S2S streaming response
     S2s {
+        encryption: EncryptionConfig,
         response_compression: s2s::CompressionAlgorithm,
     },
 }
@@ -228,11 +232,13 @@ pub enum ReadRequest {
 pub enum AppendRequest {
     /// Unary
     Unary {
+        encryption: EncryptionConfig,
         input: types::stream::AppendInput,
         response_mime: JsonOrProto,
     },
     /// S2S bi-directional streaming
     S2s {
+        encryption: EncryptionConfig,
         inputs: BoxStream<'static, Result<types::stream::AppendInput, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,
     },
@@ -242,6 +248,7 @@ impl std::fmt::Debug for AppendRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppendRequest::Unary {
+                encryption: _,
                 input,
                 response_mime: response,
             } => f

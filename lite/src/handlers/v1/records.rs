@@ -14,8 +14,7 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
-    encryption::EncryptionConfig,
-    http::extract::{Header, HeaderOpt},
+    http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
     types::{
@@ -132,7 +131,6 @@ pub struct ReadArgs {
     basin: BasinName,
     #[from_request(via(Path))]
     stream: StreamName,
-    encryption: HeaderOpt<EncryptionConfig>,
     #[from_request(via(Query))]
     start: v1t::stream::ReadStart,
     #[from_request(via(Query))]
@@ -176,16 +174,15 @@ pub async fn read(
     ReadArgs {
         basin,
         stream,
-        encryption: HeaderOpt(encryption),
         start,
         end,
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
     let start: ReadStart = start.try_into()?;
-    let encryption = encryption.unwrap_or_default();
     match request {
         v1t::stream::ReadRequest::Unary {
+            encryption,
             format,
             response_mime,
         } => {
@@ -206,6 +203,7 @@ pub async fn read(
             }
         }
         v1t::stream::ReadRequest::EventStream {
+            encryption,
             format,
             last_event_id,
         } => {
@@ -251,6 +249,7 @@ pub async fn read(
             Ok(axum::response::Sse::new(events).into_response())
         }
         v1t::stream::ReadRequest::S2s {
+            encryption,
             response_compression,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
@@ -328,7 +327,6 @@ pub struct AppendArgs {
     basin: BasinName,
     #[from_request(via(Path))]
     stream: StreamName,
-    encryption: HeaderOpt<EncryptionConfig>,
     request: v1t::stream::AppendRequest,
 }
 
@@ -361,13 +359,12 @@ pub async fn append(
     AppendArgs {
         basin,
         stream,
-        encryption: HeaderOpt(encryption),
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
-    let encryption = encryption.unwrap_or_default();
     match request {
         v1t::stream::AppendRequest::Unary {
+            encryption,
             input,
             response_mime,
         } => {
@@ -384,6 +381,7 @@ pub async fn append(
             }
         }
         v1t::stream::AppendRequest::S2s {
+            encryption,
             inputs,
             response_compression,
         } => {

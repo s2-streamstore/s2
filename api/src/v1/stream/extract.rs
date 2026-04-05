@@ -6,6 +6,7 @@ use axum::{
 use futures::StreamExt as _;
 use http::{StatusCode, request::Parts};
 use s2_common::{
+    encryption::EncryptionConfig,
     http::{ParseableHeader, extract::HeaderRejection},
     types,
 };
@@ -51,6 +52,7 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(req.headers());
+        let encryption = parse_header_opt::<EncryptionConfig>(req.headers())?.unwrap_or_default();
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
@@ -84,6 +86,7 @@ where
             });
 
             return Ok(Self::S2s {
+                encryption,
                 inputs: Box::pin(inputs),
                 response_compression,
             });
@@ -112,6 +115,7 @@ where
         };
 
         Ok(Self::Unary {
+            encryption,
             input,
             response_mime,
         })
@@ -126,11 +130,13 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(&parts.headers);
+        let encryption = parse_header_opt::<EncryptionConfig>(&parts.headers)?.unwrap_or_default();
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
                 s2s::CompressionAlgorithm::from_accept_encoding(&parts.headers);
             return Ok(Self::S2s {
+                encryption,
                 response_compression,
             });
         }
@@ -142,6 +148,7 @@ where
         if accept.as_ref().is_some_and(crate::mime::is_event_stream) {
             let last_event_id = parse_header_opt::<LastEventId>(&parts.headers)?;
             return Ok(Self::EventStream {
+                encryption,
                 format,
                 last_event_id,
             });
@@ -153,6 +160,7 @@ where
             .unwrap_or(JsonOrProto::Json);
 
         Ok(Self::Unary {
+            encryption,
             format,
             response_mime,
         })
