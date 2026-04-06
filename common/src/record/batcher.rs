@@ -1,12 +1,9 @@
 use std::iter::FusedIterator;
 
-use bytes::Bytes;
-
-use super::InternalRecordError;
 use crate::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize, Record, SequencedRecord, StreamPosition},
+    record::{Metered, MeteredSize, SequencedRecord},
 };
 
 #[derive(Debug)]
@@ -17,12 +14,11 @@ pub struct RecordBatch {
 
 pub struct RecordBatcher<I, E>
 where
-    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
-    E: Into<InternalRecordError>,
+    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>,
 {
     record_iterator: I,
     buffered_records: Metered<Vec<SequencedRecord>>,
-    buffered_error: Option<InternalRecordError>,
+    buffered_error: Option<E>,
     read_limit: EvaluatedReadLimit,
     until: ReadUntil,
     is_terminated: bool,
@@ -41,8 +37,7 @@ fn make_records(read_limit: &EvaluatedReadLimit) -> Metered<Vec<SequencedRecord>
 
 impl<I, E> RecordBatcher<I, E>
 where
-    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
-    E: std::fmt::Debug + Into<InternalRecordError>,
+    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>,
 {
     pub fn new(record_iterator: I, read_limit: ReadLimit, until: ReadUntil) -> Self {
         let read_limit = read_limit.remaining(0, 0);
@@ -56,7 +51,7 @@ where
         }
     }
 
-    fn iter_next(&mut self) -> Option<Result<RecordBatch, InternalRecordError>> {
+    fn iter_next(&mut self) -> Option<Result<RecordBatch, E>> {
         let EvaluatedReadLimit::Remaining(remaining_limit) = self.read_limit else {
             return None;
         };
@@ -64,20 +59,11 @@ where
         let mut stashed_record = None;
         while self.buffered_error.is_none() {
             match self.record_iterator.next() {
-                Some(Ok((position, data))) => {
-                    let record: Metered<Record> = match data.try_into() {
-                        Ok(record) => record,
-                        Err(err) => {
-                            self.buffered_error = Some(err);
-                            break;
-                        }
-                    };
-                    let record = record.sequenced(position);
-
+                Some(Ok(record)) => {
                     if remaining_limit.deny(
                         self.buffered_records.len() + 1,
                         self.buffered_records.metered_size() + record.metered_size(),
-                    ) || self.until.deny(position.timestamp)
+                    ) || self.until.deny(record.position.timestamp)
                     {
                         self.read_limit = EvaluatedReadLimit::Exhausted;
                         break;
@@ -95,7 +81,7 @@ where
                     self.buffered_records.push(record);
                 }
                 Some(Err(err)) => {
-                    self.buffered_error = Some(err.into());
+                    self.buffered_error = Some(err);
                     break;
                 }
                 None => {
@@ -138,10 +124,9 @@ where
 
 impl<I, E> Iterator for RecordBatcher<I, E>
 where
-    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
-    E: std::fmt::Debug + Into<InternalRecordError>,
+    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>,
 {
-    type Item = Result<RecordBatch, InternalRecordError>;
+    type Item = Result<RecordBatch, E>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.is_terminated {
@@ -153,10 +138,8 @@ where
     }
 }
 
-impl<I, E> FusedIterator for RecordBatcher<I, E>
-where
-    I: Iterator<Item = Result<(StreamPosition, Bytes), E>>,
-    E: std::fmt::Debug + Into<InternalRecordError>,
+impl<I, E> FusedIterator for RecordBatcher<I, E> where
+    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>
 {
 }
 
@@ -167,10 +150,12 @@ mod tests {
     use super::*;
     use crate::{
         caps,
+        encryption::EncryptionConfig,
         read_extent::{ReadLimit, ReadUntil},
         record::{
-            CommandRecord, Encodable, MeteredSize, Record, SeqNum, Sequenced, SequencedRecord,
-            StoredRecord, Timestamp,
+            CommandRecord, DecodedRecordIterator, Encodable, InternalRecordError, Metered,
+            MeteredSize, Record, RecordIteratorError, SeqNum, Sequenced, SequencedRecord,
+            StoredRecord, StoredSequencedBytes, StreamPosition, Timestamp,
         },
     };
 
@@ -181,16 +166,20 @@ mod tests {
 
     fn to_iter(
         records: Vec<SequencedRecord>,
-    ) -> impl Iterator<Item = Result<(StreamPosition, Bytes), InternalRecordError>> {
+    ) -> impl Iterator<Item = Result<Metered<SequencedRecord>, InternalRecordError>> {
+        records.into_iter().map(Metered::from).map(Ok)
+    }
+
+    fn to_stored_bytes_iter(
+        records: Vec<SequencedRecord>,
+    ) -> impl Iterator<Item = Result<StoredSequencedBytes, InternalRecordError>> {
         records
             .into_iter()
-            .map(|Sequenced { position, record }| {
-                (
-                    position,
-                    Metered::from(StoredRecord::from(record))
-                        .as_ref()
-                        .to_bytes(),
-                )
+            .map(|Sequenced { position, record }| Sequenced {
+                position,
+                record: Metered::from(StoredRecord::from(record))
+                    .as_ref()
+                    .to_bytes(),
             })
             .map(Ok)
     }
@@ -298,16 +287,20 @@ mod tests {
     #[test]
     fn surfaces_decode_errors_after_draining_buffer() {
         let records = vec![test_record(1, 10), test_record(2, 11)];
-        let invalid_data = (
-            StreamPosition {
+        let invalid_data = Sequenced {
+            position: StreamPosition {
                 seq_num: 3,
                 timestamp: 12,
             },
-            Bytes::new(),
-        );
+            record: Bytes::new(),
+        };
 
         let mut batcher = RecordBatcher::new(
-            to_iter(records.clone()).chain(std::iter::once(Ok(invalid_data))),
+            DecodedRecordIterator::new(
+                to_stored_bytes_iter(records.clone()).chain(std::iter::once(Ok(invalid_data))),
+                EncryptionConfig::Plain,
+                [],
+            ),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
         );
@@ -319,14 +312,21 @@ mod tests {
             .next()
             .expect("error expected")
             .expect_err("expected decode error");
-        assert!(matches!(error, InternalRecordError::Truncated("MagicByte")));
+        assert!(matches!(
+            error,
+            RecordIteratorError::Decode(InternalRecordError::Truncated("MagicByte"))
+        ));
         assert!(batcher.next().is_none());
     }
 
     #[test]
     fn surfaces_iterator_errors_immediately() {
-        let iterator = std::iter::once::<Result<(StreamPosition, Bytes), InternalRecordError>>(
-            Err(InternalRecordError::InvalidValue("test", "boom")),
+        let iterator = DecodedRecordIterator::new(
+            std::iter::once::<Result<StoredSequencedBytes, InternalRecordError>>(Err(
+                InternalRecordError::InvalidValue("test", "boom"),
+            )),
+            EncryptionConfig::Plain,
+            [],
         );
         let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
@@ -336,7 +336,7 @@ mod tests {
             .expect_err("expected iterator error");
         assert!(matches!(
             error,
-            InternalRecordError::InvalidValue("test", "boom")
+            RecordIteratorError::Source(InternalRecordError::InvalidValue("test", "boom"))
         ));
         assert!(batcher.next().is_none());
     }

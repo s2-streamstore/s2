@@ -3,6 +3,7 @@ mod command;
 mod encrypted;
 mod envelope;
 mod fencing;
+mod iterator;
 mod metering;
 
 pub use batcher::{RecordBatch, RecordBatcher};
@@ -10,13 +11,14 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
 pub use encrypted::{
-    EncryptedRecord, EncryptedRecordError, RecordEncryptionError, decrypt_read_batch,
-    to_stored_records,
+    EncryptedRecord, EncryptedRecordError, RecordEncryptionError, decode_stored_record,
+    decode_stored_sequenced_record, decrypt_read_batch, to_stored_records,
 };
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
 use envelope::HeaderValidationError;
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
+pub use iterator::{DecodedRecordIterator, RecordIteratorError};
 pub use metering::{Metered, MeteredSize};
 
 use crate::deep_size::DeepSize;
@@ -332,6 +334,7 @@ pub struct Sequenced<T> {
     pub record: T,
 }
 
+pub type StoredSequencedBytes = Sequenced<Bytes>;
 pub type SequencedRecord = Sequenced<Record>;
 pub type StoredSequencedRecord = Sequenced<StoredRecord>;
 

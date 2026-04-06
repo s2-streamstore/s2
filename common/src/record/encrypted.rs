@@ -36,8 +36,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 
 use super::{
-    Encodable, EnvelopeRecord, Metered, MeteredSize, Record, Sequenced, SequencedRecord,
-    StoredReadBatch, StoredRecord, StoredSequencedRecord,
+    Encodable, EnvelopeRecord, Metered, MeteredSize, Record, SequencedRecord, StoredReadBatch,
+    StoredRecord, StoredSequencedRecord,
 };
 use crate::{
     deep_size::DeepSize,
@@ -246,6 +246,34 @@ pub(crate) fn decrypt_payload(
     }
 }
 
+pub fn decode_stored_record(
+    record: Metered<StoredRecord>,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> Result<Metered<Record>, RecordEncryptionError> {
+    let record = match record.into_inner() {
+        StoredRecord::Plaintext(record) => record,
+        StoredRecord::Encrypted {
+            record: encrypted, ..
+        } => {
+            let plaintext = decrypt_payload(&encrypted, encryption, aad)?;
+            let envelope = EnvelopeRecord::try_from(plaintext)
+                .map_err(|e| RecordEncryptionError::InvalidDecryptedRecord(e.to_string()))?;
+            Record::Envelope(envelope)
+        }
+    };
+    Ok(Metered::from(record))
+}
+
+pub fn decode_stored_sequenced_record(
+    record: Metered<StoredSequencedRecord>,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> Result<Metered<SequencedRecord>, RecordEncryptionError> {
+    let (position, record) = record.into_parts();
+    Ok(decode_stored_record(record, encryption, aad)?.sequenced(position))
+}
+
 pub fn to_stored_records(
     records: Vec<Metered<SequencedRecord>>,
     encryption: &EncryptionConfig,
@@ -290,35 +318,17 @@ pub fn decrypt_read_batch(
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<types::stream::ReadBatch, RecordEncryptionError> {
-    let records: Result<Vec<_>, _> = batch
+    let records: Result<Metered<Vec<SequencedRecord>>, _> = batch
         .records
         .into_inner()
         .into_iter()
-        .map(|sr| -> Result<_, RecordEncryptionError> {
-            match sr.record {
-                StoredRecord::Plaintext(record) => Ok(Sequenced {
-                    position: sr.position,
-                    record,
-                }),
-                StoredRecord::Encrypted {
-                    record: encrypted, ..
-                } => {
-                    let plaintext = decrypt_payload(&encrypted, encryption, aad)?;
-                    let envelope = EnvelopeRecord::try_from(plaintext).map_err(|e| {
-                        RecordEncryptionError::InvalidDecryptedRecord(e.to_string())
-                    })?;
-                    Ok(Sequenced {
-                        position: sr.position,
-                        record: Record::Envelope(envelope),
-                    })
-                }
-            }
-        })
+        .map(Metered::from)
+        .map(|record| decode_stored_sequenced_record(record, encryption, aad))
         .collect();
     let records = records?;
 
     Ok(types::stream::ReadBatch {
-        records: Metered::from(records),
+        records,
         tail: batch.tail,
     })
 }
