@@ -1,19 +1,14 @@
 use std::time::Duration;
 
-use futures::{Stream, StreamExt as _};
+use futures::Stream;
 use s2_common::{
     caps,
-    encryption::EncryptionConfig,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{
-        Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp,
-        decrypt_read_batch,
-    },
+    record::{Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp},
     types::{
         basin::BasinName,
         stream::{
-            ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StoredReadBatch,
-            StoredReadSessionOutput, StreamName,
+            ReadEnd, ReadPosition, ReadStart, StoredReadBatch, StoredReadSessionOutput, StreamName,
         },
     },
 };
@@ -88,26 +83,6 @@ impl Backend {
     }
 
     pub async fn read(
-        &self,
-        basin: BasinName,
-        stream: StreamName,
-        start: ReadStart,
-        end: ReadEnd,
-        encryption: EncryptionConfig,
-    ) -> Result<impl Stream<Item = Result<ReadSessionOutput, ReadError>> + 'static, ReadError> {
-        let aad: [u8; StreamId::LEN] = StreamId::new(&basin, &stream).into();
-        let session = self.read_stored(basin, stream, start, end).await?;
-        Ok(session.map(move |output| match output {
-            Ok(StoredReadSessionOutput::Heartbeat(tail)) => Ok(ReadSessionOutput::Heartbeat(tail)),
-            Ok(StoredReadSessionOutput::Batch(batch)) => {
-                let batch = decrypt_read_batch(batch, &encryption, &aad)?;
-                Ok(ReadSessionOutput::Batch(batch))
-            }
-            Err(err) => Err(err),
-        }))
-    }
-
-    async fn read_stored(
         &self,
         basin: BasinName,
         stream: StreamName,
@@ -406,14 +381,15 @@ mod tests {
     use bytesize::ByteSize;
     use futures::StreamExt;
     use s2_common::{
-        encryption::EncryptionConfig,
         read_extent::{ReadLimit, ReadUntil},
+        record::{Record, StoredRecord},
         types::{
             basin::BasinName,
             config::{BasinConfig, OptionalStreamConfig},
             resources::CreateMode,
             stream::{
                 AppendInput, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom, ReadStart,
+                StoredReadSessionOutput,
             },
         },
     };
@@ -502,9 +478,8 @@ mod tests {
             .await
             .unwrap();
 
-        let record =
-            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap();
-        let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
+        let record = Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap();
+        let metered = s2_common::record::Metered::from(StoredRecord::from(record));
         let parts = AppendRecordParts {
             timestamp: None,
             record: metered,
@@ -517,12 +492,7 @@ mod tests {
             fencing_token: None,
         };
         let ack = backend
-            .append(
-                basin.clone(),
-                stream.clone(),
-                input,
-                EncryptionConfig::Plain,
-            )
+            .append(basin.clone(), stream.clone(), input)
             .await
             .unwrap();
         assert!(ack.end.seq_num > 0);
@@ -548,10 +518,7 @@ mod tests {
             until: ReadUntil::Unbounded,
             wait: None,
         };
-        let session = backend
-            .read(basin, stream, start, end, EncryptionConfig::Plain)
-            .await
-            .unwrap();
+        let session = backend.read(basin, stream, start, end).await.unwrap();
         let records: Vec<_> = tokio::time::timeout(
             Duration::from_secs(2),
             futures::StreamExt::collect::<Vec<_>>(session),
@@ -598,10 +565,7 @@ mod tests {
             wait: Some(wait),
         };
 
-        let session = backend
-            .read(basin, stream, start, end, EncryptionConfig::Plain)
-            .await
-            .unwrap();
+        let session = backend.read(basin, stream, start, end).await.unwrap();
         let started = Instant::now();
         let outputs = tokio::time::timeout(Duration::from_millis(150), session.collect::<Vec<_>>())
             .await
@@ -656,13 +620,7 @@ mod tests {
             wait: Some(wait),
         };
         let session = backend
-            .read(
-                basin.clone(),
-                stream.clone(),
-                start,
-                end,
-                EncryptionConfig::Plain,
-            )
+            .read(basin.clone(), stream.clone(), start, end)
             .await
             .unwrap();
         let mut session = Box::pin(session);
@@ -673,19 +631,16 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(first, ReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(first, StoredReadSessionOutput::Heartbeat(_)));
 
         let stream_id = StreamId::new(&basin, &stream);
         let mut delete_batch = WriteBatch::new();
         let lagged_appends = FOLLOWER_MAX_LAG + 25;
 
         for i in 0..lagged_appends {
-            let record = s2_common::record::Record::try_from_parts(
-                vec![],
-                bytes::Bytes::from(format!("lagged-{i}")),
-            )
-            .unwrap();
-            let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
+            let record =
+                Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap();
+            let metered = s2_common::record::Metered::from(StoredRecord::from(record));
             let parts = AppendRecordParts {
                 timestamp: None,
                 record: metered,
@@ -698,12 +653,7 @@ mod tests {
                 fencing_token: None,
             };
             let ack = backend
-                .append(
-                    basin.clone(),
-                    stream.clone(),
-                    input,
-                    EncryptionConfig::Plain,
-                )
+                .append(basin.clone(), stream.clone(), input)
                 .await
                 .unwrap();
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
@@ -754,11 +704,8 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_record =
-            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("initial"))
-                .unwrap();
-        let initial_metered: s2_common::record::Metered<s2_common::record::Record> =
-            initial_record.into();
+        let initial_record = Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap();
+        let initial_metered = s2_common::record::Metered::from(StoredRecord::from(initial_record));
         let initial_parts = AppendRecordParts {
             timestamp: None,
             record: initial_metered,
@@ -772,12 +719,7 @@ mod tests {
             fencing_token: None,
         };
         backend
-            .append(
-                basin.clone(),
-                stream.clone(),
-                initial_input,
-                EncryptionConfig::Plain,
-            )
+            .append(basin.clone(), stream.clone(), initial_input)
             .await
             .unwrap();
 
@@ -791,13 +733,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .read(
-                basin.clone(),
-                stream.clone(),
-                start,
-                end,
-                EncryptionConfig::Plain,
-            )
+            .read(basin.clone(), stream.clone(), start, end)
             .await
             .unwrap();
         let mut session = Box::pin(session);
@@ -808,7 +744,7 @@ mod tests {
             .await
             .expect("session should yield initial batch")
             .expect("session should not error");
-        assert!(matches!(first, ReadSessionOutput::Batch(_)));
+        assert!(matches!(first, StoredReadSessionOutput::Batch(_)));
 
         let second = session
             .as_mut()
@@ -816,16 +752,13 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
 
         tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
 
-        let follow_record =
-            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("follow-1"))
-                .unwrap();
-        let follow_metered: s2_common::record::Metered<s2_common::record::Record> =
-            follow_record.into();
+        let follow_record = Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap();
+        let follow_metered = s2_common::record::Metered::from(StoredRecord::from(follow_record));
         let follow_parts = AppendRecordParts {
             timestamp: None,
             record: follow_metered,
@@ -838,10 +771,7 @@ mod tests {
             match_seq_num: None,
             fencing_token: None,
         };
-        backend
-            .append(basin, stream, follow_input, EncryptionConfig::Plain)
-            .await
-            .unwrap();
+        backend.append(basin, stream, follow_input).await.unwrap();
 
         let next = session
             .as_mut()
@@ -849,12 +779,12 @@ mod tests {
             .await
             .expect("session should stay open after dormancy")
             .expect("session should not error after dormancy");
-        let ReadSessionOutput::Batch(batch) = next else {
+        let StoredReadSessionOutput::Batch(batch) = next else {
             panic!("expected new batch after append");
         };
         assert_eq!(batch.records.len(), 1);
         let record = batch.records.first().expect("batch should have one record");
-        let s2_common::record::Record::Envelope(envelope) = &record.record else {
+        let StoredRecord::Plaintext(Record::Envelope(envelope)) = &record.record else {
             panic!("expected envelope record");
         };
         assert_eq!(envelope.body().as_ref(), b"follow-1");

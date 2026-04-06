@@ -12,7 +12,8 @@ pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
 pub use encrypted::{
     EncryptedRecord, EncryptedRecordError, RecordDecryptionError, RecordEncryptionError,
-    decode_stored_record, decode_stored_sequenced_record, decrypt_read_batch, to_stored_records,
+    decode_stored_record, decode_stored_sequenced_record, decrypt_read_batch, encrypt_append_input,
+    to_stored_records,
 };
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
@@ -275,6 +276,12 @@ impl MeteredSize for StoredRecord {
 impl From<Record> for StoredRecord {
     fn from(value: Record) -> Self {
         Self::Plaintext(value)
+    }
+}
+
+impl From<Record> for Metered<StoredRecord> {
+    fn from(value: Record) -> Self {
+        Self::from(StoredRecord::from(value))
     }
 }
 

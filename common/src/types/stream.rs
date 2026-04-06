@@ -11,8 +11,8 @@ use crate::{
     caps,
     read_extent::{ReadLimit, ReadUntil},
     record::{
-        FencingToken, Metered, MeteredSize, Record, SeqNum, SequencedRecord, StoredSequencedRecord,
-        StreamPosition, Timestamp,
+        FencingToken, Metered, MeteredSize, SeqNum, SequencedRecord, StoredRecord,
+        StoredSequencedRecord, StreamPosition, Timestamp,
     },
     types::resources::ListItemsRequest,
 };
@@ -191,7 +191,7 @@ impl MeteredSize for AppendRecord {
 #[derive(Debug, Clone)]
 pub struct AppendRecordParts {
     pub timestamp: Option<Timestamp>,
-    pub record: Metered<Record>,
+    pub record: Metered<StoredRecord>,
 }
 
 impl MeteredSize for AppendRecordParts {

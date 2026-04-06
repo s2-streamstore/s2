@@ -237,7 +237,6 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
-                AppendError::Encryption(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -258,7 +257,6 @@ impl ServiceError {
                 ReadError::Unwritten(tail) => ErrorResponse::Unwritten(v1t::stream::TailResponse {
                     tail: tail.0.into(),
                 }),
-                ReadError::Decryption(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::NotImplemented => {
                 standard(ErrorCode::PermissionDenied, "Not implemented".to_string())

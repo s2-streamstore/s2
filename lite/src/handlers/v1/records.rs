@@ -14,20 +14,21 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
+    encryption::{EncryptionConfig, stream_id_aad},
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
-    record::{Metered, MeteredSize as _},
+    record::{Metered, MeteredSize as _, decrypt_read_batch, encrypt_append_input},
     types::{
         ValidationError,
         basin::BasinName,
-        stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
+        stream::{
+            AppendInput, ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart,
+            StoredReadSessionOutput, StreamName,
+        },
     },
 };
 
-use crate::{
-    backend::{Backend, error::ReadError},
-    handlers::v1::error::ServiceError,
-};
+use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{get, post};
@@ -35,6 +36,36 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::streams::records::CHECK_TAIL, get(check_tail))
         .route(super::paths::streams::records::READ, get(read))
         .route(super::paths::streams::records::APPEND, post(append))
+}
+
+fn encrypt_input(
+    input: AppendInput,
+    encryption: &EncryptionConfig,
+    basin: &BasinName,
+    stream: &StreamName,
+) -> Result<AppendInput, ServiceError> {
+    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    encrypt_append_input(input, encryption, &aad)
+        .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))
+}
+
+fn decrypt_session<S>(
+    session: S,
+    encryption: EncryptionConfig,
+    basin: BasinName,
+    stream: StreamName,
+) -> impl Stream<Item = Result<ReadSessionOutput, ServiceError>>
+where
+    S: Stream<Item = Result<StoredReadSessionOutput, crate::backend::error::ReadError>>,
+{
+    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    session.map(move |output| match output {
+        Ok(StoredReadSessionOutput::Heartbeat(tail)) => Ok(ReadSessionOutput::Heartbeat(tail)),
+        Ok(StoredReadSessionOutput::Batch(batch)) => decrypt_read_batch(batch, &encryption, &aad)
+            .map(ReadSessionOutput::Batch)
+            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string()))),
+        Err(err) => Err(err.into()),
+    })
 }
 
 fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceError> {
@@ -188,8 +219,9 @@ pub async fn read(
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend
-                .read(basin.clone(), stream.clone(), start, end, encryption)
+                .read(basin.clone(), stream.clone(), start, end)
                 .await?;
+            let session = decrypt_session(session, encryption, basin, stream);
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
                 JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
@@ -210,8 +242,9 @@ pub async fn read(
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend
-                .read(basin.clone(), stream.clone(), start, end, encryption)
+                .read(basin.clone(), stream.clone(), start, end)
                 .await?;
+            let session = decrypt_session(session, encryption, basin, stream);
             let events = async_stream::stream! {
                 let mut processed = CountOrBytes::ZERO;
                 tokio::pin!(session);
@@ -235,7 +268,7 @@ pub async fn read(
                             yield v1t::stream::sse::read_batch_event(format, &batch, id);
                         },
                         Err(err) => {
-                            let (_, body) = ServiceError::from(err).to_response().to_parts();
+                            let (_, body) = err.to_response().to_parts();
                             yield v1t::stream::sse::error_event(body);
                             errored = true;
                         }
@@ -253,10 +286,11 @@ pub async fn read(
             response_compression,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
-            let s2s_stream = backend
-                .read(basin.clone(), stream.clone(), start, end, encryption)
-                .await?
-                .map(move |msg| match msg {
+            let session = backend
+                .read(basin.clone(), stream.clone(), start, end)
+                .await?;
+            let s2s_stream =
+                decrypt_session(session, encryption, basin, stream).map(move |msg| match msg {
                     Ok(ReadSessionOutput::Heartbeat(tail)) => Ok(v1t::stream::proto::ReadBatch {
                         records: vec![],
                         tail: Some(tail.into()),
@@ -280,9 +314,9 @@ pub async fn read(
 }
 
 async fn merge_read_session(
-    session: impl Stream<Item = Result<ReadSessionOutput, ReadError>>,
+    session: impl Stream<Item = Result<ReadSessionOutput, ServiceError>>,
     wait: Option<Duration>,
-) -> Result<ReadBatch, ReadError> {
+) -> Result<ReadBatch, ServiceError> {
     let mut acc = ReadBatch {
         records: Metered::with_capacity(RECORD_BATCH_MAX.count),
         tail: None,
@@ -368,7 +402,8 @@ pub async fn append(
             input,
             response_mime,
         } => {
-            let ack = backend.append(basin, stream, input, encryption).await?;
+            let input = encrypt_input(input, &encryption, &basin, &stream)?;
+            let ack = backend.append(basin, stream, input).await?;
             match response_mime {
                 JsonOrProto::Json => {
                     let ack: v1t::stream::AppendAck = ack.into();
@@ -386,13 +421,22 @@ pub async fn append(
             response_compression,
         } => {
             let (err_tx, err_rx) = tokio::sync::oneshot::channel::<ServiceError>();
+            let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
 
             let inputs = async_stream::stream! {
                 tokio::pin!(inputs);
                 let mut err_tx = Some(err_tx);
                 while let Some(input) = inputs.next().await {
                     match input {
-                        Ok(input) => yield input,
+                        Ok(input) => match encrypt_append_input(input, &encryption, &aad) {
+                            Ok(input) => yield input,
+                            Err(e) => {
+                                if let Some(tx) = err_tx.take() {
+                                    let _ = tx.send(ServiceError::Validation(ValidationError(e.to_string())));
+                                }
+                                break;
+                            }
+                        },
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e.into());
@@ -404,7 +448,7 @@ pub async fn append(
             };
 
             let ack_stream = backend
-                .append_session(basin, stream, inputs, encryption)
+                .append_session(basin, stream, inputs)
                 .await?
                 .map(|res| {
                     res.map(v1t::stream::proto::AppendAck::from)

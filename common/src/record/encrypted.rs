@@ -39,7 +39,9 @@ use super::{
 use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionConfig},
-    types::stream::{ReadBatch, StoredReadBatch},
+    types::stream::{
+        AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch, StoredReadBatch,
+    },
 };
 
 const SUITE_ID_LEN: usize = 1;
@@ -373,6 +375,66 @@ pub fn to_stored_records(
             Ok(Metered::from(stored).sequenced(position))
         })
         .collect()
+}
+
+fn encrypt_append_record(
+    record: AppendRecord,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> Result<AppendRecord, RecordEncryptionError> {
+    let AppendRecordParts { timestamp, record } = record.into();
+    let metered_size = record.metered_size();
+    let record = match (record.into_inner(), encryption) {
+        (record @ StoredRecord::Encrypted { .. }, _) => record,
+        (record @ StoredRecord::Plaintext(Record::Command(_)), _) => record,
+        (record @ StoredRecord::Plaintext(Record::Envelope(_)), EncryptionConfig::Plain) => record,
+        (StoredRecord::Plaintext(Record::Envelope(envelope)), EncryptionConfig::Aegis256(key)) => {
+            let encrypted = encrypt_payload_with_algorithm(
+                &envelope,
+                EncryptionAlgorithm::Aegis256,
+                key.secret(),
+                aad,
+            )?;
+            StoredRecord::encrypted(encrypted, metered_size)
+        }
+        (StoredRecord::Plaintext(Record::Envelope(envelope)), EncryptionConfig::Aes256Gcm(key)) => {
+            let encrypted = encrypt_payload_with_algorithm(
+                &envelope,
+                EncryptionAlgorithm::Aes256Gcm,
+                key.secret(),
+                aad,
+            )?;
+            StoredRecord::encrypted(encrypted, metered_size)
+        }
+    };
+
+    AppendRecord::try_from(AppendRecordParts {
+        timestamp,
+        record: Metered {
+            size: metered_size,
+            inner: record,
+        },
+    })
+    .map_err(|_| RecordEncryptionError)
+}
+
+pub fn encrypt_append_input(
+    input: AppendInput,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> Result<AppendInput, RecordEncryptionError> {
+    let records = input
+        .records
+        .into_iter()
+        .map(|record| encrypt_append_record(record, encryption, aad))
+        .collect::<Result<Vec<_>, _>>()?;
+    let records = AppendRecordBatch::try_from(records).map_err(|_| RecordEncryptionError)?;
+
+    Ok(AppendInput {
+        records,
+        match_seq_num: input.match_seq_num,
+        fencing_token: input.fencing_token,
+    })
 }
 
 pub fn decrypt_read_batch(

@@ -5,10 +5,10 @@ use futures::StreamExt;
 use s2_common::{
     encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
-    record::{MeteredSize, RecordDecryptionError, StreamPosition},
+    record::{MeteredSize, RecordDecryptionError, StreamPosition, decrypt_read_batch},
     types::{
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
+        stream::{AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadSessionOutput},
     },
 };
 use s2_lite::backend::error::{CheckTailError, ReadError, UnwrittenError};
@@ -70,13 +70,7 @@ async fn test_read_from_beginning() {
     };
 
     let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            start,
-            end,
-            EncryptionConfig::Plain,
-        )
+        .read(basin_name.clone(), stream_name.clone(), start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -109,17 +103,13 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
     };
 
     let read_session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            start,
-            end,
-            encryption.clone(),
-        )
+        .read(basin_name.clone(), stream_name.clone(), start, end)
         .await
         .expect("Failed to create encrypted read session");
     let mut read_session = Box::pin(read_session);
-    let records = collect_records(&mut read_session).await;
+    let records =
+        collect_records_with_encryption(&mut read_session, &basin_name, &stream_name, &encryption)
+            .await;
     assert_eq!(
         envelope_bodies(&records),
         vec![b"secret-1".to_vec(), b"secret-2".to_vec()]
@@ -135,17 +125,22 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
         wait: Some(Duration::ZERO),
     };
     let read_session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create plaintext read session");
     let mut read_session = Box::pin(read_session);
     let first = read_session.next().await;
-    assert!(matches!(
-        first,
-        Some(Err(ReadError::Decryption(
-            RecordDecryptionError::UnexpectedEncryptedRecord
-        )))
-    ));
+    match first {
+        Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
+            assert!(matches!(
+                decrypt_read_batch(batch, &EncryptionConfig::Plain, &[]),
+                Err(RecordDecryptionError::UnexpectedEncryptedRecord)
+            ));
+        }
+        Some(Ok(other)) => panic!("Unexpected first output: {other:?}"),
+        Some(Err(err)) => panic!("Unexpected backend read error: {err:?}"),
+        None => panic!("Read session ended without delivering batch"),
+    }
 }
 
 #[tokio::test]
@@ -177,13 +172,7 @@ async fn test_read_with_limit() {
     };
 
     let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            start,
-            end,
-            EncryptionConfig::Plain,
-        )
+        .read(basin_name.clone(), stream_name.clone(), start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -214,7 +203,6 @@ async fn test_read_unwritten_clamp_behavior() {
             stream_name.clone(),
             start,
             ReadEnd::default(),
-            EncryptionConfig::Plain,
         )
         .await;
     assert!(matches!(result, Err(ReadError::Unwritten(_))));
@@ -230,7 +218,7 @@ async fn test_read_unwritten_clamp_behavior() {
         wait: Some(Duration::ZERO),
     };
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("should succeed with clamp");
     let records = collect_records(&mut Box::pin(session)).await;
@@ -255,12 +243,7 @@ async fn test_read_at_tail_without_follow_returns_unwritten() {
         fencing_token: None,
     };
     let ack = backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("append");
 
@@ -292,13 +275,7 @@ async fn test_read_at_tail_without_follow_returns_unwritten() {
             for clamp in [false, true] {
                 let start = ReadStart { from, clamp };
                 let result = backend
-                    .read(
-                        basin_name.clone(),
-                        stream_name.clone(),
-                        start,
-                        end,
-                        EncryptionConfig::Plain,
-                    )
+                    .read(basin_name.clone(), stream_name.clone(), start, end)
                     .await;
                 match result {
                     Err(ReadError::Unwritten(UnwrittenError(tail))) => {
@@ -340,7 +317,7 @@ async fn test_read_from_tail_offset() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -368,12 +345,7 @@ async fn test_read_timestamp_range() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append records with timestamps");
 
@@ -388,7 +360,7 @@ async fn test_read_timestamp_range() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
 
@@ -398,10 +370,10 @@ async fn test_read_timestamp_range() {
             .await
             .expect("Timed out waiting for read output");
         match output {
-            Some(Ok(ReadSessionOutput::Batch(batch))) => {
-                break batch.records.iter().cloned().collect();
+            Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
+                break decrypt_plain_batch(batch).records.iter().cloned().collect();
             }
-            Some(Ok(ReadSessionOutput::Heartbeat(_))) => continue,
+            Some(Ok(StoredReadSessionOutput::Heartbeat(_))) => continue,
             Some(Err(e)) => panic!("Read error: {:?}", e),
             None => panic!("Read session ended without delivering expected batch"),
         }
@@ -439,12 +411,7 @@ async fn test_read_from_timestamp_includes_duplicate_timestamps() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append duplicate timestamp records");
 
@@ -459,7 +426,7 @@ async fn test_read_from_timestamp_includes_duplicate_timestamps() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -490,7 +457,7 @@ async fn test_read_from_tail_times_out_without_new_data() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     tokio::pin!(session);
@@ -501,7 +468,7 @@ async fn test_read_from_tail_times_out_without_new_data() {
         .expect("Read session ended unexpectedly");
 
     match first_output {
-        Ok(ReadSessionOutput::Heartbeat(_)) => {}
+        Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
         other => panic!("Unexpected first output: {:?}", other),
     }
 
@@ -540,7 +507,7 @@ async fn test_read_with_bytes_limit() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -578,7 +545,7 @@ async fn test_read_with_count_or_bytes_limit_count_wins() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -612,7 +579,7 @@ async fn test_read_with_count_or_bytes_limit_bytes_wins() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -650,12 +617,7 @@ async fn test_read_until_timestamp_basic() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -670,7 +632,7 @@ async fn test_read_until_timestamp_basic() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -715,12 +677,7 @@ async fn test_read_until_timestamp_exact_boundary() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -735,7 +692,7 @@ async fn test_read_until_timestamp_exact_boundary() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -769,12 +726,7 @@ async fn test_read_until_timestamp_before_all_records() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -789,7 +741,7 @@ async fn test_read_until_timestamp_before_all_records() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -816,12 +768,7 @@ async fn test_read_until_timestamp_after_all_records() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -836,7 +783,7 @@ async fn test_read_until_timestamp_after_all_records() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -877,12 +824,7 @@ async fn test_read_until_with_count_limit_count_wins() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -897,7 +839,7 @@ async fn test_read_until_with_count_limit_count_wins() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -932,12 +874,7 @@ async fn test_read_until_with_count_limit_timestamp_wins() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -952,7 +889,7 @@ async fn test_read_until_with_count_limit_timestamp_wins() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -995,12 +932,7 @@ async fn test_read_until_with_bytes_limit_bytes_wins() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -1015,7 +947,7 @@ async fn test_read_until_with_bytes_limit_bytes_wins() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -1053,12 +985,7 @@ async fn test_read_until_with_bytes_limit_timestamp_wins() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -1073,7 +1000,7 @@ async fn test_read_until_with_bytes_limit_timestamp_wins() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -1112,12 +1039,7 @@ async fn test_read_timestamp_range_with_from_and_until() {
     };
 
     backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await
         .expect("Failed to append timestamped records");
 
@@ -1132,7 +1054,7 @@ async fn test_read_timestamp_range_with_from_and_until() {
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
+        .read(basin_name, stream_name, start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);

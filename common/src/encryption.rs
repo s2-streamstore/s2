@@ -8,7 +8,7 @@ use http::{HeaderName, HeaderValue};
 use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroizing};
 use strum::{Display, EnumString};
 
-use crate::http::ParseableHeader;
+use crate::{bash::Bash, http::ParseableHeader};
 
 pub static S2_ENCRYPTION_HEADER: HeaderName = HeaderName::from_static("s2-encryption");
 
@@ -199,6 +199,14 @@ fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, Encrypt
                 ))
             })
     }
+}
+
+/// Compute the stream AAD used by lite's storage layer.
+pub fn stream_id_aad(
+    basin: &(impl AsRef<[u8]> + ?Sized),
+    stream: &(impl AsRef<[u8]> + ?Sized),
+) -> [u8; 32] {
+    *Bash::delimited(&[basin.as_ref(), stream.as_ref()], 0).as_bytes()
 }
 
 #[cfg(test)]

@@ -13,10 +13,9 @@ use futures::{
     future::{BoxFuture, OptionFuture},
 };
 use s2_common::{
-    encryption::EncryptionConfig,
     record::{
         CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
-        SequencedRecord, StoredSequencedRecord, StreamPosition, Timestamp, to_stored_records,
+        StoredRecord, StoredSequencedRecord, StreamPosition, Timestamp,
     },
     types::{
         config::{
@@ -208,7 +207,7 @@ impl Streamer {
             match_seq_num,
             fencing_token,
         }: AppendInput,
-    ) -> Result<Vec<Metered<SequencedRecord>>, AppendErrorInternal> {
+    ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
         if let Some(provided_token) = fencing_token
             && provided_token != self.fencing_token.state
         {
@@ -263,7 +262,6 @@ impl Streamer {
     fn handle_append(
         &mut self,
         input: AppendInput,
-        encryption: EncryptionConfig,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -279,27 +277,15 @@ impl Streamer {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
                         sequenced_records[0].record,
-                        Record::Command(CommandRecord::Trim(SeqNum::MAX))
+                        StoredRecord::Plaintext(Record::Command(CommandRecord::Trim(SeqNum::MAX)))
                     );
                 }
                 for sr in sequenced_records.iter() {
-                    if let Record::Command(cmd) = &sr.record {
+                    if let StoredRecord::Plaintext(Record::Command(cmd)) = &sr.record {
                         self.apply_command(sr.position.seq_num, cmd, append_type);
                     }
                 }
-                let stored_records = match to_stored_records(
-                    sequenced_records,
-                    &encryption,
-                    self.stream_id.as_bytes(),
-                ) {
-                    Ok(records) => records,
-                    Err(err) => {
-                        self.pending_appends
-                            .reject(ticket, err.into(), self.stable_pos);
-                        return;
-                    }
-                };
-                let (first_pos, next_pos) = pos_span(&stored_records);
+                let (first_pos, next_pos) = pos_span(&sequenced_records);
                 let seq_num_range = first_pos.seq_num..next_pos.seq_num;
                 self.db_writes_pending.push_back(
                     db_submit_append(
@@ -307,7 +293,7 @@ impl Streamer {
                         self.stream_id,
                         retention,
                         doe_deadline,
-                        stored_records,
+                        sequenced_records,
                         self.fencing_token
                             .is_applied_in(&seq_num_range)
                             .then(|| self.fencing_token.state.clone()),
@@ -424,7 +410,6 @@ impl Streamer {
                     match msg {
                         Message::Append {
                             input,
-                            encryption,
                             session,
                             reply_tx,
                             append_type,
@@ -432,7 +417,6 @@ impl Streamer {
                             if self.trim_point.state.end < SeqNum::MAX {
                                 self.handle_append(
                                     input,
-                                    encryption,
                                     session,
                                     reply_tx,
                                     append_type,
@@ -497,7 +481,6 @@ impl Streamer {
 enum Message {
     Append {
         input: AppendInput,
-        encryption: EncryptionConfig,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -585,7 +568,6 @@ impl StreamerClient {
     pub async fn append_permit(
         &self,
         input: AppendInput,
-        encryption: EncryptionConfig,
     ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
@@ -605,7 +587,6 @@ impl StreamerClient {
             sema_permit,
             msg_tx: &self.msg_tx,
             input,
-            encryption,
         })
     }
 
@@ -626,7 +607,7 @@ impl StreamerClient {
             fencing_token: None,
         };
         match self
-            .append_permit(input, EncryptionConfig::Plain)
+            .append_permit(input)
             .await?
             .submit_internal(None, AppendType::Terminal)
             .await
@@ -642,7 +623,6 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::Encryption(_) => unreachable!("encryption not used"),
             }),
         }
     }
@@ -662,7 +642,6 @@ pub struct AppendPermit<'a> {
     sema_permit: SemaphorePermit<'a>,
     msg_tx: &'a mpsc::UnboundedSender<Message>,
     input: AppendInput,
-    encryption: EncryptionConfig,
 }
 
 impl AppendPermit<'_> {
@@ -688,13 +667,11 @@ impl AppendPermit<'_> {
             sema_permit,
             msg_tx,
             input,
-            encryption,
         } = self;
         let (reply_tx, reply_rx) = oneshot::channel();
         msg_tx
             .send(Message::Append {
                 input,
-                encryption,
                 session,
                 reply_tx,
                 append_type,
@@ -727,7 +704,7 @@ fn sequenced_records(
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
-) -> Result<Vec<Metered<SequencedRecord>>, AppendErrorInternal> {
+) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
     let mode = config.mode.unwrap_or_default();
     let uncapped = config.uncapped.unwrap_or_default();
     let mut sequenced_records = Vec::with_capacity(batch.len());
@@ -834,7 +811,7 @@ mod tests {
 
     fn test_record(body: Bytes, timestamp: Option<Timestamp>) -> AppendRecord {
         let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
-        let record: Metered<Record> = Record::Envelope(envelope).into();
+        let record = Metered::from(StoredRecord::from(Record::Envelope(envelope)));
         let parts = AppendRecordParts { timestamp, record };
         parts.try_into().unwrap()
     }
@@ -1112,31 +1089,13 @@ mod tests {
         let mut follow_rx = streamer.follow_tx.subscribe();
 
         let (tx1, mut rx1) = oneshot::channel();
-        streamer.handle_append(
-            append_input(b"p0"),
-            EncryptionConfig::Plain,
-            None,
-            tx1,
-            AppendType::Regular,
-        );
+        streamer.handle_append(append_input(b"p0"), None, tx1, AppendType::Regular);
 
         let (tx2, mut rx2) = oneshot::channel();
-        streamer.handle_append(
-            append_input(b"p1"),
-            EncryptionConfig::Plain,
-            None,
-            tx2,
-            AppendType::Regular,
-        );
+        streamer.handle_append(append_input(b"p1"), None, tx2, AppendType::Regular);
 
         let (tx3, mut rx3) = oneshot::channel();
-        streamer.handle_append(
-            append_input(b"p2"),
-            EncryptionConfig::Plain,
-            None,
-            tx3,
-            AppendType::Regular,
-        );
+        streamer.handle_append(append_input(b"p2"), None, tx3, AppendType::Regular);
 
         let mut db_seqs = Vec::new();
         while let Some(fut) = streamer.db_writes_pending.pop_front() {
@@ -1222,7 +1181,6 @@ mod tests {
             let payload = format!("jump-{i}");
             streamer.handle_append(
                 append_input(payload.as_bytes()),
-                EncryptionConfig::Plain,
                 None,
                 tx,
                 AppendType::Regular,

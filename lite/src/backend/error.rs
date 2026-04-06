@@ -1,7 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    record::{FencingToken, RecordDecryptionError, RecordEncryptionError, SeqNum, StreamPosition},
+    record::{FencingToken, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
 
@@ -102,8 +102,6 @@ pub(super) enum AppendErrorInternal {
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
-    #[error(transparent)]
-    Encryption(#[from] RecordEncryptionError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -156,8 +154,6 @@ pub enum AppendError {
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
-    #[error(transparent)]
-    Encryption(#[from] RecordEncryptionError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -170,7 +166,6 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::Encryption(e) => AppendError::Encryption(e),
         }
     }
 }
@@ -230,8 +225,6 @@ pub enum ReadError {
     StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
     Unwritten(#[from] UnwrittenError),
-    #[error(transparent)]
-    Decryption(#[from] RecordDecryptionError),
 }
 
 impl From<StreamerError> for ReadError {

@@ -4,15 +4,18 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use s2_common::{
-    encryption::EncryptionConfig,
-    record::{CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp},
+    encryption::{EncryptionConfig, stream_id_aad},
+    record::{
+        CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp,
+        decrypt_read_batch, encrypt_append_input,
+    },
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
         resources::CreateMode,
         stream::{
-            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadSessionOutput,
-            StreamName,
+            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch,
+            StoredReadBatch, StoredReadSessionOutput, StreamName,
         },
     },
 };
@@ -64,7 +67,9 @@ pub fn create_test_record_with_optional_timestamp(
     timestamp: Option<Timestamp>,
 ) -> AppendRecord {
     let envelope = s2_common::record::EnvelopeRecord::try_from_parts(vec![], body).unwrap();
-    let record: Metered<Record> = Record::Envelope(envelope).into();
+    let record = Metered::from(s2_common::record::StoredRecord::from(Record::Envelope(
+        envelope,
+    )));
     let parts = AppendRecordParts { timestamp, record };
     parts.try_into().unwrap()
 }
@@ -74,7 +79,9 @@ pub fn create_test_record_with_timestamp(body: Bytes, timestamp: Timestamp) -> A
 }
 
 pub fn create_fencing_command_record(token: FencingToken) -> AppendRecord {
-    let record: Metered<Record> = Record::Command(CommandRecord::Fence(token)).into();
+    let record = Metered::from(s2_common::record::StoredRecord::from(Record::Command(
+        CommandRecord::Fence(token),
+    )));
     let parts = AppendRecordParts {
         timestamp: None,
         record,
@@ -162,10 +169,22 @@ pub async fn append_payloads_with_encryption(
         match_seq_num: None,
         fencing_token: None,
     };
+    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    let input = encrypt_append_input(input, encryption, &aad).expect("Failed to encrypt payloads");
     backend
-        .append(basin.clone(), stream.clone(), input, encryption.clone())
+        .append(basin.clone(), stream.clone(), input)
         .await
         .expect("Failed to append payloads")
+}
+
+pub fn encrypt_input_for_stream(
+    input: AppendInput,
+    basin: &BasinName,
+    stream: &StreamName,
+    encryption: &EncryptionConfig,
+) -> AppendInput {
+    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    encrypt_append_input(input, encryption, &aad).expect("Failed to encrypt append input")
 }
 
 pub async fn append_repeat(
@@ -180,17 +199,55 @@ pub async fn append_repeat(
     }
 }
 
+pub fn decrypt_plain_batch(batch: StoredReadBatch) -> ReadBatch {
+    decrypt_read_batch(batch, &EncryptionConfig::Plain, &[]).expect("Failed to decode batch")
+}
+
+pub fn decrypt_batch_for_stream(
+    batch: StoredReadBatch,
+    basin: &BasinName,
+    stream: &StreamName,
+    encryption: &EncryptionConfig,
+) -> ReadBatch {
+    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    decrypt_read_batch(batch, encryption, &aad).expect("Failed to decode batch")
+}
+
 pub async fn collect_records<S>(session: &mut Pin<Box<S>>) -> Vec<SequencedRecord>
 where
-    S: futures::Stream<Item = Result<ReadSessionOutput, ReadError>>,
+    S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
 {
     let mut records = Vec::new();
     while let Some(output) = session.as_mut().next().await {
         match output {
-            Ok(ReadSessionOutput::Batch(batch)) => {
+            Ok(StoredReadSessionOutput::Batch(batch)) => {
+                let batch = decrypt_plain_batch(batch);
                 records.extend(batch.records.iter().cloned());
             }
-            Ok(ReadSessionOutput::Heartbeat(_)) => {}
+            Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
+            Err(e) => panic!("Read error: {:?}", e),
+        }
+    }
+    records
+}
+
+pub async fn collect_records_with_encryption<S>(
+    session: &mut Pin<Box<S>>,
+    basin: &BasinName,
+    stream: &StreamName,
+    encryption: &EncryptionConfig,
+) -> Vec<SequencedRecord>
+where
+    S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
+{
+    let mut records = Vec::new();
+    while let Some(output) = session.as_mut().next().await {
+        match output {
+            Ok(StoredReadSessionOutput::Batch(batch)) => {
+                let batch = decrypt_batch_for_stream(batch, basin, stream, encryption);
+                records.extend(batch.records.iter().cloned());
+            }
+            Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
             Err(e) => panic!("Read error: {:?}", e),
         }
     }

@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
-    encryption::EncryptionConfig,
     maybe::Maybe,
     types::{
         config::{
@@ -261,9 +260,7 @@ async fn test_reconfigure_stream_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend
-        .append(basin_name, stream_name, input, EncryptionConfig::Plain)
-        .await;
+    let result = backend.append(basin_name, stream_name, input).await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -306,9 +303,7 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend
-        .append(basin_name, stream_name, input, EncryptionConfig::Plain)
-        .await;
+    let result = backend.append(basin_name, stream_name, input).await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -435,12 +430,7 @@ async fn test_delete_stream_blocks_data_operations() {
         fencing_token: None,
     };
     let append_result = backend
-        .append(
-            basin_name.clone(),
-            stream_name.clone(),
-            input,
-            EncryptionConfig::Plain,
-        )
+        .append(basin_name.clone(), stream_name.clone(), input)
         .await;
     assert!(matches!(
         append_result,
@@ -452,9 +442,7 @@ async fn test_delete_stream_blocks_data_operations() {
         clamp: false,
     };
     let end = ReadEnd::default();
-    let read_result = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
-        .await;
+    let read_result = backend.read(basin_name, stream_name, start, end).await;
     assert!(matches!(
         read_result,
         Err(ReadError::StreamDeletionPending(_))

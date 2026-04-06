@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
-    encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
     record::StreamPosition,
     types::{
@@ -74,13 +73,7 @@ async fn test_auto_create_stream_on_read() {
     };
 
     let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            start,
-            end,
-            EncryptionConfig::Plain,
-        )
+        .read(basin_name.clone(), stream_name.clone(), start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
@@ -111,9 +104,7 @@ async fn test_auto_create_disabled_append_fails() {
         fencing_token: None,
     };
 
-    let result = backend
-        .append(basin_name, stream_name, input, EncryptionConfig::Plain)
-        .await;
+    let result = backend.append(basin_name, stream_name, input).await;
 
     assert!(matches!(result, Err(AppendError::StreamNotFound(_))));
 }
@@ -134,9 +125,7 @@ async fn test_auto_create_disabled_read_fails() {
     };
     let end = ReadEnd::default();
 
-    let result = backend
-        .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
-        .await;
+    let result = backend.read(basin_name, stream_name, start, end).await;
 
     assert!(matches!(result, Err(ReadError::StreamNotFound(_))));
 }
@@ -188,12 +177,7 @@ async fn test_auto_create_race_condition_append() {
             };
             for _ in 0..5 {
                 match backend
-                    .append(
-                        basin_name.clone(),
-                        stream_name.clone(),
-                        input.clone(),
-                        EncryptionConfig::Plain,
-                    )
+                    .append(basin_name.clone(), stream_name.clone(), input.clone())
                     .await
                 {
                     Ok(ack) => return Ok(ack),
@@ -205,9 +189,7 @@ async fn test_auto_create_race_condition_append() {
                     Err(e) => return Err(e),
                 }
             }
-            backend
-                .append(basin_name, stream_name, input, EncryptionConfig::Plain)
-                .await
+            backend.append(basin_name, stream_name, input).await
         });
         handles.push(handle);
     }
@@ -266,13 +248,7 @@ async fn test_auto_create_race_condition_read() {
             };
             for _ in 0..5 {
                 match backend
-                    .read(
-                        basin_name.clone(),
-                        stream_name.clone(),
-                        start,
-                        end,
-                        EncryptionConfig::Plain,
-                    )
+                    .read(basin_name.clone(), stream_name.clone(), start, end)
                     .await
                 {
                     Ok(session) => {
@@ -286,10 +262,7 @@ async fn test_auto_create_race_condition_read() {
                     Err(e) => return Err(e),
                 }
             }
-            match backend
-                .read(basin_name, stream_name, start, end, EncryptionConfig::Plain)
-                .await
-            {
+            match backend.read(basin_name, stream_name, start, end).await {
                 Ok(session) => {
                     drop(session);
                     Ok::<(), ReadError>(())
