@@ -75,11 +75,15 @@ jobs:
           go-version: ${{ matrix.sdk.go-version }}
           cache-dependency-path: sdk/go.sum
 
-      - name: Setup Python
+      - name: Setup uv
         if: matrix.sdk.lang == 'python'
-        uses: actions/setup-python@v5
+        uses: astral-sh/setup-uv@v7
         with:
-          python-version: ${{ matrix.sdk.python-version }}
+          version: ${{ matrix.sdk.uv-version }}
+      - name: Install dependencies (Python)
+        if: matrix.sdk.lang == 'python'
+        working-directory: sdk
+        run: uv sync --group test
 
       - name: Setup Node
         if: matrix.sdk.lang == 'node'
