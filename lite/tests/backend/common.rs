@@ -19,7 +19,7 @@ use s2_common::{
         },
     },
 };
-use s2_lite::backend::{Backend, error::ReadError, stream_id_aad};
+use s2_lite::backend::{Backend, error::ReadError};
 use slatedb::{Db, config::Settings, object_store::memory::InMemory};
 use uuid::Uuid;
 
@@ -169,7 +169,7 @@ pub async fn append_payloads_with_encryption(
         match_seq_num: None,
         fencing_token: None,
     };
-    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    let aad = s2_lite::backend::aad(basin, stream);
     let input = encrypt_append_input(input, encryption, &aad).expect("Failed to encrypt payloads");
     backend
         .append(basin.clone(), stream.clone(), input)
@@ -183,7 +183,7 @@ pub fn encrypt_input_for_stream(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> AppendInput {
-    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    let aad = s2_lite::backend::aad(basin, stream);
     encrypt_append_input(input, encryption, &aad).expect("Failed to encrypt append input")
 }
 
@@ -209,7 +209,7 @@ pub fn decrypt_batch_for_stream(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> ReadBatch {
-    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    let aad = s2_lite::backend::aad(basin, stream);
     decrypt_read_batch(batch, encryption, &aad).expect("Failed to decode batch")
 }
 

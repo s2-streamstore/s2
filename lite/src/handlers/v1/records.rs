@@ -29,7 +29,7 @@ use s2_common::{
 };
 
 use crate::{
-    backend::{Backend, stream_id_aad},
+    backend::{Backend, stream_id::StreamId},
     handlers::v1::error::ServiceError,
 };
 
@@ -47,7 +47,7 @@ fn encrypt_input(
     basin: &BasinName,
     stream: &StreamName,
 ) -> Result<AppendInput, ServiceError> {
-    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    let aad = StreamId::aad(basin, stream);
     encrypt_append_input(input, encryption, &aad)
         .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))
 }
@@ -61,7 +61,7 @@ fn decrypt_session<S>(
 where
     S: Stream<Item = Result<StoredReadSessionOutput, crate::backend::error::ReadError>>,
 {
-    let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+    let aad = StreamId::aad(&basin, &stream);
     session.map(move |output| match output {
         Ok(StoredReadSessionOutput::Heartbeat(tail)) => Ok(ReadSessionOutput::Heartbeat(tail)),
         Ok(StoredReadSessionOutput::Batch(batch)) => decrypt_read_batch(batch, &encryption, &aad)
@@ -424,7 +424,7 @@ pub async fn append(
             response_compression,
         } => {
             let (err_tx, err_rx) = tokio::sync::oneshot::channel::<ServiceError>();
-            let aad = stream_id_aad(basin.as_ref(), stream.as_ref());
+            let aad = StreamId::aad(&basin, &stream);
 
             let inputs = async_stream::stream! {
                 tokio::pin!(inputs);

@@ -11,11 +11,11 @@ mod streams;
 
 mod append;
 mod kv;
-mod stream_id;
+pub(crate) mod stream_id;
 
 pub use core::Backend;
 
-pub use stream_id::stream_id_aad;
+pub use stream_id::aad;
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
 

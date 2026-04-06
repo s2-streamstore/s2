@@ -33,13 +33,14 @@ impl StreamId {
     pub fn as_bytes(&self) -> &[u8; Self::LEN] {
         self.0.as_bytes()
     }
+
+    pub fn aad(basin: &BasinName, stream: &StreamName) -> [u8; Self::LEN] {
+        *Self::new(basin, stream).as_bytes()
+    }
 }
 
-pub fn stream_id_aad(
-    basin: &(impl AsRef<[u8]> + ?Sized),
-    stream: &(impl AsRef<[u8]> + ?Sized),
-) -> [u8; StreamId::LEN] {
-    *Bash::delimited(&[basin.as_ref(), stream.as_ref()], StreamId::SEPARATOR).as_bytes()
+pub fn aad(basin: &BasinName, stream: &StreamName) -> [u8; StreamId::LEN] {
+    StreamId::aad(basin, stream)
 }
 
 impl From<[u8; StreamId::LEN]> for StreamId {
