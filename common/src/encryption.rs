@@ -16,6 +16,7 @@ type EncryptionKey<const N: usize> = Arc<SecretBox<[u8; N]>>;
 
 /// Encryption algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+#[strum(ascii_case_insensitive)]
 pub enum EncryptionAlgorithm {
     /// AEGIS-256
     #[strum(serialize = "aegis-256")]
@@ -186,7 +187,7 @@ fn header_value_for_key(algorithm: EncryptionAlgorithm, key: &[u8; 32]) -> Heade
 }
 
 fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, EncryptionConfigError> {
-    if alg_str == "plain" {
+    if alg_str.eq_ignore_ascii_case("plain") {
         Ok(None)
     } else {
         alg_str
@@ -220,6 +221,14 @@ mod tests {
         }
     }
 
+    fn assert_invalid_parse(header: &str) {
+        let result = header.parse::<EncryptionConfig>();
+        assert!(
+            matches!(result, Err(EncryptionConfigError::InvalidConfig(_))),
+            "expected invalid config for {header:?}, got {result:?}"
+        );
+    }
+
     #[test]
     fn parse_header_valid_aegis() {
         let config = format!("aegis-256; {KEY_B64}")
@@ -239,7 +248,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_header_valid_with_whitespace() {
+    fn parse_header_valid_case_insensitive_algorithms() {
+        let aegis = format!("AEGIS-256; {KEY_B64}")
+            .parse::<EncryptionConfig>()
+            .unwrap();
+        assert!(matches!(aegis, EncryptionConfig::Aegis256(_)));
+        assert_key_matches(aegis, &KEY_BYTES);
+
+        let aes = format!("AES-256-GCM; {KEY_B64}")
+            .parse::<EncryptionConfig>()
+            .unwrap();
+        assert!(matches!(aes, EncryptionConfig::Aes256Gcm(_)));
+        assert_key_matches(aes, &KEY_BYTES);
+    }
+
+    #[test]
+    fn parse_header_aes_with_whitespace() {
         let config = format!(" aes-256-gcm ; {KEY_B64} ")
             .parse::<EncryptionConfig>()
             .unwrap();
@@ -247,9 +271,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_header_plain_without_key() {
-        let config = "plain".parse::<EncryptionConfig>().unwrap();
-        assert!(matches!(config, EncryptionConfig::Plain));
+    fn parse_header_plain_without_key_is_case_insensitive() {
+        for header in ["plain", "PLAIN"] {
+            let config = header.parse::<EncryptionConfig>().unwrap();
+            assert!(matches!(config, EncryptionConfig::Plain));
+        }
     }
 
     #[test]
@@ -259,53 +285,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_header_absent() {
-        assert!("".parse::<EncryptionConfig>().is_err());
+    fn parse_header_empty_fails() {
+        assert_invalid_parse("");
     }
 
     #[test]
-    fn parse_header_malformed_no_semicolon() {
-        let result = "aegis-256".parse::<EncryptionConfig>();
-        assert!(matches!(
-            result,
-            Err(EncryptionConfigError::InvalidConfig(_))
-        ));
+    fn parse_header_encrypted_algorithm_without_key_fails() {
+        assert_invalid_parse("aegis-256");
     }
 
     #[test]
-    fn parse_header_wrong_key_length() {
-        let result = "aegis-256; 3q2+7w==".parse::<EncryptionConfig>();
-        assert!(matches!(
-            result,
-            Err(EncryptionConfigError::InvalidConfig(_))
-        ));
+    fn parse_header_too_many_fields_fails() {
+        let header = format!("aegis-256; {KEY_B64}; extra");
+        assert_invalid_parse(&header);
     }
 
     #[test]
-    fn parse_header_invalid_base64() {
-        let result = "aegis-256; not-valid-base64!!!".parse::<EncryptionConfig>();
-        assert!(matches!(
-            result,
-            Err(EncryptionConfigError::InvalidConfig(_))
-        ));
+    fn parse_header_wrong_key_length_fails() {
+        assert_invalid_parse("aegis-256; 3q2+7w==");
+    }
+
+    #[test]
+    fn parse_header_invalid_base64_fails() {
+        assert_invalid_parse("aegis-256; not-valid-base64!!!");
     }
 
     #[test]
     fn parse_header_unknown_algorithm_fails() {
-        let result = KEY_B64.parse::<EncryptionConfig>();
-        assert!(matches!(
-            result,
-            Err(EncryptionConfigError::InvalidConfig(_))
-        ));
+        let header = format!("bogus; {KEY_B64}");
+        assert_invalid_parse(&header);
     }
 
     #[test]
     fn parse_header_plain_with_key_fails() {
-        let result = format!("plain; {KEY_B64}").parse::<EncryptionConfig>();
-        assert!(matches!(
-            result,
-            Err(EncryptionConfigError::InvalidConfig(_))
-        ));
+        let header = format!("plain; {KEY_B64}");
+        assert_invalid_parse(&header);
     }
 
     #[test]
