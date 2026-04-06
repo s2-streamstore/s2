@@ -1,59 +1,41 @@
 use std::iter::FusedIterator;
 
-use bytes::Bytes;
-
 use super::{
-    InternalRecordError, Metered, RecordEncryptionError, SequencedRecord, StoredRecord,
-    StoredSequencedBytes, decode_stored_record,
+    InternalRecordError, Metered, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
 };
-use crate::encryption::EncryptionConfig;
 
-#[derive(Debug, thiserror::Error)]
-pub enum RecordIteratorError<E> {
-    #[error("source iterator error")]
-    Source(E),
-    #[error(transparent)]
-    Decode(#[from] InternalRecordError),
-    #[error(transparent)]
-    Encryption(#[from] RecordEncryptionError),
-}
-
-pub struct DecodedRecordIterator<I> {
+pub struct StoredRecordIterator<I> {
     inner: I,
-    encryption: EncryptionConfig,
-    aad: Bytes,
 }
 
-impl<I> DecodedRecordIterator<I> {
-    pub fn new(inner: I, encryption: EncryptionConfig, aad: Bytes) -> Self {
-        Self {
-            inner,
-            encryption,
-            aad,
-        }
+impl<I> StoredRecordIterator<I> {
+    pub fn new(inner: I) -> Self {
+        Self { inner }
     }
 }
 
-impl<I, E> Iterator for DecodedRecordIterator<I>
+impl<I, E> Iterator for StoredRecordIterator<I>
 where
     I: Iterator<Item = Result<StoredSequencedBytes, E>>,
+    E: std::fmt::Debug + Into<InternalRecordError>,
 {
-    type Item = Result<Metered<SequencedRecord>, RecordIteratorError<E>>;
+    type Item = Result<Metered<StoredSequencedRecord>, InternalRecordError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|result| {
-            let stored = result.map_err(RecordIteratorError::Source)?;
+            let stored = result.map_err(Into::into)?;
             let position = stored.position;
             let bytes = stored.record;
             let record: Metered<StoredRecord> = bytes.try_into()?;
-            let record = decode_stored_record(record, &self.encryption, self.aad.as_ref())?;
             Ok(record.sequenced(position))
         })
     }
 }
 
-impl<I, E> FusedIterator for DecodedRecordIterator<I> where
-    I: FusedIterator<Item = Result<StoredSequencedBytes, E>>
+impl<I, E> FusedIterator for StoredRecordIterator<I>
+where
+    I: FusedIterator<Item = Result<StoredSequencedBytes, E>>,
+    E: std::fmt::Debug + Into<InternalRecordError>,
 {
 }
 
@@ -66,7 +48,8 @@ mod tests {
         encryption::EncryptionConfig,
         record::{
             Encodable, EnvelopeRecord, Header, Metered, Record, SeqNum, Sequenced, SequencedRecord,
-            StoredSequencedBytes, StreamPosition, Timestamp, to_stored_records,
+            StoredSequencedBytes, StoredSequencedRecord, StreamPosition, Timestamp,
+            to_stored_records,
         },
     };
 
@@ -95,13 +78,18 @@ mod tests {
         .sequenced(StreamPosition { seq_num, timestamp })
     }
 
-    fn to_stored_bytes_iter(
+    fn make_stored_records(
         records: Vec<Metered<SequencedRecord>>,
         encryption: EncryptionConfig,
         aad: impl AsRef<[u8]>,
+    ) -> Vec<Metered<StoredSequencedRecord>> {
+        to_stored_records(records, &encryption, aad.as_ref()).unwrap()
+    }
+
+    fn to_stored_bytes_iter(
+        records: Vec<Metered<StoredSequencedRecord>>,
     ) -> impl Iterator<Item = Result<StoredSequencedBytes, InternalRecordError>> {
-        to_stored_records(records, &encryption, aad.as_ref())
-            .unwrap()
+        records
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
@@ -114,66 +102,46 @@ mod tests {
     }
 
     #[test]
-    fn decodes_plaintext_records() {
-        let expected = vec![test_record(1, 10, b"p0"), test_record(2, 11, b"p1")];
-        let actual = DecodedRecordIterator::new(
-            to_stored_bytes_iter(expected.clone(), EncryptionConfig::Plain, []),
+    fn stored_iterator_decodes_plaintext_records() {
+        let expected = make_stored_records(
+            vec![test_record(1, 10, b"p0"), test_record(2, 11, b"p1")],
             EncryptionConfig::Plain,
-            Bytes::new(),
-        )
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+            [],
+        );
+        let actual = StoredRecordIterator::new(to_stored_bytes_iter(expected.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn decrypts_encrypted_records() {
+    fn stored_iterator_preserves_encrypted_records() {
         let aad = [0xA5; 32];
         let encryption = EncryptionConfig::aegis256(TEST_KEY);
-        let expected = vec![test_record_with_headers(
-            1,
-            10,
-            vec![Header {
-                name: Bytes::from_static(b"x-test"),
-                value: Bytes::from_static(b"hello"),
-            }],
-            b"secret payload",
-        )];
-
-        let actual = DecodedRecordIterator::new(
-            to_stored_bytes_iter(expected.clone(), encryption.clone(), aad),
+        let expected = make_stored_records(
+            vec![test_record_with_headers(
+                1,
+                10,
+                vec![Header {
+                    name: Bytes::from_static(b"x-test"),
+                    value: Bytes::from_static(b"hello"),
+                }],
+                b"secret payload",
+            )],
             encryption,
-            Bytes::copy_from_slice(&aad),
-        )
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+            aad,
+        );
+
+        let actual = StoredRecordIterator::new(to_stored_bytes_iter(expected.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn rejects_encrypted_records_without_decryption() {
-        let aad = [0xA5; 32];
-        let expected = vec![test_record(1, 10, b"secret payload")];
-        let mut iter = DecodedRecordIterator::new(
-            to_stored_bytes_iter(expected, EncryptionConfig::aegis256(TEST_KEY), aad),
-            EncryptionConfig::Plain,
-            Bytes::copy_from_slice(&aad),
-        );
-
-        let error = iter
-            .next()
-            .expect("record expected")
-            .expect_err("expected error");
-        assert!(matches!(
-            error,
-            RecordIteratorError::Encryption(RecordEncryptionError::UnexpectedEncryptedRecord)
-        ));
-    }
-
-    #[test]
-    fn surfaces_decode_errors() {
+    fn stored_iterator_surfaces_decode_errors() {
         let invalid_data = Sequenced {
             position: StreamPosition {
                 seq_num: 1,
@@ -181,32 +149,25 @@ mod tests {
             },
             record: Bytes::new(),
         };
-        let mut iter = DecodedRecordIterator::new(
-            std::iter::once::<Result<StoredSequencedBytes, InternalRecordError>>(Ok(invalid_data)),
-            EncryptionConfig::Plain,
-            Bytes::new(),
-        );
+        let mut iter = StoredRecordIterator::new(std::iter::once::<
+            Result<StoredSequencedBytes, InternalRecordError>,
+        >(Ok(invalid_data)));
 
         let error = iter
             .next()
             .expect("error expected")
             .expect_err("expected error");
-        assert!(matches!(
-            error,
-            RecordIteratorError::Decode(InternalRecordError::Truncated("MagicByte"))
-        ));
+        assert!(matches!(error, InternalRecordError::Truncated("MagicByte")));
         assert!(iter.next().is_none());
     }
 
     #[test]
-    fn preserves_source_errors() {
-        let mut iter = DecodedRecordIterator::new(
-            std::iter::once::<Result<StoredSequencedBytes, InternalRecordError>>(Err(
-                InternalRecordError::InvalidValue("test", "boom"),
-            )),
-            EncryptionConfig::Plain,
-            Bytes::new(),
-        );
+    fn stored_iterator_preserves_source_errors() {
+        let mut iter = StoredRecordIterator::new(std::iter::once::<
+            Result<StoredSequencedBytes, InternalRecordError>,
+        >(Err(
+            InternalRecordError::InvalidValue("test", "boom"),
+        )));
 
         let error = iter
             .next()
@@ -214,7 +175,7 @@ mod tests {
             .expect_err("expected error");
         assert!(matches!(
             error,
-            RecordIteratorError::Source(InternalRecordError::InvalidValue("test", "boom"))
+            InternalRecordError::InvalidValue("test", "boom")
         ));
     }
 }

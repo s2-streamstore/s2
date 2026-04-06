@@ -11,8 +11,8 @@ use crate::{
     caps,
     read_extent::{ReadLimit, ReadUntil},
     record::{
-        FencingToken, Metered, MeteredSize, Record, SeqNum, SequencedRecord, StreamPosition,
-        Timestamp,
+        FencingToken, Metered, MeteredSize, Record, SeqNum, SequencedRecord, StoredSequencedRecord,
+        StreamPosition, Timestamp,
     },
     types::resources::ListItemsRequest,
 };
@@ -336,6 +336,22 @@ impl ReadEnd {
 }
 
 #[derive(Default, Clone)]
+pub struct StoredReadBatch {
+    pub records: Metered<Vec<StoredSequencedRecord>>,
+    pub tail: Option<StreamPosition>,
+}
+
+impl std::fmt::Debug for StoredReadBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredReadBatch")
+            .field("num_records", &self.records.len())
+            .field("metered_size", &self.records.metered_size())
+            .field("tail", &self.tail)
+            .finish()
+    }
+}
+
+#[derive(Default, Clone)]
 pub struct ReadBatch {
     pub records: Metered<Vec<SequencedRecord>>,
     pub tail: Option<StreamPosition>,
@@ -349,6 +365,12 @@ impl std::fmt::Debug for ReadBatch {
             .field("tail", &self.tail)
             .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum StoredReadSessionOutput {
+    Heartbeat(StreamPosition),
+    Batch(StoredReadBatch),
 }
 
 #[derive(Debug, Clone)]

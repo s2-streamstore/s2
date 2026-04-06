@@ -6,19 +6,19 @@ mod fencing;
 mod iterator;
 mod metering;
 
-pub use batcher::{RecordBatch, RecordBatcher};
+pub use batcher::{RecordBatch, RecordBatcher, StoredRecordBatch, StoredRecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
 pub use encrypted::{
-    EncryptedRecord, EncryptedRecordError, RecordEncryptionError, decode_stored_record,
-    decode_stored_sequenced_record, decrypt_read_batch, to_stored_records,
+    EncryptedRecord, EncryptedRecordError, RecordDecryptionError, RecordEncryptionError,
+    decode_stored_record, decode_stored_sequenced_record, decrypt_read_batch, to_stored_records,
 };
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
 use envelope::HeaderValidationError;
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
-pub use iterator::{DecodedRecordIterator, RecordIteratorError};
+pub use iterator::StoredRecordIterator;
 pub use metering::{Metered, MeteredSize};
 
 use crate::deep_size::DeepSize;
@@ -465,22 +465,6 @@ impl<T> Metered<Sequenced<T>> {
                 inner: self.inner.record,
             },
         )
-    }
-}
-
-#[derive(Default, Clone)]
-pub struct StoredReadBatch {
-    pub records: Metered<Vec<StoredSequencedRecord>>,
-    pub tail: Option<StreamPosition>,
-}
-
-impl std::fmt::Debug for StoredReadBatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StoredReadBatch")
-            .field("num_records", &self.records.len())
-            .field("metered_size", &self.records.metered_size())
-            .field("tail", &self.tail)
-            .finish()
     }
 }
 

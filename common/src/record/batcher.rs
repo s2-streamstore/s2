@@ -3,28 +3,51 @@ use std::iter::FusedIterator;
 use crate::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize, SequencedRecord},
+    record::{Metered, MeteredSize, Sequenced, StoredRecord},
 };
 
-#[derive(Debug)]
-pub struct RecordBatch {
-    pub records: Metered<Vec<SequencedRecord>>,
+pub struct RecordBatch<T>
+where
+    T: MeteredSize,
+{
+    pub records: Metered<Vec<Sequenced<T>>>,
     pub is_terminal: bool,
 }
 
-pub struct RecordBatcher<I, E>
+pub type StoredRecordBatch = RecordBatch<StoredRecord>;
+
+impl<T> std::fmt::Debug for RecordBatch<T>
 where
-    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>,
+    T: MeteredSize,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordBatch")
+            .field("num_records", &self.records.len())
+            .field("metered_size", &self.records.metered_size())
+            .field("is_terminal", &self.is_terminal)
+            .finish()
+    }
+}
+
+pub struct RecordBatcher<I, E, T>
+where
+    T: MeteredSize,
+    I: Iterator<Item = Result<Metered<Sequenced<T>>, E>>,
 {
     record_iterator: I,
-    buffered_records: Metered<Vec<SequencedRecord>>,
+    buffered_records: Metered<Vec<Sequenced<T>>>,
     buffered_error: Option<E>,
     read_limit: EvaluatedReadLimit,
     until: ReadUntil,
     is_terminated: bool,
 }
 
-fn make_records(read_limit: &EvaluatedReadLimit) -> Metered<Vec<SequencedRecord>> {
+pub type StoredRecordBatcher<I, E> = RecordBatcher<I, E, StoredRecord>;
+
+fn make_records<T>(read_limit: &EvaluatedReadLimit) -> Metered<Vec<Sequenced<T>>>
+where
+    T: MeteredSize,
+{
     match read_limit {
         EvaluatedReadLimit::Remaining(limit) => {
             Metered::with_capacity(limit.count().map_or(caps::RECORD_BATCH_MAX.count, |n| {
@@ -35,9 +58,10 @@ fn make_records(read_limit: &EvaluatedReadLimit) -> Metered<Vec<SequencedRecord>
     }
 }
 
-impl<I, E> RecordBatcher<I, E>
+impl<I, E, T> RecordBatcher<I, E, T>
 where
-    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>,
+    T: MeteredSize,
+    I: Iterator<Item = Result<Metered<Sequenced<T>>, E>>,
 {
     pub fn new(record_iterator: I, read_limit: ReadLimit, until: ReadUntil) -> Self {
         let read_limit = read_limit.remaining(0, 0);
@@ -51,7 +75,7 @@ where
         }
     }
 
-    fn iter_next(&mut self) -> Option<Result<RecordBatch, E>> {
+    fn iter_next(&mut self) -> Option<Result<RecordBatch<T>, E>> {
         let EvaluatedReadLimit::Remaining(remaining_limit) = self.read_limit else {
             return None;
         };
@@ -122,11 +146,12 @@ where
     }
 }
 
-impl<I, E> Iterator for RecordBatcher<I, E>
+impl<I, E, T> Iterator for RecordBatcher<I, E, T>
 where
-    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>,
+    T: MeteredSize,
+    I: Iterator<Item = Result<Metered<Sequenced<T>>, E>>,
 {
-    type Item = Result<RecordBatch, E>;
+    type Item = Result<RecordBatch<T>, E>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.is_terminated {
@@ -138,8 +163,10 @@ where
     }
 }
 
-impl<I, E> FusedIterator for RecordBatcher<I, E> where
-    I: Iterator<Item = Result<Metered<SequencedRecord>, E>>
+impl<I, E, T> FusedIterator for RecordBatcher<I, E, T>
+where
+    T: MeteredSize,
+    I: Iterator<Item = Result<Metered<Sequenced<T>>, E>>,
 {
 }
 
@@ -150,52 +177,69 @@ mod tests {
     use super::*;
     use crate::{
         caps,
-        encryption::EncryptionConfig,
         read_extent::{ReadLimit, ReadUntil},
         record::{
-            CommandRecord, DecodedRecordIterator, Encodable, EnvelopeRecord, InternalRecordError,
-            Metered, MeteredSize, Record, RecordIteratorError, SeqNum, Sequenced, SequencedRecord,
-            StoredRecord, StoredSequencedBytes, StreamPosition, Timestamp,
+            CommandRecord, Encodable, EnvelopeRecord, InternalRecordError, Metered, MeteredSize,
+            Record, SeqNum, Sequenced, SequencedRecord, StoredRecord, StoredRecordIterator,
+            StoredSequencedBytes, StoredSequencedRecord, StreamPosition, Timestamp,
         },
     };
 
-    fn test_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
-        Record::Command(CommandRecord::Trim(seq_num))
+    fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
+        Metered::from(Record::Command(CommandRecord::Trim(seq_num)))
             .sequenced(StreamPosition { seq_num, timestamp })
+            .into_inner()
+    }
+
+    fn test_record(seq_num: SeqNum, timestamp: Timestamp) -> StoredSequencedRecord {
+        Metered::from(StoredRecord::from(Record::Command(CommandRecord::Trim(
+            seq_num,
+        ))))
+        .sequenced(StreamPosition { seq_num, timestamp })
+        .into_inner()
     }
 
     fn test_large_record(
         seq_num: SeqNum,
         timestamp: Timestamp,
         body_len: usize,
-    ) -> SequencedRecord {
-        Record::Envelope(
+    ) -> StoredSequencedRecord {
+        Metered::from(StoredRecord::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from(vec![0; body_len])).unwrap(),
-        )
+        )))
         .sequenced(StreamPosition { seq_num, timestamp })
+        .into_inner()
     }
 
     fn to_iter(
+        records: Vec<StoredSequencedRecord>,
+    ) -> impl Iterator<Item = Result<Metered<StoredSequencedRecord>, InternalRecordError>> {
+        records.into_iter().map(Metered::from).map(Ok)
+    }
+
+    fn to_logical_iter(
         records: Vec<SequencedRecord>,
     ) -> impl Iterator<Item = Result<Metered<SequencedRecord>, InternalRecordError>> {
         records.into_iter().map(Metered::from).map(Ok)
     }
 
     fn to_stored_bytes_iter(
-        records: Vec<SequencedRecord>,
+        records: Vec<StoredSequencedRecord>,
     ) -> impl Iterator<Item = Result<StoredSequencedBytes, InternalRecordError>> {
         records
             .into_iter()
             .map(|Sequenced { position, record }| Sequenced {
                 position,
-                record: Metered::from(StoredRecord::from(record))
-                    .as_ref()
-                    .to_bytes(),
+                record: Metered::from(record).as_ref().to_bytes(),
             })
             .map(Ok)
     }
 
-    fn assert_batch(batch: &RecordBatch, expected: &[SequencedRecord], is_terminal: bool) {
+    fn assert_batch(
+        batch: &StoredRecordBatch,
+        expected: &[StoredSequencedRecord],
+        is_terminal: bool,
+    ) {
         assert_eq!(batch.is_terminal, is_terminal);
         assert_eq!(batch.records.len(), expected.len());
         let expected_size: usize = expected.iter().map(|r| r.metered_size()).sum();
@@ -208,7 +252,7 @@ mod tests {
     #[test]
     fn collects_records_until_iterator_ends() {
         let expected = vec![test_record(1, 10), test_record(2, 11), test_record(3, 12)];
-        let mut batcher = RecordBatcher::new(
+        let mut batcher = StoredRecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -219,9 +263,33 @@ mod tests {
     }
 
     #[test]
+    fn generic_batcher_collects_logical_records() {
+        let expected = vec![
+            test_logical_record(1, 10),
+            test_logical_record(2, 11),
+            test_logical_record(3, 12),
+        ];
+        let mut batcher = RecordBatcher::new(
+            to_logical_iter(expected.clone()),
+            ReadLimit::Unbounded,
+            ReadUntil::Unbounded,
+        );
+
+        let batch = batcher.next().expect("batch expected").expect("ok batch");
+        assert!(!batch.is_terminal);
+        assert_eq!(batch.records.len(), expected.len());
+        let expected_size: usize = expected.iter().map(|r| r.metered_size()).sum();
+        assert_eq!(batch.records.metered_size(), expected_size);
+        for (actual, expected) in batch.records.iter().zip(expected.iter()) {
+            assert_eq!(actual, expected);
+        }
+        assert!(batcher.next().is_none());
+    }
+
+    #[test]
     fn stops_at_count_read_limit() {
         let expected = vec![test_record(1, 10), test_record(2, 11), test_record(3, 12)];
-        let mut batcher = RecordBatcher::new(
+        let mut batcher = StoredRecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Count(2),
             ReadUntil::Unbounded,
@@ -236,7 +304,7 @@ mod tests {
     fn stops_at_byte_read_limit() {
         let expected = vec![test_record(1, 10), test_record(2, 11)];
         let first_size = expected[0].metered_size();
-        let mut batcher = RecordBatcher::new(
+        let mut batcher = StoredRecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Bytes(first_size),
             ReadUntil::Unbounded,
@@ -250,7 +318,7 @@ mod tests {
     #[test]
     fn stops_at_timestamp_limit() {
         let expected = vec![test_record(1, 10), test_record(2, 19), test_record(3, 20)];
-        let mut batcher = RecordBatcher::new(
+        let mut batcher = StoredRecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Timestamp(20),
@@ -267,7 +335,7 @@ mod tests {
         for index in 0..=(caps::RECORD_BATCH_MAX.count as SeqNum) {
             records.push(test_record(index, index + 10));
         }
-        let mut batcher = RecordBatcher::new(
+        let mut batcher = StoredRecordBatcher::new(
             to_iter(records.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -307,7 +375,7 @@ mod tests {
             records[0].metered_size() + records[1].metered_size() > caps::RECORD_BATCH_MAX.bytes
         );
 
-        let mut batcher = RecordBatcher::new(
+        let mut batcher = StoredRecordBatcher::new(
             to_iter(records.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -338,11 +406,9 @@ mod tests {
             record: Bytes::new(),
         };
 
-        let mut batcher = RecordBatcher::new(
-            DecodedRecordIterator::new(
+        let mut batcher = StoredRecordBatcher::new(
+            StoredRecordIterator::new(
                 to_stored_bytes_iter(records.clone()).chain(std::iter::once(Ok(invalid_data))),
-                EncryptionConfig::Plain,
-                Bytes::new(),
             ),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -355,23 +421,19 @@ mod tests {
             .next()
             .expect("error expected")
             .expect_err("expected decode error");
-        assert!(matches!(
-            error,
-            RecordIteratorError::Decode(InternalRecordError::Truncated("MagicByte"))
-        ));
+        assert!(matches!(error, InternalRecordError::Truncated("MagicByte")));
         assert!(batcher.next().is_none());
     }
 
     #[test]
     fn surfaces_iterator_errors_immediately() {
-        let iterator = DecodedRecordIterator::new(
-            std::iter::once::<Result<StoredSequencedBytes, InternalRecordError>>(Err(
-                InternalRecordError::InvalidValue("test", "boom"),
-            )),
-            EncryptionConfig::Plain,
-            Bytes::new(),
-        );
-        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
+        let iterator = StoredRecordIterator::new(std::iter::once::<
+            Result<StoredSequencedBytes, InternalRecordError>,
+        >(Err(
+            InternalRecordError::InvalidValue("test", "boom"),
+        )));
+        let mut batcher =
+            StoredRecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
         let error = batcher
             .next()
@@ -379,7 +441,7 @@ mod tests {
             .expect_err("expected iterator error");
         assert!(matches!(
             error,
-            RecordIteratorError::Source(InternalRecordError::InvalidValue("test", "boom"))
+            InternalRecordError::InvalidValue("test", "boom")
         ));
         assert!(batcher.next().is_none());
     }

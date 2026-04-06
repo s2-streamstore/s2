@@ -6,12 +6,15 @@ use s2_common::{
     encryption::EncryptionConfig,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{
-        Metered, MeteredSize as _, SeqNum, StoredReadBatch, StoredSequencedRecord, StreamPosition,
-        Timestamp, decrypt_read_batch,
+        Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp,
+        decrypt_read_batch,
     },
     types::{
         basin::BasinName,
-        stream::{ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
+        stream::{
+            ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StoredReadBatch,
+            StoredReadSessionOutput, StreamName,
+        },
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
@@ -25,11 +28,6 @@ use crate::backend::{
     kv,
     stream_id::StreamId,
 };
-
-enum StoredReadSessionOutput {
-    Heartbeat(StreamPosition),
-    Batch(StoredReadBatch),
-}
 
 impl Backend {
     async fn read_start_seq_num(

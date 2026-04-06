@@ -5,7 +5,7 @@ use futures::StreamExt;
 use s2_common::{
     encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
-    record::{MeteredSize, RecordEncryptionError, StreamPosition},
+    record::{MeteredSize, RecordDecryptionError, StreamPosition},
     types::{
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
         stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
@@ -142,8 +142,8 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
     let first = read_session.next().await;
     assert!(matches!(
         first,
-        Some(Err(ReadError::Encryption(
-            RecordEncryptionError::UnexpectedEncryptedRecord
+        Some(Err(ReadError::Decryption(
+            RecordDecryptionError::UnexpectedEncryptedRecord
         )))
     ));
 }

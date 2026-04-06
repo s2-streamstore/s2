@@ -28,21 +28,18 @@
 //! metering, limits, or accounting.
 
 use aegis::aegis256::Aegis256;
-use aes_gcm::{
-    Aes256Gcm, KeyInit,
-    aead::{Aead, AeadInPlace, Payload},
-};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 
 use super::{
-    Encodable, EnvelopeRecord, Metered, MeteredSize, Record, SequencedRecord, StoredReadBatch,
-    StoredRecord, StoredSequencedRecord,
+    Encodable, EnvelopeRecord, Metered, MeteredSize, Record, SequencedRecord, StoredRecord,
+    StoredSequencedRecord,
 };
 use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionConfig},
-    types::{self},
+    types::stream::{ReadBatch, StoredReadBatch},
 };
 
 const SUITE_ID_LEN: usize = 1;
@@ -58,8 +55,12 @@ pub enum EncryptedRecordError {
     InvalidSuiteId(u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("Encryption failed")]
+pub struct RecordEncryptionError;
+
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum RecordEncryptionError {
+pub enum RecordDecryptionError {
     #[error("Ciphertext algorithm mismatch: expected {expected}, actual {actual}")]
     AlgorithmMismatch {
         expected: EncryptionAlgorithm,
@@ -67,8 +68,6 @@ pub enum RecordEncryptionError {
     },
     #[error("Encrypted record encountered without decryption")]
     UnexpectedEncryptedRecord,
-    #[error("Encryption failed")]
-    EncryptFailed,
     #[error("Decryption failed")]
     DecryptionFailed,
     #[error("Invalid decrypted record: {0}")]
@@ -105,6 +104,7 @@ impl EncryptedRecord {
         &self.encoded[start..end]
     }
 
+    #[cfg(test)]
     pub(crate) fn ciphertext_and_tag(&self) -> &[u8] {
         let start = SUITE_ID_LEN + self.algorithm.nonce_len();
         &self.encoded[start..]
@@ -114,6 +114,12 @@ impl EncryptedRecord {
         let start = self.encoded.len() - self.algorithm.tag_len();
         let end = self.encoded.len();
         &self.encoded[start..end]
+    }
+
+    fn into_mut_encoded(self) -> BytesMut {
+        self.encoded
+            .try_into_mut()
+            .unwrap_or_else(|encoded| BytesMut::from(encoded.as_ref()))
     }
 }
 
@@ -202,42 +208,87 @@ impl TryFrom<Bytes> for EncryptedRecord {
     }
 }
 
+fn payload_end(
+    encoded_len: usize,
+    payload_start: usize,
+    tag_len: usize,
+) -> Result<usize, RecordDecryptionError> {
+    let payload_end = encoded_len
+        .checked_sub(tag_len)
+        .ok_or(RecordDecryptionError::DecryptionFailed)?;
+    if payload_start > payload_end {
+        return Err(RecordDecryptionError::DecryptionFailed);
+    }
+    Ok(payload_end)
+}
+
 pub(crate) fn decrypt_payload(
-    record: &EncryptedRecord,
+    record: EncryptedRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> Result<Bytes, RecordEncryptionError> {
-    match (encryption, record.algorithm()) {
-        (EncryptionConfig::Plain, _) => Err(RecordEncryptionError::UnexpectedEncryptedRecord),
+) -> Result<Bytes, RecordDecryptionError> {
+    let algorithm = record.algorithm();
+    match (encryption, algorithm) {
+        (EncryptionConfig::Plain, _) => Err(RecordDecryptionError::UnexpectedEncryptedRecord),
         (EncryptionConfig::Aegis256(key), EncryptionAlgorithm::Aegis256) => {
-            let nonce = record.nonce().try_into().unwrap();
-            let tag = record.tag().try_into().unwrap();
+            let payload_start = SUITE_ID_LEN + algorithm.nonce_len();
+            let tag_len = algorithm.tag_len();
+            let mut encoded = record.into_mut_encoded();
+            let payload_end = payload_end(encoded.len(), payload_start, tag_len)?;
+            let plaintext_len = payload_end - payload_start;
+            let nonce: [u8; 32] = encoded
+                .get(SUITE_ID_LEN..payload_start)
+                .ok_or(RecordDecryptionError::DecryptionFailed)?
+                .try_into()
+                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+            let tag: [u8; 16] = encoded
+                .get(payload_end..)
+                .ok_or(RecordDecryptionError::DecryptionFailed)?
+                .try_into()
+                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+            let ciphertext = encoded
+                .get_mut(payload_start..payload_end)
+                .ok_or(RecordDecryptionError::DecryptionFailed)?;
 
-            let plaintext = Aegis256::<16>::new(key.secret(), nonce)
-                .decrypt(record.ciphertext(), tag, aad)
-                .map_err(|_| RecordEncryptionError::DecryptionFailed)?;
-            Ok(Bytes::from(plaintext))
+            Aegis256::<16>::new(key.secret(), &nonce)
+                .decrypt_in_place(ciphertext, &tag, aad)
+                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+            let _ = encoded.split_to(payload_start);
+            encoded.truncate(plaintext_len);
+            Ok(encoded.freeze())
         }
         (EncryptionConfig::Aes256Gcm(key), EncryptionAlgorithm::Aes256Gcm) => {
-            let cipher = Aes256Gcm::new_from_slice(key.secret())
-                .expect("AES-256-GCM key length should be valid");
-            let nonce_generic = aes_gcm::Nonce::from_slice(record.nonce());
-            let plaintext = cipher
-                .decrypt(
-                    nonce_generic,
-                    Payload {
-                        msg: record.ciphertext_and_tag(),
-                        aad,
-                    },
-                )
-                .map_err(|_| RecordEncryptionError::DecryptionFailed)?;
-            Ok(Bytes::from(plaintext))
+            let payload_start = SUITE_ID_LEN + algorithm.nonce_len();
+            let tag_len = algorithm.tag_len();
+            let mut encoded = record.into_mut_encoded();
+            let payload_end = payload_end(encoded.len(), payload_start, tag_len)?;
+            let plaintext_len = payload_end - payload_start;
+            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.secret()));
+            let nonce = aes_gcm::Nonce::clone_from_slice(
+                encoded
+                    .get(SUITE_ID_LEN..payload_start)
+                    .ok_or(RecordDecryptionError::DecryptionFailed)?,
+            );
+            let tag = aes_gcm::Tag::clone_from_slice(
+                encoded
+                    .get(payload_end..)
+                    .ok_or(RecordDecryptionError::DecryptionFailed)?,
+            );
+            let ciphertext = encoded
+                .get_mut(payload_start..payload_end)
+                .ok_or(RecordDecryptionError::DecryptionFailed)?;
+            cipher
+                .decrypt_in_place_detached(&nonce, aad, ciphertext, &tag)
+                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+            let _ = encoded.split_to(payload_start);
+            encoded.truncate(plaintext_len);
+            Ok(encoded.freeze())
         }
-        (EncryptionConfig::Aegis256(_), actual) => Err(RecordEncryptionError::AlgorithmMismatch {
+        (EncryptionConfig::Aegis256(_), actual) => Err(RecordDecryptionError::AlgorithmMismatch {
             expected: EncryptionAlgorithm::Aegis256,
             actual,
         }),
-        (EncryptionConfig::Aes256Gcm(_), actual) => Err(RecordEncryptionError::AlgorithmMismatch {
+        (EncryptionConfig::Aes256Gcm(_), actual) => Err(RecordDecryptionError::AlgorithmMismatch {
             expected: EncryptionAlgorithm::Aes256Gcm,
             actual,
         }),
@@ -248,7 +299,7 @@ pub fn decode_stored_record(
     record: Metered<StoredRecord>,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> Result<Metered<Record>, RecordEncryptionError> {
+) -> Result<Metered<Record>, RecordDecryptionError> {
     let cached_metered_size = record.metered_size();
     match record.into_inner() {
         StoredRecord::Plaintext(record) => Ok(Metered {
@@ -258,13 +309,13 @@ pub fn decode_stored_record(
         StoredRecord::Encrypted {
             record: encrypted, ..
         } => {
-            let plaintext = decrypt_payload(&encrypted, encryption, aad)?;
+            let plaintext = decrypt_payload(encrypted, encryption, aad)?;
             let envelope = EnvelopeRecord::try_from(plaintext)
-                .map_err(|e| RecordEncryptionError::InvalidDecryptedRecord(e.to_string()))?;
+                .map_err(|e| RecordDecryptionError::InvalidDecryptedRecord(e.to_string()))?;
             let record = Record::Envelope(envelope);
             let actual_metered_size = record.metered_size();
             if cached_metered_size != actual_metered_size {
-                return Err(RecordEncryptionError::InvalidDecryptedRecord(format!(
+                return Err(RecordDecryptionError::InvalidDecryptedRecord(format!(
                     "metered size mismatch: stored {cached_metered_size}, actual {actual_metered_size}"
                 )));
             }
@@ -280,7 +331,7 @@ pub fn decode_stored_sequenced_record(
     record: Metered<StoredSequencedRecord>,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> Result<Metered<SequencedRecord>, RecordEncryptionError> {
+) -> Result<Metered<SequencedRecord>, RecordDecryptionError> {
     let (position, record) = record.into_parts();
     Ok(decode_stored_record(record, encryption, aad)?.sequenced(position))
 }
@@ -328,7 +379,7 @@ pub fn decrypt_read_batch(
     batch: StoredReadBatch,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> Result<types::stream::ReadBatch, RecordEncryptionError> {
+) -> Result<ReadBatch, RecordDecryptionError> {
     let records: Result<Metered<Vec<SequencedRecord>>, _> = batch
         .records
         .into_inner()
@@ -338,7 +389,7 @@ pub fn decrypt_read_batch(
         .collect();
     let records = records?;
 
-    Ok(types::stream::ReadBatch {
+    Ok(ReadBatch {
         records,
         tail: batch.tail,
     })
@@ -347,7 +398,7 @@ pub fn decrypt_read_batch(
 fn encrypt_payload_with_algorithm(
     plaintext: &(impl Encodable + ?Sized),
     alg: EncryptionAlgorithm,
-    key: &[u8],
+    key: &[u8; 32],
     aad: &[u8],
 ) -> Result<EncryptedRecord, RecordEncryptionError> {
     let payload_start = SUITE_ID_LEN + alg.nonce_len();
@@ -362,14 +413,15 @@ fn encrypt_payload_with_algorithm(
 
     match alg {
         EncryptionAlgorithm::Aegis256 => {
-            let tag = Aegis256::<16>::new(key.try_into().unwrap(), nonce.try_into().unwrap())
-                .encrypt_in_place(payload, aad);
+            let nonce: [u8; 32] = nonce.try_into().map_err(|_| RecordEncryptionError)?;
+            let tag = Aegis256::<16>::new(key, &nonce).encrypt_in_place(payload, aad);
             encoded.put_slice(tag.as_ref());
         }
         EncryptionAlgorithm::Aes256Gcm => {
-            let tag = Aes256Gcm::new(key.into())
-                .encrypt_in_place_detached(nonce.into(), aad, payload)
-                .map_err(|_| RecordEncryptionError::EncryptFailed)?;
+            let nonce = aes_gcm::Nonce::from_slice(nonce);
+            let tag = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key))
+                .encrypt_in_place_detached(nonce, aad, payload)
+                .map_err(|_| RecordEncryptionError)?;
             encoded.put_slice(tag.as_ref());
         }
     }
@@ -517,7 +569,27 @@ mod tests {
         let plaintext = make_envelope(headers.clone(), body.clone());
         let encryption = test_encryption(alg);
         let ciphertext = encrypt_test_payload(&plaintext, alg, &aad);
-        let decrypted = decrypt_payload(&ciphertext, &encryption, &aad).unwrap();
+        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
+        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
+
+        assert_eq!(out_headers, headers);
+        assert_eq!(out_body, body);
+    }
+
+    fn roundtrip_shared_ciphertext_buffer(alg: EncryptionAlgorithm) {
+        let headers = vec![Header {
+            name: Bytes::from_static(b"x-test"),
+            value: Bytes::from_static(b"hello"),
+        }];
+        let body = Bytes::from_static(b"secret payload");
+
+        let aad = aad();
+        let plaintext = make_envelope(headers.clone(), body.clone());
+        let encryption = test_encryption(alg);
+        let ciphertext = encrypt_test_payload(&plaintext, alg, &aad);
+        let shared = ciphertext.encoded.clone();
+        let ciphertext = EncryptedRecord::try_from(shared.clone()).unwrap();
+        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
         let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
 
         assert_eq!(out_headers, headers);
@@ -535,18 +607,28 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_aegis256_with_shared_ciphertext_buffer() {
+        roundtrip_shared_ciphertext_buffer(EncryptionAlgorithm::Aegis256);
+    }
+
+    #[test]
+    fn roundtrip_aes256gcm_with_shared_ciphertext_buffer() {
+        roundtrip_shared_ciphertext_buffer(EncryptionAlgorithm::Aes256Gcm);
+    }
+
+    #[test]
     fn wrong_key_fails_aegis256() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
         let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let result = decrypt_payload(
-            &ciphertext,
+            ciphertext,
             &other_test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         );
         assert!(matches!(
             result,
-            Err(RecordEncryptionError::DecryptionFailed)
+            Err(RecordDecryptionError::DecryptionFailed)
         ));
     }
 
@@ -556,13 +638,13 @@ mod tests {
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
         let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aes256Gcm, &aad);
         let result = decrypt_payload(
-            &ciphertext,
+            ciphertext,
             &other_test_encryption(EncryptionAlgorithm::Aes256Gcm),
             &aad,
         );
         assert!(matches!(
             result,
-            Err(RecordEncryptionError::DecryptionFailed)
+            Err(RecordDecryptionError::DecryptionFailed)
         ));
     }
 
@@ -613,13 +695,13 @@ mod tests {
         ciphertext[0] = 0x02;
         let ciphertext = EncryptedRecord::try_from(Bytes::from(ciphertext)).unwrap();
         let result = decrypt_payload(
-            &ciphertext,
+            ciphertext,
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         );
         assert!(matches!(
             result,
-            Err(RecordEncryptionError::AlgorithmMismatch {
+            Err(RecordDecryptionError::AlgorithmMismatch {
                 expected: EncryptionAlgorithm::Aegis256,
                 actual: EncryptionAlgorithm::Aes256Gcm,
             })
@@ -648,13 +730,33 @@ mod tests {
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
         let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let result = decrypt_payload(
-            &ciphertext,
+            ciphertext,
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &other_aad,
         );
         assert!(matches!(
             result,
-            Err(RecordEncryptionError::DecryptionFailed)
+            Err(RecordDecryptionError::DecryptionFailed)
+        ));
+    }
+
+    #[test]
+    fn malformed_encrypted_record_layout_returns_error_instead_of_panicking() {
+        let aad = aad();
+        let record = EncryptedRecord {
+            encoded: Bytes::from_static(b"\x01short"),
+            algorithm: EncryptionAlgorithm::Aegis256,
+        };
+
+        let result = decrypt_payload(
+            record,
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RecordDecryptionError::DecryptionFailed)
         ));
     }
 
@@ -768,7 +870,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RecordEncryptionError::UnexpectedEncryptedRecord)
+            Err(RecordDecryptionError::UnexpectedEncryptedRecord)
         ));
     }
 
@@ -800,7 +902,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RecordEncryptionError::InvalidDecryptedRecord(message))
+            Err(RecordDecryptionError::InvalidDecryptedRecord(message))
                 if message == format!(
                     "metered size mismatch: stored {}, actual {}",
                     metered_size + 1,

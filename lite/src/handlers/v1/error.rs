@@ -258,7 +258,7 @@ impl ServiceError {
                 ReadError::Unwritten(tail) => ErrorResponse::Unwritten(v1t::stream::TailResponse {
                     tail: tail.0.into(),
                 }),
-                ReadError::Encryption(e) => standard(ErrorCode::Invalid, e.to_string()),
+                ReadError::Decryption(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::NotImplemented => {
                 standard(ErrorCode::PermissionDenied, "Not implemented".to_string())

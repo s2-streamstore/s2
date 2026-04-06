@@ -1,7 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    record::{FencingToken, RecordEncryptionError, SeqNum, StreamPosition},
+    record::{FencingToken, RecordDecryptionError, RecordEncryptionError, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
 
@@ -231,7 +231,7 @@ pub enum ReadError {
     #[error(transparent)]
     Unwritten(#[from] UnwrittenError),
     #[error(transparent)]
-    Encryption(#[from] RecordEncryptionError),
+    Decryption(#[from] RecordDecryptionError),
 }
 
 impl From<StreamerError> for ReadError {
