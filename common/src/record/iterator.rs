@@ -13,21 +13,9 @@ pub enum RecordIteratorError<E> {
     #[error("source iterator error")]
     Source(E),
     #[error(transparent)]
-    Decode(InternalRecordError),
+    Decode(#[from] InternalRecordError),
     #[error(transparent)]
-    Encryption(RecordEncryptionError),
-}
-
-impl<E> From<InternalRecordError> for RecordIteratorError<E> {
-    fn from(error: InternalRecordError) -> Self {
-        Self::Decode(error)
-    }
-}
-
-impl<E> From<RecordEncryptionError> for RecordIteratorError<E> {
-    fn from(error: RecordEncryptionError) -> Self {
-        Self::Encryption(error)
-    }
+    Encryption(#[from] RecordEncryptionError),
 }
 
 pub struct DecodedRecordIterator<I> {
@@ -57,11 +45,9 @@ where
             let stored = result.map_err(RecordIteratorError::Source)?;
             let position = stored.position;
             let bytes = stored.record;
-            let record: Metered<StoredRecord> =
-                bytes.try_into().map_err(RecordIteratorError::Decode)?;
-            decode_stored_record(record, &self.encryption, self.aad.as_ref())
-                .map(|record| record.sequenced(position))
-                .map_err(RecordIteratorError::Encryption)
+            let record: Metered<StoredRecord> = bytes.try_into()?;
+            let record = decode_stored_record(record, &self.encryption, self.aad.as_ref())?;
+            Ok(record.sequenced(position))
         })
     }
 }
