@@ -14,7 +14,7 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
-    encryption::{EncryptionConfig, stream_id_aad},
+    encryption::EncryptionConfig,
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _, decrypt_read_batch, encrypt_append_input},
@@ -28,7 +28,10 @@ use s2_common::{
     },
 };
 
-use crate::{backend::Backend, handlers::v1::error::ServiceError};
+use crate::{
+    backend::{Backend, stream_id_aad},
+    handlers::v1::error::ServiceError,
+};
 
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{get, post};

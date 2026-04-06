@@ -15,6 +15,8 @@ mod stream_id;
 
 pub use core::Backend;
 
+pub use stream_id::stream_id_aad;
+
 pub const FOLLOWER_MAX_LAG: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

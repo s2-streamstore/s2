@@ -4,7 +4,7 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use s2_common::{
-    encryption::{EncryptionConfig, stream_id_aad},
+    encryption::EncryptionConfig,
     record::{
         CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp,
         decrypt_read_batch, encrypt_append_input,
@@ -19,7 +19,7 @@ use s2_common::{
         },
     },
 };
-use s2_lite::backend::{Backend, error::ReadError};
+use s2_lite::backend::{Backend, error::ReadError, stream_id_aad};
 use slatedb::{Db, config::Settings, object_store::memory::InMemory};
 use uuid::Uuid;
 
