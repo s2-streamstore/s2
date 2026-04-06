@@ -39,6 +39,7 @@ use super::{
 use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionConfig},
+    record::Sequenced,
     types::stream::{
         AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch, StoredReadBatch,
     },
@@ -298,31 +299,28 @@ pub(crate) fn decrypt_payload(
 }
 
 pub fn decode_stored_record(
-    record: Metered<StoredRecord>,
+    record: StoredRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<Metered<Record>, RecordDecryptionError> {
-    let cached_metered_size = record.metered_size();
-    match record.into_inner() {
-        StoredRecord::Plaintext(record) => Ok(Metered {
-            size: cached_metered_size,
-            inner: record,
-        }),
+    match record {
+        StoredRecord::Plaintext(record) => Ok(record.into()),
         StoredRecord::Encrypted {
-            record: encrypted, ..
+            metered_size,
+            record: encrypted,
         } => {
             let plaintext = decrypt_payload(encrypted, encryption, aad)?;
             let envelope = EnvelopeRecord::try_from(plaintext)
                 .map_err(|e| RecordDecryptionError::InvalidDecryptedRecord(e.to_string()))?;
             let record = Record::Envelope(envelope);
             let actual_metered_size = record.metered_size();
-            if cached_metered_size != actual_metered_size {
+            if metered_size != actual_metered_size {
                 return Err(RecordDecryptionError::InvalidDecryptedRecord(format!(
-                    "metered size mismatch: stored {cached_metered_size}, actual {actual_metered_size}"
+                    "metered size mismatch: stored {metered_size}, actual {actual_metered_size}"
                 )));
             }
             Ok(Metered {
-                size: cached_metered_size,
+                size: metered_size,
                 inner: record,
             })
         }
@@ -330,11 +328,10 @@ pub fn decode_stored_record(
 }
 
 pub fn decode_stored_sequenced_record(
-    record: Metered<StoredSequencedRecord>,
+    Sequenced { position, record }: StoredSequencedRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<Metered<SequencedRecord>, RecordDecryptionError> {
-    let (position, record) = record.into_parts();
     Ok(decode_stored_record(record, encryption, aad)?.sequenced(position))
 }
 
@@ -446,7 +443,6 @@ pub fn decrypt_read_batch(
         .records
         .into_inner()
         .into_iter()
-        .map(Metered::from)
         .map(|record| decode_stored_sequenced_record(record, encryption, aad))
         .collect();
     let records = records?;
@@ -957,7 +953,7 @@ mod tests {
         };
 
         let result = decode_stored_record(
-            Metered::from(StoredRecord::encrypted(record, metered_size + 1)),
+            StoredRecord::encrypted(record, metered_size + 1),
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         );

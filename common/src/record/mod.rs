@@ -1,6 +1,6 @@
 mod batcher;
 mod command;
-mod encrypted;
+mod encryption;
 mod envelope;
 mod fencing;
 mod iterator;
@@ -10,7 +10,7 @@ pub use batcher::{RecordBatch, RecordBatcher, StoredRecordBatch, StoredRecordBat
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
-pub use encrypted::{
+pub use encryption::{
     EncryptedRecord, EncryptedRecordError, RecordDecryptionError, RecordEncryptionError,
     decode_stored_record, decode_stored_sequenced_record, decrypt_read_batch, encrypt_append_input,
     to_stored_records,
