@@ -153,8 +153,8 @@ mod tests {
         encryption::EncryptionConfig,
         read_extent::{ReadLimit, ReadUntil},
         record::{
-            CommandRecord, DecodedRecordIterator, Encodable, InternalRecordError, Metered,
-            MeteredSize, Record, RecordIteratorError, SeqNum, Sequenced, SequencedRecord,
+            CommandRecord, DecodedRecordIterator, Encodable, EnvelopeRecord, InternalRecordError,
+            Metered, MeteredSize, Record, RecordIteratorError, SeqNum, Sequenced, SequencedRecord,
             StoredRecord, StoredSequencedBytes, StreamPosition, Timestamp,
         },
     };
@@ -162,6 +162,17 @@ mod tests {
     fn test_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
         Record::Command(CommandRecord::Trim(seq_num))
             .sequenced(StreamPosition { seq_num, timestamp })
+    }
+
+    fn test_large_record(
+        seq_num: SeqNum,
+        timestamp: Timestamp,
+        body_len: usize,
+    ) -> SequencedRecord {
+        Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from(vec![0; body_len])).unwrap(),
+        )
+        .sequenced(StreamPosition { seq_num, timestamp })
     }
 
     fn to_iter(
@@ -281,6 +292,38 @@ mod tests {
             &records[caps::RECORD_BATCH_MAX.count..],
             false,
         );
+        assert!(batcher.next().is_none());
+    }
+
+    #[test]
+    fn splits_batches_when_byte_cap_is_hit() {
+        let records = vec![
+            test_large_record(1, 10, caps::RECORD_BATCH_MAX.bytes / 2 + 1),
+            test_large_record(2, 11, caps::RECORD_BATCH_MAX.bytes / 2 + 1),
+        ];
+        assert!(records[0].metered_size() <= caps::RECORD_BATCH_MAX.bytes);
+        assert!(records[1].metered_size() <= caps::RECORD_BATCH_MAX.bytes);
+        assert!(
+            records[0].metered_size() + records[1].metered_size() > caps::RECORD_BATCH_MAX.bytes
+        );
+
+        let mut batcher = RecordBatcher::new(
+            to_iter(records.clone()),
+            ReadLimit::Unbounded,
+            ReadUntil::Unbounded,
+        );
+
+        let first_batch = batcher
+            .next()
+            .expect("first batch expected")
+            .expect("first batch ok");
+        assert_batch(&first_batch, &records[..1], false);
+
+        let second_batch = batcher
+            .next()
+            .expect("second batch expected")
+            .expect("second batch ok");
+        assert_batch(&second_batch, &records[1..], false);
         assert!(batcher.next().is_none());
     }
 

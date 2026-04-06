@@ -187,6 +187,32 @@ mod tests {
     }
 
     #[test]
+    fn surfaces_decode_errors() {
+        let invalid_data = Sequenced {
+            position: StreamPosition {
+                seq_num: 1,
+                timestamp: 10,
+            },
+            record: Bytes::new(),
+        };
+        let mut iter = DecodedRecordIterator::new(
+            std::iter::once::<Result<StoredSequencedBytes, InternalRecordError>>(Ok(invalid_data)),
+            EncryptionConfig::Plain,
+            Bytes::new(),
+        );
+
+        let error = iter
+            .next()
+            .expect("error expected")
+            .expect_err("expected error");
+        assert!(matches!(
+            error,
+            RecordIteratorError::Decode(InternalRecordError::Truncated("MagicByte"))
+        ));
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
     fn preserves_source_errors() {
         let mut iter = DecodedRecordIterator::new(
             std::iter::once::<Result<StoredSequencedBytes, InternalRecordError>>(Err(
