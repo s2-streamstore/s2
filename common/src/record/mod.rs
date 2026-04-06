@@ -119,6 +119,19 @@ pub fn try_metered_size(record_bytes: &[u8]) -> Result<u32, &'static str> {
     ))
 }
 
+impl MeteredSize for Record {
+    fn metered_size(&self) -> usize {
+        8 + match self {
+            Self::Command(command) => 2 + command.op().to_id().len() + command.payload().len(),
+            Self::Envelope(envelope) => {
+                (2 * envelope.headers().len())
+                    + envelope.headers().deep_size()
+                    + envelope.body().len()
+            }
+        }
+    }
+}
+
 impl TryFrom<u8> for MagicByte {
     type Error = &'static str;
 
@@ -154,19 +167,6 @@ impl DeepSize for Record {
         match self {
             Self::Command(c) => c.deep_size(),
             Self::Envelope(e) => e.deep_size(),
-        }
-    }
-}
-
-impl MeteredSize for Record {
-    fn metered_size(&self) -> usize {
-        8 + match self {
-            Self::Command(command) => 2 + command.op().to_id().len() + command.payload().len(),
-            Self::Envelope(envelope) => {
-                (2 * envelope.headers().len())
-                    + envelope.headers().deep_size()
-                    + envelope.body().len()
-            }
         }
     }
 }
