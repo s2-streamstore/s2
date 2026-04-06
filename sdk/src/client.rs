@@ -421,21 +421,15 @@ pub fn default_connector(
         connector.set_connect_timeout(Some(timeout));
     }
 
-    // The workspace can enable multiple rustls crypto backends transitively, so
-    // select the SDK's backend explicitly instead of depending on process-global
-    // default provider installation.
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = if insecure_skip_cert_verification {
         HttpsConnectorBuilder::new().with_tls_config(
-            rustls::ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .map_err(std::io::Error::other)?
+            rustls::ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerifier))
                 .with_no_client_auth(),
         )
     } else {
-        HttpsConnectorBuilder::new().with_provider_and_native_roots(provider)?
+        HttpsConnectorBuilder::new().with_native_roots()?
     };
 
     Ok(builder

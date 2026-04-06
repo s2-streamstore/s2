@@ -1,40 +1,13 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
-use tempfile::TempDir;
 
-struct TestEnv {
-    home: TempDir,
-}
-
-impl TestEnv {
-    fn new() -> Self {
-        Self {
-            home: tempfile::tempdir().expect("temp home dir"),
-        }
-    }
-
-    fn s2(&self) -> Command {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("s2"));
-        cmd.env("HOME", self.home.path());
-        cmd.env("XDG_CONFIG_HOME", self.home.path().join(".config"));
-        for key in [
-            "S2_ACCESS_TOKEN",
-            "S2_ACCOUNT_ENDPOINT",
-            "S2_BASIN_ENDPOINT",
-            "S2_COMPRESSION",
-            "S2_SSL_NO_VERIFY",
-        ] {
-            cmd.env_remove(key);
-        }
-        cmd
-    }
+fn s2() -> Command {
+    Command::new(assert_cmd::cargo::cargo_bin!("s2"))
 }
 
 #[test]
 fn invalid_uri_scheme() {
-    TestEnv::new()
-        .s2()
-        .args(["get-stream-config", "foo://invalid/stream"])
+    s2().args(["get-stream-config", "foo://invalid/stream"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("s2://"));
@@ -42,25 +15,22 @@ fn invalid_uri_scheme() {
 
 #[test]
 fn missing_stream_in_uri() {
-    TestEnv::new()
-        .s2()
-        .args(["get-stream-config", "s2://basin-only"])
+    s2().args(["get-stream-config", "s2://basin-only"])
         .assert()
         .failure();
 }
 
 #[test]
 fn invalid_basin_name() {
-    TestEnv::new()
-        .s2()
-        .args(["create-basin", "-invalid-name"])
+    s2().args(["create-basin", "-invalid-name"])
         .assert()
         .failure();
 }
 
 #[test]
 fn missing_access_token() {
-    let mut cmd = TestEnv::new().s2();
+    let mut cmd = s2();
+    cmd.env_remove("S2_ACCESS_TOKEN");
     cmd.args(["list-basins"])
         .assert()
         .failure()
@@ -69,9 +39,7 @@ fn missing_access_token() {
 
 #[test]
 fn unknown_subcommand() {
-    TestEnv::new()
-        .s2()
-        .args(["unknown-command"])
+    s2().args(["unknown-command"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unrecognized subcommand"));
@@ -79,45 +47,33 @@ fn unknown_subcommand() {
 
 #[test]
 fn config_list() {
-    TestEnv::new()
-        .s2()
-        .args(["config", "list"])
-        .assert()
-        .success();
+    s2().args(["config", "list"]).assert().success();
 }
 
 #[test]
 fn config_set_and_get() {
-    let env = TestEnv::new();
-    env.s2()
-        .args(["config", "set", "compression", "zstd"])
+    s2().args(["config", "set", "compression", "zstd"])
         .assert()
         .success();
-    env.s2()
-        .args(["config", "get", "compression"])
+    s2().args(["config", "get", "compression"])
         .assert()
         .success()
         .stdout(predicate::str::contains("zstd"));
-    env.s2()
-        .args(["config", "unset", "compression"])
+    s2().args(["config", "unset", "compression"])
         .assert()
         .success();
 }
 
 #[test]
 fn config_get_invalid_key() {
-    TestEnv::new()
-        .s2()
-        .args(["config", "get", "invalid_key"])
+    s2().args(["config", "get", "invalid_key"])
         .assert()
         .failure();
 }
 
 #[test]
 fn config_set_invalid_key() {
-    TestEnv::new()
-        .s2()
-        .args(["config", "set", "invalid_key", "value"])
+    s2().args(["config", "set", "invalid_key", "value"])
         .assert()
         .failure();
 }
