@@ -608,7 +608,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(i, record)| {
-                Metered::from(record).sequenced(StreamPosition {
+                Metered::<Record>::from(record).sequenced(StreamPosition {
                     seq_num: i as u64 + 1,
                     timestamp: i as u64 + 10,
                 })

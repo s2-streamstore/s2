@@ -186,7 +186,7 @@ mod tests {
     };
 
     fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
-        Metered::from(Record::Command(CommandRecord::Trim(seq_num)))
+        Metered::<Record>::from(Record::Command(CommandRecord::Trim(seq_num)))
             .sequenced(StreamPosition { seq_num, timestamp })
             .into_inner()
     }

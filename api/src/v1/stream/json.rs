@@ -322,19 +322,25 @@ mod tests {
 
         types::stream::ReadBatch {
             records: vec![
-                record::Metered::from(envelope).sequenced(record::StreamPosition {
-                    seq_num: 7,
-                    timestamp: 11,
-                }),
-                record::Metered::from(empty_fence).sequenced(record::StreamPosition {
-                    seq_num: 8,
-                    timestamp: 12,
-                }),
-                record::Metered::from(non_empty_fence).sequenced(record::StreamPosition {
-                    seq_num: 9,
-                    timestamp: 13,
-                }),
-                record::Metered::from(trim).sequenced(record::StreamPosition {
+                record::Metered::<record::Record>::from(envelope).sequenced(
+                    record::StreamPosition {
+                        seq_num: 7,
+                        timestamp: 11,
+                    },
+                ),
+                record::Metered::<record::Record>::from(empty_fence).sequenced(
+                    record::StreamPosition {
+                        seq_num: 8,
+                        timestamp: 12,
+                    },
+                ),
+                record::Metered::<record::Record>::from(non_empty_fence).sequenced(
+                    record::StreamPosition {
+                        seq_num: 9,
+                        timestamp: 13,
+                    },
+                ),
+                record::Metered::<record::Record>::from(trim).sequenced(record::StreamPosition {
                     seq_num: 10,
                     timestamp: 14,
                 }),

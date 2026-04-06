@@ -60,7 +60,7 @@ mod tests {
         timestamp: Timestamp,
         body: &'static [u8],
     ) -> Metered<SequencedRecord> {
-        Metered::from(Record::Envelope(
+        Metered::<Record>::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap(),
         ))
         .sequenced(StreamPosition { seq_num, timestamp })
@@ -72,7 +72,7 @@ mod tests {
         headers: Vec<Header>,
         body: &'static [u8],
     ) -> Metered<SequencedRecord> {
-        Metered::from(Record::Envelope(
+        Metered::<Record>::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(headers, Bytes::from_static(body)).unwrap(),
         ))
         .sequenced(StreamPosition { seq_num, timestamp })
