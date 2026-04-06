@@ -299,7 +299,7 @@ mod tests {
             DecodedRecordIterator::new(
                 to_stored_bytes_iter(records.clone()).chain(std::iter::once(Ok(invalid_data))),
                 EncryptionConfig::Plain,
-                [],
+                Bytes::new(),
             ),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -326,7 +326,7 @@ mod tests {
                 InternalRecordError::InvalidValue("test", "boom"),
             )),
             EncryptionConfig::Plain,
-            [],
+            Bytes::new(),
         );
         let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 

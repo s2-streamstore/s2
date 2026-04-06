@@ -1,5 +1,7 @@
 use std::iter::FusedIterator;
 
+use bytes::Bytes;
+
 use super::{
     InternalRecordError, Metered, RecordEncryptionError, SequencedRecord, StoredRecord,
     StoredSequencedBytes, decode_stored_record,
@@ -31,15 +33,15 @@ impl<E> From<RecordEncryptionError> for RecordIteratorError<E> {
 pub struct DecodedRecordIterator<I> {
     inner: I,
     encryption: EncryptionConfig,
-    aad: Vec<u8>,
+    aad: Bytes,
 }
 
 impl<I> DecodedRecordIterator<I> {
-    pub fn new(inner: I, encryption: EncryptionConfig, aad: impl AsRef<[u8]>) -> Self {
+    pub fn new(inner: I, encryption: EncryptionConfig, aad: Bytes) -> Self {
         Self {
             inner,
             encryption,
-            aad: aad.as_ref().to_vec(),
+            aad,
         }
     }
 }
@@ -57,7 +59,7 @@ where
             let bytes = stored.record;
             let record: Metered<StoredRecord> =
                 bytes.try_into().map_err(RecordIteratorError::Decode)?;
-            decode_stored_record(record, &self.encryption, &self.aad)
+            decode_stored_record(record, &self.encryption, self.aad.as_ref())
                 .map(|record| record.sequenced(position))
                 .map_err(RecordIteratorError::Encryption)
         })
@@ -131,7 +133,7 @@ mod tests {
         let actual = DecodedRecordIterator::new(
             to_stored_bytes_iter(expected.clone(), EncryptionConfig::Plain, []),
             EncryptionConfig::Plain,
-            [],
+            Bytes::new(),
         )
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -156,7 +158,7 @@ mod tests {
         let actual = DecodedRecordIterator::new(
             to_stored_bytes_iter(expected.clone(), encryption.clone(), aad),
             encryption,
-            aad,
+            Bytes::copy_from_slice(&aad),
         )
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -171,7 +173,7 @@ mod tests {
         let mut iter = DecodedRecordIterator::new(
             to_stored_bytes_iter(expected, EncryptionConfig::aegis256(TEST_KEY), aad),
             EncryptionConfig::Plain,
-            aad,
+            Bytes::copy_from_slice(&aad),
         );
 
         let error = iter
@@ -191,7 +193,7 @@ mod tests {
                 InternalRecordError::InvalidValue("test", "boom"),
             )),
             EncryptionConfig::Plain,
-            [],
+            Bytes::new(),
         );
 
         let error = iter

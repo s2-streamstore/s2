@@ -251,18 +251,31 @@ pub fn decode_stored_record(
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<Metered<Record>, RecordEncryptionError> {
-    let record = match record.into_inner() {
-        StoredRecord::Plaintext(record) => record,
+    let cached_metered_size = record.metered_size();
+    match record.into_inner() {
+        StoredRecord::Plaintext(record) => Ok(Metered {
+            size: cached_metered_size,
+            inner: record,
+        }),
         StoredRecord::Encrypted {
             record: encrypted, ..
         } => {
             let plaintext = decrypt_payload(&encrypted, encryption, aad)?;
             let envelope = EnvelopeRecord::try_from(plaintext)
                 .map_err(|e| RecordEncryptionError::InvalidDecryptedRecord(e.to_string()))?;
-            Record::Envelope(envelope)
+            let record = Record::Envelope(envelope);
+            let actual_metered_size = record.metered_size();
+            if cached_metered_size != actual_metered_size {
+                return Err(RecordEncryptionError::InvalidDecryptedRecord(format!(
+                    "metered size mismatch: stored {cached_metered_size}, actual {actual_metered_size}"
+                )));
+            }
+            Ok(Metered {
+                size: cached_metered_size,
+                inner: record,
+            })
         }
-    };
-    Ok(Metered::from(record))
+    }
 }
 
 pub fn decode_stored_sequenced_record(
@@ -758,6 +771,43 @@ mod tests {
         assert!(matches!(
             result,
             Err(RecordEncryptionError::UnexpectedEncryptedRecord)
+        ));
+    }
+
+    #[test]
+    fn decode_stored_record_rejects_encrypted_metered_size_mismatch() {
+        let aad = aad();
+        let stored = make_encrypted_stored_record(
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            vec![Header {
+                name: Bytes::from_static(b"x-test"),
+                value: Bytes::from_static(b"hello"),
+            }],
+            Bytes::from_static(b"secret payload"),
+            &aad,
+        );
+        let StoredRecord::Encrypted {
+            metered_size,
+            record,
+        } = stored
+        else {
+            panic!("expected encrypted stored record");
+        };
+
+        let result = decode_stored_record(
+            Metered::from(StoredRecord::encrypted(record, metered_size + 1)),
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RecordEncryptionError::InvalidDecryptedRecord(message))
+                if message == format!(
+                    "metered size mismatch: stored {}, actual {}",
+                    metered_size + 1,
+                    metered_size
+                )
         ));
     }
 }
