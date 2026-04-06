@@ -6,15 +6,13 @@ use crate::{
     record::{Metered, MeteredSize, Sequenced, StoredRecord},
 };
 
-pub struct RecordBatch<T>
+pub struct RecordBatch<T = StoredRecord>
 where
     T: MeteredSize,
 {
     pub records: Metered<Vec<Sequenced<T>>>,
     pub is_terminal: bool,
 }
-
-pub type StoredRecordBatch = RecordBatch<StoredRecord>;
 
 impl<T> std::fmt::Debug for RecordBatch<T>
 where
@@ -41,8 +39,6 @@ where
     until: ReadUntil,
     is_terminated: bool,
 }
-
-pub type StoredRecordBatcher<I, E> = RecordBatcher<I, E, StoredRecord>;
 
 fn make_records<T>(read_limit: &EvaluatedReadLimit) -> Metered<Vec<Sequenced<T>>>
 where
@@ -237,11 +233,7 @@ mod tests {
             .map(Ok)
     }
 
-    fn assert_batch(
-        batch: &StoredRecordBatch,
-        expected: &[StoredSequencedRecord],
-        is_terminal: bool,
-    ) {
+    fn assert_batch(batch: &RecordBatch, expected: &[StoredSequencedRecord], is_terminal: bool) {
         assert_eq!(batch.is_terminal, is_terminal);
         assert_eq!(batch.records.len(), expected.len());
         let expected_size: usize = expected.iter().map(|r| r.metered_size()).sum();
@@ -254,7 +246,7 @@ mod tests {
     #[test]
     fn collects_records_until_iterator_ends() {
         let expected = vec![test_record(1, 10), test_record(2, 11), test_record(3, 12)];
-        let mut batcher = StoredRecordBatcher::new(
+        let mut batcher = RecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -291,7 +283,7 @@ mod tests {
     #[test]
     fn stops_at_count_read_limit() {
         let expected = vec![test_record(1, 10), test_record(2, 11), test_record(3, 12)];
-        let mut batcher = StoredRecordBatcher::new(
+        let mut batcher = RecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Count(2),
             ReadUntil::Unbounded,
@@ -306,7 +298,7 @@ mod tests {
     fn stops_at_byte_read_limit() {
         let expected = vec![test_record(1, 10), test_record(2, 11)];
         let first_size = expected[0].metered_size();
-        let mut batcher = StoredRecordBatcher::new(
+        let mut batcher = RecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Bytes(first_size),
             ReadUntil::Unbounded,
@@ -320,7 +312,7 @@ mod tests {
     #[test]
     fn stops_at_timestamp_limit() {
         let expected = vec![test_record(1, 10), test_record(2, 19), test_record(3, 20)];
-        let mut batcher = StoredRecordBatcher::new(
+        let mut batcher = RecordBatcher::new(
             to_iter(expected.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Timestamp(20),
@@ -337,7 +329,7 @@ mod tests {
         for index in 0..=(caps::RECORD_BATCH_MAX.count as SeqNum) {
             records.push(test_record(index, index + 10));
         }
-        let mut batcher = StoredRecordBatcher::new(
+        let mut batcher = RecordBatcher::new(
             to_iter(records.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -377,7 +369,7 @@ mod tests {
             records[0].metered_size() + records[1].metered_size() > caps::RECORD_BATCH_MAX.bytes
         );
 
-        let mut batcher = StoredRecordBatcher::new(
+        let mut batcher = RecordBatcher::new(
             to_iter(records.clone()),
             ReadLimit::Unbounded,
             ReadUntil::Unbounded,
@@ -408,7 +400,7 @@ mod tests {
             record: Bytes::new(),
         };
 
-        let mut batcher = StoredRecordBatcher::new(
+        let mut batcher = RecordBatcher::new(
             StoredRecordIterator::new(
                 to_stored_bytes_iter(records.clone()).chain(std::iter::once(Ok(invalid_data))),
             ),
@@ -434,8 +426,7 @@ mod tests {
         >(Err(
             InternalRecordError::InvalidValue("test", "boom"),
         )));
-        let mut batcher =
-            StoredRecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
+        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
         let error = batcher
             .next()

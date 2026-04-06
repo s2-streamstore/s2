@@ -6,7 +6,7 @@ mod fencing;
 mod iterator;
 mod metering;
 
-pub use batcher::{RecordBatch, RecordBatcher, StoredRecordBatch, StoredRecordBatcher};
+pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
