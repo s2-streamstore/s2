@@ -60,7 +60,8 @@ fn invalid_basin_name() {
 
 #[test]
 fn missing_access_token() {
-    let mut cmd = TestEnv::new().s2();
+    let env = TestEnv::new();
+    let mut cmd = env.s2();
     cmd.args(["list-basins"])
         .assert()
         .failure()
