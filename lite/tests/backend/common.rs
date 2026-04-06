@@ -170,7 +170,7 @@ pub async fn append_payloads_with_encryption(
         fencing_token: None,
     };
     let aad = s2_lite::backend::aad(basin, stream);
-    let input = encrypt_append_input(input, encryption, &aad).expect("Failed to encrypt payloads");
+    let input = encrypt_append_input(input, encryption, &aad);
     backend
         .append(basin.clone(), stream.clone(), input)
         .await
@@ -184,7 +184,7 @@ pub fn encrypt_input_for_stream(
     encryption: &EncryptionConfig,
 ) -> AppendInput {
     let aad = s2_lite::backend::aad(basin, stream);
-    encrypt_append_input(input, encryption, &aad).expect("Failed to encrypt append input")
+    encrypt_append_input(input, encryption, &aad)
 }
 
 pub async fn append_repeat(

@@ -46,10 +46,9 @@ fn encrypt_input(
     encryption: &EncryptionConfig,
     basin: &BasinName,
     stream: &StreamName,
-) -> Result<AppendInput, ServiceError> {
+) -> AppendInput {
     let aad = StreamId::aad(basin, stream);
     encrypt_append_input(input, encryption, &aad)
-        .map_err(|e| ServiceError::Validation(ValidationError(e.to_string())))
 }
 
 fn decrypt_session<S>(
@@ -405,7 +404,7 @@ pub async fn append(
             input,
             response_mime,
         } => {
-            let input = encrypt_input(input, &encryption, &basin, &stream)?;
+            let input = encrypt_input(input, &encryption, &basin, &stream);
             let ack = backend.append(basin, stream, input).await?;
             match response_mime {
                 JsonOrProto::Json => {
@@ -431,15 +430,7 @@ pub async fn append(
                 let mut err_tx = Some(err_tx);
                 while let Some(input) = inputs.next().await {
                     match input {
-                        Ok(input) => match encrypt_append_input(input, &encryption, &aad) {
-                            Ok(input) => yield input,
-                            Err(e) => {
-                                if let Some(tx) = err_tx.take() {
-                                    let _ = tx.send(ServiceError::Validation(ValidationError(e.to_string())));
-                                }
-                                break;
-                            }
-                        },
+                        Ok(input) => yield encrypt_append_input(input, &encryption, &aad),
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e.into());

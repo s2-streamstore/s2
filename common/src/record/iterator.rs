@@ -79,7 +79,7 @@ mod tests {
         encryption: EncryptionConfig,
         aad: impl AsRef<[u8]>,
     ) -> Vec<Metered<StoredSequencedRecord>> {
-        to_stored_records(records, &encryption, aad.as_ref()).unwrap()
+        to_stored_records(records, &encryption, aad.as_ref())
     }
 
     fn to_stored_bytes_iter(
