@@ -33,7 +33,7 @@ pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, StreamPosition), Deseria
     ))
 }
 
-pub fn ser_value(record: impl Encodable) -> Bytes {
+pub fn ser_value(record: Metered<&StoredRecord>) -> Bytes {
     record.to_bytes()
 }
 

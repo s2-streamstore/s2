@@ -352,15 +352,12 @@ async fn test_append_session_basic() {
     assert_eq!(tail.seq_num, 3);
 }
 
-#[tokio::test]
-async fn test_append_session_basic_with_encryption() {
-    let encryption = aegis256_encryption();
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "append-session-basic-encrypted",
-        "stream",
-        OptionalStreamConfig::default(),
-    )
-    .await;
+async fn assert_append_session_basic_with_encryption(
+    test_suffix: &str,
+    encryption: EncryptionConfig,
+) {
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
 
     let inputs = futures::stream::iter(vec![
         AppendInput {
@@ -425,6 +422,16 @@ async fn test_append_session_basic_with_encryption() {
             b"batch 3".to_vec()
         ]
     );
+}
+
+#[tokio::test]
+async fn test_append_session_basic_with_aegis256_encryption() {
+    assert_append_session_basic_with_encryption("appsess-enc-aegis", aegis256_encryption()).await;
+}
+
+#[tokio::test]
+async fn test_append_session_basic_with_aes256gcm_encryption() {
+    assert_append_session_basic_with_encryption("appsess-enc-aes", aes256gcm_encryption()).await;
 }
 
 #[tokio::test]

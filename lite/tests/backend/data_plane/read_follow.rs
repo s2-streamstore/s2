@@ -182,15 +182,12 @@ async fn test_follow_mode_receives_new_data() {
     );
 }
 
-#[tokio::test]
-async fn test_follow_mode_receives_new_encrypted_data() {
-    let encryption = aegis256_encryption();
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "follow-new-encrypted-data",
-        "stream",
-        OptionalStreamConfig::default(),
-    )
-    .await;
+async fn assert_follow_mode_receives_new_encrypted_data(
+    test_suffix: &str,
+    encryption: EncryptionConfig,
+) {
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
 
     append_payloads_with_encryption(
         &backend,
@@ -276,6 +273,16 @@ async fn test_follow_mode_receives_new_encrypted_data() {
             b"follow-2".to_vec()
         ]
     );
+}
+
+#[tokio::test]
+async fn test_follow_mode_receives_new_aegis256_encrypted_data() {
+    assert_follow_mode_receives_new_encrypted_data("follow-enc-aegis", aegis256_encryption()).await;
+}
+
+#[tokio::test]
+async fn test_follow_mode_receives_new_aes256gcm_encrypted_data() {
+    assert_follow_mode_receives_new_encrypted_data("follow-enc-aes", aes256gcm_encryption()).await;
 }
 
 #[tokio::test]

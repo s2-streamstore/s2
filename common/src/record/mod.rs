@@ -419,10 +419,6 @@ impl TryFrom<Bytes> for Metered<StoredRecord> {
                                 "invalid ciphertext suite id",
                             )
                         }
-                        EncryptedRecordError::InvalidLayout => InternalRecordError::InvalidValue(
-                            "EncryptedRecord",
-                            "invalid ciphertext layout",
-                        ),
                     })?,
                     metered_size,
                 ),

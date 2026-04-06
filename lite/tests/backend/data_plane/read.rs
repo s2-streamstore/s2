@@ -85,15 +85,9 @@ async fn test_read_from_beginning() {
     assert_eq!(records.len(), 5);
 }
 
-#[tokio::test]
-async fn test_read_encrypted_roundtrip() {
-    let encryption = aegis256_encryption();
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-encrypted-roundtrip",
-        "stream",
-        OptionalStreamConfig::default(),
-    )
-    .await;
+async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: EncryptionConfig) {
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
 
     append_payloads_with_encryption(
         &backend,
@@ -152,6 +146,16 @@ async fn test_read_encrypted_roundtrip() {
             RecordEncryptionError::UnexpectedEncryptedRecord
         )))
     ));
+}
+
+#[tokio::test]
+async fn test_read_encrypted_roundtrip_aegis256() {
+    assert_read_encrypted_roundtrip("read-enc-aegis", aegis256_encryption()).await;
+}
+
+#[tokio::test]
+async fn test_read_encrypted_roundtrip_aes256gcm() {
+    assert_read_encrypted_roundtrip("read-enc-aes", aes256gcm_encryption()).await;
 }
 
 #[tokio::test]

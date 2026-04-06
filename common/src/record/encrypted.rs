@@ -56,8 +56,6 @@ pub enum EncryptedRecordError {
     Truncated,
     #[error("invalid ciphertext suite id: {0:#04x}")]
     InvalidSuiteId(u8),
-    #[error("invalid ciphertext layout")]
-    InvalidLayout,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
