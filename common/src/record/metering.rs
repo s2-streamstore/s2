@@ -38,15 +38,16 @@ pub struct Metered<T> {
 }
 
 impl<T> Metered<T> {
+    pub(crate) const fn with_size(size: usize, inner: T) -> Self {
+        Self { size, inner }
+    }
+
     pub fn into_inner(self) -> T {
         self.inner
     }
 
     pub const fn as_ref(&self) -> Metered<&T> {
-        Metered {
-            size: self.size,
-            inner: &self.inner,
-        }
+        Metered::with_size(self.size, &self.inner)
     }
 }
 
@@ -86,10 +87,7 @@ where
     T: MeteredSize,
 {
     fn from(inner: T) -> Self {
-        Self {
-            size: inner.metered_size(),
-            inner,
-        }
+        Self::with_size(inner.metered_size(), inner)
     }
 }
 
@@ -107,10 +105,7 @@ where
     T: Clone,
 {
     fn clone(&self) -> Self {
-        Self {
-            size: self.size,
-            inner: self.inner.clone(),
-        }
+        Self::with_size(self.size, self.inner.clone())
     }
 }
 

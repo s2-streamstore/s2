@@ -23,9 +23,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|result| {
-            let stored = result.map_err(Into::into)?;
-            let position = stored.position;
-            let bytes = stored.record;
+            let (position, bytes) = result.map_err(Into::into)?.into_parts();
             let record: Metered<StoredRecord> = bytes.try_into()?;
             Ok(record.sequenced(position))
         })
@@ -91,10 +89,7 @@ mod tests {
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
-                Sequenced {
-                    position,
-                    record: record.as_ref().to_bytes(),
-                }
+                Sequenced::new(position, record.as_ref().to_bytes())
             })
             .map(Ok)
     }
@@ -140,13 +135,13 @@ mod tests {
 
     #[test]
     fn stored_iterator_surfaces_decode_errors() {
-        let invalid_data = Sequenced {
-            position: StreamPosition {
+        let invalid_data = Sequenced::new(
+            StreamPosition {
                 seq_num: 1,
                 timestamp: 10,
             },
-            record: Bytes::new(),
-        };
+            Bytes::new(),
+        );
         let mut iter = StoredRecordIterator::new(std::iter::once::<
             Result<StoredSequencedBytes, InternalRecordError>,
         >(Ok(invalid_data)));

@@ -80,12 +80,8 @@ impl From<types::stream::AppendAck> for AppendAck {
 }
 
 impl From<record::SequencedRecord> for SequencedRecord {
-    fn from(
-        record::Sequenced {
-            position: record::StreamPosition { seq_num, timestamp },
-            record,
-        }: record::SequencedRecord,
-    ) -> Self {
+    fn from(record: record::SequencedRecord) -> Self {
+        let (record::StreamPosition { seq_num, timestamp }, record) = record.into_parts();
         let (headers, body) = record.into_parts();
         Self {
             seq_num,

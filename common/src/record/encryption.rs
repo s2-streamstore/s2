@@ -39,7 +39,6 @@ use super::{
 use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionConfig},
-    record::Sequenced,
     types::stream::{
         AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch, StoredReadBatch,
     },
@@ -319,19 +318,17 @@ pub fn decode_stored_record(
                     "metered size mismatch: stored {metered_size}, actual {actual_metered_size}"
                 )));
             }
-            Ok(Metered {
-                size: metered_size,
-                inner: record,
-            })
+            Ok(Metered::with_size(metered_size, record))
         }
     }
 }
 
 pub fn decode_stored_sequenced_record(
-    Sequenced { position, record }: StoredSequencedRecord,
+    record: StoredSequencedRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<Metered<SequencedRecord>, RecordDecryptionError> {
+    let (position, record) = record.into_parts();
     Ok(decode_stored_record(record, encryption, aad)?.sequenced(position))
 }
 
@@ -407,10 +404,7 @@ fn encrypt_append_record(
 
     AppendRecord::try_from(AppendRecordParts {
         timestamp,
-        record: Metered {
-            size: metered_size,
-            inner: record,
-        },
+        record: Metered::with_size(metered_size, record),
     })
     .map_err(|_| RecordEncryptionError)
 }
@@ -900,12 +894,12 @@ mod tests {
                 .unwrap();
         let records = decrypted.records.into_inner();
 
-        let Record::Envelope(first) = &records[0].record else {
+        let Record::Envelope(first) = &records[0].inner else {
             panic!("expected envelope record");
         };
         assert_eq!(first.body().as_ref(), b"legacy-plaintext");
 
-        let Record::Envelope(second) = &records[1].record else {
+        let Record::Envelope(second) = &records[1].inner else {
             panic!("expected envelope record");
         };
         assert_eq!(second.headers().len(), 1);

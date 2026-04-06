@@ -189,10 +189,7 @@ impl Record {
     }
 
     pub fn sequenced(self, position: StreamPosition) -> SequencedRecord {
-        Sequenced {
-            position,
-            record: self,
-        }
+        Sequenced::new(position, self)
     }
 
     pub fn into_parts(self) -> (Vec<Header>, Bytes) {
@@ -337,8 +334,34 @@ impl Encodable for Metered<&StoredRecord> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sequenced<T> {
-    pub position: StreamPosition,
-    pub record: T,
+    position: StreamPosition,
+    inner: T,
+}
+
+impl<T> Sequenced<T> {
+    pub const fn new(position: StreamPosition, inner: T) -> Self {
+        Self { position, inner }
+    }
+
+    pub const fn position(&self) -> StreamPosition {
+        self.position
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    pub fn as_ref(&self) -> Sequenced<&T> {
+        Sequenced::new(self.position, &self.inner)
+    }
+
+    pub fn parts(&self) -> (StreamPosition, &T) {
+        (self.position, &self.inner)
+    }
+
+    pub fn into_parts(self) -> (StreamPosition, T) {
+        (self.position, self.inner)
+    }
 }
 
 pub type StoredSequencedBytes = Sequenced<Bytes>;
@@ -350,7 +373,7 @@ where
     T: MeteredSize,
 {
     fn metered_size(&self) -> usize {
-        self.record.metered_size()
+        self.inner.metered_size()
     }
 }
 
@@ -359,7 +382,7 @@ where
     T: DeepSize,
 {
     fn deep_size(&self) -> usize {
-        self.position.deep_size() + self.record.deep_size()
+        self.position.deep_size() + self.inner.deep_size()
     }
 }
 
@@ -368,13 +391,7 @@ where
     T: MeteredSize,
 {
     pub fn sequenced(self, position: StreamPosition) -> Metered<Sequenced<T>> {
-        Metered {
-            size: self.size,
-            inner: Sequenced {
-                position,
-                record: self.inner,
-            },
-        }
+        Metered::with_size(self.size, Sequenced::new(position, self.inner))
     }
 }
 
@@ -406,9 +423,9 @@ impl TryFrom<Bytes> for Metered<StoredRecord> {
             buf.try_get_uint(magic_byte.metered_size_varlen as usize)
                 .map_err(|_| InternalRecordError::Truncated("MeteredSize"))? as usize;
 
-        Ok(Self {
-            size: metered_size,
-            inner: match magic_byte.record_type {
+        Ok(Self::with_size(
+            metered_size,
+            match magic_byte.record_type {
                 RecordType::Command => {
                     StoredRecord::Plaintext(Record::Command(CommandRecord::try_from(buf.as_ref())?))
                 }
@@ -430,7 +447,7 @@ impl TryFrom<Bytes> for Metered<StoredRecord> {
                     metered_size,
                 ),
             },
-        })
+        ))
     }
 }
 
@@ -440,38 +457,27 @@ impl TryFrom<Bytes> for Metered<Record> {
     fn try_from(buf: Bytes) -> Result<Self, Self::Error> {
         let stored: Metered<StoredRecord> = buf.try_into()?;
         let size = stored.size;
-        let inner = match stored.inner {
-            StoredRecord::Plaintext(record) => record,
-            StoredRecord::Encrypted { .. } => {
-                return Err(InternalRecordError::InvalidValue(
-                    "RecordType",
-                    "encrypted envelope requires decryption",
-                ));
-            }
-        };
-        Ok(Self { size, inner })
+        match stored.into_inner() {
+            StoredRecord::Plaintext(record) => Ok(record),
+            StoredRecord::Encrypted { .. } => Err(InternalRecordError::InvalidValue(
+                "RecordType",
+                "encrypted envelope requires decryption",
+            )),
+        }
+        .map(|record| Metered::with_size(size, record))
     }
 }
 
 impl<T> Metered<Sequenced<T>> {
     pub fn parts(&self) -> (StreamPosition, Metered<&T>) {
-        (
-            self.inner.position,
-            Metered {
-                size: self.size,
-                inner: &self.inner.record,
-            },
-        )
+        let (position, inner) = self.inner.parts();
+        (position, Metered::with_size(self.size, inner))
     }
 
     pub fn into_parts(self) -> (StreamPosition, Metered<T>) {
-        (
-            self.inner.position,
-            Metered {
-                size: self.size,
-                inner: self.inner.record,
-            },
-        )
+        let size = self.size;
+        let (position, inner) = self.inner.into_parts();
+        (position, Metered::with_size(size, inner))
     }
 }
 
@@ -568,8 +574,9 @@ mod test {
             let decoded_record = Metered::try_from(encoded_record).unwrap();
             prop_assert_eq!(&decoded_record, &metered_record);
             let sequenced = decoded_record.sequenced(StreamPosition { seq_num, timestamp });
-            assert_eq!(sequenced.position, StreamPosition {seq_num, timestamp});
-            assert_eq!(sequenced.record, record);
+            let (position, sequenced_record) = sequenced.into_parts();
+            assert_eq!(position, StreamPosition { seq_num, timestamp });
+            assert_eq!(sequenced_record.into_inner(), record);
         }
     );
 
@@ -681,7 +688,7 @@ mod test {
             }
         );
         assert_eq!(
-            sequenced_record.record,
+            sequenced_record.inner,
             Record::try_from_parts(headers, body).unwrap()
         );
     }

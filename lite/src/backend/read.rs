@@ -327,9 +327,10 @@ impl ReadSessionState {
         };
         let count = batch.records.len();
         let bytes = batch.records.metered_size();
+        let last_position = last_record.position();
         assert!(limit.allow(count, bytes));
-        assert!(self.until.allow(last_record.position.timestamp));
-        self.start_seq_num = last_record.position.seq_num + 1;
+        assert!(self.until.allow(last_position.timestamp));
+        self.start_seq_num = last_position.seq_num + 1;
         self.limit = limit.remaining(count, bytes);
         self.reset_wait_deadline();
         StoredReadSessionOutput::Batch(batch)
@@ -345,7 +346,7 @@ fn count_allowed_records(
     let mut acc_count = 0;
     for record in records {
         if limit.deny(acc_count + 1, acc_size + record.metered_size())
-            || until.deny(record.position.timestamp)
+            || until.deny(record.position().timestamp)
         {
             break;
         }
@@ -784,7 +785,7 @@ mod tests {
         };
         assert_eq!(batch.records.len(), 1);
         let record = batch.records.first().expect("batch should have one record");
-        let StoredRecord::Plaintext(Record::Envelope(envelope)) = &record.record else {
+        let StoredRecord::Plaintext(Record::Envelope(envelope)) = record.inner() else {
             panic!("expected envelope record");
         };
         assert_eq!(envelope.body().as_ref(), b"follow-1");

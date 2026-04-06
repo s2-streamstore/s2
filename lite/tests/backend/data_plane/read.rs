@@ -383,7 +383,11 @@ async fn test_read_timestamp_range() {
     let bodies = envelope_bodies(&records);
 
     assert_eq!(bodies, vec![b"ts-200".to_vec()]);
-    assert!(records.iter().all(|record| record.position.timestamp < 300));
+    assert!(
+        records
+            .iter()
+            .all(|record| record.position().timestamp < 300)
+    );
 }
 
 #[tokio::test]
@@ -516,7 +520,7 @@ async fn test_read_with_bytes_limit() {
     assert!(records.len() >= 2);
     assert!(records.len() <= 4);
 
-    let total_bytes: usize = records.iter().map(|r| r.record.metered_size()).sum();
+    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
     assert!(total_bytes <= 20000);
 }
 
@@ -589,7 +593,7 @@ async fn test_read_with_count_or_bytes_limit_bytes_wins() {
     assert!(records.len() <= 5);
     assert!(records.len() < 100);
 
-    let total_bytes: usize = records.iter().map(|r| r.record.metered_size()).sum();
+    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
     assert!(total_bytes <= 50000);
 }
 
@@ -650,7 +654,7 @@ async fn test_read_until_timestamp_basic() {
     assert!(
         records
             .iter()
-            .all(|record| record.position.timestamp < 3500)
+            .all(|record| record.position().timestamp < 3500)
     );
 }
 
@@ -703,7 +707,7 @@ async fn test_read_until_timestamp_exact_boundary() {
     assert!(
         records
             .iter()
-            .all(|record| record.position.timestamp < 3000)
+            .all(|record| record.position().timestamp < 3000)
     );
 }
 
@@ -956,7 +960,7 @@ async fn test_read_until_with_bytes_limit_bytes_wins() {
     assert!(records.len() >= 2);
     assert!(records.len() <= 3);
 
-    let total_bytes: usize = records.iter().map(|r| r.record.metered_size()).sum();
+    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
     assert!(total_bytes <= 15000);
 }
 
@@ -1010,7 +1014,7 @@ async fn test_read_until_with_bytes_limit_timestamp_wins() {
     assert!(
         records
             .iter()
-            .all(|record| record.position.timestamp < 3500)
+            .all(|record| record.position().timestamp < 3500)
     );
 }
 
@@ -1063,9 +1067,8 @@ async fn test_read_timestamp_range_with_from_and_until() {
     assert_eq!(records.len(), 2);
     let bodies = envelope_bodies(&records);
     assert_eq!(bodies, vec![b"ts-2500".to_vec(), b"ts-3500".to_vec()]);
-    assert!(
-        records
-            .iter()
-            .all(|record| record.position.timestamp >= 2000 && record.position.timestamp < 4500)
-    );
+    assert!(records.iter().all(|record| {
+        let position = record.position();
+        position.timestamp >= 2000 && position.timestamp < 4500
+    }));
 }

@@ -264,7 +264,7 @@ pub async fn read(
                             processed.count += batch.records.len();
                             processed.bytes += batch.records.metered_size();
                             let id = v1t::stream::sse::LastEventId {
-                                seq_num: last_record.position.seq_num,
+                                seq_num: last_record.position().seq_num,
                                 count: processed.count,
                                 bytes: processed.bytes,
                             };

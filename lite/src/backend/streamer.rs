@@ -276,13 +276,13 @@ impl Streamer {
                 if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
-                        sequenced_records[0].record,
-                        StoredRecord::Plaintext(Record::Command(CommandRecord::Trim(SeqNum::MAX)))
+                        sequenced_records[0].inner(),
+                        &StoredRecord::Plaintext(Record::Command(CommandRecord::Trim(SeqNum::MAX)))
                     );
                 }
                 for sr in sequenced_records.iter() {
-                    if let StoredRecord::Plaintext(Record::Command(cmd)) = &sr.record {
-                        self.apply_command(sr.position.seq_num, cmd, append_type);
+                    if let StoredRecord::Plaintext(Record::Command(cmd)) = sr.inner() {
+                        self.apply_command(sr.position().seq_num, cmd, append_type);
                     }
                 }
                 let (first_pos, next_pos) = pos_span(&sequenced_records);
@@ -686,13 +686,13 @@ impl AppendPermit<'_> {
 
 fn pos_span(records: &[Metered<StoredSequencedRecord>]) -> (StreamPosition, StreamPosition) {
     (
-        records.first().expect("non-empty").position,
+        records.first().expect("non-empty").position(),
         next_pos(records),
     )
 }
 
 pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
-    let last_pos = records.last().expect("non-empty").position;
+    let last_pos = records.last().expect("non-empty").position();
     StreamPosition {
         seq_num: last_pos.seq_num + 1,
         timestamp: last_pos.timestamp,
@@ -833,10 +833,10 @@ mod tests {
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].position.seq_num, 100);
-        assert_eq!(result[0].position.timestamp, 900);
-        assert_eq!(result[1].position.seq_num, 101);
-        assert_eq!(result[1].position.timestamp, 950);
+        assert_eq!(result[0].position().seq_num, 100);
+        assert_eq!(result[0].position().timestamp, 900);
+        assert_eq!(result[1].position().seq_num, 101);
+        assert_eq!(result[1].position().timestamp, 950);
     }
 
     #[test]
@@ -857,10 +857,10 @@ mod tests {
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].position.seq_num, 100);
-        assert!(result[0].position.timestamp >= now);
-        assert_eq!(result[1].position.seq_num, 101);
-        assert!(result[1].position.timestamp >= now);
+        assert_eq!(result[0].position().seq_num, 100);
+        assert!(result[0].position().timestamp >= now);
+        assert_eq!(result[1].position().seq_num, 101);
+        assert!(result[1].position().timestamp >= now);
     }
 
     #[test]
@@ -899,8 +899,8 @@ mod tests {
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].position.timestamp, 900);
-        assert_eq!(result[1].position.timestamp, 950);
+        assert_eq!(result[0].position().timestamp, 900);
+        assert_eq!(result[1].position().timestamp, 950);
     }
 
     #[test]
@@ -921,8 +921,8 @@ mod tests {
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
-        assert!(result[0].position.timestamp >= now);
-        assert!(result[1].position.timestamp >= now);
+        assert!(result[0].position().timestamp >= now);
+        assert!(result[1].position().timestamp >= now);
     }
 
     #[test]
@@ -943,9 +943,9 @@ mod tests {
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].position.timestamp, 1000);
-        assert_eq!(result[1].position.timestamp, 1000);
-        assert_eq!(result[2].position.timestamp, 1100);
+        assert_eq!(result[0].position().timestamp, 1000);
+        assert_eq!(result[1].position().timestamp, 1000);
+        assert_eq!(result[2].position().timestamp, 1100);
     }
 
     #[test]
@@ -965,8 +965,8 @@ mod tests {
         let result = sequenced_records(records, 100, 1000, &config).unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].position.timestamp, 1000);
-        assert_eq!(result[1].position.timestamp, 1000);
+        assert_eq!(result[0].position().timestamp, 1000);
+        assert_eq!(result[1].position().timestamp, 1000);
     }
 
     #[test]
@@ -985,7 +985,7 @@ mod tests {
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result[0].position.timestamp <= now + 100);
+        assert!(result[0].position().timestamp <= now + 100);
     }
 
     #[test]
@@ -1004,7 +1004,7 @@ mod tests {
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].position.timestamp, future);
+        assert_eq!(result[0].position().timestamp, future);
     }
 
     #[test]
@@ -1022,9 +1022,9 @@ mod tests {
         let result = sequenced_records(records, 42, 0, &config).unwrap();
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].position.seq_num, 42);
-        assert_eq!(result[1].position.seq_num, 43);
-        assert_eq!(result[2].position.seq_num, 44);
+        assert_eq!(result[0].position().seq_num, 42);
+        assert_eq!(result[1].position().seq_num, 43);
+        assert_eq!(result[2].position().seq_num, 44);
     }
 
     #[test]
@@ -1142,7 +1142,7 @@ mod tests {
         ));
         let batch1 = follow_rx.recv().await.expect("follow batch 1");
         assert_eq!(batch1.len(), 1);
-        let StoredRecord::Plaintext(Record::Envelope(env)) = &batch1[0].record else {
+        let StoredRecord::Plaintext(Record::Envelope(env)) = batch1[0].inner() else {
             panic!("expected envelope")
         };
         assert_eq!(env.body().as_ref(), b"p0");
@@ -1159,10 +1159,10 @@ mod tests {
 
         let batch2 = follow_rx.recv().await.expect("follow batch 2");
         let batch3 = follow_rx.recv().await.expect("follow batch 3");
-        let StoredRecord::Plaintext(Record::Envelope(env2)) = &batch2[0].record else {
+        let StoredRecord::Plaintext(Record::Envelope(env2)) = batch2[0].inner() else {
             panic!("expected envelope")
         };
-        let StoredRecord::Plaintext(Record::Envelope(env3)) = &batch3[0].record else {
+        let StoredRecord::Plaintext(Record::Envelope(env3)) = batch3[0].inner() else {
             panic!("expected envelope")
         };
         assert_eq!(env2.body().as_ref(), b"p1");
@@ -1205,7 +1205,7 @@ mod tests {
 
         for i in 0..4 {
             let batch = follow_rx.recv().await.expect("follow batch");
-            let StoredRecord::Plaintext(Record::Envelope(env)) = &batch[0].record else {
+            let StoredRecord::Plaintext(Record::Envelope(env)) = batch[0].inner() else {
                 panic!("expected envelope")
             };
             assert_eq!(env.body(), format!("jump-{i}").as_bytes());

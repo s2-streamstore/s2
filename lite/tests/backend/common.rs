@@ -257,7 +257,7 @@ where
 pub fn envelope_bodies(records: &[SequencedRecord]) -> Vec<Vec<u8>> {
     records
         .iter()
-        .map(|record| match &record.record {
+        .map(|record| match record.inner() {
             Record::Envelope(envelope) => envelope.body().to_vec(),
             other => panic!("Unexpected record type: {:?}", other),
         })

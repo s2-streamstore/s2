@@ -226,9 +226,9 @@ mod tests {
     ) -> impl Iterator<Item = Result<StoredSequencedBytes, InternalRecordError>> {
         records
             .into_iter()
-            .map(|Sequenced { position, record }| Sequenced {
-                position,
-                record: Metered::from(record).as_ref().to_bytes(),
+            .map(|record| {
+                let (position, record) = record.into_parts();
+                Sequenced::new(position, (&record).metered().to_bytes())
             })
             .map(Ok)
     }
@@ -392,13 +392,13 @@ mod tests {
     #[test]
     fn surfaces_decode_errors_after_draining_buffer() {
         let records = vec![test_record(1, 10), test_record(2, 11)];
-        let invalid_data = Sequenced {
-            position: StreamPosition {
+        let invalid_data = Sequenced::new(
+            StreamPosition {
                 seq_num: 3,
                 timestamp: 12,
             },
-            record: Bytes::new(),
-        };
+            Bytes::new(),
+        );
 
         let mut batcher = RecordBatcher::new(
             StoredRecordIterator::new(

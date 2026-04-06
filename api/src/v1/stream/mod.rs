@@ -302,13 +302,8 @@ pub struct SequencedRecord {
 }
 
 impl SequencedRecord {
-    pub fn encode(
-        format: Format,
-        record::Sequenced {
-            position: record::StreamPosition { seq_num, timestamp },
-            record,
-        }: record::SequencedRecord,
-    ) -> Self {
+    pub fn encode(format: Format, record: record::SequencedRecord) -> Self {
+        let (record::StreamPosition { seq_num, timestamp }, record) = record.into_parts();
         let (headers, body) = record.into_parts();
         Self {
             seq_num,
