@@ -492,7 +492,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::record::{Header, StreamPosition};
+    use crate::record::{Header, MeteredExt, StreamPosition};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
     const OTHER_TEST_KEY: [u8; 32] = [0x99; 32];
@@ -608,7 +608,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(i, record)| {
-                Metered::<Record>::from(record).sequenced(StreamPosition {
+                record.metered().sequenced(StreamPosition {
                     seq_num: i as u64 + 1,
                     timestamp: i as u64 + 10,
                 })

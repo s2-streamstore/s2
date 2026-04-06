@@ -296,6 +296,7 @@ impl std::fmt::Display for Base64Display<'_> {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use s2_common::record::MeteredExt;
 
     use super::*;
     use crate::v1::stream::ReadBatch;
@@ -322,25 +323,19 @@ mod tests {
 
         types::stream::ReadBatch {
             records: vec![
-                record::Metered::<record::Record>::from(envelope).sequenced(
-                    record::StreamPosition {
-                        seq_num: 7,
-                        timestamp: 11,
-                    },
-                ),
-                record::Metered::<record::Record>::from(empty_fence).sequenced(
-                    record::StreamPosition {
-                        seq_num: 8,
-                        timestamp: 12,
-                    },
-                ),
-                record::Metered::<record::Record>::from(non_empty_fence).sequenced(
-                    record::StreamPosition {
-                        seq_num: 9,
-                        timestamp: 13,
-                    },
-                ),
-                record::Metered::<record::Record>::from(trim).sequenced(record::StreamPosition {
+                envelope.metered().sequenced(record::StreamPosition {
+                    seq_num: 7,
+                    timestamp: 11,
+                }),
+                empty_fence.metered().sequenced(record::StreamPosition {
+                    seq_num: 8,
+                    timestamp: 12,
+                }),
+                non_empty_fence.metered().sequenced(record::StreamPosition {
+                    seq_num: 9,
+                    timestamp: 13,
+                }),
+                trim.metered().sequenced(record::StreamPosition {
                     seq_num: 10,
                     timestamp: 14,
                 }),

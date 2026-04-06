@@ -24,6 +24,14 @@ impl<T: MeteredSize> MeteredSize for Vec<T> {
     }
 }
 
+pub trait MeteredExt: MeteredSize + Sized {
+    fn metered(self) -> Metered<Self> {
+        Metered::from(self)
+    }
+}
+
+impl<T> MeteredExt for T where T: MeteredSize {}
+
 pub struct Metered<T> {
     pub(super) size: usize,
     pub(super) inner: T,

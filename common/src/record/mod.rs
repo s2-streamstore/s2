@@ -20,7 +20,7 @@ pub use envelope::EnvelopeRecord;
 use envelope::HeaderValidationError;
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
 pub use iterator::StoredRecordIterator;
-pub use metering::{Metered, MeteredSize};
+pub use metering::{Metered, MeteredExt, MeteredSize};
 
 use crate::deep_size::DeepSize;
 

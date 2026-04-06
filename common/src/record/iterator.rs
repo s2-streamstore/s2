@@ -47,9 +47,9 @@ mod tests {
     use crate::{
         encryption::EncryptionConfig,
         record::{
-            Encodable, EnvelopeRecord, Header, Metered, Record, SeqNum, Sequenced, SequencedRecord,
-            StoredSequencedBytes, StoredSequencedRecord, StreamPosition, Timestamp,
-            to_stored_records,
+            Encodable, EnvelopeRecord, Header, Metered, MeteredExt, Record, SeqNum, Sequenced,
+            SequencedRecord, StoredSequencedBytes, StoredSequencedRecord, StreamPosition,
+            Timestamp, to_stored_records,
         },
     };
 
@@ -60,10 +60,9 @@ mod tests {
         timestamp: Timestamp,
         body: &'static [u8],
     ) -> Metered<SequencedRecord> {
-        Metered::<Record>::from(Record::Envelope(
-            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap(),
-        ))
-        .sequenced(StreamPosition { seq_num, timestamp })
+        Record::Envelope(EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap())
+            .metered()
+            .sequenced(StreamPosition { seq_num, timestamp })
     }
 
     fn test_record_with_headers(
@@ -72,10 +71,9 @@ mod tests {
         headers: Vec<Header>,
         body: &'static [u8],
     ) -> Metered<SequencedRecord> {
-        Metered::<Record>::from(Record::Envelope(
-            EnvelopeRecord::try_from_parts(headers, Bytes::from_static(body)).unwrap(),
-        ))
-        .sequenced(StreamPosition { seq_num, timestamp })
+        Record::Envelope(EnvelopeRecord::try_from_parts(headers, Bytes::from_static(body)).unwrap())
+            .metered()
+            .sequenced(StreamPosition { seq_num, timestamp })
     }
 
     fn make_stored_records(

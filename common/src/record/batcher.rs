@@ -179,14 +179,16 @@ mod tests {
         caps,
         read_extent::{ReadLimit, ReadUntil},
         record::{
-            CommandRecord, Encodable, EnvelopeRecord, InternalRecordError, Metered, MeteredSize,
-            Record, SeqNum, Sequenced, SequencedRecord, StoredRecord, StoredRecordIterator,
-            StoredSequencedBytes, StoredSequencedRecord, StreamPosition, Timestamp,
+            CommandRecord, Encodable, EnvelopeRecord, InternalRecordError, Metered, MeteredExt,
+            MeteredSize, Record, SeqNum, Sequenced, SequencedRecord, StoredRecord,
+            StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord, StreamPosition,
+            Timestamp,
         },
     };
 
     fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
-        Metered::<Record>::from(Record::Command(CommandRecord::Trim(seq_num)))
+        Record::Command(CommandRecord::Trim(seq_num))
+            .metered()
             .sequenced(StreamPosition { seq_num, timestamp })
             .into_inner()
     }
