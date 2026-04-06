@@ -232,7 +232,7 @@ impl StoredRecord {
         }
     }
 
-    fn encode_body_size(&self) -> usize {
+    fn encoded_body_size(&self) -> usize {
         match self {
             Self::Plaintext(Record::Command(record)) => record.encoded_size(),
             Self::Plaintext(Record::Envelope(record)) => record.encoded_size(),
@@ -318,7 +318,7 @@ pub trait Encodable {
 
 impl Encodable for Metered<&StoredRecord> {
     fn encoded_size(&self) -> usize {
-        1 + self.magic_byte().metered_size_varlen as usize + self.inner.encode_body_size()
+        1 + self.magic_byte().metered_size_varlen as usize + self.encoded_body_size()
     }
 
     fn encode_into(&self, buf: &mut impl BufMut) {
@@ -328,7 +328,7 @@ impl Encodable for Metered<&StoredRecord> {
             self.metered_size() as u64,
             magic_byte.metered_size_varlen as usize,
         );
-        self.inner.encode_body_into(buf);
+        self.encode_body_into(buf);
     }
 }
 
@@ -391,7 +391,10 @@ where
     T: MeteredSize,
 {
     pub fn sequenced(self, position: StreamPosition) -> Metered<Sequenced<T>> {
-        Metered::with_size(self.size, Sequenced::new(position, self.inner))
+        Metered::with_size(
+            self.metered_size(),
+            Sequenced::new(position, self.into_inner()),
+        )
     }
 }
 
@@ -403,7 +406,7 @@ impl Metered<&StoredRecord> {
             panic!("illegal metered size varlen {metered_size} for record")
         }
         MagicByte {
-            record_type: self.inner.record_type(),
+            record_type: self.record_type(),
             metered_size_varlen,
         }
     }
@@ -456,7 +459,7 @@ impl TryFrom<Bytes> for Metered<Record> {
 
     fn try_from(buf: Bytes) -> Result<Self, Self::Error> {
         let stored: Metered<StoredRecord> = buf.try_into()?;
-        let size = stored.size;
+        let size = stored.metered_size();
         match stored.into_inner() {
             StoredRecord::Plaintext(record) => Ok(record),
             StoredRecord::Encrypted { .. } => Err(InternalRecordError::InvalidValue(
@@ -470,13 +473,14 @@ impl TryFrom<Bytes> for Metered<Record> {
 
 impl<T> Metered<Sequenced<T>> {
     pub fn parts(&self) -> (StreamPosition, Metered<&T>) {
-        let (position, inner) = self.inner.parts();
-        (position, Metered::with_size(self.size, inner))
+        let size = self.metered_size();
+        let (position, inner) = self.as_ref().into_inner().parts();
+        (position, Metered::with_size(size, inner))
     }
 
     pub fn into_parts(self) -> (StreamPosition, Metered<T>) {
-        let size = self.size;
-        let (position, inner) = self.inner.into_parts();
+        let size = self.metered_size();
+        let (position, inner) = self.into_inner().into_parts();
         (position, Metered::with_size(size, inner))
     }
 }

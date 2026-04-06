@@ -33,12 +33,12 @@ pub trait MeteredExt: MeteredSize + Sized {
 impl<T> MeteredExt for T where T: MeteredSize {}
 
 pub struct Metered<T> {
-    pub(super) size: usize,
-    pub(super) inner: T,
+    size: usize,
+    inner: T,
 }
 
 impl<T> Metered<T> {
-    pub(crate) const fn with_size(size: usize, inner: T) -> Self {
+    pub(super) const fn with_size(size: usize, inner: T) -> Self {
         Self { size, inner }
     }
 
