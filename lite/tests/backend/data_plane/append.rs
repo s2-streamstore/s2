@@ -432,7 +432,7 @@ async fn test_append_session_empty() {
     )
     .await;
 
-    let inputs = futures::stream::iter(vec![]);
+    let inputs = futures::stream::iter(Vec::<AppendInput>::new());
 
     let session = backend
         .clone()

@@ -21,7 +21,10 @@ use s2_common::{
         config::{
             OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy, TimestampingMode,
         },
-        stream::{AppendAck, AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts},
+        stream::{
+            AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
+            StoredAppendRecordParts,
+        },
     },
 };
 use slatedb::{
@@ -202,11 +205,11 @@ impl Streamer {
 
     fn sequence_records(
         &self,
-        AppendInput {
+        StoredAppendInput {
             records,
             match_seq_num,
             fencing_token,
-        }: AppendInput,
+        }: StoredAppendInput,
     ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
         if let Some(provided_token) = fencing_token
             && provided_token != self.fencing_token.state
@@ -261,7 +264,7 @@ impl Streamer {
 
     fn handle_append(
         &mut self,
-        input: AppendInput,
+        input: StoredAppendInput,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -480,7 +483,7 @@ impl Streamer {
 
 enum Message {
     Append {
-        input: AppendInput,
+        input: StoredAppendInput,
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
@@ -567,7 +570,7 @@ impl StreamerClient {
 
     pub async fn append_permit(
         &self,
-        input: AppendInput,
+        input: StoredAppendInput,
     ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
@@ -595,13 +598,13 @@ impl StreamerClient {
     }
 
     pub async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
-        let record: AppendRecord = AppendRecordParts {
+        let record: StoredAppendRecord = StoredAppendRecordParts {
             timestamp: Some(Timestamp::MAX),
             record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
         }
         .try_into()
         .expect("valid append record");
-        let input = AppendInput {
+        let input = StoredAppendInput {
             records: vec![record].try_into().expect("valid append batch"),
             match_seq_num: None,
             fencing_token: None,
@@ -641,7 +644,7 @@ fn timestamp_now() -> Timestamp {
 pub struct AppendPermit<'a> {
     sema_permit: SemaphorePermit<'a>,
     msg_tx: &'a mpsc::UnboundedSender<Message>,
-    input: AppendInput,
+    input: StoredAppendInput,
 }
 
 impl AppendPermit<'_> {
@@ -700,7 +703,7 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
 }
 
 fn sequenced_records(
-    batch: AppendRecordBatch,
+    batch: StoredAppendRecordBatch,
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
@@ -710,7 +713,7 @@ fn sequenced_records(
     let mut sequenced_records = Vec::with_capacity(batch.len());
     let mut max_timestamp = prev_max_timestamp;
     let now = timestamp_now();
-    for (i, AppendRecordParts { timestamp, record }) in
+    for (i, StoredAppendRecordParts { timestamp, record }) in
         batch.into_iter().map(Into::into).enumerate()
     {
         let mut timestamp = match mode {
@@ -802,17 +805,19 @@ mod tests {
     use bytes::Bytes;
     use s2_common::{
         record::{EnvelopeRecord, Metered, Record, StoredRecord},
-        types::stream::{AppendRecord, AppendRecordParts},
+        types::stream::{
+            StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
+        },
     };
     use slatedb::object_store::memory::InMemory;
     use tokio::sync::{broadcast, mpsc, oneshot};
 
     use super::*;
 
-    fn test_record(body: Bytes, timestamp: Option<Timestamp>) -> AppendRecord {
+    fn test_record(body: Bytes, timestamp: Option<Timestamp>) -> StoredAppendRecord {
         let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
         let record = Metered::from(StoredRecord::from(Record::Envelope(envelope)));
-        let parts = AppendRecordParts { timestamp, record };
+        let parts = StoredAppendRecordParts { timestamp, record };
         parts.try_into().unwrap()
     }
 
@@ -823,7 +828,7 @@ mod tests {
             uncapped: Some(false),
         };
 
-        let records: AppendRecordBatch = vec![
+        let records: StoredAppendRecordBatch = vec![
             test_record(vec![1, 2, 3].into(), Some(900)),
             test_record(vec![4, 5, 6].into(), Some(950)),
         ]
@@ -847,7 +852,7 @@ mod tests {
             uncapped: Some(false),
         };
 
-        let records: AppendRecordBatch = vec![
+        let records: StoredAppendRecordBatch = vec![
             test_record(vec![1, 2, 3].into(), None),
             test_record(vec![4, 5, 6].into(), None),
         ]
@@ -870,7 +875,7 @@ mod tests {
             uncapped: Some(false),
         };
 
-        let records: AppendRecordBatch = vec![test_record(vec![1, 2, 3].into(), None)]
+        let records: StoredAppendRecordBatch = vec![test_record(vec![1, 2, 3].into(), None)]
             .try_into()
             .unwrap();
 
@@ -889,7 +894,7 @@ mod tests {
             uncapped: Some(false),
         };
 
-        let records: AppendRecordBatch = vec![
+        let records: StoredAppendRecordBatch = vec![
             test_record(vec![1, 2, 3].into(), Some(900)),
             test_record(vec![4, 5, 6].into(), Some(950)),
         ]
@@ -911,7 +916,7 @@ mod tests {
             uncapped: Some(false),
         };
 
-        let records: AppendRecordBatch = vec![
+        let records: StoredAppendRecordBatch = vec![
             test_record(vec![1, 2, 3].into(), Some(900)),
             test_record(vec![4, 5, 6].into(), Some(950)),
         ]
@@ -932,7 +937,7 @@ mod tests {
             uncapped: Some(false),
         };
 
-        let records: AppendRecordBatch = vec![
+        let records: StoredAppendRecordBatch = vec![
             test_record(vec![1, 2, 3].into(), Some(1000)),
             test_record(vec![4, 5, 6].into(), Some(900)),
             test_record(vec![7, 8, 9].into(), Some(1100)),
@@ -955,7 +960,7 @@ mod tests {
             uncapped: Some(false),
         };
 
-        let records: AppendRecordBatch = vec![
+        let records: StoredAppendRecordBatch = vec![
             test_record(vec![1, 2, 3].into(), Some(500)),
             test_record(vec![4, 5, 6].into(), Some(600)),
         ]
@@ -978,9 +983,10 @@ mod tests {
         };
 
         let future = now + 10_000;
-        let records: AppendRecordBatch = vec![test_record(vec![1, 2, 3].into(), Some(future))]
-            .try_into()
-            .unwrap();
+        let records: StoredAppendRecordBatch =
+            vec![test_record(vec![1, 2, 3].into(), Some(future))]
+                .try_into()
+                .unwrap();
 
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
@@ -997,9 +1003,10 @@ mod tests {
         };
 
         let future = now + 10_000;
-        let records: AppendRecordBatch = vec![test_record(vec![1, 2, 3].into(), Some(future))]
-            .try_into()
-            .unwrap();
+        let records: StoredAppendRecordBatch =
+            vec![test_record(vec![1, 2, 3].into(), Some(future))]
+                .try_into()
+                .unwrap();
 
         let result = sequenced_records(records, 100, 0, &config).unwrap();
 
@@ -1011,7 +1018,7 @@ mod tests {
     fn sequenced_records_seq_num_assignment() {
         let config = OptionalTimestampingConfig::default();
 
-        let records: AppendRecordBatch = vec![
+        let records: StoredAppendRecordBatch = vec![
             test_record(vec![1].into(), None),
             test_record(vec![2].into(), None),
             test_record(vec![3].into(), None),
@@ -1039,8 +1046,8 @@ mod tests {
         assert!(state.is_applied_in(&(0..5)));
     }
 
-    fn append_input(body: &[u8]) -> AppendInput {
-        AppendInput {
+    fn append_input(body: &[u8]) -> StoredAppendInput {
+        StoredAppendInput {
             records: vec![test_record(Bytes::copy_from_slice(body), None)]
                 .try_into()
                 .expect("valid batch"),

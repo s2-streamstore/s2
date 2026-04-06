@@ -9,7 +9,7 @@ use s2_common::{
     record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
-        stream::{AppendAck, AppendInput, StreamName},
+        stream::{AppendAck, StoredAppendInput, StreamName},
     },
 };
 use tokio::sync::oneshot;
@@ -18,27 +18,34 @@ use super::Backend;
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
-    pub async fn append(
+    pub async fn append<I>(
         &self,
         basin: BasinName,
         stream: StreamName,
-        input: AppendInput,
-    ) -> Result<AppendAck, AppendError> {
+        input: I,
+    ) -> Result<AppendAck, AppendError>
+    where
+        I: Into<StoredAppendInput>,
+    {
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
-        let ack = client.append_permit(input).await?.submit().await?;
+        let ack = client.append_permit(input.into()).await?.submit().await?;
         Ok(ack)
     }
 
-    pub async fn append_session(
+    pub async fn append_session<I, S>(
         self,
         basin: BasinName,
         stream: StreamName,
-        inputs: impl Stream<Item = AppendInput>,
-    ) -> Result<impl Stream<Item = Result<AppendAck, AppendError>>, AppendError> {
+        inputs: S,
+    ) -> Result<impl Stream<Item = Result<AppendAck, AppendError>>, AppendError>
+    where
+        I: Into<StoredAppendInput>,
+        S: Stream<Item = I>,
+    {
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
@@ -52,7 +59,7 @@ impl Backend {
             loop {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
-                        permit_opt = Some(Box::pin(client.append_permit(input)));
+                        permit_opt = Some(Box::pin(client.append_permit(input.into())));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
                         permit_opt = None;

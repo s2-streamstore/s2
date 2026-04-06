@@ -23,7 +23,7 @@ use s2_common::{
         basin::BasinName,
         stream::{
             AppendInput, ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart,
-            StoredReadSessionOutput, StreamName,
+            StoredAppendInput, StoredReadSessionOutput, StreamName,
         },
     },
 };
@@ -46,7 +46,7 @@ fn encrypt_input(
     encryption: &EncryptionConfig,
     basin: &BasinName,
     stream: &StreamName,
-) -> AppendInput {
+) -> StoredAppendInput {
     let aad = StreamId::aad(basin, stream);
     encrypt_append_input(input, encryption, &aad)
 }

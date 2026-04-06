@@ -11,8 +11,8 @@ use crate::{
     caps,
     read_extent::{ReadLimit, ReadUntil},
     record::{
-        FencingToken, Metered, MeteredSize, SeqNum, SequencedRecord, StoredRecord,
-        StoredSequencedRecord, StreamPosition, Timestamp,
+        FencingToken, Metered, MeteredSize, Record, SeqNum, Sequenced, StoredRecord,
+        StreamPosition, Timestamp,
     },
     types::resources::ListItemsRequest,
 };
@@ -171,10 +171,10 @@ pub struct StreamInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct AppendRecord(AppendRecordParts);
+pub struct AppendRecord<T = Record>(AppendRecordParts<T>);
 
-impl Deref for AppendRecord {
-    type Target = AppendRecordParts;
+impl<T> Deref for AppendRecord<T> {
+    type Target = AppendRecordParts<T>;
 
     fn deref(&self) -> &Self::Target {
         let Self(parts) = self;
@@ -182,34 +182,34 @@ impl Deref for AppendRecord {
     }
 }
 
-impl MeteredSize for AppendRecord {
+impl<T> MeteredSize for AppendRecord<T> {
     fn metered_size(&self) -> usize {
         self.0.record.metered_size()
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct AppendRecordParts {
+pub struct AppendRecordParts<T = Record> {
     pub timestamp: Option<Timestamp>,
-    pub record: Metered<StoredRecord>,
+    pub record: Metered<T>,
 }
 
-impl MeteredSize for AppendRecordParts {
+impl<T> MeteredSize for AppendRecordParts<T> {
     fn metered_size(&self) -> usize {
         self.record.metered_size()
     }
 }
 
-impl From<AppendRecord> for AppendRecordParts {
-    fn from(AppendRecord(parts): AppendRecord) -> Self {
+impl<T> From<AppendRecord<T>> for AppendRecordParts<T> {
+    fn from(AppendRecord(parts): AppendRecord<T>) -> Self {
         parts
     }
 }
 
-impl TryFrom<AppendRecordParts> for AppendRecord {
+impl<T> TryFrom<AppendRecordParts<T>> for AppendRecord<T> {
     type Error = &'static str;
 
-    fn try_from(parts: AppendRecordParts) -> Result<Self, Self::Error> {
+    fn try_from(parts: AppendRecordParts<T>) -> Result<Self, Self::Error> {
         if parts.metered_size() > caps::RECORD_BATCH_MAX.bytes {
             Err("record must have metered size less than 1 MiB")
         } else {
@@ -219,9 +219,9 @@ impl TryFrom<AppendRecordParts> for AppendRecord {
 }
 
 #[derive(Clone)]
-pub struct AppendRecordBatch(Metered<Vec<AppendRecord>>);
+pub struct AppendRecordBatch<T = Record>(Metered<Vec<AppendRecord<T>>>);
 
-impl std::fmt::Debug for AppendRecordBatch {
+impl<T> std::fmt::Debug for AppendRecordBatch<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppendRecordBatch")
             .field("num_records", &self.0.len())
@@ -230,24 +230,24 @@ impl std::fmt::Debug for AppendRecordBatch {
     }
 }
 
-impl MeteredSize for AppendRecordBatch {
+impl<T> MeteredSize for AppendRecordBatch<T> {
     fn metered_size(&self) -> usize {
         self.0.metered_size()
     }
 }
 
-impl std::ops::Deref for AppendRecordBatch {
-    type Target = [AppendRecord];
+impl<T> std::ops::Deref for AppendRecordBatch<T> {
+    type Target = [AppendRecord<T>];
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl TryFrom<Metered<Vec<AppendRecord>>> for AppendRecordBatch {
+impl<T> TryFrom<Metered<Vec<AppendRecord<T>>>> for AppendRecordBatch<T> {
     type Error = &'static str;
 
-    fn try_from(records: Metered<Vec<AppendRecord>>) -> Result<Self, Self::Error> {
+    fn try_from(records: Metered<Vec<AppendRecord<T>>>) -> Result<Self, Self::Error> {
         if records.is_empty() {
             return Err("record batch must not be empty");
         }
@@ -264,17 +264,17 @@ impl TryFrom<Metered<Vec<AppendRecord>>> for AppendRecordBatch {
     }
 }
 
-impl TryFrom<Vec<AppendRecord>> for AppendRecordBatch {
+impl<T> TryFrom<Vec<AppendRecord<T>>> for AppendRecordBatch<T> {
     type Error = &'static str;
 
-    fn try_from(records: Vec<AppendRecord>) -> Result<Self, Self::Error> {
+    fn try_from(records: Vec<AppendRecord<T>>) -> Result<Self, Self::Error> {
         let records = Metered::from(records);
         Self::try_from(records)
     }
 }
 
-impl IntoIterator for AppendRecordBatch {
-    type Item = AppendRecord;
+impl<T> IntoIterator for AppendRecordBatch<T> {
+    type Item = AppendRecord<T>;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -282,11 +282,64 @@ impl IntoIterator for AppendRecordBatch {
     }
 }
 
+pub type StoredAppendRecord = AppendRecord<StoredRecord>;
+pub type StoredAppendRecordParts = AppendRecordParts<StoredRecord>;
+pub type StoredAppendRecordBatch = AppendRecordBatch<StoredRecord>;
+
+impl From<AppendRecordParts<Record>> for AppendRecordParts<StoredRecord> {
+    fn from(
+        AppendRecordParts { timestamp, record }: AppendRecordParts<Record>,
+    ) -> AppendRecordParts<StoredRecord> {
+        AppendRecordParts {
+            timestamp,
+            record: StoredRecord::from(record.into_inner()).into(),
+        }
+    }
+}
+
+impl From<AppendRecord<Record>> for AppendRecord<StoredRecord> {
+    fn from(record: AppendRecord<Record>) -> Self {
+        Self::try_from(AppendRecordParts::<StoredRecord>::from(
+            AppendRecordParts::from(record),
+        ))
+        .expect("converting an append record to stored form should preserve invariants")
+    }
+}
+
+impl From<AppendRecordBatch<Record>> for AppendRecordBatch<StoredRecord> {
+    fn from(records: AppendRecordBatch<Record>) -> Self {
+        let records = records
+            .into_iter()
+            .map(AppendRecord::<StoredRecord>::from)
+            .collect::<Vec<_>>();
+        Self::try_from(records)
+            .expect("converting an append batch to stored form should preserve invariants")
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct AppendInput {
-    pub records: AppendRecordBatch,
+pub struct AppendInput<T = Record> {
+    pub records: AppendRecordBatch<T>,
     pub match_seq_num: Option<SeqNum>,
     pub fencing_token: Option<FencingToken>,
+}
+
+pub type StoredAppendInput = AppendInput<StoredRecord>;
+
+impl From<AppendInput<Record>> for AppendInput<StoredRecord> {
+    fn from(
+        AppendInput {
+            records,
+            match_seq_num,
+            fencing_token,
+        }: AppendInput<Record>,
+    ) -> Self {
+        Self {
+            records: records.into(),
+            match_seq_num,
+            fencing_token,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -335,29 +388,25 @@ impl ReadEnd {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct StoredReadBatch {
-    pub records: Metered<Vec<StoredSequencedRecord>>,
+#[derive(Clone)]
+pub struct ReadBatch<T = Record> {
+    pub records: Metered<Vec<Sequenced<T>>>,
     pub tail: Option<StreamPosition>,
 }
 
-impl std::fmt::Debug for StoredReadBatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StoredReadBatch")
-            .field("num_records", &self.records.len())
-            .field("metered_size", &self.records.metered_size())
-            .field("tail", &self.tail)
-            .finish()
+impl<T> Default for ReadBatch<T>
+where
+    T: MeteredSize,
+{
+    fn default() -> Self {
+        Self {
+            records: Metered::default(),
+            tail: None,
+        }
     }
 }
 
-#[derive(Default, Clone)]
-pub struct ReadBatch {
-    pub records: Metered<Vec<SequencedRecord>>,
-    pub tail: Option<StreamPosition>,
-}
-
-impl std::fmt::Debug for ReadBatch {
+impl<T> std::fmt::Debug for ReadBatch<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReadBatch")
             .field("num_records", &self.records.len())
@@ -367,17 +416,15 @@ impl std::fmt::Debug for ReadBatch {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum StoredReadSessionOutput {
-    Heartbeat(StreamPosition),
-    Batch(StoredReadBatch),
-}
+pub type StoredReadBatch = ReadBatch<StoredRecord>;
 
 #[derive(Debug, Clone)]
-pub enum ReadSessionOutput {
+pub enum ReadSessionOutput<T = Record> {
     Heartbeat(StreamPosition),
-    Batch(ReadBatch),
+    Batch(ReadBatch<T>),
 }
+
+pub type StoredReadSessionOutput = ReadSessionOutput<StoredRecord>;
 
 pub type ListStreamsRequest = ListItemsRequest<StreamNamePrefix, StreamNameStartAfter>;
 

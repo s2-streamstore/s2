@@ -383,14 +383,14 @@ mod tests {
     use futures::StreamExt;
     use s2_common::{
         read_extent::{ReadLimit, ReadUntil},
-        record::{Record, StoredRecord},
+        record::{Metered, Record, StoredRecord},
         types::{
             basin::BasinName,
             config::{BasinConfig, OptionalStreamConfig},
             resources::CreateMode,
             stream::{
-                AppendInput, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom, ReadStart,
-                StoredReadSessionOutput,
+                ReadEnd, ReadFrom, ReadStart, StoredAppendInput, StoredAppendRecord,
+                StoredAppendRecordBatch, StoredAppendRecordParts, StoredReadSessionOutput,
             },
         },
     };
@@ -399,6 +399,21 @@ mod tests {
 
     use super::*;
     use crate::backend::{FOLLOWER_MAX_LAG, kv, stream_id::StreamId, streamer::DORMANT_TIMEOUT};
+
+    fn stored_append_input(record: Record) -> StoredAppendInput {
+        let record: StoredAppendRecord = StoredAppendRecordParts {
+            timestamp: None,
+            record: Metered::from(StoredRecord::from(record)),
+        }
+        .try_into()
+        .unwrap();
+        let records: StoredAppendRecordBatch = vec![record].try_into().unwrap();
+        StoredAppendInput {
+            records,
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
 
     #[tokio::test]
     async fn resolve_timestamp_bounded_to_stream() {
@@ -479,19 +494,8 @@ mod tests {
             .await
             .unwrap();
 
-        let record = Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap();
-        let metered = s2_common::record::Metered::from(StoredRecord::from(record));
-        let parts = AppendRecordParts {
-            timestamp: None,
-            record: metered,
-        };
-        let append_record: s2_common::types::stream::AppendRecord = parts.try_into().unwrap();
-        let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
-        let input = AppendInput {
-            records: batch,
-            match_seq_num: None,
-            fencing_token: None,
-        };
+        let input =
+            stored_append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
         let ack = backend
             .append(basin.clone(), stream.clone(), input)
             .await
@@ -639,20 +643,9 @@ mod tests {
         let lagged_appends = FOLLOWER_MAX_LAG + 25;
 
         for i in 0..lagged_appends {
-            let record =
-                Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap();
-            let metered = s2_common::record::Metered::from(StoredRecord::from(record));
-            let parts = AppendRecordParts {
-                timestamp: None,
-                record: metered,
-            };
-            let append_record: s2_common::types::stream::AppendRecord = parts.try_into().unwrap();
-            let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
-            let input = AppendInput {
-                records: batch,
-                match_seq_num: None,
-                fencing_token: None,
-            };
+            let input = stored_append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap(),
+            );
             let ack = backend
                 .append(basin.clone(), stream.clone(), input)
                 .await
@@ -705,20 +698,9 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_record = Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap();
-        let initial_metered = s2_common::record::Metered::from(StoredRecord::from(initial_record));
-        let initial_parts = AppendRecordParts {
-            timestamp: None,
-            record: initial_metered,
-        };
-        let initial_append_record: s2_common::types::stream::AppendRecord =
-            initial_parts.try_into().unwrap();
-        let initial_batch: AppendRecordBatch = vec![initial_append_record].try_into().unwrap();
-        let initial_input = AppendInput {
-            records: initial_batch,
-            match_seq_num: None,
-            fencing_token: None,
-        };
+        let initial_input = stored_append_input(
+            Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap(),
+        );
         backend
             .append(basin.clone(), stream.clone(), initial_input)
             .await
@@ -758,20 +740,9 @@ mod tests {
         tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
 
-        let follow_record = Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap();
-        let follow_metered = s2_common::record::Metered::from(StoredRecord::from(follow_record));
-        let follow_parts = AppendRecordParts {
-            timestamp: None,
-            record: follow_metered,
-        };
-        let follow_append_record: s2_common::types::stream::AppendRecord =
-            follow_parts.try_into().unwrap();
-        let follow_batch: AppendRecordBatch = vec![follow_append_record].try_into().unwrap();
-        let follow_input = AppendInput {
-            records: follow_batch,
-            match_seq_num: None,
-            fencing_token: None,
-        };
+        let follow_input = stored_append_input(
+            Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap(),
+        );
         backend.append(basin, stream, follow_input).await.unwrap();
 
         let next = session

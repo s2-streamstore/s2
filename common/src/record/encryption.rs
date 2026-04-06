@@ -40,7 +40,8 @@ use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionConfig},
     types::stream::{
-        AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch, StoredReadBatch,
+        AppendInput, AppendRecord, AppendRecordParts, ReadBatch, StoredAppendInput,
+        StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts, StoredReadBatch,
     },
 };
 
@@ -371,14 +372,13 @@ fn encrypt_append_record(
     record: AppendRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> AppendRecord {
+) -> StoredAppendRecord {
     let AppendRecordParts { timestamp, record } = record.into();
     let metered_size = record.metered_size();
     let record = match (record.into_inner(), encryption) {
-        (record @ StoredRecord::Encrypted { .. }, _) => record,
-        (record @ StoredRecord::Plaintext(Record::Command(_)), _) => record,
-        (record @ StoredRecord::Plaintext(Record::Envelope(_)), EncryptionConfig::Plain) => record,
-        (StoredRecord::Plaintext(Record::Envelope(envelope)), EncryptionConfig::Aegis256(key)) => {
+        (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
+        (record @ Record::Envelope(_), EncryptionConfig::Plain) => StoredRecord::Plaintext(record),
+        (Record::Envelope(envelope), EncryptionConfig::Aegis256(key)) => {
             let encrypted = encrypt_payload_with_algorithm(
                 &envelope,
                 EncryptionAlgorithm::Aegis256,
@@ -387,7 +387,7 @@ fn encrypt_append_record(
             );
             StoredRecord::encrypted(encrypted, metered_size)
         }
-        (StoredRecord::Plaintext(Record::Envelope(envelope)), EncryptionConfig::Aes256Gcm(key)) => {
+        (Record::Envelope(envelope), EncryptionConfig::Aes256Gcm(key)) => {
             let encrypted = encrypt_payload_with_algorithm(
                 &envelope,
                 EncryptionAlgorithm::Aes256Gcm,
@@ -398,7 +398,7 @@ fn encrypt_append_record(
         }
     };
 
-    AppendRecord::try_from(AppendRecordParts {
+    StoredAppendRecord::try_from(StoredAppendRecordParts {
         timestamp,
         record: Metered::with_size(metered_size, record),
     })
@@ -409,16 +409,16 @@ pub fn encrypt_append_input(
     input: AppendInput,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> AppendInput {
+) -> StoredAppendInput {
     let records = input
         .records
         .into_iter()
         .map(|record| encrypt_append_record(record, encryption, aad))
         .collect::<Vec<_>>();
-    let records = AppendRecordBatch::try_from(records)
+    let records = StoredAppendRecordBatch::try_from(records)
         .expect("encrypting an append input should preserve append batch invariants");
 
-    AppendInput {
+    StoredAppendInput {
         records,
         match_seq_num: input.match_seq_num,
         fencing_token: input.fencing_token,

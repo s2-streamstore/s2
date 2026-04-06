@@ -15,7 +15,7 @@ use s2_common::{
         resources::CreateMode,
         stream::{
             AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch,
-            StoredReadBatch, StoredReadSessionOutput, StreamName,
+            StoredAppendInput, StoredReadBatch, StoredReadSessionOutput, StreamName,
         },
     },
 };
@@ -67,9 +67,7 @@ pub fn create_test_record_with_optional_timestamp(
     timestamp: Option<Timestamp>,
 ) -> AppendRecord {
     let envelope = s2_common::record::EnvelopeRecord::try_from_parts(vec![], body).unwrap();
-    let record = Metered::from(s2_common::record::StoredRecord::from(Record::Envelope(
-        envelope,
-    )));
+    let record = Metered::from(Record::Envelope(envelope));
     let parts = AppendRecordParts { timestamp, record };
     parts.try_into().unwrap()
 }
@@ -79,9 +77,7 @@ pub fn create_test_record_with_timestamp(body: Bytes, timestamp: Timestamp) -> A
 }
 
 pub fn create_fencing_command_record(token: FencingToken) -> AppendRecord {
-    let record = Metered::from(s2_common::record::StoredRecord::from(Record::Command(
-        CommandRecord::Fence(token),
-    )));
+    let record = Metered::from(Record::Command(CommandRecord::Fence(token)));
     let parts = AppendRecordParts {
         timestamp: None,
         record,
@@ -182,7 +178,7 @@ pub fn encrypt_input_for_stream(
     basin: &BasinName,
     stream: &StreamName,
     encryption: &EncryptionConfig,
-) -> AppendInput {
+) -> StoredAppendInput {
     let aad = s2_lite::backend::aad(basin, stream);
     encrypt_append_input(input, encryption, &aad)
 }

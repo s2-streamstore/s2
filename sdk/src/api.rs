@@ -1189,6 +1189,12 @@ mod tests {
         )
     }
 
+    fn install_test_crypto_provider() {
+        // `cargo test --all-features` enables multiple rustls crypto backends,
+        // so unit tests must pick one explicitly before constructing clients.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+
     #[test]
     fn api_error_has_no_side_effects() {
         // Server errors that guarantee no mutation.
@@ -1264,6 +1270,7 @@ mod tests {
 
     #[tokio::test]
     async fn dns_error_message_is_clear() {
+        install_test_crypto_provider();
         let config = crate::types::S2Config::new("test-token".to_owned())
             .with_endpoints(
                 crate::types::S2Endpoints::new(
@@ -1293,6 +1300,7 @@ mod tests {
 
     #[tokio::test]
     async fn encryption_header_is_marked_sensitive() {
+        install_test_crypto_provider();
         let config = crate::types::S2Config::new("test-token".to_owned());
         let client = BaseClient::init(&config).expect("client init");
         let encryption = crate::types::EncryptionConfig::aegis256([1; 32]);
