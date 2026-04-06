@@ -207,6 +207,18 @@ mod tests {
     use super::*;
 
     const KEY_B64: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
+    const KEY_BYTES: [u8; 32] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+        26, 27, 28, 29, 30, 31, 32,
+    ];
+
+    fn assert_key_matches(config: EncryptionConfig, expected: &[u8; 32]) {
+        match config {
+            EncryptionConfig::Aegis256(key) => assert_eq!(key.secret(), expected),
+            EncryptionConfig::Aes256Gcm(key) => assert_eq!(key.secret(), expected),
+            EncryptionConfig::Plain => panic!("expected encrypted config"),
+        }
+    }
 
     #[test]
     fn parse_header_valid_aegis() {
@@ -214,6 +226,7 @@ mod tests {
             .parse::<EncryptionConfig>()
             .unwrap();
         assert!(matches!(config, EncryptionConfig::Aegis256(_)));
+        assert_key_matches(config, &KEY_BYTES);
     }
 
     #[test]
@@ -222,6 +235,7 @@ mod tests {
             .parse::<EncryptionConfig>()
             .unwrap();
         assert!(matches!(config, EncryptionConfig::Aes256Gcm(_)));
+        assert_key_matches(config, &KEY_BYTES);
     }
 
     #[test]
@@ -299,5 +313,35 @@ mod tests {
         let value = EncryptionConfig::aegis256([7; 32]).to_header_value();
         assert!(value.is_sensitive());
         assert_ne!(value, HeaderValue::from_static("plain"));
+    }
+
+    #[test]
+    fn plain_header_value_roundtrips() {
+        let value = EncryptionConfig::Plain.to_header_value();
+        assert_eq!(value.to_str().unwrap(), "plain");
+        assert!(value.is_sensitive());
+
+        let parsed = value.to_str().unwrap().parse::<EncryptionConfig>().unwrap();
+        assert!(matches!(parsed, EncryptionConfig::Plain));
+    }
+
+    #[test]
+    fn aegis_header_value_roundtrips() {
+        let value = EncryptionConfig::aegis256(KEY_BYTES).to_header_value();
+        assert_eq!(value.to_str().unwrap(), format!("aegis-256; {KEY_B64}"));
+        assert!(value.is_sensitive());
+
+        let parsed = value.to_str().unwrap().parse::<EncryptionConfig>().unwrap();
+        assert_key_matches(parsed, &KEY_BYTES);
+    }
+
+    #[test]
+    fn aes_header_value_roundtrips() {
+        let value = EncryptionConfig::aes256_gcm(KEY_BYTES).to_header_value();
+        assert_eq!(value.to_str().unwrap(), format!("aes-256-gcm; {KEY_B64}"));
+        assert!(value.is_sensitive());
+
+        let parsed = value.to_str().unwrap().parse::<EncryptionConfig>().unwrap();
+        assert_key_matches(parsed, &KEY_BYTES);
     }
 }
