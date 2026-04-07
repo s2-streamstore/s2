@@ -459,49 +459,25 @@ mod tests {
         StoredRecord::encrypted(encrypted, metered_size)
     }
 
-    fn assert_encrypted_payload_roundtrip(alg: EncryptionAlgorithm) {
-        let headers = vec![Header {
-            name: Bytes::from_static(b"x-test"),
-            value: Bytes::from_static(b"hello"),
-        }];
-        let body = Bytes::from_static(b"secret payload");
-
-        let aad = aad();
-        let plaintext = make_envelope(headers.clone(), body.clone());
-        let encryption = test_encryption(alg);
-        let ciphertext = encrypt_test_payload(&plaintext, alg, &aad);
-        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
-        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
-
-        assert_eq!(out_headers, headers);
-        assert_eq!(out_body, body);
-    }
-
-    fn assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(alg: EncryptionAlgorithm) {
-        let headers = vec![Header {
-            name: Bytes::from_static(b"x-test"),
-            value: Bytes::from_static(b"hello"),
-        }];
-        let body = Bytes::from_static(b"secret payload");
-
-        let aad = aad();
-        let plaintext = make_envelope(headers.clone(), body.clone());
-        let encryption = test_encryption(alg);
-        let ciphertext = encrypt_test_payload(&plaintext, alg, &aad);
-        let shared = ciphertext.encoded.clone();
-        let ciphertext = EncryptedRecord::try_from(shared.clone()).unwrap();
-        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
-        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
-
-        assert_eq!(out_headers, headers);
-        assert_eq!(out_body, body);
-    }
-
     #[rstest]
     #[case(EncryptionAlgorithm::Aegis256)]
     #[case(EncryptionAlgorithm::Aes256Gcm)]
     fn encrypted_payload_roundtrips(#[case] algorithm: EncryptionAlgorithm) {
-        assert_encrypted_payload_roundtrip(algorithm);
+        let headers = vec![Header {
+            name: Bytes::from_static(b"x-test"),
+            value: Bytes::from_static(b"hello"),
+        }];
+        let body = Bytes::from_static(b"secret payload");
+
+        let aad = aad();
+        let plaintext = make_envelope(headers.clone(), body.clone());
+        let encryption = test_encryption(algorithm);
+        let ciphertext = encrypt_test_payload(&plaintext, algorithm, &aad);
+        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
+        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
+
+        assert_eq!(out_headers, headers);
+        assert_eq!(out_body, body);
     }
 
     #[rstest]
@@ -510,7 +486,23 @@ mod tests {
     fn encrypted_payload_roundtrips_with_shared_ciphertext_buffer(
         #[case] algorithm: EncryptionAlgorithm,
     ) {
-        assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(algorithm);
+        let headers = vec![Header {
+            name: Bytes::from_static(b"x-test"),
+            value: Bytes::from_static(b"hello"),
+        }];
+        let body = Bytes::from_static(b"secret payload");
+
+        let aad = aad();
+        let plaintext = make_envelope(headers.clone(), body.clone());
+        let encryption = test_encryption(algorithm);
+        let ciphertext = encrypt_test_payload(&plaintext, algorithm, &aad);
+        let shared = ciphertext.encoded.clone();
+        let ciphertext = EncryptedRecord::try_from(shared).unwrap();
+        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
+        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
+
+        assert_eq!(out_headers, headers);
+        assert_eq!(out_body, body);
     }
 
     #[rstest]
