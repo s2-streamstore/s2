@@ -39,47 +39,49 @@ where
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
+    use bytes::{BufMut, Bytes, BytesMut};
 
     use super::*;
-    use crate::{
-        encryption::EncryptionConfig,
-        record::{
-            Encodable, EnvelopeRecord, Header, Metered, MeteredExt, Record, SeqNum, Sequenced,
-            SequencedRecord, StoredSequencedBytes, StoredSequencedRecord, StreamPosition,
-            Timestamp, to_stored_records,
-        },
+    use crate::record::{
+        Encodable, EncryptedRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record,
+        SeqNum, Sequenced, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+        StreamPosition, Timestamp,
     };
 
-    const TEST_KEY: [u8; 32] = [0x42; 32];
-
-    fn test_record(
+    fn test_stored_plaintext_record(
         seq_num: SeqNum,
         timestamp: Timestamp,
         body: &'static [u8],
-    ) -> Metered<SequencedRecord> {
-        Record::Envelope(EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap())
-            .metered()
-            .sequenced(StreamPosition { seq_num, timestamp })
+    ) -> Metered<StoredSequencedRecord> {
+        StoredRecord::Plaintext(Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap(),
+        ))
+        .metered()
+        .sequenced(StreamPosition { seq_num, timestamp })
     }
 
-    fn test_record_with_headers(
+    fn test_stored_encrypted_record(
         seq_num: SeqNum,
         timestamp: Timestamp,
-        headers: Vec<Header>,
-        body: &'static [u8],
-    ) -> Metered<SequencedRecord> {
-        Record::Envelope(EnvelopeRecord::try_from_parts(headers, Bytes::from_static(body)).unwrap())
-            .metered()
-            .sequenced(StreamPosition { seq_num, timestamp })
-    }
+    ) -> Metered<StoredSequencedRecord> {
+        let metered_size = Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"secret payload")).unwrap(),
+        )
+        .metered_size();
 
-    fn make_stored_records(
-        records: Vec<Metered<SequencedRecord>>,
-        encryption: EncryptionConfig,
-        aad: impl AsRef<[u8]>,
-    ) -> Vec<Metered<StoredSequencedRecord>> {
-        to_stored_records(records, &encryption, aad.as_ref())
+        let mut encoded = BytesMut::with_capacity(1 + 12 + 10 + 16);
+        encoded.put_u8(0x02);
+        encoded.put_bytes(0xAB, 12);
+        encoded.put_slice(b"ciphertext");
+        encoded.put_bytes(0xCD, 16);
+        let record = EncryptedRecord::try_from(encoded.freeze()).unwrap();
+
+        StoredRecord::Encrypted {
+            metered_size,
+            record,
+        }
+        .metered()
+        .sequenced(StreamPosition { seq_num, timestamp })
     }
 
     fn to_stored_bytes_iter(
@@ -96,11 +98,10 @@ mod tests {
 
     #[test]
     fn stored_iterator_decodes_plaintext_records() {
-        let expected = make_stored_records(
-            vec![test_record(1, 10, b"p0"), test_record(2, 11, b"p1")],
-            EncryptionConfig::Plain,
-            [],
-        );
+        let expected = vec![
+            test_stored_plaintext_record(1, 10, b"p0"),
+            test_stored_plaintext_record(2, 11, b"p1"),
+        ];
         let actual = StoredRecordIterator::new(to_stored_bytes_iter(expected.clone()))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -110,21 +111,7 @@ mod tests {
 
     #[test]
     fn stored_iterator_preserves_encrypted_records() {
-        let aad = [0xA5; 32];
-        let encryption = EncryptionConfig::aegis256(TEST_KEY);
-        let expected = make_stored_records(
-            vec![test_record_with_headers(
-                1,
-                10,
-                vec![Header {
-                    name: Bytes::from_static(b"x-test"),
-                    value: Bytes::from_static(b"hello"),
-                }],
-                b"secret payload",
-            )],
-            encryption,
-            aad,
-        );
+        let expected = vec![test_stored_encrypted_record(1, 10)];
 
         let actual = StoredRecordIterator::new(to_stored_bytes_iter(expected.clone()))
             .collect::<Result<Vec<_>, _>>()
