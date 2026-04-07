@@ -165,8 +165,8 @@ pub async fn append_payloads_with_encryption(
         match_seq_num: None,
         fencing_token: None,
     };
-    let aad = s2_lite::backend::StreamId::aad(basin, stream);
-    let input = encrypt_append_input(input, encryption, &aad);
+    let stream_id = s2_lite::backend::StreamId::new(basin, stream);
+    let input = encrypt_append_input(input, encryption, stream_id.as_bytes());
     backend
         .append(basin.clone(), stream.clone(), input)
         .await
@@ -179,8 +179,8 @@ pub fn encrypt_input_for_stream(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> StoredAppendInput {
-    let aad = s2_lite::backend::StreamId::aad(basin, stream);
-    encrypt_append_input(input, encryption, &aad)
+    let stream_id = s2_lite::backend::StreamId::new(basin, stream);
+    encrypt_append_input(input, encryption, stream_id.as_bytes())
 }
 
 pub async fn append_repeat(
@@ -205,8 +205,8 @@ pub fn decrypt_batch_for_stream(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> ReadBatch {
-    let aad = s2_lite::backend::StreamId::aad(basin, stream);
-    decrypt_read_batch(batch, encryption, &aad).expect("Failed to decode batch")
+    let stream_id = s2_lite::backend::StreamId::new(basin, stream);
+    decrypt_read_batch(batch, encryption, stream_id.as_bytes()).expect("Failed to decode batch")
 }
 
 pub async fn collect_records<S>(session: &mut Pin<Box<S>>) -> Vec<SequencedRecord>

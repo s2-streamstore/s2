@@ -33,10 +33,6 @@ impl StreamId {
     pub fn as_bytes(&self) -> &[u8; Self::LEN] {
         self.0.as_bytes()
     }
-
-    pub fn aad(basin: &BasinName, stream: &StreamName) -> [u8; Self::LEN] {
-        *Self::new(basin, stream).as_bytes()
-    }
 }
 
 impl From<[u8; StreamId::LEN]> for StreamId {
