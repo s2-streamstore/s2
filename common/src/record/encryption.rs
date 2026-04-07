@@ -460,31 +460,13 @@ mod tests {
     }
 
     #[rstest]
-    #[case(EncryptionAlgorithm::Aegis256)]
-    #[case(EncryptionAlgorithm::Aes256Gcm)]
-    fn encrypted_payload_roundtrips(#[case] algorithm: EncryptionAlgorithm) {
-        let headers = vec![Header {
-            name: Bytes::from_static(b"x-test"),
-            value: Bytes::from_static(b"hello"),
-        }];
-        let body = Bytes::from_static(b"secret payload");
-
-        let aad = aad();
-        let plaintext = make_envelope(headers.clone(), body.clone());
-        let encryption = test_encryption(algorithm);
-        let ciphertext = encrypt_test_payload(&plaintext, algorithm, &aad);
-        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
-        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
-
-        assert_eq!(out_headers, headers);
-        assert_eq!(out_body, body);
-    }
-
-    #[rstest]
-    #[case(EncryptionAlgorithm::Aegis256)]
-    #[case(EncryptionAlgorithm::Aes256Gcm)]
-    fn encrypted_payload_roundtrips_with_shared_ciphertext_buffer(
+    #[case::aegis_unique(EncryptionAlgorithm::Aegis256, false)]
+    #[case::aegis_shared(EncryptionAlgorithm::Aegis256, true)]
+    #[case::aes_unique(EncryptionAlgorithm::Aes256Gcm, false)]
+    #[case::aes_shared(EncryptionAlgorithm::Aes256Gcm, true)]
+    fn encrypted_payload_roundtrips(
         #[case] algorithm: EncryptionAlgorithm,
+        #[case] shared_ciphertext_buffer: bool,
     ) {
         let headers = vec![Header {
             name: Bytes::from_static(b"x-test"),
@@ -496,8 +478,12 @@ mod tests {
         let plaintext = make_envelope(headers.clone(), body.clone());
         let encryption = test_encryption(algorithm);
         let ciphertext = encrypt_test_payload(&plaintext, algorithm, &aad);
-        let shared = ciphertext.encoded.clone();
-        let ciphertext = EncryptedRecord::try_from(shared).unwrap();
+        let ciphertext = if shared_ciphertext_buffer {
+            let shared = ciphertext.encoded.clone();
+            EncryptedRecord::try_from(shared).unwrap()
+        } else {
+            ciphertext
+        };
         let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
         let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
 
