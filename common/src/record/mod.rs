@@ -60,7 +60,6 @@ pub enum RecordDecodeError {
     InvalidValue(&'static str, &'static str),
 }
 
-/// `impl Display` can be safely returned to the client without leaking internal details.
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum RecordPartsError {
     #[error("unknown command")]
