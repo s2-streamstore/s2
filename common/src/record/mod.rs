@@ -11,8 +11,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
 pub use encryption::{
-    EncryptedRecord, RecordDecryptionError, decrypt_read_batch, decrypt_stored_record,
-    decrypt_stored_sequenced_record, encrypt_append_input,
+    EncryptedRecord, RecordDecryptionError, decrypt_read_batch, encrypt_append_input,
 };
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;

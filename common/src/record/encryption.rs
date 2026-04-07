@@ -179,6 +179,91 @@ impl Encodable for EncryptedRecord {
     }
 }
 
+pub fn encrypt_append_input(
+    input: AppendInput,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> StoredAppendInput {
+    let records = input
+        .records
+        .into_iter()
+        .map(|record| encrypt_append_record(record, encryption, aad))
+        .collect::<Vec<_>>();
+    let records = StoredAppendRecordBatch::try_from(records)
+        .expect("encrypting an append input should preserve append batch invariants");
+
+    StoredAppendInput {
+        records,
+        match_seq_num: input.match_seq_num,
+        fencing_token: input.fencing_token,
+    }
+}
+
+fn encrypt_append_record(
+    record: AppendRecord,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> StoredAppendRecord {
+    let AppendRecordParts { timestamp, record } = record.into();
+    let metered_size = record.metered_size();
+    let record = match (record.into_inner(), encryption) {
+        (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
+        (record @ Record::Envelope(_), EncryptionConfig::Plain) => StoredRecord::Plaintext(record),
+        (Record::Envelope(envelope), EncryptionConfig::Aegis256(key)) => {
+            let encrypted =
+                encrypt_payload(&envelope, EncryptionAlgorithm::Aegis256, key.secret(), aad);
+            StoredRecord::encrypted(encrypted, metered_size)
+        }
+        (Record::Envelope(envelope), EncryptionConfig::Aes256Gcm(key)) => {
+            let encrypted =
+                encrypt_payload(&envelope, EncryptionAlgorithm::Aes256Gcm, key.secret(), aad);
+            StoredRecord::encrypted(encrypted, metered_size)
+        }
+    };
+
+    StoredAppendRecord::try_from(StoredAppendRecordParts {
+        timestamp,
+        record: Metered::with_size(metered_size, record),
+    })
+    .expect("encrypting an append record should preserve its metered-size invariant")
+}
+
+fn encrypt_payload(
+    plaintext: &(impl Encodable + ?Sized),
+    alg: EncryptionAlgorithm,
+    key: &[u8; 32],
+    aad: &[u8],
+) -> EncryptedRecord {
+    let payload_start = SUITE_ID_LEN + alg.nonce_len();
+    let mut encoded =
+        BytesMut::with_capacity(payload_start + plaintext.encoded_size() + alg.tag_len());
+    encoded.put_u8(alg.suite_id());
+    alg.put_random_nonce(&mut encoded);
+    plaintext.encode_into(&mut encoded);
+
+    let (prefix, payload) = encoded.split_at_mut(payload_start);
+    let nonce = &prefix[SUITE_ID_LEN..];
+
+    match alg {
+        EncryptionAlgorithm::Aegis256 => {
+            let nonce: &[u8; 32] = nonce
+                .try_into()
+                .expect("AEGIS-256 nonce should match the encoded record framing");
+            let tag = Aegis256::<16>::new(key, nonce).encrypt_in_place(payload, aad);
+            encoded.put_slice(tag.as_ref());
+        }
+        EncryptionAlgorithm::Aes256Gcm => {
+            let nonce = aes_gcm::Nonce::from_slice(nonce);
+            let tag = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key))
+                .encrypt_in_place_detached(nonce, aad, payload)
+                .expect("AES-256-GCM encryption should not fail on size validation");
+            encoded.put_slice(tag.as_ref());
+        }
+    }
+
+    EncryptedRecord::new(encoded.freeze(), alg)
+}
+
 impl TryFrom<Bytes> for EncryptedRecord {
     type Error = RecordDecodeError;
 
@@ -198,21 +283,58 @@ impl TryFrom<Bytes> for EncryptedRecord {
     }
 }
 
-fn payload_end(
-    encoded_len: usize,
-    payload_start: usize,
-    tag_len: usize,
-) -> Result<usize, RecordDecryptionError> {
-    let payload_end = encoded_len
-        .checked_sub(tag_len)
-        .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
-    if payload_start > payload_end {
-        return Err(RecordDecryptionError::MalformedEncryptedRecord);
-    }
-    Ok(payload_end)
+pub fn decrypt_read_batch(
+    batch: StoredReadBatch,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> Result<ReadBatch, RecordDecryptionError> {
+    let records: Result<Metered<Vec<SequencedRecord>>, _> = batch
+        .records
+        .into_inner()
+        .into_iter()
+        .map(|record| decrypt_stored_sequenced_record(record, encryption, aad))
+        .collect();
+    Ok(ReadBatch {
+        records: records?,
+        tail: batch.tail,
+    })
 }
 
-pub(crate) fn decrypt_payload(
+fn decrypt_stored_sequenced_record(
+    record: StoredSequencedRecord,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> Result<Metered<SequencedRecord>, RecordDecryptionError> {
+    let (position, record) = record.into_parts();
+    Ok(decrypt_stored_record(record, encryption, aad)?.sequenced(position))
+}
+
+fn decrypt_stored_record(
+    record: StoredRecord,
+    encryption: &EncryptionConfig,
+    aad: &[u8],
+) -> Result<Metered<Record>, RecordDecryptionError> {
+    match record {
+        StoredRecord::Plaintext(record) => Ok(record.into()),
+        StoredRecord::Encrypted {
+            metered_size,
+            record: encrypted,
+        } => {
+            let plaintext = decrypt_payload(encrypted, encryption, aad)?;
+            let record = Record::Envelope(plaintext.try_into()?);
+            let actual_metered_size = record.metered_size();
+            if metered_size != actual_metered_size {
+                return Err(RecordDecryptionError::MeteredSizeMismatch {
+                    stored: metered_size,
+                    actual: actual_metered_size,
+                });
+            }
+            Ok(Metered::with_size(metered_size, record))
+        }
+    }
+}
+
+fn decrypt_payload(
     record: EncryptedRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
@@ -288,140 +410,18 @@ pub(crate) fn decrypt_payload(
     }
 }
 
-pub fn decrypt_stored_record(
-    record: StoredRecord,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> Result<Metered<Record>, RecordDecryptionError> {
-    match record {
-        StoredRecord::Plaintext(record) => Ok(record.into()),
-        StoredRecord::Encrypted {
-            metered_size,
-            record: encrypted,
-        } => {
-            let plaintext = decrypt_payload(encrypted, encryption, aad)?;
-            let record = Record::Envelope(plaintext.try_into()?);
-            let actual_metered_size = record.metered_size();
-            if metered_size != actual_metered_size {
-                return Err(RecordDecryptionError::MeteredSizeMismatch {
-                    stored: metered_size,
-                    actual: actual_metered_size,
-                });
-            }
-            Ok(Metered::with_size(metered_size, record))
-        }
+fn payload_end(
+    encoded_len: usize,
+    payload_start: usize,
+    tag_len: usize,
+) -> Result<usize, RecordDecryptionError> {
+    let payload_end = encoded_len
+        .checked_sub(tag_len)
+        .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
+    if payload_start > payload_end {
+        return Err(RecordDecryptionError::MalformedEncryptedRecord);
     }
-}
-
-pub fn decrypt_stored_sequenced_record(
-    record: StoredSequencedRecord,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> Result<Metered<SequencedRecord>, RecordDecryptionError> {
-    let (position, record) = record.into_parts();
-    Ok(decrypt_stored_record(record, encryption, aad)?.sequenced(position))
-}
-
-fn encrypt_append_record(
-    record: AppendRecord,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> StoredAppendRecord {
-    let AppendRecordParts { timestamp, record } = record.into();
-    let metered_size = record.metered_size();
-    let record = match (record.into_inner(), encryption) {
-        (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
-        (record @ Record::Envelope(_), EncryptionConfig::Plain) => StoredRecord::Plaintext(record),
-        (Record::Envelope(envelope), EncryptionConfig::Aegis256(key)) => {
-            let encrypted =
-                encrypt_payload(&envelope, EncryptionAlgorithm::Aegis256, key.secret(), aad);
-            StoredRecord::encrypted(encrypted, metered_size)
-        }
-        (Record::Envelope(envelope), EncryptionConfig::Aes256Gcm(key)) => {
-            let encrypted =
-                encrypt_payload(&envelope, EncryptionAlgorithm::Aes256Gcm, key.secret(), aad);
-            StoredRecord::encrypted(encrypted, metered_size)
-        }
-    };
-
-    StoredAppendRecord::try_from(StoredAppendRecordParts {
-        timestamp,
-        record: Metered::with_size(metered_size, record),
-    })
-    .expect("encrypting an append record should preserve its metered-size invariant")
-}
-
-pub fn encrypt_append_input(
-    input: AppendInput,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> StoredAppendInput {
-    let records = input
-        .records
-        .into_iter()
-        .map(|record| encrypt_append_record(record, encryption, aad))
-        .collect::<Vec<_>>();
-    let records = StoredAppendRecordBatch::try_from(records)
-        .expect("encrypting an append input should preserve append batch invariants");
-
-    StoredAppendInput {
-        records,
-        match_seq_num: input.match_seq_num,
-        fencing_token: input.fencing_token,
-    }
-}
-
-pub fn decrypt_read_batch(
-    batch: StoredReadBatch,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> Result<ReadBatch, RecordDecryptionError> {
-    let records: Result<Metered<Vec<SequencedRecord>>, _> = batch
-        .records
-        .into_inner()
-        .into_iter()
-        .map(|record| decrypt_stored_sequenced_record(record, encryption, aad))
-        .collect();
-    Ok(ReadBatch {
-        records: records?,
-        tail: batch.tail,
-    })
-}
-
-fn encrypt_payload(
-    plaintext: &(impl Encodable + ?Sized),
-    alg: EncryptionAlgorithm,
-    key: &[u8; 32],
-    aad: &[u8],
-) -> EncryptedRecord {
-    let payload_start = SUITE_ID_LEN + alg.nonce_len();
-    let mut encoded =
-        BytesMut::with_capacity(payload_start + plaintext.encoded_size() + alg.tag_len());
-    encoded.put_u8(alg.suite_id());
-    alg.put_random_nonce(&mut encoded);
-    plaintext.encode_into(&mut encoded);
-
-    let (prefix, payload) = encoded.split_at_mut(payload_start);
-    let nonce = &prefix[SUITE_ID_LEN..];
-
-    match alg {
-        EncryptionAlgorithm::Aegis256 => {
-            let nonce: &[u8; 32] = nonce
-                .try_into()
-                .expect("AEGIS-256 nonce should match the encoded record framing");
-            let tag = Aegis256::<16>::new(key, nonce).encrypt_in_place(payload, aad);
-            encoded.put_slice(tag.as_ref());
-        }
-        EncryptionAlgorithm::Aes256Gcm => {
-            let nonce = aes_gcm::Nonce::from_slice(nonce);
-            let tag = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key))
-                .encrypt_in_place_detached(nonce, aad, payload)
-                .expect("AES-256-GCM encryption should not fail on size validation");
-            encoded.put_slice(tag.as_ref());
-        }
-    }
-
-    EncryptedRecord::new(encoded.freeze(), alg)
+    Ok(payload_end)
 }
 
 #[cfg(test)]
