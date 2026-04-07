@@ -2,7 +2,7 @@ use std::num::NonZeroU8;
 
 use bytes::{Buf, BufMut, Bytes};
 
-use super::{Encodable, Header, PublicRecordError, RecordDecodeError};
+use super::{Encodable, Header, RecordDecodeError, RecordPartsError};
 use crate::deep_size::DeepSize;
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -50,7 +50,7 @@ impl EnvelopeRecord {
         (self.headers, self.body)
     }
 
-    pub fn try_from_parts(headers: Vec<Header>, body: Bytes) -> Result<Self, PublicRecordError> {
+    pub fn try_from_parts(headers: Vec<Header>, body: Bytes) -> Result<Self, RecordPartsError> {
         let encoding_info = headers.as_slice().try_into()?;
         Ok(Self {
             headers,

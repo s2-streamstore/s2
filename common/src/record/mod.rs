@@ -62,7 +62,7 @@ pub enum RecordDecodeError {
 
 /// `impl Display` can be safely returned to the client without leaking internal details.
 #[derive(Debug, PartialEq, thiserror::Error)]
-pub enum PublicRecordError {
+pub enum RecordPartsError {
     #[error("unknown command")]
     UnknownCommand,
     #[error("invalid `{0}` command: {1}")]
@@ -172,14 +172,14 @@ impl DeepSize for Record {
 }
 
 impl Record {
-    pub fn try_from_parts(headers: Vec<Header>, body: Bytes) -> Result<Self, PublicRecordError> {
+    pub fn try_from_parts(headers: Vec<Header>, body: Bytes) -> Result<Self, RecordPartsError> {
         if headers.len() == 1 {
             let header = &headers[0];
             if header.name.is_empty() {
                 let op = CommandOp::from_id(header.value.as_ref())
-                    .ok_or(PublicRecordError::UnknownCommand)?;
+                    .ok_or(RecordPartsError::UnknownCommand)?;
                 let command_record = CommandRecord::try_from_parts(op, body.as_ref())
-                    .map_err(|e| PublicRecordError::CommandPayload(op, e))?;
+                    .map_err(|e| RecordPartsError::CommandPayload(op, e))?;
                 return Ok(Self::Command(command_record));
             }
         }
@@ -609,7 +609,7 @@ mod test {
         let body = Bytes::from("hello");
         assert_eq!(
             Record::try_from_parts(headers, body),
-            Err(PublicRecordError::UnknownCommand)
+            Err(RecordPartsError::UnknownCommand)
         );
     }
 
@@ -628,7 +628,7 @@ mod test {
         let body = Bytes::from("hello");
         assert_eq!(
             Record::try_from_parts(headers, body),
-            Err(PublicRecordError::Header(HeaderValidationError::NameEmpty))
+            Err(RecordPartsError::Header(HeaderValidationError::NameEmpty))
         );
     }
 
