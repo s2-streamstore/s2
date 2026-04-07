@@ -458,7 +458,7 @@ mod tests {
         StoredRecord::encrypted(encrypted, metered_size)
     }
 
-    fn roundtrip(alg: EncryptionAlgorithm) {
+    fn assert_encrypted_payload_roundtrip(alg: EncryptionAlgorithm) {
         let headers = vec![Header {
             name: Bytes::from_static(b"x-test"),
             value: Bytes::from_static(b"hello"),
@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(out_body, body);
     }
 
-    fn roundtrip_shared_ciphertext_buffer(alg: EncryptionAlgorithm) {
+    fn assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(alg: EncryptionAlgorithm) {
         let headers = vec![Header {
             name: Bytes::from_static(b"x-test"),
             value: Bytes::from_static(b"hello"),
@@ -497,23 +497,27 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_aegis256() {
-        roundtrip(EncryptionAlgorithm::Aegis256);
+    fn encrypted_payload_roundtrips_aegis256() {
+        assert_encrypted_payload_roundtrip(EncryptionAlgorithm::Aegis256);
     }
 
     #[test]
-    fn roundtrip_aes256gcm() {
-        roundtrip(EncryptionAlgorithm::Aes256Gcm);
+    fn encrypted_payload_roundtrips_aes256gcm() {
+        assert_encrypted_payload_roundtrip(EncryptionAlgorithm::Aes256Gcm);
     }
 
     #[test]
-    fn roundtrip_aegis256_with_shared_ciphertext_buffer() {
-        roundtrip_shared_ciphertext_buffer(EncryptionAlgorithm::Aegis256);
+    fn encrypted_payload_roundtrips_aegis256_with_shared_ciphertext_buffer() {
+        assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(
+            EncryptionAlgorithm::Aegis256,
+        );
     }
 
     #[test]
-    fn roundtrip_aes256gcm_with_shared_ciphertext_buffer() {
-        roundtrip_shared_ciphertext_buffer(EncryptionAlgorithm::Aes256Gcm);
+    fn encrypted_payload_roundtrips_aes256gcm_with_shared_ciphertext_buffer() {
+        assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(
+            EncryptionAlgorithm::Aes256Gcm,
+        );
     }
 
     #[test]
@@ -647,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_aes256gcm_record() {
+    fn encrypted_record_roundtrips_aes256gcm() {
         let record = make_encrypted_record(
             EncryptionAlgorithm::Aes256Gcm,
             Bytes::from_static(b"0123456789ab"),
