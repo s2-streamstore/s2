@@ -11,7 +11,7 @@ mod streams;
 
 mod append;
 mod kv;
-pub(crate) mod stream_id;
+mod stream_id;
 
 pub use core::Backend;
 

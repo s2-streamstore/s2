@@ -29,7 +29,7 @@ use s2_common::{
 };
 
 use crate::{
-    backend::{Backend, stream_id::StreamId},
+    backend::{Backend, StreamId},
     handlers::v1::error::ServiceError,
 };
 
