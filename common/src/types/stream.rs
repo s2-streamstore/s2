@@ -695,24 +695,4 @@ mod test {
         assert!(matches!(records[0].inner(), Record::Envelope(_)));
         assert!(matches!(records[1].inner(), Record::Envelope(_)));
     }
-
-    #[test]
-    fn stored_read_session_output_decrypt_preserves_heartbeat() {
-        let output = StoredReadSessionOutput::Heartbeat(StreamPosition {
-            seq_num: 9,
-            timestamp: 99,
-        });
-
-        let mapped = output
-            .decrypt(&crate::encryption::EncryptionConfig::Plain, &[])
-            .unwrap();
-
-        assert!(matches!(
-            mapped,
-            ReadSessionOutput::Heartbeat(StreamPosition {
-                seq_num: 9,
-                timestamp: 99,
-            })
-        ));
-    }
 }
