@@ -689,7 +689,7 @@ impl AppendPermit<'_> {
 
 fn pos_span(records: &[Metered<StoredSequencedRecord>]) -> (StreamPosition, StreamPosition) {
     (
-        records.first().expect("non-empty").position(),
+        *records.first().expect("non-empty").position(),
         next_pos(records),
     )
 }

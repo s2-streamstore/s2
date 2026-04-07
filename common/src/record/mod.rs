@@ -342,8 +342,8 @@ impl<T> Sequenced<T> {
         Self { position, inner }
     }
 
-    pub const fn position(&self) -> StreamPosition {
-        self.position
+    pub const fn position(&self) -> &StreamPosition {
+        &self.position
     }
 
     pub fn inner(&self) -> &T {
