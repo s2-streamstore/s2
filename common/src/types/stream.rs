@@ -174,10 +174,13 @@ pub struct StreamInfo {
 #[derive(Debug, Clone)]
 pub struct AppendRecord<T = Record>(AppendRecordParts<T>);
 
-impl<T> Deref for AppendRecord<T> {
-    type Target = AppendRecordParts<T>;
+impl<T> AppendRecord<T> {
+    pub fn parts(&self) -> &AppendRecordParts<T> {
+        let Self(parts) = self;
+        parts
+    }
 
-    fn deref(&self) -> &Self::Target {
+    pub fn into_parts(self) -> AppendRecordParts<T> {
         let Self(parts) = self;
         parts
     }
@@ -202,8 +205,8 @@ impl<T> MeteredSize for AppendRecordParts<T> {
 }
 
 impl<T> From<AppendRecord<T>> for AppendRecordParts<T> {
-    fn from(AppendRecord(parts): AppendRecord<T>) -> Self {
-        parts
+    fn from(record: AppendRecord<T>) -> Self {
+        record.into_parts()
     }
 }
 
@@ -312,10 +315,8 @@ impl From<AppendRecordParts<Record>> for AppendRecordParts<StoredRecord> {
 
 impl From<AppendRecord<Record>> for AppendRecord<StoredRecord> {
     fn from(record: AppendRecord<Record>) -> Self {
-        Self::try_from(AppendRecordParts::<StoredRecord>::from(
-            AppendRecordParts::from(record),
-        ))
-        .expect("converting an append record to stored form should preserve invariants")
+        Self::try_from(AppendRecordParts::<StoredRecord>::from(record.into_parts()))
+            .expect("converting an append record to stored form should preserve invariants")
     }
 }
 
@@ -341,7 +342,7 @@ impl AppendInput<Record> {
             fencing_token,
         } = self;
         let records = try_collect_append_record_batch(records.into_iter().map(|record| {
-            let AppendRecordParts { timestamp, record } = record.into();
+            let AppendRecordParts { timestamp, record } = record.into_parts();
             let metered_size = record.metered_size();
             let record = encrypt_record(record, encryption, aad);
             debug_assert_eq!(
@@ -469,7 +470,7 @@ impl ReadBatch<StoredRecord> {
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
-                decrypt_stored_record(Metered::from(record), encryption, aad)
+                decrypt_stored_record(record, encryption, aad)
                     .map(|record| record.sequenced(position))
             })
             .collect();
@@ -594,7 +595,7 @@ mod test {
             Some("fence")
         );
         let record: AppendRecordParts<StoredRecord> =
-            mapped.records.into_iter().next().unwrap().into();
+            mapped.records.into_iter().next().unwrap().into_parts();
         assert_eq!(record.timestamp, Some(42));
         assert!(matches!(
             record.record.into_inner(),
@@ -629,7 +630,7 @@ mod test {
             Some("fence")
         );
         let record: AppendRecordParts<StoredRecord> =
-            mapped.records.into_iter().next().unwrap().into();
+            mapped.records.into_iter().next().unwrap().into_parts();
         assert_eq!(record.timestamp, Some(42));
         assert!(matches!(
             record.record.into_inner(),

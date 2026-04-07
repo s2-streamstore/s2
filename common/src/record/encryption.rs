@@ -36,6 +36,7 @@ use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, StoredRe
 use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionConfig},
+    record::MeteredExt as _,
 };
 
 const SUITE_ID_LEN: usize = 1;
@@ -251,13 +252,12 @@ impl TryFrom<Bytes> for EncryptedRecord {
 }
 
 pub fn decrypt_stored_record(
-    record: Metered<StoredRecord>,
+    record: StoredRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<Metered<Record>, RecordDecryptionError> {
-    let metered_size = record.metered_size();
-    match record.into_inner() {
-        StoredRecord::Plaintext(record) => Ok(Metered::with_size(metered_size, record)),
+    match record {
+        StoredRecord::Plaintext(record) => Ok(record.metered()),
         StoredRecord::Encrypted {
             metered_size,
             record: encrypted,
@@ -718,7 +718,7 @@ mod tests {
         ));
 
         let decrypted = decrypt_stored_record(
-            Metered::from(record),
+            record,
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad(),
         )
@@ -738,7 +738,7 @@ mod tests {
         ));
 
         let decrypted = decrypt_stored_record(
-            Metered::with_size(1234, record),
+            record,
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad(),
         )
@@ -761,7 +761,7 @@ mod tests {
         );
 
         let decrypted = decrypt_stored_record(
-            Metered::from(record),
+            record,
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         )
@@ -786,7 +786,7 @@ mod tests {
             &aad,
         );
 
-        let result = decrypt_stored_record(Metered::from(record), &EncryptionConfig::Plain, &aad);
+        let result = decrypt_stored_record(record, &EncryptionConfig::Plain, &aad);
 
         assert!(matches!(
             result,
@@ -818,7 +818,7 @@ mod tests {
         };
 
         let result = decrypt_stored_record(
-            Metered::from(StoredRecord::encrypted(record, metered_size + 1)),
+            StoredRecord::encrypted(record, metered_size + 1),
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         );

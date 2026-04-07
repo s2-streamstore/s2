@@ -713,8 +713,10 @@ fn sequenced_records(
     let mut sequenced_records = Vec::with_capacity(batch.len());
     let mut max_timestamp = prev_max_timestamp;
     let now = timestamp_now();
-    for (i, StoredAppendRecordParts { timestamp, record }) in
-        batch.into_iter().map(Into::into).enumerate()
+    for (i, StoredAppendRecordParts { timestamp, record }) in batch
+        .into_iter()
+        .map(|record| record.into_parts())
+        .enumerate()
     {
         let mut timestamp = match mode {
             TimestampingMode::ClientPrefer => timestamp.unwrap_or(now),
