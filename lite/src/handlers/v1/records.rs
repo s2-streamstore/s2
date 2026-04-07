@@ -277,15 +277,12 @@ pub async fn read(
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
             let s2s_stream =
-                decrypt_session(session, encryption, stream_id).map(move |msg| match msg {
-                    Ok(ReadSessionOutput::Heartbeat(tail)) => Ok(v1t::stream::proto::ReadBatch {
+                decrypt_session(session, encryption, stream_id).map_ok(move |msg| match msg {
+                    ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
                         records: vec![],
                         tail: Some(tail.into()),
-                    }),
-                    Ok(ReadSessionOutput::Batch(batch)) => {
-                        Ok(v1t::stream::proto::ReadBatch::from(batch))
-                    }
-                    Err(e) => Err(e),
+                    },
+                    ReadSessionOutput::Batch(batch) => v1t::stream::proto::ReadBatch::from(batch),
                 });
             let response_stream = s2s::FramedMessageStream::<_>::new(
                 response_compression,
