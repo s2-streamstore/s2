@@ -7,7 +7,7 @@ use s2_common::{
     encryption::EncryptionConfig,
     record::{
         CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp,
-        decrypt_read_batch, encrypt_append_input,
+        decrypt_stored_record, encrypt_record,
     },
     types::{
         basin::BasinName,
@@ -166,7 +166,9 @@ pub async fn append_payloads_with_encryption(
         fencing_token: None,
     };
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    let input = encrypt_append_input(input, encryption, stream_id.as_bytes());
+    let input = input.map_records(|record| {
+        Metered::from(encrypt_record(record, encryption, stream_id.as_bytes()))
+    });
     backend
         .append(basin.clone(), stream.clone(), input)
         .await
@@ -180,7 +182,9 @@ pub fn encrypt_input_for_stream(
     encryption: &EncryptionConfig,
 ) -> StoredAppendInput {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    encrypt_append_input(input, encryption, stream_id.as_bytes())
+    input.map_records(|record| {
+        Metered::from(encrypt_record(record, encryption, stream_id.as_bytes()))
+    })
 }
 
 pub async fn append_repeat(
@@ -196,7 +200,11 @@ pub async fn append_repeat(
 }
 
 pub fn decrypt_plain_batch(batch: StoredReadBatch) -> ReadBatch {
-    decrypt_read_batch(batch, &EncryptionConfig::Plain, &[]).expect("Failed to decode batch")
+    batch
+        .try_map_records(|record| {
+            decrypt_stored_record(record.into_inner(), &EncryptionConfig::Plain, &[])
+        })
+        .expect("Failed to decode batch")
 }
 
 pub fn decrypt_batch_for_stream(
@@ -206,7 +214,11 @@ pub fn decrypt_batch_for_stream(
     encryption: &EncryptionConfig,
 ) -> ReadBatch {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    decrypt_read_batch(batch, encryption, stream_id.as_bytes()).expect("Failed to decode batch")
+    batch
+        .try_map_records(|record| {
+            decrypt_stored_record(record.into_inner(), encryption, stream_id.as_bytes())
+        })
+        .expect("Failed to decode batch")
 }
 
 pub async fn collect_records<S>(session: &mut Pin<Box<S>>) -> Vec<SequencedRecord>

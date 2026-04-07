@@ -17,7 +17,7 @@ use s2_common::{
     encryption::EncryptionConfig,
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
-    record::{Metered, MeteredSize as _, decrypt_read_batch, encrypt_append_input},
+    record::{Metered, MeteredSize as _, decrypt_stored_record, encrypt_record},
     types::{
         ValidationError,
         basin::BasinName,
@@ -50,12 +50,11 @@ where
     S: Stream<Item = Result<StoredReadSessionOutput, crate::backend::error::ReadError>>,
 {
     session.map(move |output| match output {
-        Ok(StoredReadSessionOutput::Heartbeat(tail)) => Ok(ReadSessionOutput::Heartbeat(tail)),
-        Ok(StoredReadSessionOutput::Batch(batch)) => {
-            decrypt_read_batch(batch, &encryption, stream_id.as_bytes())
-                .map(ReadSessionOutput::Batch)
-                .map_err(ServiceError::from)
-        }
+        Ok(output) => output
+            .try_map_records(|record| {
+                decrypt_stored_record(record.into_inner(), &encryption, stream_id.as_bytes())
+            })
+            .map_err(ServiceError::from),
         Err(err) => Err(err.into()),
     })
 }
@@ -387,7 +386,9 @@ pub async fn append(
             input,
             response_mime,
         } => {
-            let input = encrypt_append_input(input, &encryption, stream_id.as_bytes());
+            let input = input.map_records(|record| {
+                Metered::from(encrypt_record(record, &encryption, stream_id.as_bytes()))
+            });
             let ack = backend.append(basin, stream, input).await?;
             match response_mime {
                 JsonOrProto::Json => {
@@ -412,7 +413,9 @@ pub async fn append(
                 let mut err_tx = Some(err_tx);
                 while let Some(input) = inputs.next().await {
                     match input {
-                        Ok(input) => yield encrypt_append_input(input, &encryption, stream_id.as_bytes()),
+                        Ok(input) => yield input.map_records(|record| {
+                            Metered::from(encrypt_record(record, &encryption, stream_id.as_bytes()))
+                        }),
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e);

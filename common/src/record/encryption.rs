@@ -32,17 +32,10 @@ use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 
-use super::{
-    Encodable, Metered, MeteredSize, Record, RecordDecodeError, SequencedRecord, StoredRecord,
-    StoredSequencedRecord,
-};
+use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, StoredRecord};
 use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionConfig},
-    types::stream::{
-        AppendInput, AppendRecord, AppendRecordParts, ReadBatch, StoredAppendInput,
-        StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts, StoredReadBatch,
-    },
 };
 
 const SUITE_ID_LEN: usize = 1;
@@ -179,34 +172,13 @@ impl Encodable for EncryptedRecord {
     }
 }
 
-pub fn encrypt_append_input(
-    input: AppendInput,
+pub fn encrypt_record(
+    record: Metered<Record>,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> StoredAppendInput {
-    let records = input
-        .records
-        .into_iter()
-        .map(|record| encrypt_append_record(record, encryption, aad))
-        .collect::<Vec<_>>();
-    let records = StoredAppendRecordBatch::try_from(records)
-        .expect("encrypting an append input should preserve append batch invariants");
-
-    StoredAppendInput {
-        records,
-        match_seq_num: input.match_seq_num,
-        fencing_token: input.fencing_token,
-    }
-}
-
-fn encrypt_append_record(
-    record: AppendRecord,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> StoredAppendRecord {
-    let AppendRecordParts { timestamp, record } = record.into();
+) -> StoredRecord {
     let metered_size = record.metered_size();
-    let record = match (record.into_inner(), encryption) {
+    match (record.into_inner(), encryption) {
         (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
         (record @ Record::Envelope(_), EncryptionConfig::Plain) => StoredRecord::Plaintext(record),
         (Record::Envelope(envelope), EncryptionConfig::Aegis256(key)) => {
@@ -219,13 +191,7 @@ fn encrypt_append_record(
                 encrypt_payload(&envelope, EncryptionAlgorithm::Aes256Gcm, key.secret(), aad);
             StoredRecord::encrypted(encrypted, metered_size)
         }
-    };
-
-    StoredAppendRecord::try_from(StoredAppendRecordParts {
-        timestamp,
-        record: Metered::with_size(metered_size, record),
-    })
-    .expect("encrypting an append record should preserve its metered-size invariant")
+    }
 }
 
 fn encrypt_payload(
@@ -283,33 +249,7 @@ impl TryFrom<Bytes> for EncryptedRecord {
     }
 }
 
-pub fn decrypt_read_batch(
-    batch: StoredReadBatch,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> Result<ReadBatch, RecordDecryptionError> {
-    let records: Result<Metered<Vec<SequencedRecord>>, _> = batch
-        .records
-        .into_inner()
-        .into_iter()
-        .map(|record| decrypt_stored_sequenced_record(record, encryption, aad))
-        .collect();
-    Ok(ReadBatch {
-        records: records?,
-        tail: batch.tail,
-    })
-}
-
-fn decrypt_stored_sequenced_record(
-    record: StoredSequencedRecord,
-    encryption: &EncryptionConfig,
-    aad: &[u8],
-) -> Result<Metered<SequencedRecord>, RecordDecryptionError> {
-    let (position, record) = record.into_parts();
-    Ok(decrypt_stored_record(record, encryption, aad)?.sequenced(position))
-}
-
-fn decrypt_stored_record(
+pub fn decrypt_stored_record(
     record: StoredRecord,
     encryption: &EncryptionConfig,
     aad: &[u8],
@@ -429,7 +369,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::record::{EnvelopeRecord, Header, MeteredExt, StreamPosition};
+    use crate::record::{EnvelopeRecord, Header, MeteredExt};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
     const OTHER_TEST_KEY: [u8; 32] = [0x99; 32];
@@ -514,25 +454,6 @@ mod tests {
             ),
         };
         StoredRecord::encrypted(encrypted, metered_size)
-    }
-
-    fn make_stored_read_batch(records: Vec<StoredRecord>) -> StoredReadBatch {
-        let records: Vec<_> = records
-            .into_iter()
-            .enumerate()
-            .map(|(i, record)| {
-                Metered::from(record)
-                    .sequenced(StreamPosition {
-                        seq_num: i as u64 + 1,
-                        timestamp: i as u64 + 10,
-                    })
-                    .into_inner()
-            })
-            .collect();
-        StoredReadBatch {
-            records: Metered::from(records),
-            tail: None,
-        }
     }
 
     fn roundtrip(alg: EncryptionAlgorithm) {
@@ -784,34 +705,22 @@ mod tests {
     }
 
     #[test]
-    fn encrypt_append_input_encrypts_envelope_records() {
+    fn encrypt_record_encrypts_envelope_records() {
         let aad = aad();
-        let input = AppendInput {
-            records: vec![
-                AppendRecord::try_from(AppendRecordParts {
-                    timestamp: Some(10),
-                    record: make_plaintext_envelope(
-                        vec![Header {
-                            name: Bytes::from_static(b"x-test"),
-                            value: Bytes::from_static(b"hello"),
-                        }],
-                        Bytes::from_static(b"secret payload"),
-                    )
-                    .metered(),
-                })
-                .unwrap(),
-            ]
-            .try_into()
-            .unwrap(),
-            match_seq_num: None,
-            fencing_token: None,
-        };
+        let record = make_plaintext_envelope(
+            vec![Header {
+                name: Bytes::from_static(b"x-test"),
+                value: Bytes::from_static(b"hello"),
+            }],
+            Bytes::from_static(b"secret payload"),
+        )
+        .metered();
 
-        let encrypted =
-            encrypt_append_input(input, &test_encryption(EncryptionAlgorithm::Aegis256), &aad);
-        let record: StoredAppendRecordParts = encrypted.records.into_iter().next().unwrap().into();
-        let record = record.record.into_inner();
-
+        let record = encrypt_record(
+            record,
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad,
+        );
         let StoredRecord::Encrypted {
             record: envelope, ..
         } = record
@@ -822,54 +731,65 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_read_batch_preserves_plaintext_and_decrypts_encrypted_records() {
-        let aad = aad();
-        let batch = make_stored_read_batch(vec![
-            StoredRecord::Plaintext(Record::Envelope(
-                EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"legacy-plaintext"))
-                    .unwrap(),
-            )),
-            make_encrypted_stored_record(
-                &test_encryption(EncryptionAlgorithm::Aegis256),
-                vec![Header {
-                    name: Bytes::from_static(b"x-test"),
-                    value: Bytes::from_static(b"hello"),
-                }],
-                Bytes::from_static(b"secret payload"),
-                &aad,
-            ),
-        ]);
+    fn decrypt_stored_record_preserves_plaintext() {
+        let record = StoredRecord::Plaintext(Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"legacy-plaintext"))
+                .unwrap(),
+        ));
 
-        let decrypted =
-            decrypt_read_batch(batch, &test_encryption(EncryptionAlgorithm::Aegis256), &aad)
-                .unwrap();
-        let records = decrypted.records.into_inner();
+        let decrypted = decrypt_stored_record(
+            record,
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad(),
+        )
+        .unwrap();
 
-        let Record::Envelope(first) = &records[0].inner else {
+        let Record::Envelope(record) = decrypted.into_inner() else {
             panic!("expected envelope record");
         };
-        assert_eq!(first.body().as_ref(), b"legacy-plaintext");
-
-        let Record::Envelope(second) = &records[1].inner else {
-            panic!("expected envelope record");
-        };
-        assert_eq!(second.headers().len(), 1);
-        assert_eq!(second.headers()[0].name.as_ref(), b"x-test");
-        assert_eq!(second.headers()[0].value.as_ref(), b"hello");
-        assert_eq!(second.body().as_ref(), b"secret payload");
+        assert_eq!(record.body().as_ref(), b"legacy-plaintext");
     }
 
     #[test]
-    fn decrypt_read_batch_plain_rejects_encrypted_records() {
+    fn decrypt_stored_record_decrypts_encrypted_records() {
         let aad = aad();
-        let batch = make_stored_read_batch(vec![make_encrypted_stored_record(
+        let record = make_encrypted_stored_record(
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            vec![Header {
+                name: Bytes::from_static(b"x-test"),
+                value: Bytes::from_static(b"hello"),
+            }],
+            Bytes::from_static(b"secret payload"),
+            &aad,
+        );
+
+        let decrypted = decrypt_stored_record(
+            record,
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad,
+        )
+        .unwrap();
+
+        let Record::Envelope(record) = decrypted.into_inner() else {
+            panic!("expected envelope record");
+        };
+        assert_eq!(record.headers().len(), 1);
+        assert_eq!(record.headers()[0].name.as_ref(), b"x-test");
+        assert_eq!(record.headers()[0].value.as_ref(), b"hello");
+        assert_eq!(record.body().as_ref(), b"secret payload");
+    }
+
+    #[test]
+    fn decrypt_stored_record_plain_rejects_encrypted_records() {
+        let aad = aad();
+        let record = make_encrypted_stored_record(
             &test_encryption(EncryptionAlgorithm::Aegis256),
             vec![],
             Bytes::from_static(b"secret payload"),
             &aad,
-        )]);
+        );
 
-        let result = decrypt_read_batch(batch, &EncryptionConfig::Plain, &aad);
+        let result = decrypt_stored_record(record, &EncryptionConfig::Plain, &aad);
 
         assert!(matches!(
             result,

@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
+use std::{convert::Infallible, marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
 
 use compact_str::{CompactString, ToCompactString};
 use time::OffsetDateTime;
@@ -324,21 +324,54 @@ pub struct AppendInput<T = Record> {
     pub fencing_token: Option<FencingToken>,
 }
 
-pub type StoredAppendInput = AppendInput<StoredRecord>;
+impl<T> AppendInput<T> {
+    pub fn map_records<U, F>(self, mut f: F) -> AppendInput<U>
+    where
+        F: FnMut(Metered<T>) -> Metered<U>,
+    {
+        match self.try_map_records(|record| Ok::<_, Infallible>(f(record))) {
+            Ok(mapped) => mapped,
+            Err(never) => match never {},
+        }
+    }
 
-impl From<AppendInput<Record>> for AppendInput<StoredRecord> {
-    fn from(
-        AppendInput {
+    pub fn try_map_records<U, E, F>(self, mut f: F) -> Result<AppendInput<U>, E>
+    where
+        F: FnMut(Metered<T>) -> Result<Metered<U>, E>,
+    {
+        let AppendInput {
             records,
             match_seq_num,
             fencing_token,
-        }: AppendInput<Record>,
-    ) -> Self {
-        Self {
-            records: records.into(),
+        } = self;
+        let records = records
+            .into_iter()
+            .map(|record| {
+                let AppendRecordParts { timestamp, record } = record.into();
+                let record = f(record)?;
+                Ok(
+                    AppendRecord::try_from(AppendRecordParts { timestamp, record }).expect(
+                        "mapping append input records should preserve append record invariants",
+                    ),
+                )
+            })
+            .collect::<Result<Vec<_>, E>>()?;
+        let records = AppendRecordBatch::try_from(records)
+            .expect("mapping append input records should preserve append batch invariants");
+
+        Ok(AppendInput {
+            records,
             match_seq_num,
             fencing_token,
-        }
+        })
+    }
+}
+
+pub type StoredAppendInput = AppendInput<StoredRecord>;
+
+impl From<AppendInput<Record>> for AppendInput<StoredRecord> {
+    fn from(value: AppendInput<Record>) -> Self {
+        value.map_records(|record| Metered::from(StoredRecord::from(record.into_inner())))
     }
 }
 
@@ -416,6 +449,43 @@ impl<T> std::fmt::Debug for ReadBatch<T> {
     }
 }
 
+impl<T> ReadBatch<T>
+where
+    T: MeteredSize,
+{
+    pub fn map_records<U, F>(self, mut f: F) -> ReadBatch<U>
+    where
+        U: MeteredSize,
+        F: FnMut(Metered<T>) -> Metered<U>,
+    {
+        match self.try_map_records(|record| Ok::<_, Infallible>(f(record))) {
+            Ok(mapped) => mapped,
+            Err(never) => match never {},
+        }
+    }
+
+    pub fn try_map_records<U, E, F>(self, mut f: F) -> Result<ReadBatch<U>, E>
+    where
+        U: MeteredSize,
+        F: FnMut(Metered<T>) -> Result<Metered<U>, E>,
+    {
+        let records: Result<Metered<Vec<Sequenced<U>>>, E> = self
+            .records
+            .into_inner()
+            .into_iter()
+            .map(|record| {
+                let (position, record) = record.into_parts();
+                Ok(f(Metered::from(record))?.sequenced(position))
+            })
+            .collect();
+
+        Ok(ReadBatch {
+            records: records?,
+            tail: self.tail,
+        })
+    }
+}
+
 pub type StoredReadBatch = ReadBatch<StoredRecord>;
 
 #[derive(Debug, Clone)]
@@ -424,18 +494,47 @@ pub enum ReadSessionOutput<T = Record> {
     Batch(ReadBatch<T>),
 }
 
+impl<T> ReadSessionOutput<T>
+where
+    T: MeteredSize,
+{
+    pub fn map_records<U, F>(self, mut f: F) -> ReadSessionOutput<U>
+    where
+        U: MeteredSize,
+        F: FnMut(Metered<T>) -> Metered<U>,
+    {
+        match self.try_map_records(|record| Ok::<_, Infallible>(f(record))) {
+            Ok(mapped) => mapped,
+            Err(never) => match never {},
+        }
+    }
+
+    pub fn try_map_records<U, E, F>(self, f: F) -> Result<ReadSessionOutput<U>, E>
+    where
+        U: MeteredSize,
+        F: FnMut(Metered<T>) -> Result<Metered<U>, E>,
+    {
+        match self {
+            Self::Heartbeat(tail) => Ok(ReadSessionOutput::Heartbeat(tail)),
+            Self::Batch(batch) => batch.try_map_records(f).map(ReadSessionOutput::Batch),
+        }
+    }
+}
+
 pub type StoredReadSessionOutput = ReadSessionOutput<StoredRecord>;
 
 pub type ListStreamsRequest = ListItemsRequest<StreamNamePrefix, StreamNameStartAfter>;
 
 #[cfg(test)]
 mod test {
+    use bytes::Bytes;
     use rstest::rstest;
 
     use super::{
         super::strings::{NameProps, PrefixProps, StartAfterProps},
-        StreamNameStr,
+        *,
     };
+    use crate::record::{EnvelopeRecord, MeteredExt, Record, StoredRecord, StreamPosition};
 
     #[rstest]
     #[case::normal("my-stream".to_owned())]
@@ -485,5 +584,122 @@ mod test {
     fn validate_start_after_err(#[case] start_after: String) {
         StreamNameStr::<StartAfterProps>::validate_str(&start_after)
             .expect_err("expected validation error");
+    }
+
+    #[test]
+    fn append_input_map_records_preserves_metadata() {
+        let record = Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
+        );
+        let input = AppendInput {
+            records: vec![
+                AppendRecord::try_from(AppendRecordParts {
+                    timestamp: Some(42),
+                    record: record.metered(),
+                })
+                .unwrap(),
+            ]
+            .try_into()
+            .unwrap(),
+            match_seq_num: Some(7),
+            fencing_token: Some("fence".parse().unwrap()),
+        };
+
+        let mapped =
+            input.map_records(|record| Metered::from(StoredRecord::from(record.into_inner())));
+
+        assert_eq!(mapped.match_seq_num, Some(7));
+        assert_eq!(
+            mapped.fencing_token.as_ref().map(|token| token.as_ref()),
+            Some("fence")
+        );
+        let record: AppendRecordParts<StoredRecord> =
+            mapped.records.into_iter().next().unwrap().into();
+        assert_eq!(record.timestamp, Some(42));
+        assert!(matches!(
+            record.record.into_inner(),
+            StoredRecord::Plaintext(_)
+        ));
+    }
+
+    #[test]
+    fn read_batch_try_map_records_preserves_positions_and_tail() {
+        let batch = ReadBatch {
+            records: Metered::from(vec![
+                Record::Envelope(
+                    EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"one")).unwrap(),
+                )
+                .metered()
+                .sequenced(StreamPosition {
+                    seq_num: 1,
+                    timestamp: 10,
+                })
+                .into_inner(),
+                Record::Envelope(
+                    EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"two")).unwrap(),
+                )
+                .metered()
+                .sequenced(StreamPosition {
+                    seq_num: 2,
+                    timestamp: 20,
+                })
+                .into_inner(),
+            ]),
+            tail: Some(StreamPosition {
+                seq_num: 3,
+                timestamp: 30,
+            }),
+        };
+
+        let mapped = batch
+            .try_map_records(|record| {
+                Ok::<_, &'static str>(Metered::from(StoredRecord::from(record.into_inner())))
+            })
+            .unwrap();
+        let records = mapped.records.into_inner();
+
+        assert_eq!(
+            mapped.tail,
+            Some(StreamPosition {
+                seq_num: 3,
+                timestamp: 30
+            })
+        );
+        assert_eq!(
+            records[0].position(),
+            &StreamPosition {
+                seq_num: 1,
+                timestamp: 10
+            }
+        );
+        assert_eq!(
+            records[1].position(),
+            &StreamPosition {
+                seq_num: 2,
+                timestamp: 20
+            }
+        );
+        assert!(matches!(records[0].inner(), StoredRecord::Plaintext(_)));
+        assert!(matches!(records[1].inner(), StoredRecord::Plaintext(_)));
+    }
+
+    #[test]
+    fn read_session_output_try_map_records_preserves_heartbeat() {
+        let output = ReadSessionOutput::<Record>::Heartbeat(StreamPosition {
+            seq_num: 9,
+            timestamp: 99,
+        });
+
+        let mapped = output
+            .try_map_records::<StoredRecord, &'static str, _>(|_| Err("should not be called"))
+            .unwrap();
+
+        assert!(matches!(
+            mapped,
+            ReadSessionOutput::Heartbeat(StreamPosition {
+                seq_num: 9,
+                timestamp: 99,
+            })
+        ));
     }
 }
