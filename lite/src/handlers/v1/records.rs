@@ -49,12 +49,22 @@ fn decrypt_session<S>(
 where
     S: Stream<Item = Result<StoredReadSessionOutput, crate::backend::error::ReadError>>,
 {
-    session.map(move |output| match output {
-        Ok(output) => output
-            .decrypt(&encryption, stream_id.as_bytes())
-            .map_err(ServiceError::from),
-        Err(err) => Err(err.into()),
-    })
+    async_stream::stream! {
+        tokio::pin!(session);
+        while let Some(output) = session.next().await {
+            let output = match output {
+                Ok(output) => output
+                    .decrypt(&encryption, stream_id.as_bytes())
+                    .map_err(ServiceError::from),
+                Err(err) => Err(err.into()),
+            };
+            let should_stop = output.is_err();
+            yield output;
+            if should_stop {
+                break;
+            }
+        }
+    }
 }
 
 fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceError> {
@@ -258,7 +268,6 @@ pub async fn read(
                             let (_, body) = err.to_response().to_parts();
                             yield v1t::stream::sse::error_event(body);
                             errored = true;
-                            break;
                         }
                     }
                 }
