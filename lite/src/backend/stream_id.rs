@@ -39,10 +39,6 @@ impl StreamId {
     }
 }
 
-pub fn aad(basin: &BasinName, stream: &StreamName) -> [u8; StreamId::LEN] {
-    StreamId::aad(basin, stream)
-}
-
 impl From<[u8; StreamId::LEN]> for StreamId {
     fn from(bytes: [u8; StreamId::LEN]) -> Self {
         Self(bytes.into())
