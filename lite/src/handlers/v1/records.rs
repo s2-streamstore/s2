@@ -408,7 +408,7 @@ pub async fn append(
             inputs,
             response_compression,
         } => {
-            let (err_tx, err_rx) = tokio::sync::oneshot::channel::<ServiceError>();
+            let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
             let inputs = async_stream::stream! {
                 tokio::pin!(inputs);
@@ -418,7 +418,7 @@ pub async fn append(
                         Ok(input) => yield encrypt_append_input(input, &encryption, stream_id.as_bytes()),
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
-                                let _ = tx.send(e.into());
+                                let _ = tx.send(e);
                             }
                             break;
                         }
@@ -436,7 +436,7 @@ pub async fn append(
 
             let input_err_stream = futures::stream::once(err_rx).filter_map(|res| async move {
                 match res {
-                    Ok(err) => Some(Err(err)),
+                    Ok(err) => Some(Err(err.into())),
                     Err(_) => None,
                 }
             });
