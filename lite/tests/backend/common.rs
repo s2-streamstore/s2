@@ -165,7 +165,7 @@ pub async fn append_payloads_with_encryption(
         match_seq_num: None,
         fencing_token: None,
     };
-    let aad = s2_lite::backend::aad(basin, stream);
+    let aad = s2_lite::backend::StreamId::aad(basin, stream);
     let input = encrypt_append_input(input, encryption, &aad);
     backend
         .append(basin.clone(), stream.clone(), input)
@@ -179,7 +179,7 @@ pub fn encrypt_input_for_stream(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> StoredAppendInput {
-    let aad = s2_lite::backend::aad(basin, stream);
+    let aad = s2_lite::backend::StreamId::aad(basin, stream);
     encrypt_append_input(input, encryption, &aad)
 }
 
@@ -205,7 +205,7 @@ pub fn decrypt_batch_for_stream(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> ReadBatch {
-    let aad = s2_lite::backend::aad(basin, stream);
+    let aad = s2_lite::backend::StreamId::aad(basin, stream);
     decrypt_read_batch(batch, encryption, &aad).expect("Failed to decode batch")
 }
 

@@ -1,7 +1,5 @@
 pub mod error;
 
-use s2_common::types::{basin::BasinName, stream::StreamName};
-
 mod basins;
 pub mod bgtasks;
 mod core;
@@ -17,10 +15,7 @@ pub(crate) mod stream_id;
 
 pub use core::Backend;
 
-#[inline]
-pub fn aad(basin: &BasinName, stream: &StreamName) -> [u8; stream_id::StreamId::LEN] {
-    *stream_id::StreamId::new(basin, stream).as_bytes()
-}
+pub use stream_id::StreamId;
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
 
