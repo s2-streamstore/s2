@@ -138,9 +138,7 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
     match first {
         Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
             assert!(matches!(
-                batch.try_map_records(|record| {
-                    decrypt_stored_record(record.into_inner(), &EncryptionConfig::Plain, &[])
-                }),
+                batch.try_map_records(|record| decrypt_stored_record(record, &EncryptionConfig::Plain, &[])),
                 Err(RecordDecryptionError::AlgorithmMismatch {
                     expected: None,
                     actual,

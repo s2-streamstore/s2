@@ -166,9 +166,8 @@ pub async fn append_payloads_with_encryption(
         fencing_token: None,
     };
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    let input = input.map_records(|record| {
-        Metered::from(encrypt_record(record, encryption, stream_id.as_bytes()))
-    });
+    let input =
+        input.map_records(|record| encrypt_record(record, encryption, stream_id.as_bytes()));
     backend
         .append(basin.clone(), stream.clone(), input)
         .await
@@ -182,9 +181,7 @@ pub fn encrypt_input_for_stream(
     encryption: &EncryptionConfig,
 ) -> StoredAppendInput {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    input.map_records(|record| {
-        Metered::from(encrypt_record(record, encryption, stream_id.as_bytes()))
-    })
+    input.map_records(|record| encrypt_record(record, encryption, stream_id.as_bytes()))
 }
 
 pub async fn append_repeat(
@@ -201,9 +198,7 @@ pub async fn append_repeat(
 
 pub fn decrypt_plain_batch(batch: StoredReadBatch) -> ReadBatch {
     batch
-        .try_map_records(|record| {
-            decrypt_stored_record(record.into_inner(), &EncryptionConfig::Plain, &[])
-        })
+        .try_map_records(|record| decrypt_stored_record(record, &EncryptionConfig::Plain, &[]))
         .expect("Failed to decode batch")
 }
 
@@ -215,9 +210,7 @@ pub fn decrypt_batch_for_stream(
 ) -> ReadBatch {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
     batch
-        .try_map_records(|record| {
-            decrypt_stored_record(record.into_inner(), encryption, stream_id.as_bytes())
-        })
+        .try_map_records(|record| decrypt_stored_record(record, encryption, stream_id.as_bytes()))
         .expect("Failed to decode batch")
 }
 
