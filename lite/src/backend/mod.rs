@@ -14,6 +14,8 @@ mod kv;
 
 pub use core::Backend;
 
+pub use crate::stream_id::StreamId;
+
 pub const FOLLOWER_MAX_LAG: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
