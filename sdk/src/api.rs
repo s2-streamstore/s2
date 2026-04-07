@@ -352,13 +352,12 @@ impl BasinClient {
         let url = self
             .base_url
             .join(&format!("v1/streams/{}/records", urlencoding::encode(name)))?;
-        let request = self
+        let mut request = self
             .post(url)
             .header(CONTENT_TYPE, CONTENT_TYPE_PROTO)
             .header(ACCEPT, ACCEPT_PROTO)
             .body(input.encode_to_vec())
             .build()?;
-        let mut request = request;
         set_encryption_header(&mut request, encryption);
         let response = self
             .request(request)
