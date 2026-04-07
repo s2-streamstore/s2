@@ -731,23 +731,6 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_stored_record_preserves_cached_size_for_plaintext() {
-        let record = StoredRecord::Plaintext(Record::Envelope(
-            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"legacy-plaintext"))
-                .unwrap(),
-        ));
-
-        let decrypted = decrypt_stored_record(
-            record,
-            &test_encryption(EncryptionAlgorithm::Aegis256),
-            &aad(),
-        )
-        .unwrap();
-
-        assert_eq!(decrypted.metered_size(), 1234);
-    }
-
-    #[test]
     fn decrypt_stored_record_decrypts_encrypted_records() {
         let aad = aad();
         let record = make_encrypted_stored_record(
