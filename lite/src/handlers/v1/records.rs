@@ -52,7 +52,7 @@ where
     session.map(move |output| match output {
         Ok(output) => output
             .try_map_records(|record| {
-                decrypt_stored_record(record.into_inner(), &encryption, stream_id.as_bytes())
+                decrypt_stored_record(record, &encryption, stream_id.as_bytes())
             })
             .map_err(ServiceError::from),
         Err(err) => Err(err.into()),
@@ -180,6 +180,7 @@ pub struct ReadArgs {
     params(
         v1t::StreamNamePathSegment,
         s2_api::data::S2FormatHeader,
+        s2_api::data::S2EncryptionHeader,
         v1t::stream::ReadStart,
         v1t::stream::ReadEnd,
     ),
@@ -362,7 +363,11 @@ pub struct AppendArgs {
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
-    params(v1t::StreamNamePathSegment, s2_api::data::S2FormatHeader),
+    params(
+        v1t::StreamNamePathSegment,
+        s2_api::data::S2FormatHeader,
+        s2_api::data::S2EncryptionHeader,
+    ),
     servers(
         (url = super::paths::cloud_endpoints::BASIN, variables(
             ("basin" = (
@@ -386,9 +391,8 @@ pub async fn append(
             input,
             response_mime,
         } => {
-            let input = input.map_records(|record| {
-                Metered::from(encrypt_record(record, &encryption, stream_id.as_bytes()))
-            });
+            let input = input
+                .map_records(|record| encrypt_record(record, &encryption, stream_id.as_bytes()));
             let ack = backend.append(basin, stream, input).await?;
             match response_mime {
                 JsonOrProto::Json => {
@@ -414,7 +418,7 @@ pub async fn append(
                 while let Some(input) = inputs.next().await {
                     match input {
                         Ok(input) => yield input.map_records(|record| {
-                            Metered::from(encrypt_record(record, &encryption, stream_id.as_bytes()))
+                            encrypt_record(record, &encryption, stream_id.as_bytes())
                         }),
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {

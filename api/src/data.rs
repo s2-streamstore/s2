@@ -96,6 +96,17 @@ pub struct S2FormatHeader {
     pub s2_format: Format,
 }
 
+#[rustfmt::skip]
+#[derive(Debug)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
+pub struct S2EncryptionHeader {
+    /// Optional per-request encryption spec for append/read operations.
+    /// Use `plain` for plaintext, or `<alg>; <base64-key>` where `<alg>` is `aegis-256` or `aes-256-gcm`.
+    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-encryption", value_type = String))]
+    pub s2_encryption: String,
+}
+
 #[cfg(feature = "axum")]
 pub mod extract {
     use axum::{
