@@ -67,10 +67,6 @@ pub enum RecordDecryptionError {
     MalformedDecryptedRecord(#[from] RecordDecodeError),
 }
 
-fn malformed_encrypted_record() -> RecordDecryptionError {
-    RecordDecryptionError::MalformedEncryptedRecord
-}
-
 #[derive(PartialEq, Eq, Clone)]
 pub struct EncryptedRecord {
     encoded: Bytes,
@@ -215,9 +211,9 @@ fn payload_end(
 ) -> Result<usize, RecordDecryptionError> {
     let payload_end = encoded_len
         .checked_sub(tag_len)
-        .ok_or_else(malformed_encrypted_record)?;
+        .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
     if payload_start > payload_end {
-        return Err(malformed_encrypted_record());
+        return Err(RecordDecryptionError::MalformedEncryptedRecord);
     }
     Ok(payload_end)
 }
@@ -241,17 +237,17 @@ pub(crate) fn decrypt_payload(
             let plaintext_len = payload_end - payload_start;
             let nonce: [u8; 32] = encoded
                 .get(SUITE_ID_LEN..payload_start)
-                .ok_or_else(malformed_encrypted_record)?
+                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
                 .try_into()
-                .map_err(|_| malformed_encrypted_record())?;
+                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
             let tag: [u8; 16] = encoded
                 .get(payload_end..)
-                .ok_or_else(malformed_encrypted_record)?
+                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
                 .try_into()
-                .map_err(|_| malformed_encrypted_record())?;
+                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
             let ciphertext = encoded
                 .get_mut(payload_start..payload_end)
-                .ok_or_else(malformed_encrypted_record)?;
+                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
 
             Aegis256::<16>::new(key.secret(), &nonce)
                 .decrypt_in_place(ciphertext, &tag, aad)
@@ -270,16 +266,16 @@ pub(crate) fn decrypt_payload(
             let nonce = aes_gcm::Nonce::clone_from_slice(
                 encoded
                     .get(SUITE_ID_LEN..payload_start)
-                    .ok_or_else(malformed_encrypted_record)?,
+                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?,
             );
             let tag = aes_gcm::Tag::clone_from_slice(
                 encoded
                     .get(payload_end..)
-                    .ok_or_else(malformed_encrypted_record)?,
+                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?,
             );
             let ciphertext = encoded
                 .get_mut(payload_start..payload_end)
-                .ok_or_else(malformed_encrypted_record)?;
+                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
             cipher
                 .decrypt_in_place_detached(&nonce, aad, ciphertext, &tag)
                 .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
