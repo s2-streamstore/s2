@@ -519,6 +519,16 @@ mod test {
         LegacyPlaintextFrame { record }.to_bytes()
     }
 
+    fn semantic_metered_size(record: &Record) -> usize {
+        let (headers, body) = record.clone().into_parts();
+        8 + (2 * headers.len())
+            + headers
+                .iter()
+                .map(|header| header.name.len() + header.value.len())
+                .sum::<usize>()
+            + body.len()
+    }
+
     fn bytes_strategy(allow_empty: bool) -> impl Strategy<Value = Bytes> {
         prop_oneof![
             prop::collection::vec(any::<u8>(), (if allow_empty { 0 } else { 1 })..10)
@@ -536,6 +546,15 @@ mod test {
         prop_oneof![
             prop::collection::vec(header_strategy(), 0..10),
             prop::collection::vec(header_strategy(), 200..300),
+        ]
+    }
+
+    fn command_strategy() -> impl Strategy<Value = CommandRecord> {
+        prop_oneof![
+            proptest::string::string_regex(&format!("[ -~]{{0,{MAX_FENCING_TOKEN_LENGTH}}}"))
+                .unwrap()
+                .prop_map(|token| CommandRecord::Fence(token.parse().unwrap())),
+            any::<SeqNum>().prop_map(CommandRecord::Trim),
         ]
     }
 
@@ -575,7 +594,26 @@ mod test {
             let encoded_record = Metered::from(StoredRecord::from(record.clone()))
                 .as_ref()
                 .to_bytes();
+            assert_eq!(record.metered_size(), semantic_metered_size(&record));
             assert_eq!(record.metered_size(), try_metered_size(encoded_record.as_ref()).unwrap() as usize);
+        }
+    );
+
+    proptest!(
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn roundtrip_command_metered(command in command_strategy()) {
+            let record = Record::Command(command);
+            let encoded_record = Metered::from(StoredRecord::from(record.clone()))
+                .as_ref()
+                .to_bytes();
+            let expected_metered = semantic_metered_size(&record);
+            let wire_metered = try_metered_size(encoded_record.as_ref()).unwrap() as usize;
+            let decoded_record: Metered<Record> = Metered::try_from(encoded_record).unwrap();
+
+            assert_eq!(record.metered_size(), expected_metered);
+            assert_eq!(record.metered_size(), wire_metered);
+            prop_assert_eq!(decoded_record, Metered::<Record>::from(record));
         }
     );
 
@@ -654,6 +692,11 @@ mod test {
         let encoded_record = Metered::from(StoredRecord::from(record.clone()))
             .as_ref()
             .to_bytes();
+        assert_eq!(record_metered, semantic_metered_size(&record));
+        assert_eq!(
+            record_metered,
+            try_metered_size(encoded_record.as_ref()).unwrap() as usize
+        );
         assert_eq!(
             encoded_record.as_ref(),
             legacy_plaintext_bytes(&record).as_ref()

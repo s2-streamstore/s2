@@ -5,7 +5,7 @@ use futures::StreamExt;
 use s2_common::{
     encryption::{EncryptionAlgorithm, EncryptionConfig},
     read_extent::{ReadLimit, ReadUntil},
-    record::{MeteredSize, RecordDecryptionError, StreamPosition, decrypt_stored_record},
+    record::{MeteredSize, RecordDecryptionError, StreamPosition},
     types::{
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
         stream::{AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadSessionOutput},
@@ -138,7 +138,7 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
     match first {
         Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
             assert!(matches!(
-                batch.try_map_records(|record| decrypt_stored_record(record, &EncryptionConfig::Plain, &[])),
+                batch.decrypt(&EncryptionConfig::Plain, &[]),
                 Err(RecordDecryptionError::AlgorithmMismatch {
                     expected: None,
                     actual,

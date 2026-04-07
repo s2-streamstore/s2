@@ -1,4 +1,4 @@
-use std::{convert::Infallible, marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
+use std::{marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
 
 use compact_str::{CompactString, ToCompactString};
 use time::OffsetDateTime;
@@ -9,10 +9,11 @@ use super::{
 };
 use crate::{
     caps,
+    encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
     record::{
-        FencingToken, Metered, MeteredSize, Record, SeqNum, Sequenced, StoredRecord,
-        StreamPosition, Timestamp,
+        FencingToken, Metered, MeteredSize, Record, RecordDecryptionError, SeqNum, Sequenced,
+        StoredRecord, StreamPosition, Timestamp, decrypt_stored_record, encrypt_record,
     },
     types::resources::ListItemsRequest,
 };
@@ -324,21 +325,8 @@ pub struct AppendInput<T = Record> {
     pub fencing_token: Option<FencingToken>,
 }
 
-impl<T> AppendInput<T> {
-    pub fn map_records<U, F>(self, mut f: F) -> AppendInput<U>
-    where
-        F: FnMut(Metered<T>) -> Metered<U>,
-    {
-        match self.try_map_records(|record| Ok::<_, Infallible>(f(record))) {
-            Ok(mapped) => mapped,
-            Err(never) => match never {},
-        }
-    }
-
-    pub fn try_map_records<U, E, F>(self, mut f: F) -> Result<AppendInput<U>, E>
-    where
-        F: FnMut(Metered<T>) -> Result<Metered<U>, E>,
-    {
+impl AppendInput<Record> {
+    pub fn encrypt(self, encryption: &EncryptionConfig, aad: &[u8]) -> AppendInput<StoredRecord> {
         let AppendInput {
             records,
             match_seq_num,
@@ -348,22 +336,25 @@ impl<T> AppendInput<T> {
             .into_iter()
             .map(|record| {
                 let AppendRecordParts { timestamp, record } = record.into();
-                let record = f(record)?;
-                Ok(
-                    AppendRecord::try_from(AppendRecordParts { timestamp, record }).expect(
-                        "mapping append input records should preserve append record invariants",
-                    ),
-                )
+                let metered_size = record.metered_size();
+                let record = encrypt_record(record, encryption, aad);
+                debug_assert_eq!(
+                    record.metered_size(),
+                    metered_size,
+                    "record encryption should preserve metered size"
+                );
+                AppendRecord::try_from(AppendRecordParts { timestamp, record })
+                    .expect("record encryption should preserve append record invariants")
             })
-            .collect::<Result<Vec<_>, E>>()?;
+            .collect::<Vec<_>>();
         let records = AppendRecordBatch::try_from(records)
-            .expect("mapping append input records should preserve append batch invariants");
+            .expect("record encryption should preserve append batch invariants");
 
-        Ok(AppendInput {
+        AppendInput {
             records,
             match_seq_num,
             fencing_token,
-        })
+        }
     }
 }
 
@@ -371,7 +362,22 @@ pub type StoredAppendInput = AppendInput<StoredRecord>;
 
 impl From<AppendInput<Record>> for AppendInput<StoredRecord> {
     fn from(value: AppendInput<Record>) -> Self {
-        value.map_records(|record| Metered::from(StoredRecord::from(record.into_inner())))
+        let AppendInput {
+            records,
+            match_seq_num,
+            fencing_token,
+        } = value;
+        let records = records
+            .into_iter()
+            .map(AppendRecord::<StoredRecord>::from)
+            .collect::<Vec<_>>();
+        let records = AppendRecordBatch::try_from(records)
+            .expect("converting an append input to stored form should preserve invariants");
+        AppendInput {
+            records,
+            match_seq_num,
+            fencing_token,
+        }
     }
 }
 
@@ -449,33 +455,20 @@ impl<T> std::fmt::Debug for ReadBatch<T> {
     }
 }
 
-impl<T> ReadBatch<T>
-where
-    T: MeteredSize,
-{
-    pub fn map_records<U, F>(self, mut f: F) -> ReadBatch<U>
-    where
-        U: MeteredSize,
-        F: FnMut(Metered<T>) -> Metered<U>,
-    {
-        match self.try_map_records(|record| Ok::<_, Infallible>(f(record))) {
-            Ok(mapped) => mapped,
-            Err(never) => match never {},
-        }
-    }
-
-    pub fn try_map_records<U, E, F>(self, mut f: F) -> Result<ReadBatch<U>, E>
-    where
-        U: MeteredSize,
-        F: FnMut(Metered<T>) -> Result<Metered<U>, E>,
-    {
-        let records: Result<Metered<Vec<Sequenced<U>>>, E> = self
+impl ReadBatch<StoredRecord> {
+    pub fn decrypt(
+        self,
+        encryption: &EncryptionConfig,
+        aad: &[u8],
+    ) -> Result<ReadBatch, RecordDecryptionError> {
+        let records: Result<Metered<Vec<Sequenced<Record>>>, RecordDecryptionError> = self
             .records
             .into_inner()
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
-                Ok(f(Metered::from(record))?.sequenced(position))
+                decrypt_stored_record(Metered::from(record), encryption, aad)
+                    .map(|record| record.sequenced(position))
             })
             .collect();
 
@@ -494,29 +487,15 @@ pub enum ReadSessionOutput<T = Record> {
     Batch(ReadBatch<T>),
 }
 
-impl<T> ReadSessionOutput<T>
-where
-    T: MeteredSize,
-{
-    pub fn map_records<U, F>(self, mut f: F) -> ReadSessionOutput<U>
-    where
-        U: MeteredSize,
-        F: FnMut(Metered<T>) -> Metered<U>,
-    {
-        match self.try_map_records(|record| Ok::<_, Infallible>(f(record))) {
-            Ok(mapped) => mapped,
-            Err(never) => match never {},
-        }
-    }
-
-    pub fn try_map_records<U, E, F>(self, f: F) -> Result<ReadSessionOutput<U>, E>
-    where
-        U: MeteredSize,
-        F: FnMut(Metered<T>) -> Result<Metered<U>, E>,
-    {
+impl ReadSessionOutput<StoredRecord> {
+    pub fn decrypt(
+        self,
+        encryption: &EncryptionConfig,
+        aad: &[u8],
+    ) -> Result<ReadSessionOutput, RecordDecryptionError> {
         match self {
             Self::Heartbeat(tail) => Ok(ReadSessionOutput::Heartbeat(tail)),
-            Self::Batch(batch) => batch.try_map_records(f).map(ReadSessionOutput::Batch),
+            Self::Batch(batch) => batch.decrypt(encryption, aad).map(ReadSessionOutput::Batch),
         }
     }
 }
@@ -587,7 +566,7 @@ mod test {
     }
 
     #[test]
-    fn append_input_map_records_preserves_metadata() {
+    fn append_input_encrypt_preserves_metadata() {
         let record = Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
         );
@@ -605,8 +584,7 @@ mod test {
             fencing_token: Some("fence".parse().unwrap()),
         };
 
-        let mapped =
-            input.map_records(|record| Metered::from(StoredRecord::from(record.into_inner())));
+        let mapped = input.encrypt(&crate::encryption::EncryptionConfig::Plain, &[]);
 
         assert_eq!(mapped.match_seq_num, Some(7));
         assert_eq!(
@@ -623,21 +601,21 @@ mod test {
     }
 
     #[test]
-    fn read_batch_try_map_records_preserves_positions_and_tail() {
+    fn stored_read_batch_decrypt_preserves_positions_and_tail() {
         let batch = ReadBatch {
             records: Metered::from(vec![
-                Record::Envelope(
+                StoredRecord::Plaintext(Record::Envelope(
                     EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"one")).unwrap(),
-                )
+                ))
                 .metered()
                 .sequenced(StreamPosition {
                     seq_num: 1,
                     timestamp: 10,
                 })
                 .into_inner(),
-                Record::Envelope(
+                StoredRecord::Plaintext(Record::Envelope(
                     EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"two")).unwrap(),
-                )
+                ))
                 .metered()
                 .sequenced(StreamPosition {
                     seq_num: 2,
@@ -652,9 +630,7 @@ mod test {
         };
 
         let mapped = batch
-            .try_map_records(|record| {
-                Ok::<_, &'static str>(Metered::from(StoredRecord::from(record.into_inner())))
-            })
+            .decrypt(&crate::encryption::EncryptionConfig::Plain, &[])
             .unwrap();
         let records = mapped.records.into_inner();
 
@@ -679,19 +655,19 @@ mod test {
                 timestamp: 20
             }
         );
-        assert!(matches!(records[0].inner(), StoredRecord::Plaintext(_)));
-        assert!(matches!(records[1].inner(), StoredRecord::Plaintext(_)));
+        assert!(matches!(records[0].inner(), Record::Envelope(_)));
+        assert!(matches!(records[1].inner(), Record::Envelope(_)));
     }
 
     #[test]
-    fn read_session_output_try_map_records_preserves_heartbeat() {
-        let output = ReadSessionOutput::<Record>::Heartbeat(StreamPosition {
+    fn stored_read_session_output_decrypt_preserves_heartbeat() {
+        let output = StoredReadSessionOutput::Heartbeat(StreamPosition {
             seq_num: 9,
             timestamp: 99,
         });
 
         let mapped = output
-            .try_map_records::<StoredRecord, &'static str, _>(|_| Err("should not be called"))
+            .decrypt(&crate::encryption::EncryptionConfig::Plain, &[])
             .unwrap();
 
         assert!(matches!(

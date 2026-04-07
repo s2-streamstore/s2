@@ -51,6 +51,7 @@ uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 assert_matches = "1.5"
+hyper = { version = "1.8", features = ["server", "http1"] }
 rstest = { workspace = true }
 test-context = { version = "0.5" }
 tokio = { workspace = true, features = ["full", "test-util"] }

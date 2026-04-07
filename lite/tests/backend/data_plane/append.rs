@@ -130,6 +130,75 @@ async fn test_append_fencing_token_conditions() {
 }
 
 #[tokio::test]
+async fn test_encrypted_fencing_command_controls_stream_state() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "append-fencing-encrypted",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let encryption = aegis256_encryption();
+    let matching_token = FencingToken::default();
+    let new_token: FencingToken = "updated-token".parse().unwrap();
+
+    let command_batch: AppendRecordBatch = vec![create_fencing_command_record(new_token.clone())]
+        .try_into()
+        .unwrap();
+    let command_input = AppendInput {
+        records: command_batch,
+        match_seq_num: None,
+        fencing_token: Some(matching_token.clone()),
+    };
+    let command_input =
+        encrypt_input_for_stream(command_input, &basin_name, &stream_name, &encryption);
+
+    let command_ack = backend
+        .append(basin_name.clone(), stream_name.clone(), command_input)
+        .await
+        .expect("encrypted fencing command should succeed");
+
+    let mismatched_input = AppendInput {
+        records: create_test_record_batch(vec![Bytes::from_static(b"mismatched token")]),
+        match_seq_num: Some(command_ack.end.seq_num),
+        fencing_token: Some(matching_token.clone()),
+    };
+    let mismatched_input =
+        encrypt_input_for_stream(mismatched_input, &basin_name, &stream_name, &encryption);
+
+    let result = backend
+        .append(basin_name.clone(), stream_name.clone(), mismatched_input)
+        .await;
+
+    let Err(AppendError::ConditionFailed(AppendConditionFailedError::FencingTokenMismatch {
+        expected,
+        actual,
+        ..
+    })) = result
+    else {
+        panic!("expected encrypted fencing token mismatch");
+    };
+    assert_eq!(expected, matching_token);
+    assert_eq!(actual, new_token);
+
+    let refreshed_input = AppendInput {
+        records: create_test_record_batch(vec![Bytes::from_static(b"updated token accepted")]),
+        match_seq_num: Some(command_ack.end.seq_num),
+        fencing_token: Some(new_token.clone()),
+    };
+    let refreshed_input =
+        encrypt_input_for_stream(refreshed_input, &basin_name, &stream_name, &encryption);
+
+    let refreshed_ack = backend
+        .append(basin_name, stream_name, refreshed_input)
+        .await
+        .expect("encrypted append should succeed with updated token");
+
+    assert_eq!(refreshed_ack.start.seq_num, command_ack.end.seq_num);
+    assert_eq!(refreshed_ack.end.seq_num, command_ack.end.seq_num + 1);
+}
+
+#[tokio::test]
 async fn test_append_requires_timestamp() {
     let stream_config = OptionalStreamConfig {
         timestamping: OptionalTimestampingConfig {
