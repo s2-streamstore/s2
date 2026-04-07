@@ -277,7 +277,7 @@ pub async fn read(
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
             let s2s_stream =
-                decrypt_session(session, encryption, stream_id).map_ok(move |msg| match msg {
+                decrypt_session(session, encryption, stream_id).map_ok(|msg| match msg {
                     ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
                         records: vec![],
                         tail: Some(tail.into()),
