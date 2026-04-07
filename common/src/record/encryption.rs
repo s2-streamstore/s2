@@ -184,14 +184,14 @@ impl TryFrom<Bytes> for EncryptedRecord {
 
     fn try_from(encoded: Bytes) -> Result<Self, Self::Error> {
         if encoded.len() < SUITE_ID_LEN {
-            return Err(RecordDecodeError::Truncated("EncryptedRecord"));
+            return Err(RecordDecodeError::Truncated("EncryptedRecordSuiteId"));
         }
 
         let algorithm = EncryptionAlgorithm::try_from_suite_id(encoded[0])?;
         let nonce_len = algorithm.nonce_len();
         let tag_len = algorithm.tag_len();
         if encoded.len() < SUITE_ID_LEN + nonce_len + tag_len {
-            return Err(RecordDecodeError::Truncated("EncryptedRecord"));
+            return Err(RecordDecodeError::Truncated("EncryptedRecordFrame"));
         }
 
         Ok(Self::new(encoded, algorithm))
@@ -702,7 +702,7 @@ mod tests {
         let result = EncryptedRecord::try_from(truncated);
         assert!(matches!(
             result,
-            Err(RecordDecodeError::Truncated("EncryptedRecord"))
+            Err(RecordDecodeError::Truncated("EncryptedRecordFrame"))
         ));
     }
 
@@ -724,7 +724,7 @@ mod tests {
         let result = EncryptedRecord::try_from(Bytes::new());
         assert!(matches!(
             result,
-            Err(RecordDecodeError::Truncated("EncryptedRecord"))
+            Err(RecordDecodeError::Truncated("EncryptedRecordSuiteId"))
         ));
     }
 
@@ -848,7 +848,7 @@ mod tests {
     #[test]
     fn rejects_truncated_layout() {
         let err = EncryptedRecord::try_from(Bytes::from_static(b"\x01tiny")).unwrap_err();
-        assert_eq!(err, RecordDecodeError::Truncated("EncryptedRecord"));
+        assert_eq!(err, RecordDecodeError::Truncated("EncryptedRecordFrame"));
     }
 
     #[test]
