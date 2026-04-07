@@ -33,7 +33,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 
 use super::{
-    Encodable, EnvelopeRecord, InternalRecordError, Metered, MeteredSize, Record, SequencedRecord,
+    Encodable, EnvelopeRecord, Metered, MeteredSize, Record, RecordDecodeError, SequencedRecord,
     StoredRecord, StoredSequencedRecord,
 };
 use crate::{
@@ -50,14 +50,6 @@ const SUITE_ID_LEN: usize = 1;
 const SUITE_ID_AEGIS256_V1: u8 = 0x01;
 const SUITE_ID_AES256GCM_V1: u8 = 0x02;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum EncryptedRecordError {
-    #[error("truncated ciphertext")]
-    Truncated,
-    #[error("invalid ciphertext suite id: {0:#04x}")]
-    InvalidSuiteId(u8),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordDecryptionError {
     #[error("ciphertext algorithm mismatch")]
@@ -72,7 +64,7 @@ pub enum RecordDecryptionError {
     #[error("decrypted record metered size mismatch: stored {stored}, actual {actual}")]
     MeteredSizeMismatch { stored: usize, actual: usize },
     #[error("malformed decrypted record: {0}")]
-    MalformedDecryptedRecord(InternalRecordError),
+    MalformedDecryptedRecord(RecordDecodeError),
 }
 
 fn malformed_encrypted_record() -> RecordDecryptionError {
@@ -129,11 +121,14 @@ impl EncryptedRecord {
 }
 
 impl EncryptionAlgorithm {
-    const fn try_from_suite_id(suite_id: u8) -> Result<Self, EncryptedRecordError> {
+    const fn try_from_suite_id(suite_id: u8) -> Result<Self, RecordDecodeError> {
         match suite_id {
             SUITE_ID_AEGIS256_V1 => Ok(Self::Aegis256),
             SUITE_ID_AES256GCM_V1 => Ok(Self::Aes256Gcm),
-            _ => Err(EncryptedRecordError::InvalidSuiteId(suite_id)),
+            _ => Err(RecordDecodeError::InvalidValue(
+                "EncryptedRecord",
+                "invalid ciphertext suite id",
+            )),
         }
     }
 
@@ -195,18 +190,18 @@ impl Encodable for EncryptedRecord {
 }
 
 impl TryFrom<Bytes> for EncryptedRecord {
-    type Error = EncryptedRecordError;
+    type Error = RecordDecodeError;
 
     fn try_from(encoded: Bytes) -> Result<Self, Self::Error> {
         if encoded.len() < SUITE_ID_LEN {
-            return Err(EncryptedRecordError::Truncated);
+            return Err(RecordDecodeError::Truncated("EncryptedRecord"));
         }
 
         let algorithm = EncryptionAlgorithm::try_from_suite_id(encoded[0])?;
         let nonce_len = algorithm.nonce_len();
         let tag_len = algorithm.tag_len();
         if encoded.len() < SUITE_ID_LEN + nonce_len + tag_len {
-            return Err(EncryptedRecordError::Truncated);
+            return Err(RecordDecodeError::Truncated("EncryptedRecord"));
         }
 
         Ok(Self::new(encoded, algorithm))
@@ -717,7 +712,10 @@ mod tests {
         let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let truncated = ciphertext.to_bytes().slice(..4);
         let result = EncryptedRecord::try_from(truncated);
-        assert!(matches!(result, Err(EncryptedRecordError::Truncated)));
+        assert!(matches!(
+            result,
+            Err(RecordDecodeError::Truncated("EncryptedRecord"))
+        ));
     }
 
     #[test]
@@ -726,14 +724,20 @@ mod tests {
         let result = EncryptedRecord::try_from(body);
         assert!(matches!(
             result,
-            Err(EncryptedRecordError::InvalidSuiteId(0xFF))
+            Err(RecordDecodeError::InvalidValue(
+                "EncryptedRecord",
+                "invalid ciphertext suite id"
+            ))
         ));
     }
 
     #[test]
     fn empty_body_fails() {
         let result = EncryptedRecord::try_from(Bytes::new());
-        assert!(matches!(result, Err(EncryptedRecordError::Truncated)));
+        assert!(matches!(
+            result,
+            Err(RecordDecodeError::Truncated("EncryptedRecord"))
+        ));
     }
 
     #[test]
@@ -781,7 +785,10 @@ mod tests {
         let result = EncryptedRecord::try_from(Bytes::from(ciphertext));
         assert!(matches!(
             result,
-            Err(EncryptedRecordError::InvalidSuiteId(0xFF))
+            Err(RecordDecodeError::InvalidValue(
+                "EncryptedRecord",
+                "invalid ciphertext suite id"
+            ))
         ));
     }
 
@@ -845,13 +852,16 @@ mod tests {
     #[test]
     fn rejects_invalid_suite_id() {
         let err = EncryptedRecord::try_from(Bytes::from_static(b"\xFFpayload")).unwrap_err();
-        assert_eq!(err, EncryptedRecordError::InvalidSuiteId(0xFF));
+        assert_eq!(
+            err,
+            RecordDecodeError::InvalidValue("EncryptedRecord", "invalid ciphertext suite id")
+        );
     }
 
     #[test]
     fn rejects_truncated_layout() {
         let err = EncryptedRecord::try_from(Bytes::from_static(b"\x01tiny")).unwrap_err();
-        assert_eq!(err, EncryptedRecordError::Truncated);
+        assert_eq!(err, RecordDecodeError::Truncated("EncryptedRecord"));
     }
 
     #[test]

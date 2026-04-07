@@ -11,8 +11,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use command::CommandRecord;
 use command::{CommandOp, CommandPayloadError};
 pub use encryption::{
-    EncryptedRecord, EncryptedRecordError, RecordDecryptionError, decode_stored_record,
-    decode_stored_sequenced_record, decrypt_read_batch, encrypt_append_input, to_stored_records,
+    EncryptedRecord, RecordDecryptionError, decode_stored_record, decode_stored_sequenced_record,
+    decrypt_read_batch, encrypt_append_input, to_stored_records,
 };
 use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
@@ -53,7 +53,7 @@ impl DeepSize for StreamPosition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum InternalRecordError {
+pub enum RecordDecodeError {
     #[error("truncated: {0}")]
     Truncated(&'static str),
     #[error("invalid value [{0}]: {1}")]
@@ -281,19 +281,17 @@ impl From<Record> for Metered<StoredRecord> {
     }
 }
 
-pub fn decode_if_command_record(
-    record: &[u8],
-) -> Result<Option<CommandRecord>, InternalRecordError> {
+pub fn decode_if_command_record(record: &[u8]) -> Result<Option<CommandRecord>, RecordDecodeError> {
     if record.is_empty() {
-        return Err(InternalRecordError::Truncated("MagicByte"));
+        return Err(RecordDecodeError::Truncated("MagicByte"));
     }
     let magic_byte = MagicByte::try_from(record[0])
-        .map_err(|msg| InternalRecordError::InvalidValue("MagicByte", msg))?;
+        .map_err(|msg| RecordDecodeError::InvalidValue("MagicByte", msg))?;
     match magic_byte.record_type {
         RecordType::Command => {
             let offset = 1 + magic_byte.metered_size_varlen as usize;
             if record.len() < offset {
-                return Err(InternalRecordError::Truncated("MeteredSize"));
+                return Err(RecordDecodeError::Truncated("MeteredSize"));
             }
             Ok(Some(CommandRecord::try_from(&record[offset..])?))
         }
@@ -412,18 +410,18 @@ impl Metered<&StoredRecord> {
 }
 
 impl TryFrom<Bytes> for Metered<StoredRecord> {
-    type Error = InternalRecordError;
+    type Error = RecordDecodeError;
 
     fn try_from(mut buf: Bytes) -> Result<Self, Self::Error> {
         if buf.is_empty() {
-            return Err(InternalRecordError::Truncated("MagicByte"));
+            return Err(RecordDecodeError::Truncated("MagicByte"));
         }
         let magic_byte = MagicByte::try_from(buf.get_u8())
-            .map_err(|msg| InternalRecordError::InvalidValue("MagicByte", msg))?;
+            .map_err(|msg| RecordDecodeError::InvalidValue("MagicByte", msg))?;
 
         let metered_size =
             buf.try_get_uint(magic_byte.metered_size_varlen as usize)
-                .map_err(|_| InternalRecordError::Truncated("MeteredSize"))? as usize;
+                .map_err(|_| RecordDecodeError::Truncated("MeteredSize"))? as usize;
 
         Ok(Self::with_size(
             metered_size,
@@ -434,34 +432,23 @@ impl TryFrom<Bytes> for Metered<StoredRecord> {
                 RecordType::Envelope => {
                     StoredRecord::Plaintext(Record::Envelope(EnvelopeRecord::try_from(buf)?))
                 }
-                RecordType::EncryptedEnvelope => StoredRecord::encrypted(
-                    EncryptedRecord::try_from(buf).map_err(|err| match err {
-                        EncryptedRecordError::Truncated => {
-                            InternalRecordError::Truncated("EncryptedRecord")
-                        }
-                        EncryptedRecordError::InvalidSuiteId(_) => {
-                            InternalRecordError::InvalidValue(
-                                "EncryptedRecord",
-                                "invalid ciphertext suite id",
-                            )
-                        }
-                    })?,
-                    metered_size,
-                ),
+                RecordType::EncryptedEnvelope => {
+                    StoredRecord::encrypted(EncryptedRecord::try_from(buf)?, metered_size)
+                }
             },
         ))
     }
 }
 
 impl TryFrom<Bytes> for Metered<Record> {
-    type Error = InternalRecordError;
+    type Error = RecordDecodeError;
 
     fn try_from(buf: Bytes) -> Result<Self, Self::Error> {
         let stored: Metered<StoredRecord> = buf.try_into()?;
         let size = stored.metered_size();
         match stored.into_inner() {
             StoredRecord::Plaintext(record) => Ok(record),
-            StoredRecord::Encrypted { .. } => Err(InternalRecordError::InvalidValue(
+            StoredRecord::Encrypted { .. } => Err(RecordDecodeError::InvalidValue(
                 "RecordType",
                 "encrypted envelope requires decryption",
             )),
@@ -713,7 +700,7 @@ mod test {
         // Magic byte: Envelope (0b0000_0010), metered_size_varlen = 1 → expects 1 more byte.
         let truncated = Bytes::from_static(&[0b0000_0010]);
         let result: Result<Metered<Record>, _> = truncated.try_into();
-        assert_eq!(result, Err(InternalRecordError::Truncated("MeteredSize")));
+        assert_eq!(result, Err(RecordDecodeError::Truncated("MeteredSize")));
     }
 
     #[test]

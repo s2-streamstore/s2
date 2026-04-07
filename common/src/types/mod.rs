@@ -66,12 +66,12 @@ impl From<resources::StartAfterLessThanPrefixError> for ValidationError {
 #[cfg(test)]
 mod tests {
     use super::ValidationError;
-    use crate::record::{InternalRecordError, RecordDecryptionError};
+    use crate::record::{RecordDecodeError, RecordDecryptionError};
 
     #[test]
     fn record_decryption_error_conversion_hides_internal_record_details() {
         let err: ValidationError = RecordDecryptionError::MalformedDecryptedRecord(
-            InternalRecordError::InvalidValue("HeaderFlag", "reserved bit set"),
+            RecordDecodeError::InvalidValue("HeaderFlag", "reserved bit set"),
         )
         .into();
 

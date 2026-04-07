@@ -4,7 +4,7 @@ use bytes::{BufMut, Bytes};
 use compact_str::CompactString;
 use enum_ordinalize::Ordinalize;
 
-use super::{Encodable, FencingTokenTooLongError, InternalRecordError, fencing::FencingToken};
+use super::{Encodable, FencingTokenTooLongError, RecordDecodeError, fencing::FencingToken};
 use crate::{deep_size::DeepSize, record::SeqNum};
 
 pub const COMMAND_ID_FENCE: &[u8] = b"fence";
@@ -92,16 +92,14 @@ impl CommandRecord {
 }
 
 impl TryFrom<&[u8]> for CommandRecord {
-    type Error = InternalRecordError;
+    type Error = RecordDecodeError;
 
     fn try_from(record: &[u8]) -> Result<Self, Self::Error> {
         if record.is_empty() {
-            return Err(InternalRecordError::Truncated("CommandOrdinal"));
+            return Err(RecordDecodeError::Truncated("CommandOrdinal"));
         }
-        let op = CommandOp::from_ordinal(record[0]).ok_or(InternalRecordError::InvalidValue(
-            "CommandOrdinal",
-            "unknown",
-        ))?;
+        let op = CommandOp::from_ordinal(record[0])
+            .ok_or(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))?;
         Self::try_from_parts(op, &record[1..]).map_err(Into::into)
     }
 }
@@ -137,17 +135,17 @@ pub enum CommandPayloadError {
     TrimPointSize(usize),
 }
 
-impl From<CommandPayloadError> for InternalRecordError {
+impl From<CommandPayloadError> for RecordDecodeError {
     fn from(e: CommandPayloadError) -> Self {
         match e {
             CommandPayloadError::InvalidUtf8(_) => {
-                InternalRecordError::InvalidValue("CommandPayload", "fencing token not valid utf8")
+                RecordDecodeError::InvalidValue("CommandPayload", "fencing token not valid utf8")
             }
             CommandPayloadError::FencingTokenTooLong(_) => {
-                InternalRecordError::InvalidValue("CommandPayload", "fencing token too long")
+                RecordDecodeError::InvalidValue("CommandPayload", "fencing token too long")
             }
             CommandPayloadError::TrimPointSize(_) => {
-                InternalRecordError::InvalidValue("CommandPayload", "trim point size")
+                RecordDecodeError::InvalidValue("CommandPayload", "trim point size")
             }
         }
     }
@@ -238,18 +236,15 @@ mod tests {
         let try_convert = |raw: &[u8]| CommandRecord::try_from(raw);
         assert_eq!(
             try_convert(&[]),
-            Err(InternalRecordError::Truncated("CommandOrdinal"))
+            Err(RecordDecodeError::Truncated("CommandOrdinal"))
         );
         assert_eq!(
             try_convert(&[0xff]),
-            Err(InternalRecordError::InvalidValue(
-                "CommandOrdinal",
-                "unknown"
-            ))
+            Err(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))
         );
         assert_eq!(
             try_convert(&[CommandOp::Fence.ordinal(), 0xff, 0xff]),
-            Err(InternalRecordError::InvalidValue(
+            Err(RecordDecodeError::InvalidValue(
                 "CommandPayload",
                 "fencing token not valid utf8"
             ))

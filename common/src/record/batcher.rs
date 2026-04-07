@@ -175,8 +175,8 @@ mod tests {
         caps,
         read_extent::{ReadLimit, ReadUntil},
         record::{
-            CommandRecord, Encodable, EnvelopeRecord, InternalRecordError, Metered, MeteredExt,
-            MeteredSize, Record, SeqNum, Sequenced, SequencedRecord, StoredRecord,
+            CommandRecord, Encodable, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record,
+            RecordDecodeError, SeqNum, Sequenced, SequencedRecord, StoredRecord,
             StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord, StreamPosition,
             Timestamp,
         },
@@ -211,19 +211,19 @@ mod tests {
 
     fn to_iter(
         records: Vec<StoredSequencedRecord>,
-    ) -> impl Iterator<Item = Result<Metered<StoredSequencedRecord>, InternalRecordError>> {
+    ) -> impl Iterator<Item = Result<Metered<StoredSequencedRecord>, RecordDecodeError>> {
         records.into_iter().map(Metered::from).map(Ok)
     }
 
     fn to_logical_iter(
         records: Vec<SequencedRecord>,
-    ) -> impl Iterator<Item = Result<Metered<SequencedRecord>, InternalRecordError>> {
+    ) -> impl Iterator<Item = Result<Metered<SequencedRecord>, RecordDecodeError>> {
         records.into_iter().map(Metered::from).map(Ok)
     }
 
     fn to_stored_bytes_iter(
         records: Vec<StoredSequencedRecord>,
-    ) -> impl Iterator<Item = Result<StoredSequencedBytes, InternalRecordError>> {
+    ) -> impl Iterator<Item = Result<StoredSequencedBytes, RecordDecodeError>> {
         records
             .into_iter()
             .map(|record| {
@@ -415,17 +415,17 @@ mod tests {
             .next()
             .expect("error expected")
             .expect_err("expected decode error");
-        assert!(matches!(error, InternalRecordError::Truncated("MagicByte")));
+        assert!(matches!(error, RecordDecodeError::Truncated("MagicByte")));
         assert!(batcher.next().is_none());
     }
 
     #[test]
     fn surfaces_iterator_errors_immediately() {
         let iterator = StoredRecordIterator::new(std::iter::once::<
-            Result<StoredSequencedBytes, InternalRecordError>,
-        >(Err(
-            InternalRecordError::InvalidValue("test", "boom"),
-        )));
+            Result<StoredSequencedBytes, RecordDecodeError>,
+        >(Err(RecordDecodeError::InvalidValue(
+            "test", "boom",
+        ))));
         let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
         let error = batcher
@@ -434,7 +434,7 @@ mod tests {
             .expect_err("expected iterator error");
         assert!(matches!(
             error,
-            InternalRecordError::InvalidValue("test", "boom")
+            RecordDecodeError::InvalidValue("test", "boom")
         ));
         assert!(batcher.next().is_none());
     }

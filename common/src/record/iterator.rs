@@ -1,7 +1,7 @@
 use std::iter::FusedIterator;
 
 use super::{
-    InternalRecordError, Metered, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+    Metered, RecordDecodeError, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
 };
 
 pub struct StoredRecordIterator<I> {
@@ -17,9 +17,9 @@ impl<I> StoredRecordIterator<I> {
 impl<I, E> Iterator for StoredRecordIterator<I>
 where
     I: Iterator<Item = Result<StoredSequencedBytes, E>>,
-    E: std::fmt::Debug + Into<InternalRecordError>,
+    E: std::fmt::Debug + Into<RecordDecodeError>,
 {
-    type Item = Result<Metered<StoredSequencedRecord>, InternalRecordError>;
+    type Item = Result<Metered<StoredSequencedRecord>, RecordDecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|result| {
@@ -33,7 +33,7 @@ where
 impl<I, E> FusedIterator for StoredRecordIterator<I>
 where
     I: FusedIterator<Item = Result<StoredSequencedBytes, E>>,
-    E: std::fmt::Debug + Into<InternalRecordError>,
+    E: std::fmt::Debug + Into<RecordDecodeError>,
 {
 }
 
@@ -84,7 +84,7 @@ mod tests {
 
     fn to_stored_bytes_iter(
         records: Vec<Metered<StoredSequencedRecord>>,
-    ) -> impl Iterator<Item = Result<StoredSequencedBytes, InternalRecordError>> {
+    ) -> impl Iterator<Item = Result<StoredSequencedBytes, RecordDecodeError>> {
         records
             .into_iter()
             .map(|record| {
@@ -143,24 +143,24 @@ mod tests {
             Bytes::new(),
         );
         let mut iter = StoredRecordIterator::new(std::iter::once::<
-            Result<StoredSequencedBytes, InternalRecordError>,
+            Result<StoredSequencedBytes, RecordDecodeError>,
         >(Ok(invalid_data)));
 
         let error = iter
             .next()
             .expect("error expected")
             .expect_err("expected error");
-        assert!(matches!(error, InternalRecordError::Truncated("MagicByte")));
+        assert!(matches!(error, RecordDecodeError::Truncated("MagicByte")));
         assert!(iter.next().is_none());
     }
 
     #[test]
     fn stored_iterator_preserves_source_errors() {
         let mut iter = StoredRecordIterator::new(std::iter::once::<
-            Result<StoredSequencedBytes, InternalRecordError>,
-        >(Err(
-            InternalRecordError::InvalidValue("test", "boom"),
-        )));
+            Result<StoredSequencedBytes, RecordDecodeError>,
+        >(Err(RecordDecodeError::InvalidValue(
+            "test", "boom",
+        ))));
 
         let error = iter
             .next()
@@ -168,7 +168,7 @@ mod tests {
             .expect_err("expected error");
         assert!(matches!(
             error,
-            InternalRecordError::InvalidValue("test", "boom")
+            RecordDecodeError::InvalidValue("test", "boom")
         ));
     }
 }
