@@ -258,6 +258,7 @@ pub async fn read(
                             let (_, body) = err.to_response().to_parts();
                             yield v1t::stream::sse::error_event(body);
                             errored = true;
+                            break;
                         }
                     }
                 }
@@ -598,7 +599,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sse_read_with_plain_header_emits_error_event() {
+    async fn sse_read_with_plain_header_emits_error_event_and_terminates() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
         let (app, backend, basin, stream) = setup_app("read-sse-plain").await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
@@ -607,7 +608,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(read_uri(&stream))
+                    .uri(format!("/v1/streams/{stream}/records?seq_num=0"))
                     .header(BASIN_HEADER.as_str(), basin.as_ref())
                     .header(header::ACCEPT, "text/event-stream")
                     .header(
@@ -621,13 +622,19 @@ mod tests {
             .expect("sse read request should complete");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("sse body");
+        let body = tokio::time::timeout(
+            Duration::from_secs(1),
+            body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("sse body should terminate after the first error event")
+        .expect("sse body");
         let body = String::from_utf8(body.to_vec()).expect("utf8 sse body");
         assert!(body.contains("event: error"));
         assert!(body.contains("\"code\":\"invalid\""));
         assert!(body.contains("ciphertext algorithm mismatch"));
+        assert!(!body.contains("event: ping"));
+        assert!(!body.contains("[DONE]"));
     }
 
     #[tokio::test]

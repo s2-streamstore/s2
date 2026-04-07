@@ -283,6 +283,18 @@ impl<T> IntoIterator for AppendRecordBatch<T> {
     }
 }
 
+fn try_collect_append_record_batch<T>(
+    records: impl IntoIterator<Item = AppendRecord<T>>,
+) -> Result<AppendRecordBatch<T>, &'static str> {
+    let records = records.into_iter();
+    let (cap_lower, cap_upper) = records.size_hint();
+    let mut metered_records = Metered::with_capacity(cap_upper.unwrap_or(cap_lower));
+    for record in records {
+        metered_records.push(Metered::from(record));
+    }
+    AppendRecordBatch::try_from(metered_records)
+}
+
 pub type StoredAppendRecord = AppendRecord<StoredRecord>;
 pub type StoredAppendRecordParts = AppendRecordParts<StoredRecord>;
 pub type StoredAppendRecordBatch = AppendRecordBatch<StoredRecord>;
@@ -309,11 +321,7 @@ impl From<AppendRecord<Record>> for AppendRecord<StoredRecord> {
 
 impl From<AppendRecordBatch<Record>> for AppendRecordBatch<StoredRecord> {
     fn from(records: AppendRecordBatch<Record>) -> Self {
-        let records = records
-            .into_iter()
-            .map(AppendRecord::<StoredRecord>::from)
-            .collect::<Vec<_>>();
-        Self::try_from(records)
+        try_collect_append_record_batch(records.into_iter().map(AppendRecord::<StoredRecord>::from))
             .expect("converting an append batch to stored form should preserve invariants")
     }
 }
@@ -332,23 +340,19 @@ impl AppendInput<Record> {
             match_seq_num,
             fencing_token,
         } = self;
-        let records = records
-            .into_iter()
-            .map(|record| {
-                let AppendRecordParts { timestamp, record } = record.into();
-                let metered_size = record.metered_size();
-                let record = encrypt_record(record, encryption, aad);
-                debug_assert_eq!(
-                    record.metered_size(),
-                    metered_size,
-                    "record encryption should preserve metered size"
-                );
-                AppendRecord::try_from(AppendRecordParts { timestamp, record })
-                    .expect("record encryption should preserve append record invariants")
-            })
-            .collect::<Vec<_>>();
-        let records = AppendRecordBatch::try_from(records)
-            .expect("record encryption should preserve append batch invariants");
+        let records = try_collect_append_record_batch(records.into_iter().map(|record| {
+            let AppendRecordParts { timestamp, record } = record.into();
+            let metered_size = record.metered_size();
+            let record = encrypt_record(record, encryption, aad);
+            debug_assert_eq!(
+                record.metered_size(),
+                metered_size,
+                "record encryption should preserve metered size"
+            );
+            AppendRecord::try_from(AppendRecordParts { timestamp, record })
+                .expect("record encryption should preserve append record invariants")
+        }))
+        .expect("record encryption should preserve append batch invariants");
 
         AppendInput {
             records,
@@ -367,12 +371,10 @@ impl From<AppendInput<Record>> for AppendInput<StoredRecord> {
             match_seq_num,
             fencing_token,
         } = value;
-        let records = records
-            .into_iter()
-            .map(AppendRecord::<StoredRecord>::from)
-            .collect::<Vec<_>>();
-        let records = AppendRecordBatch::try_from(records)
-            .expect("converting an append input to stored form should preserve invariants");
+        let records = try_collect_append_record_batch(
+            records.into_iter().map(AppendRecord::<StoredRecord>::from),
+        )
+        .expect("converting an append input to stored form should preserve invariants");
         AppendInput {
             records,
             match_seq_num,
@@ -585,6 +587,41 @@ mod test {
         };
 
         let mapped = input.encrypt(&crate::encryption::EncryptionConfig::Plain, &[]);
+
+        assert_eq!(mapped.match_seq_num, Some(7));
+        assert_eq!(
+            mapped.fencing_token.as_ref().map(|token| token.as_ref()),
+            Some("fence")
+        );
+        let record: AppendRecordParts<StoredRecord> =
+            mapped.records.into_iter().next().unwrap().into();
+        assert_eq!(record.timestamp, Some(42));
+        assert!(matches!(
+            record.record.into_inner(),
+            StoredRecord::Plaintext(_)
+        ));
+    }
+
+    #[test]
+    fn append_input_into_stored_preserves_metadata() {
+        let record = Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
+        );
+        let input = AppendInput {
+            records: vec![
+                AppendRecord::try_from(AppendRecordParts {
+                    timestamp: Some(42),
+                    record: record.metered(),
+                })
+                .unwrap(),
+            ]
+            .try_into()
+            .unwrap(),
+            match_seq_num: Some(7),
+            fencing_token: Some("fence".parse().unwrap()),
+        };
+
+        let mapped: StoredAppendInput = input.into();
 
         assert_eq!(mapped.match_seq_num, Some(7));
         assert_eq!(
