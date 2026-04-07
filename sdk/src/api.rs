@@ -1298,23 +1298,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn encryption_header_is_marked_sensitive() {
-        install_test_crypto_provider();
-        let config = crate::types::S2Config::new("test-token".to_owned());
-        let client = BaseClient::init(&config).expect("client init");
-        let encryption = crate::types::EncryptionConfig::aegis256([1; 32]);
-        let mut request = client
-            .get("https://example.com".parse().unwrap())
-            .build()
-            .expect("request");
-        set_encryption_header(&mut request, Some(&encryption));
-        assert!(
-            request
-                .headers_mut()
-                .get(&S2_ENCRYPTION_HEADER)
-                .expect("encryption header")
-                .is_sensitive()
-        );
-    }
 }

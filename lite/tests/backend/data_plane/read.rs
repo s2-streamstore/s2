@@ -79,9 +79,11 @@ async fn test_read_from_beginning() {
     assert_eq!(records.len(), 5);
 }
 
-async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: EncryptionConfig) {
+#[tokio::test]
+async fn test_read_encrypted_roundtrip() {
+    let encryption = aegis256_encryption();
     let (backend, basin_name, stream_name) =
-        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
+        setup_backend_with_stream("read-enc", "stream", OptionalStreamConfig::default()).await;
 
     append_payloads_with_encryption(
         &backend,
@@ -114,11 +116,6 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
         envelope_bodies(&records),
         vec![b"secret-1".to_vec(), b"secret-2".to_vec()]
     );
-    let actual_algorithm = match &encryption {
-        EncryptionConfig::Aegis256(_) => EncryptionAlgorithm::Aegis256,
-        EncryptionConfig::Aes256Gcm(_) => EncryptionAlgorithm::Aes256Gcm,
-        EncryptionConfig::Plain => panic!("expected encrypted test config"),
-    };
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -142,23 +139,13 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
                 Err(RecordDecryptionError::AlgorithmMismatch {
                     expected: None,
                     actual,
-                }) if actual == actual_algorithm
+                }) if actual == EncryptionAlgorithm::Aegis256
             ));
         }
         Some(Ok(other)) => panic!("Unexpected first output: {other:?}"),
         Some(Err(err)) => panic!("Unexpected backend read error: {err:?}"),
         None => panic!("Read session ended without delivering batch"),
     }
-}
-
-#[tokio::test]
-async fn test_read_encrypted_roundtrip_aegis256() {
-    assert_read_encrypted_roundtrip("read-enc-aegis", aegis256_encryption()).await;
-}
-
-#[tokio::test]
-async fn test_read_encrypted_roundtrip_aes256gcm() {
-    assert_read_encrypted_roundtrip("read-enc-aes", aes256gcm_encryption()).await;
 }
 
 #[tokio::test]

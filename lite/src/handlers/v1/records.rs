@@ -474,18 +474,24 @@ mod tests {
     };
     use bytes::{Bytes, BytesMut};
     use bytesize::ByteSize;
+    use futures::StreamExt as _;
+    use prost::Message as _;
     use s2_api::v1::stream::{
         proto,
         s2s::{FrameDecoder, SessionMessage, TerminalMessage},
     };
     use s2_common::{
-        encryption::{EncryptionConfig, S2_ENCRYPTION_HEADER},
-        record::{EnvelopeRecord, Metered, Record},
+        encryption::{EncryptionAlgorithm, EncryptionConfig, S2_ENCRYPTION_HEADER},
+        read_extent::{ReadLimit, ReadUntil},
+        record::{EnvelopeRecord, Metered, Record, RecordDecryptionError},
         types::{
             basin::{BASIN_HEADER, BasinName},
             config::{BasinConfig, OptionalStreamConfig},
             resources::CreateMode,
-            stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName},
+            stream::{
+                AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
+                ReadStart, StoredReadSessionOutput, StreamName,
+            },
         },
     };
     use slatedb::{Db, config::Settings, object_store::memory::InMemory};
@@ -571,6 +577,87 @@ mod tests {
 
     fn read_uri(stream: &StreamName) -> String {
         format!("/v1/streams/{stream}/records?seq_num=0&wait=0")
+    }
+
+    #[tokio::test]
+    async fn unary_append_with_encryption_header_persists_encrypted_record() {
+        let encryption = EncryptionConfig::aegis256([0x42; 32]);
+        let (app, backend, basin, stream) = setup_app("append-unary-encrypted").await;
+
+        let input = proto::AppendInput {
+            records: vec![proto::AppendRecord {
+                timestamp: None,
+                headers: vec![],
+                body: Bytes::from_static(b"secret"),
+            }],
+            match_seq_num: None,
+            fencing_token: None,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/streams/{stream}/records"))
+                    .header(BASIN_HEADER.as_str(), basin.as_ref())
+                    .header(header::CONTENT_TYPE, "application/protobuf")
+                    .header(header::ACCEPT, "application/protobuf")
+                    .header(S2_ENCRYPTION_HEADER.as_str(), encryption.to_header_value())
+                    .body(Body::from(input.encode_to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .expect("append request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("append ack body");
+        let ack = proto::AppendAck::decode(body).expect("append ack");
+        assert_eq!(ack.end.as_ref().map(|pos| pos.seq_num), Some(1));
+
+        let session = backend
+            .read(
+                basin.clone(),
+                stream.clone(),
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Unbounded,
+                    wait: Some(Duration::ZERO),
+                },
+            )
+            .await
+            .expect("create stored read session");
+        let mut session = Box::pin(session);
+        let stored_batch = match session.next().await {
+            Some(Ok(StoredReadSessionOutput::Batch(batch))) => batch,
+            Some(Ok(other)) => panic!("unexpected first output: {other:?}"),
+            Some(Err(err)) => panic!("unexpected read error: {err:?}"),
+            None => panic!("read session ended without batch"),
+        };
+
+        assert!(matches!(
+            stored_batch.clone().decrypt(&EncryptionConfig::Plain, &[]),
+            Err(RecordDecryptionError::AlgorithmMismatch {
+                expected: None,
+                actual: EncryptionAlgorithm::Aegis256,
+            })
+        ));
+
+        let stream_id = StreamId::new(&basin, &stream);
+        let batch = stored_batch
+            .decrypt(&encryption, stream_id.as_bytes())
+            .expect("decrypt stored batch");
+        assert_eq!(batch.records.len(), 1);
+        let record = batch.records.first().expect("record");
+        let Record::Envelope(record) = record.inner() else {
+            panic!("expected envelope record");
+        };
+        assert_eq!(record.body().as_ref(), b"secret");
     }
 
     #[tokio::test]

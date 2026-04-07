@@ -51,10 +51,6 @@ pub fn aegis256_encryption() -> EncryptionConfig {
     EncryptionConfig::aegis256([0x42; 32])
 }
 
-pub fn aes256gcm_encryption() -> EncryptionConfig {
-    EncryptionConfig::aes256_gcm([0x24; 32])
-}
-
 pub fn create_test_record(body: Bytes) -> AppendRecord {
     create_test_record_with_optional_timestamp(body, None)
 }

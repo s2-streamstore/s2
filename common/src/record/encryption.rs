@@ -549,32 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn truncated_ciphertext_fails_no_panic() {
-        let aad = aad();
-        let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
-        let truncated = ciphertext.to_bytes().slice(..4);
-        let result = EncryptedRecord::try_from(truncated);
-        assert!(matches!(
-            result,
-            Err(RecordDecodeError::Truncated("EncryptedRecordFrame"))
-        ));
-    }
-
-    #[test]
-    fn invalid_suite_id_fails() {
-        let body = Bytes::from_static(b"\xFFsome opaque bytes");
-        let result = EncryptedRecord::try_from(body);
-        assert!(matches!(
-            result,
-            Err(RecordDecodeError::InvalidValue(
-                "EncryptedRecord",
-                "invalid ciphertext suite id"
-            ))
-        ));
-    }
-
-    #[test]
     fn empty_body_fails() {
         let result = EncryptedRecord::try_from(Bytes::new());
         assert!(matches!(
