@@ -2,7 +2,7 @@ use std::num::NonZeroU8;
 
 use bytes::{Buf, BufMut, Bytes};
 
-use super::{Encodable, Header, RecordDecodeError, RecordPartsError};
+use super::{Encodable, Header, MeteredSize, RecordDecodeError, RecordPartsError};
 use crate::deep_size::DeepSize;
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -34,6 +34,12 @@ impl std::fmt::Debug for EnvelopeRecord {
 impl DeepSize for EnvelopeRecord {
     fn deep_size(&self) -> usize {
         self.headers.deep_size() + self.body.deep_size()
+    }
+}
+
+impl MeteredSize for EnvelopeRecord {
+    fn metered_size(&self) -> usize {
+        8 + (2 * self.headers.len()) + self.encoding_info.headers_total_bytes + self.body.len()
     }
 }
 
@@ -271,7 +277,9 @@ mod test {
 
     use bytes::Bytes;
 
-    use super::{Encodable as _, EnvelopeRecord, Header, HeaderFlag, RecordDecodeError};
+    use super::{
+        Encodable as _, EnvelopeRecord, Header, HeaderFlag, MeteredSize, RecordDecodeError,
+    };
 
     fn roundtrip_parts(headers: Vec<Header>, body: Bytes) {
         let encoded: Bytes = EnvelopeRecord::try_from_parts(headers.clone(), body.clone())
@@ -331,6 +339,31 @@ mod test {
                 },
             ],
             Bytes::from("hello"),
+        );
+    }
+
+    #[test]
+    fn metered_size_uses_cached_header_bytes() {
+        let record = EnvelopeRecord::try_from_parts(
+            vec![
+                Header {
+                    name: Bytes::from("alpha"),
+                    value: Bytes::from("1"),
+                },
+                Header {
+                    name: Bytes::from("beta"),
+                    value: Bytes::from("two"),
+                },
+            ],
+            Bytes::from("body"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            record.metered_size(),
+            8 + (2 * record.headers().len())
+                + ("alpha".len() + "1".len() + "beta".len() + "two".len())
+                + "body".len()
         );
     }
 

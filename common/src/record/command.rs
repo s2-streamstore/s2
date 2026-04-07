@@ -4,7 +4,9 @@ use bytes::{BufMut, Bytes};
 use compact_str::CompactString;
 use enum_ordinalize::Ordinalize;
 
-use super::{Encodable, FencingTokenTooLongError, RecordDecodeError, fencing::FencingToken};
+use super::{
+    Encodable, FencingTokenTooLongError, MeteredSize, RecordDecodeError, fencing::FencingToken,
+};
 use crate::{deep_size::DeepSize, record::SeqNum};
 
 pub const COMMAND_ID_FENCE: &[u8] = b"fence";
@@ -53,6 +55,17 @@ impl DeepSize for CommandRecord {
             Self::Fence(token) => token.deep_size(),
             Self::Trim(seq_num) => seq_num.deep_size(),
         }
+    }
+}
+
+impl MeteredSize for CommandRecord {
+    fn metered_size(&self) -> usize {
+        8 + 2
+            + self.op().to_id().len()
+            + match self {
+                Self::Fence(token) => token.len(),
+                Self::Trim(trim_point) => size_of_val(trim_point),
+            }
     }
 }
 
@@ -219,6 +232,22 @@ mod tests {
         assert_eq!(
             CommandRecord::try_from_parts(CommandOp::Trim, payload),
             Err(CommandPayloadError::TrimPointSize(payload.len()))
+        );
+    }
+
+    #[test]
+    fn metered_size_is_computed_without_materializing_payload() {
+        let fence =
+            CommandRecord::Fence(FencingToken::try_from("fence-me".to_compact_string()).unwrap());
+        assert_eq!(
+            fence.metered_size(),
+            8 + 2 + CommandOp::Fence.to_id().len() + "fence-me".len()
+        );
+
+        let trim = CommandRecord::Trim(42);
+        assert_eq!(
+            trim.metered_size(),
+            8 + 2 + CommandOp::Trim.to_id().len() + size_of_val(&42u64)
         );
     }
 

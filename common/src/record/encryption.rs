@@ -176,9 +176,9 @@ pub fn encrypt_record(
     record: Metered<Record>,
     encryption: &EncryptionConfig,
     aad: &[u8],
-) -> StoredRecord {
+) -> Metered<StoredRecord> {
     let metered_size = record.metered_size();
-    match (record.into_inner(), encryption) {
+    let record = match (record.into_inner(), encryption) {
         (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
         (record @ Record::Envelope(_), EncryptionConfig::Plain) => StoredRecord::Plaintext(record),
         (Record::Envelope(envelope), EncryptionConfig::Aegis256(key)) => {
@@ -191,7 +191,8 @@ pub fn encrypt_record(
                 encrypt_payload(&envelope, EncryptionAlgorithm::Aes256Gcm, key.secret(), aad);
             StoredRecord::encrypted(encrypted, metered_size)
         }
-    }
+    };
+    Metered::with_size(metered_size, record)
 }
 
 fn encrypt_payload(
@@ -250,12 +251,13 @@ impl TryFrom<Bytes> for EncryptedRecord {
 }
 
 pub fn decrypt_stored_record(
-    record: StoredRecord,
+    record: Metered<StoredRecord>,
     encryption: &EncryptionConfig,
     aad: &[u8],
 ) -> Result<Metered<Record>, RecordDecryptionError> {
-    match record {
-        StoredRecord::Plaintext(record) => Ok(record.into()),
+    let metered_size = record.metered_size();
+    match record.into_inner() {
+        StoredRecord::Plaintext(record) => Ok(Metered::with_size(metered_size, record)),
         StoredRecord::Encrypted {
             metered_size,
             record: encrypted,
@@ -723,7 +725,7 @@ mod tests {
         );
         let StoredRecord::Encrypted {
             record: envelope, ..
-        } = record
+        } = record.into_inner()
         else {
             panic!("expected encrypted envelope record");
         };
@@ -738,7 +740,7 @@ mod tests {
         ));
 
         let decrypted = decrypt_stored_record(
-            record,
+            Metered::from(record),
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad(),
         )
@@ -748,6 +750,23 @@ mod tests {
             panic!("expected envelope record");
         };
         assert_eq!(record.body().as_ref(), b"legacy-plaintext");
+    }
+
+    #[test]
+    fn decrypt_stored_record_preserves_cached_size_for_plaintext() {
+        let record = StoredRecord::Plaintext(Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"legacy-plaintext"))
+                .unwrap(),
+        ));
+
+        let decrypted = decrypt_stored_record(
+            Metered::with_size(1234, record),
+            &test_encryption(EncryptionAlgorithm::Aegis256),
+            &aad(),
+        )
+        .unwrap();
+
+        assert_eq!(decrypted.metered_size(), 1234);
     }
 
     #[test]
@@ -764,7 +783,7 @@ mod tests {
         );
 
         let decrypted = decrypt_stored_record(
-            record,
+            Metered::from(record),
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         )
@@ -789,7 +808,7 @@ mod tests {
             &aad,
         );
 
-        let result = decrypt_stored_record(record, &EncryptionConfig::Plain, &aad);
+        let result = decrypt_stored_record(Metered::from(record), &EncryptionConfig::Plain, &aad);
 
         assert!(matches!(
             result,
@@ -821,7 +840,7 @@ mod tests {
         };
 
         let result = decrypt_stored_record(
-            StoredRecord::encrypted(record, metered_size + 1),
+            Metered::from(StoredRecord::encrypted(record, metered_size + 1)),
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         );
