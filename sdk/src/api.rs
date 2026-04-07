@@ -1188,12 +1188,6 @@ mod tests {
         )
     }
 
-    fn install_test_crypto_provider() {
-        // `cargo test --all-features` enables multiple rustls crypto backends,
-        // so unit tests must pick one explicitly before constructing clients.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    }
-
     #[test]
     fn api_error_has_no_side_effects() {
         // Server errors that guarantee no mutation.
@@ -1203,9 +1197,7 @@ mod tests {
         // Server errors that do NOT guarantee no mutation.
         assert!(!server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal").has_no_side_effects());
         assert!(!server_error(StatusCode::BAD_GATEWAY, "other").has_no_side_effects());
-        assert!(
-            !server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects()
-        );
+        assert!(!server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects());
     }
 
     #[test]
@@ -1269,7 +1261,6 @@ mod tests {
 
     #[tokio::test]
     async fn dns_error_message_is_clear() {
-        install_test_crypto_provider();
         let config = crate::types::S2Config::new("test-token".to_owned())
             .with_endpoints(
                 crate::types::S2Endpoints::new(
@@ -1296,5 +1287,4 @@ mod tests {
             "expected 'dns resolution' in error, got: {msg}"
         );
     }
-
 }
