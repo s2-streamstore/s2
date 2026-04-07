@@ -97,12 +97,6 @@ impl EncryptedRecord {
         &self.encoded[start..end]
     }
 
-    #[cfg(test)]
-    pub(crate) fn ciphertext_and_tag(&self) -> &[u8] {
-        let start = SUITE_ID_LEN + self.algorithm.nonce_len();
-        &self.encoded[start..]
-    }
-
     pub(crate) fn tag(&self) -> &[u8] {
         let start = self.encoded.len() - self.algorithm.tag_len();
         let end = self.encoded.len();
@@ -839,7 +833,6 @@ mod tests {
         assert_eq!(decoded.encoded[0], SUITE_ID_AES256GCM_V1);
         assert_eq!(decoded.nonce(), b"0123456789ab");
         assert_eq!(decoded.ciphertext(), b"ciphertext");
-        assert_eq!(decoded.ciphertext_and_tag(), b"ciphertext0123456789abcdef");
         assert_eq!(decoded.tag(), b"0123456789abcdef");
     }
 
