@@ -664,22 +664,17 @@ mod test {
         );
     }
 
-    #[rstest]
-    #[case::fence_empty(b"fence", b"")]
-    #[case::fence_uuid(b"fence", b"my-special-uuid")]
-    #[should_panic(expected = "FencingTokenTooLongError(49)")]
-    #[case::fence_too_long(b"fence", b"toolongtoolongtoolongtoolongtoolongtoolongtoolong")]
-    #[case::trim_0(b"trim", b"\x00\x00\x00\x00\x00\x00\x00\x00")]
-    #[should_panic(expected = "TrimPointSize(0)")]
-    #[case::trim_empty(b"trim", b"")]
-    #[should_panic(expected = "TrimPointSize(9)")]
-    #[case::trim_overflow(b"trim", b"\x00\x00\x00\x00\x00\x00\x00\x00\x00")]
-    fn command_records(#[case] op: &'static [u8], #[case] payload: &'static [u8]) {
+    fn command_parts(op: &'static [u8], payload: &'static [u8]) -> (Vec<Header>, Bytes) {
         let headers = vec![Header {
             name: Bytes::new(),
             value: Bytes::from_static(op),
         }];
         let body = Bytes::from_static(payload);
+        (headers, body)
+    }
+
+    fn assert_valid_command_record(op: &'static [u8], payload: &'static [u8]) {
+        let (headers, body) = command_parts(op, payload);
         let record = Record::try_from_parts(headers.clone(), body.clone()).unwrap();
         let record_metered = record.metered_size();
         match &record {
@@ -721,15 +716,56 @@ mod test {
     }
 
     #[rstest]
+    #[case::fence_empty(b"fence", b"")]
+    #[case::fence_uuid(b"fence", b"my-special-uuid")]
+    #[case::trim_0(b"trim", b"\x00\x00\x00\x00\x00\x00\x00\x00")]
+    fn valid_command_records(#[case] op: &'static [u8], #[case] payload: &'static [u8]) {
+        assert_valid_command_record(op, payload);
+    }
+
+    #[rstest]
+    #[case::fence_too_long(
+        b"fence",
+        b"toolongtoolongtoolongtoolongtoolongtoolongtoolong",
+        RecordPartsError::CommandPayload(
+            CommandOp::Fence,
+            CommandPayloadError::FencingTokenTooLong(FencingTokenTooLongError(49)),
+        )
+    )]
+    #[case::trim_empty(
+        b"trim",
+        b"",
+        RecordPartsError::CommandPayload(CommandOp::Trim, CommandPayloadError::TrimPointSize(0),)
+    )]
+    #[case::trim_overflow(
+        b"trim",
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        RecordPartsError::CommandPayload(CommandOp::Trim, CommandPayloadError::TrimPointSize(9),)
+    )]
+    fn invalid_command_records(
+        #[case] op: &'static [u8],
+        #[case] payload: &'static [u8],
+        #[case] expected: RecordPartsError,
+    ) {
+        let (headers, body) = command_parts(op, payload);
+        assert_eq!(Record::try_from_parts(headers, body), Err(expected));
+    }
+
+    #[rstest]
     #[case(0b0000_0010, MagicByte { record_type: RecordType::Envelope, metered_size_varlen: 1})]
     #[case(0b0001_0010, MagicByte { record_type: RecordType::Envelope, metered_size_varlen: 3})]
     #[case(0b0000_0011, MagicByte { record_type: RecordType::EncryptedEnvelope, metered_size_varlen: 1})]
     #[case(0b0000_1001, MagicByte { record_type: RecordType::Command, metered_size_varlen: 2})]
-    #[should_panic(expected = "invalid record type ordinal")]
-    #[case(0b0000_1101, MagicByte { record_type: RecordType::Command, metered_size_varlen: 2})]
-    fn magic_byte_parsing(#[case] as_u8: u8, #[case] magic_byte: MagicByte) {
+    fn valid_magic_byte_parsing(#[case] as_u8: u8, #[case] magic_byte: MagicByte) {
         assert_eq!(MagicByte::try_from(as_u8).unwrap(), magic_byte);
         assert_eq!(u8::from(magic_byte), as_u8);
+    }
+
+    #[rstest]
+    #[case(0b0000_1101, "invalid record type ordinal")]
+    #[case(0b0001_1001, "invalid metered_size_varlen")]
+    fn invalid_magic_byte_parsing(#[case] as_u8: u8, #[case] expected: &'static str) {
+        assert_eq!(MagicByte::try_from(as_u8), Err(expected));
     }
 
     #[test]

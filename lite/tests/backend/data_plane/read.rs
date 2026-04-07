@@ -8,12 +8,50 @@ use s2_common::{
     record::{MeteredSize, RecordDecryptionError, StreamPosition},
     types::{
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadSessionOutput},
+        stream::{
+            AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadBatch, StoredReadSessionOutput,
+        },
     },
 };
-use s2_lite::backend::error::{CheckTailError, ReadError, UnwrittenError};
+use s2_lite::backend::{
+    Backend,
+    error::{CheckTailError, ReadError, UnwrittenError},
+};
 
 use super::common::*;
+
+fn read_all_bounds() -> (ReadStart, ReadEnd) {
+    (
+        ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::ZERO),
+        },
+    )
+}
+
+async fn first_stored_batch(
+    backend: &Backend,
+    basin: &s2_common::types::basin::BasinName,
+    stream: &s2_common::types::stream::StreamName,
+) -> StoredReadBatch {
+    let (start, end) = read_all_bounds();
+    let read_session = backend
+        .read(basin.clone(), stream.clone(), start, end)
+        .await
+        .expect("Failed to create read session");
+    let mut read_session = Box::pin(read_session);
+    match read_session.next().await {
+        Some(Ok(StoredReadSessionOutput::Batch(batch))) => batch,
+        Some(Ok(other)) => panic!("Unexpected first output: {other:?}"),
+        Some(Err(err)) => panic!("Unexpected backend read error: {err:?}"),
+        None => panic!("Read session ended without delivering batch"),
+    }
+}
 
 #[tokio::test]
 async fn test_check_tail_scenarios() {
@@ -94,16 +132,7 @@ async fn test_read_encrypted_roundtrip() {
     )
     .await;
 
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Unbounded,
-        wait: Some(Duration::ZERO),
-    };
-
+    let (start, end) = read_all_bounds();
     let read_session = backend
         .read(basin_name.clone(), stream_name.clone(), start, end)
         .await
@@ -116,36 +145,35 @@ async fn test_read_encrypted_roundtrip() {
         envelope_bodies(&records),
         vec![b"secret-1".to_vec(), b"secret-2".to_vec()]
     );
+}
 
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Unbounded,
-        wait: Some(Duration::ZERO),
-    };
-    let read_session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create plaintext read session");
-    let mut read_session = Box::pin(read_session);
-    let first = read_session.next().await;
-    match first {
-        Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
-            assert!(matches!(
-                batch.decrypt(&EncryptionConfig::Plain, &[]),
-                Err(RecordDecryptionError::AlgorithmMismatch {
-                    expected: None,
-                    actual,
-                }) if actual == EncryptionAlgorithm::Aegis256
-            ));
-        }
-        Some(Ok(other)) => panic!("Unexpected first output: {other:?}"),
-        Some(Err(err)) => panic!("Unexpected backend read error: {err:?}"),
-        None => panic!("Read session ended without delivering batch"),
-    }
+#[tokio::test]
+async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
+    let encryption = aegis256_encryption();
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-enc-plain-mismatch",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads_with_encryption(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"secret-1", b"secret-2"],
+        &encryption,
+    )
+    .await;
+
+    let batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    assert!(matches!(
+        batch.decrypt(&EncryptionConfig::Plain, &[]),
+        Err(RecordDecryptionError::AlgorithmMismatch {
+            expected: None,
+            actual,
+        }) if actual == EncryptionAlgorithm::Aegis256
+    ));
 }
 
 #[tokio::test]
