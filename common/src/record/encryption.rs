@@ -69,6 +69,8 @@ pub enum RecordDecryptionError {
     UnexpectedEncryptedRecord,
     #[error("Decryption failed")]
     DecryptionFailed,
+    #[error("Invalid decrypted record metered size: stored {stored}, actual {actual}")]
+    MeteredSizeMismatch { stored: usize, actual: usize },
     #[error("Invalid decrypted record: {0}")]
     InvalidDecryptedRecord(String),
 }
@@ -311,9 +313,10 @@ pub fn decode_stored_record(
             let record = Record::Envelope(envelope);
             let actual_metered_size = record.metered_size();
             if metered_size != actual_metered_size {
-                return Err(RecordDecryptionError::InvalidDecryptedRecord(format!(
-                    "metered size mismatch: stored {metered_size}, actual {actual_metered_size}"
-                )));
+                return Err(RecordDecryptionError::MeteredSizeMismatch {
+                    stored: metered_size,
+                    actual: actual_metered_size,
+                });
             }
             Ok(Metered::with_size(metered_size, record))
         }
@@ -953,12 +956,10 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::InvalidDecryptedRecord(message))
-                if message == format!(
-                    "metered size mismatch: stored {}, actual {}",
-                    metered_size + 1,
-                    metered_size
-                )
+            Err(RecordDecryptionError::MeteredSizeMismatch {
+                stored,
+                actual
+            }) if stored == metered_size + 1 && actual == metered_size
         ));
     }
 }
