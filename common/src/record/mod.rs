@@ -52,7 +52,7 @@ impl DeepSize for StreamPosition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InternalRecordError {
     #[error("truncated: {0}")]
     Truncated(&'static str),

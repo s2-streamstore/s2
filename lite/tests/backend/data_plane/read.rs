@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::{EncryptionAlgorithm, EncryptionConfig},
     read_extent::{ReadLimit, ReadUntil},
     record::{MeteredSize, RecordDecryptionError, StreamPosition, decrypt_read_batch},
     types::{
@@ -114,6 +114,11 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
         envelope_bodies(&records),
         vec![b"secret-1".to_vec(), b"secret-2".to_vec()]
     );
+    let actual_algorithm = match &encryption {
+        EncryptionConfig::Aegis256(_) => EncryptionAlgorithm::Aegis256,
+        EncryptionConfig::Aes256Gcm(_) => EncryptionAlgorithm::Aes256Gcm,
+        EncryptionConfig::Plain => panic!("expected encrypted test config"),
+    };
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -134,7 +139,10 @@ async fn assert_read_encrypted_roundtrip(test_suffix: &str, encryption: Encrypti
         Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
             assert!(matches!(
                 decrypt_read_batch(batch, &EncryptionConfig::Plain, &[]),
-                Err(RecordDecryptionError::UnexpectedEncryptedRecord)
+                Err(RecordDecryptionError::AlgorithmMismatch {
+                    expected: None,
+                    actual,
+                }) if actual == actual_algorithm
             ));
         }
         Some(Ok(other)) => panic!("Unexpected first output: {other:?}"),

@@ -65,7 +65,7 @@ where
         Ok(StoredReadSessionOutput::Heartbeat(tail)) => Ok(ReadSessionOutput::Heartbeat(tail)),
         Ok(StoredReadSessionOutput::Batch(batch)) => decrypt_read_batch(batch, &encryption, &aad)
             .map(ReadSessionOutput::Batch)
-            .map_err(|e| ServiceError::Validation(ValidationError(e.to_string()))),
+            .map_err(|e| ServiceError::Validation(e.into())),
         Err(err) => Err(err.into()),
     })
 }

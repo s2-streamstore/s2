@@ -33,8 +33,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 
 use super::{
-    Encodable, EnvelopeRecord, Metered, MeteredSize, Record, SequencedRecord, StoredRecord,
-    StoredSequencedRecord,
+    Encodable, EnvelopeRecord, InternalRecordError, Metered, MeteredSize, Record, SequencedRecord,
+    StoredRecord, StoredSequencedRecord,
 };
 use crate::{
     deep_size::DeepSize,
@@ -58,21 +58,25 @@ pub enum EncryptedRecordError {
     InvalidSuiteId(u8),
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordDecryptionError {
-    #[error("Ciphertext algorithm mismatch: expected {expected}, actual {actual}")]
+    #[error("ciphertext algorithm mismatch")]
     AlgorithmMismatch {
-        expected: EncryptionAlgorithm,
+        expected: Option<EncryptionAlgorithm>,
         actual: EncryptionAlgorithm,
     },
-    #[error("Encrypted record encountered without decryption")]
-    UnexpectedEncryptedRecord,
-    #[error("Decryption failed")]
-    DecryptionFailed,
-    #[error("Invalid decrypted record metered size: stored {stored}, actual {actual}")]
+    #[error("record decryption failed")]
+    AuthenticationFailed,
+    #[error("malformed encrypted record")]
+    MalformedEncryptedRecord,
+    #[error("decrypted record metered size mismatch: stored {stored}, actual {actual}")]
     MeteredSizeMismatch { stored: usize, actual: usize },
-    #[error("Invalid decrypted record: {0}")]
-    InvalidDecryptedRecord(String),
+    #[error("malformed decrypted record: {0}")]
+    MalformedDecryptedRecord(InternalRecordError),
+}
+
+fn malformed_encrypted_record() -> RecordDecryptionError {
+    RecordDecryptionError::MalformedEncryptedRecord
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -216,9 +220,9 @@ fn payload_end(
 ) -> Result<usize, RecordDecryptionError> {
     let payload_end = encoded_len
         .checked_sub(tag_len)
-        .ok_or(RecordDecryptionError::DecryptionFailed)?;
+        .ok_or_else(malformed_encrypted_record)?;
     if payload_start > payload_end {
-        return Err(RecordDecryptionError::DecryptionFailed);
+        return Err(malformed_encrypted_record());
     }
     Ok(payload_end)
 }
@@ -230,7 +234,10 @@ pub(crate) fn decrypt_payload(
 ) -> Result<Bytes, RecordDecryptionError> {
     let algorithm = record.algorithm();
     match (encryption, algorithm) {
-        (EncryptionConfig::Plain, _) => Err(RecordDecryptionError::UnexpectedEncryptedRecord),
+        (EncryptionConfig::Plain, actual) => Err(RecordDecryptionError::AlgorithmMismatch {
+            expected: None,
+            actual,
+        }),
         (EncryptionConfig::Aegis256(key), EncryptionAlgorithm::Aegis256) => {
             let payload_start = SUITE_ID_LEN + algorithm.nonce_len();
             let tag_len = algorithm.tag_len();
@@ -239,21 +246,21 @@ pub(crate) fn decrypt_payload(
             let plaintext_len = payload_end - payload_start;
             let nonce: [u8; 32] = encoded
                 .get(SUITE_ID_LEN..payload_start)
-                .ok_or(RecordDecryptionError::DecryptionFailed)?
+                .ok_or_else(malformed_encrypted_record)?
                 .try_into()
-                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+                .map_err(|_| malformed_encrypted_record())?;
             let tag: [u8; 16] = encoded
                 .get(payload_end..)
-                .ok_or(RecordDecryptionError::DecryptionFailed)?
+                .ok_or_else(malformed_encrypted_record)?
                 .try_into()
-                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+                .map_err(|_| malformed_encrypted_record())?;
             let ciphertext = encoded
                 .get_mut(payload_start..payload_end)
-                .ok_or(RecordDecryptionError::DecryptionFailed)?;
+                .ok_or_else(malformed_encrypted_record)?;
 
             Aegis256::<16>::new(key.secret(), &nonce)
                 .decrypt_in_place(ciphertext, &tag, aad)
-                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+                .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             let _ = encoded.split_to(payload_start);
             encoded.truncate(plaintext_len);
             Ok(encoded.freeze())
@@ -268,29 +275,29 @@ pub(crate) fn decrypt_payload(
             let nonce = aes_gcm::Nonce::clone_from_slice(
                 encoded
                     .get(SUITE_ID_LEN..payload_start)
-                    .ok_or(RecordDecryptionError::DecryptionFailed)?,
+                    .ok_or_else(malformed_encrypted_record)?,
             );
             let tag = aes_gcm::Tag::clone_from_slice(
                 encoded
                     .get(payload_end..)
-                    .ok_or(RecordDecryptionError::DecryptionFailed)?,
+                    .ok_or_else(malformed_encrypted_record)?,
             );
             let ciphertext = encoded
                 .get_mut(payload_start..payload_end)
-                .ok_or(RecordDecryptionError::DecryptionFailed)?;
+                .ok_or_else(malformed_encrypted_record)?;
             cipher
                 .decrypt_in_place_detached(&nonce, aad, ciphertext, &tag)
-                .map_err(|_| RecordDecryptionError::DecryptionFailed)?;
+                .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             let _ = encoded.split_to(payload_start);
             encoded.truncate(plaintext_len);
             Ok(encoded.freeze())
         }
         (EncryptionConfig::Aegis256(_), actual) => Err(RecordDecryptionError::AlgorithmMismatch {
-            expected: EncryptionAlgorithm::Aegis256,
+            expected: Some(EncryptionAlgorithm::Aegis256),
             actual,
         }),
         (EncryptionConfig::Aes256Gcm(_), actual) => Err(RecordDecryptionError::AlgorithmMismatch {
-            expected: EncryptionAlgorithm::Aes256Gcm,
+            expected: Some(EncryptionAlgorithm::Aes256Gcm),
             actual,
         }),
     }
@@ -309,7 +316,7 @@ pub fn decode_stored_record(
         } => {
             let plaintext = decrypt_payload(encrypted, encryption, aad)?;
             let envelope = EnvelopeRecord::try_from(plaintext)
-                .map_err(|e| RecordDecryptionError::InvalidDecryptedRecord(e.to_string()))?;
+                .map_err(RecordDecryptionError::MalformedDecryptedRecord)?;
             let record = Record::Envelope(envelope);
             let actual_metered_size = record.metered_size();
             if metered_size != actual_metered_size {
@@ -683,7 +690,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::DecryptionFailed)
+            Err(RecordDecryptionError::AuthenticationFailed)
         ));
     }
 
@@ -699,7 +706,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::DecryptionFailed)
+            Err(RecordDecryptionError::AuthenticationFailed)
         ));
     }
 
@@ -757,7 +764,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(RecordDecryptionError::AlgorithmMismatch {
-                expected: EncryptionAlgorithm::Aegis256,
+                expected: Some(EncryptionAlgorithm::Aegis256),
                 actual: EncryptionAlgorithm::Aes256Gcm,
             })
         ));
@@ -791,7 +798,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::DecryptionFailed)
+            Err(RecordDecryptionError::AuthenticationFailed)
         ));
     }
 
@@ -811,7 +818,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::DecryptionFailed)
+            Err(RecordDecryptionError::MalformedEncryptedRecord)
         ));
     }
 
@@ -924,7 +931,10 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::UnexpectedEncryptedRecord)
+            Err(RecordDecryptionError::AlgorithmMismatch {
+                expected: None,
+                actual: EncryptionAlgorithm::Aegis256,
+            })
         ));
     }
 
