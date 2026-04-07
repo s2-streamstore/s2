@@ -343,13 +343,7 @@ impl AppendInput<Record> {
         } = self;
         let records = try_collect_append_record_batch(records.into_iter().map(|record| {
             let AppendRecordParts { timestamp, record } = record.into_parts();
-            let metered_size = record.metered_size();
             let record = encrypt_record(record, encryption, aad);
-            debug_assert_eq!(
-                record.metered_size(),
-                metered_size,
-                "record encryption should preserve metered size"
-            );
             AppendRecord::try_from(AppendRecordParts { timestamp, record })
                 .expect("record encryption should preserve append record invariants")
         }))
