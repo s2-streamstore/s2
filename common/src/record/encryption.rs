@@ -33,8 +33,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 
 use super::{
-    Encodable, EnvelopeRecord, Metered, MeteredSize, Record, RecordDecodeError, SequencedRecord,
-    StoredRecord, StoredSequencedRecord,
+    Encodable, Metered, MeteredSize, Record, RecordDecodeError, SequencedRecord, StoredRecord,
+    StoredSequencedRecord,
 };
 use crate::{
     deep_size::DeepSize,
@@ -64,7 +64,7 @@ pub enum RecordDecryptionError {
     #[error("decrypted record metered size mismatch: stored {stored}, actual {actual}")]
     MeteredSizeMismatch { stored: usize, actual: usize },
     #[error("malformed decrypted record: {0}")]
-    MalformedDecryptedRecord(RecordDecodeError),
+    MalformedDecryptedRecord(#[from] RecordDecodeError),
 }
 
 fn malformed_encrypted_record() -> RecordDecryptionError {
@@ -310,9 +310,7 @@ pub fn decode_stored_record(
             record: encrypted,
         } => {
             let plaintext = decrypt_payload(encrypted, encryption, aad)?;
-            let envelope = EnvelopeRecord::try_from(plaintext)
-                .map_err(RecordDecryptionError::MalformedDecryptedRecord)?;
-            let record = Record::Envelope(envelope);
+            let record = Record::Envelope(plaintext.try_into()?);
             let actual_metered_size = record.metered_size();
             if metered_size != actual_metered_size {
                 return Err(RecordDecryptionError::MeteredSizeMismatch {
@@ -493,7 +491,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::record::{Header, MeteredExt, StreamPosition};
+    use crate::record::{EnvelopeRecord, Header, MeteredExt, StreamPosition};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
     const OTHER_TEST_KEY: [u8; 32] = [0x99; 32];

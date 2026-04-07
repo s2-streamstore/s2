@@ -10,7 +10,9 @@ use s2_api::{
         stream::{AppendInputStreamError, extract::AppendRequestRejection, s2s},
     },
 };
-use s2_common::{http::extract::HeaderRejection, types::ValidationError};
+use s2_common::{
+    http::extract::HeaderRejection, record::RecordDecryptionError, types::ValidationError,
+};
 
 use crate::backend::error::{
     AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError, CreateStreamError,
@@ -34,6 +36,8 @@ pub enum ServiceError {
     AppendInputStream(#[from] AppendInputStreamError),
     #[error(transparent)]
     Validation(#[from] ValidationError),
+    #[error(transparent)]
+    RecordDecryption(#[from] RecordDecryptionError),
     #[error(transparent)]
     ListBasins(#[from] ListBasinsError),
     #[error(transparent)]
@@ -92,6 +96,17 @@ impl ServiceError {
                 }
             },
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
+            ServiceError::RecordDecryption(e) => match e {
+                RecordDecryptionError::AlgorithmMismatch { .. }
+                | RecordDecryptionError::AuthenticationFailed => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
+                RecordDecryptionError::MalformedEncryptedRecord
+                | RecordDecryptionError::MeteredSizeMismatch { .. }
+                | RecordDecryptionError::MalformedDecryptedRecord(_) => {
+                    standard(ErrorCode::Storage, e.to_string())
+                }
+            },
             ServiceError::ListBasins(e) => match e {
                 ListBasinsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
             },

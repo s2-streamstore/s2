@@ -54,7 +54,7 @@ where
         Ok(StoredReadSessionOutput::Batch(batch)) => {
             decrypt_read_batch(batch, &encryption, stream_id.as_bytes())
                 .map(ReadSessionOutput::Batch)
-                .map_err(|e| ServiceError::Validation(e.into()))
+                .map_err(ServiceError::from)
         }
         Err(err) => Err(err.into()),
     })
