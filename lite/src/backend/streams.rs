@@ -20,13 +20,16 @@ use super::{
     store::db_txn_get,
     streamer::{doe_arm_delay, retention_age_or_zero},
 };
-use crate::backend::{
-    error::{
-        BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
-        GetStreamConfigError, ListStreamsError, ReconfigureStreamError, StorageError,
-        StreamAlreadyExistsError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
+use crate::{
+    backend::{
+        error::{
+            BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
+            GetStreamConfigError, ListStreamsError, ReconfigureStreamError, StorageError,
+            StreamAlreadyExistsError, StreamDeletionPendingError, StreamNotFoundError,
+            StreamerError,
+        },
+        kv,
     },
-    kv,
     stream_id::StreamId,
 };
 

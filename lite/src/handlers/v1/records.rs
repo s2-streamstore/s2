@@ -28,10 +28,7 @@ use s2_common::{
     },
 };
 
-use crate::{
-    backend::{Backend, StreamId},
-    handlers::v1::error::ServiceError,
-};
+use crate::{backend::Backend, handlers::v1::error::ServiceError, stream_id::StreamId};
 
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{get, post};
@@ -499,10 +496,7 @@ mod tests {
     use tower::ServiceExt as _;
     use uuid::Uuid;
 
-    use crate::{
-        backend::{Backend, StreamId},
-        handlers,
-    };
+    use crate::{backend::Backend, handlers, stream_id::StreamId};
 
     async fn create_backend() -> Backend {
         let object_store = Arc::new(InMemory::new());

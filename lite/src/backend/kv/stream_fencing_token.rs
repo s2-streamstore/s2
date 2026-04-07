@@ -5,7 +5,7 @@ use enum_ordinalize::Ordinalize;
 use s2_common::record::FencingToken;
 
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
-use crate::backend::stream_id::StreamId;
+use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
 
@@ -51,7 +51,7 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::record::FencingToken;
 
-    use crate::backend::{kv::DeserializationError, stream_id::StreamId};
+    use crate::{backend::kv::DeserializationError, stream_id::StreamId};
 
     #[test]
     fn stream_fencing_token_rejects_invalid_utf8() {

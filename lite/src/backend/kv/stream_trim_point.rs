@@ -5,7 +5,7 @@ use enum_ordinalize::Ordinalize;
 use s2_common::record::NonZeroSeqNum;
 
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
-use crate::backend::stream_id::StreamId;
+use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
 const VALUE_LEN: usize = 8;
@@ -48,7 +48,7 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::record::NonZeroSeqNum;
 
-    use crate::backend::stream_id::StreamId;
+    use crate::stream_id::StreamId;
 
     proptest! {
         #[test]

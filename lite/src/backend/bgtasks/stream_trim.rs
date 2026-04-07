@@ -12,7 +12,10 @@ use slatedb::{
 };
 use tracing::instrument;
 
-use crate::backend::{Backend, error::StorageError, kv, store::db_txn_get, stream_id::StreamId};
+use crate::{
+    backend::{Backend, error::StorageError, kv, store::db_txn_get},
+    stream_id::StreamId,
+};
 
 const PENDING_LIST_LIMIT: usize = 128;
 const CONCURRENCY: usize = 4;
@@ -191,7 +194,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
-    use crate::backend::{kv, stream_id::StreamId};
+    use crate::{backend::kv, stream_id::StreamId};
 
     fn test_record() -> Metered<StoredRecord> {
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"trim-test")).unwrap();

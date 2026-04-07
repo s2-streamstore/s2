@@ -14,12 +14,14 @@ use slatedb::{
 };
 use tracing::instrument;
 
-use crate::backend::{
-    Backend,
-    error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
-    kv::{self, timestamp::TimestampSecs},
+use crate::{
+    backend::{
+        Backend,
+        error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
+        kv::{self, timestamp::TimestampSecs},
+        streamer::{doe_arm_delay, retention_age_or_zero},
+    },
     stream_id::StreamId,
-    streamer::{doe_arm_delay, retention_age_or_zero},
 };
 
 const PENDING_LIST_LIMIT: usize = 10_000;
@@ -229,7 +231,10 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{super::tests::test_backend, TimestampSecs};
-    use crate::backend::{Backend, kv, stream_id::StreamId};
+    use crate::{
+        backend::{Backend, kv},
+        stream_id::StreamId,
+    };
 
     const MIN_AGE: Duration = Duration::from_secs(60);
 

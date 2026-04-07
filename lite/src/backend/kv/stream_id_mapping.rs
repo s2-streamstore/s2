@@ -8,7 +8,7 @@ use s2_common::{
 };
 
 use super::{DeserializationError, KeyType, check_exact_size, check_min_size, invalid_value_err};
-use crate::backend::stream_id::StreamId;
+use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
 const FIELD_SEPARATOR: u8 = b'\0';
@@ -69,7 +69,7 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::types::{basin::BasinName, stream::StreamName};
 
-    use crate::backend::stream_id::StreamId;
+    use crate::stream_id::StreamId;
 
     #[test]
     fn roundtrip_stream_id_mapping_value() {

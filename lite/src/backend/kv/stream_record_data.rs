@@ -3,7 +3,7 @@ use enum_ordinalize::Ordinalize;
 use s2_common::record::{Encodable, Metered, StoredRecord, StreamPosition};
 
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
-use crate::backend::stream_id::StreamId;
+use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN + 8 + 8;
 
@@ -47,7 +47,7 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::record::{Metered, SeqNum, StreamPosition, Timestamp};
 
-    use crate::backend::{kv::DeserializationError, stream_id::StreamId};
+    use crate::{backend::kv::DeserializationError, stream_id::StreamId};
 
     #[test]
     fn stream_record_data_rejects_invalid_payload() {

@@ -20,7 +20,7 @@ use s2_common::{
 };
 use thiserror::Error;
 
-use crate::backend::stream_id::StreamId;
+use crate::stream_id::StreamId;
 
 #[derive(Debug, Clone, Error)]
 pub enum DeserializationError {

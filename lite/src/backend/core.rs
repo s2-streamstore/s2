@@ -30,10 +30,9 @@ use super::{
         TransactionConflictError,
     },
     kv,
-    stream_id::StreamId,
     streamer::StreamerClient,
 };
-use crate::backend::bgtasks::BgtaskTrigger;
+use crate::{backend::bgtasks::BgtaskTrigger, stream_id::StreamId};
 
 type StreamerInitFuture = Shared<BoxFuture<'static, Result<StreamerClient, StreamerError>>>;
 

@@ -16,11 +16,13 @@ use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
 
 use super::Backend;
-use crate::backend::{
-    error::{
-        CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
+use crate::{
+    backend::{
+        error::{
+            CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
+        },
+        kv,
     },
-    kv,
     stream_id::StreamId,
 };
 
@@ -398,7 +400,10 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::backend::{FOLLOWER_MAX_LAG, kv, stream_id::StreamId, streamer::DORMANT_TIMEOUT};
+    use crate::{
+        backend::{FOLLOWER_MAX_LAG, kv, streamer::DORMANT_TIMEOUT},
+        stream_id::StreamId,
+    };
 
     fn stored_append_input(record: Record) -> StoredAppendInput {
         let record: StoredAppendRecord = StoredAppendRecordParts {

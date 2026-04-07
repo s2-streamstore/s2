@@ -3,7 +3,7 @@ use enum_ordinalize::Ordinalize;
 use s2_common::record::StreamPosition;
 
 use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
-use crate::backend::stream_id::StreamId;
+use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
 const VALUE_LEN: usize = 8 + 8 + 4;
@@ -52,8 +52,8 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::record::{SeqNum, Timestamp};
 
-    use crate::backend::{
-        kv::{DeserializationError, timestamp::TimestampSecs},
+    use crate::{
+        backend::kv::{DeserializationError, timestamp::TimestampSecs},
         stream_id::StreamId,
     };
 

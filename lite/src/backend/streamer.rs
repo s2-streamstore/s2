@@ -46,9 +46,9 @@ use crate::{
             DeleteStreamError, RequestDroppedError, StreamerMissingInActionError,
         },
         kv,
-        stream_id::StreamId,
     },
     metrics,
+    stream_id::StreamId,
 };
 
 pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);

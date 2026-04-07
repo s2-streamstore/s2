@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
 
 use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
-use crate::backend::stream_id::StreamId;
+use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + 4 + StreamId::LEN;
 const VALUE_LEN: usize = 8;
@@ -63,8 +63,8 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::backend::{
-        kv::{stream_doe_deadline, timestamp::TimestampSecs},
+    use crate::{
+        backend::kv::{stream_doe_deadline, timestamp::TimestampSecs},
         stream_id::StreamId,
     };
 
