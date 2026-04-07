@@ -204,6 +204,7 @@ fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, Encrypt
 #[cfg(test)]
 mod tests {
     use http::header::HeaderValue;
+    use rstest::rstest;
 
     use super::*;
 
@@ -213,11 +214,22 @@ mod tests {
         26, 27, 28, 29, 30, 31, 32,
     ];
 
-    fn assert_key_matches(config: EncryptionConfig, expected: &[u8; 32]) {
-        match config {
-            EncryptionConfig::Aegis256(key) => assert_eq!(key.secret(), expected),
-            EncryptionConfig::Aes256Gcm(key) => assert_eq!(key.secret(), expected),
-            EncryptionConfig::Plain => panic!("expected encrypted config"),
+    fn assert_encrypted_config(
+        config: EncryptionConfig,
+        algorithm: EncryptionAlgorithm,
+        expected: &[u8; 32],
+    ) {
+        match (algorithm, config) {
+            (EncryptionAlgorithm::Aegis256, EncryptionConfig::Aegis256(key)) => {
+                assert_eq!(key.secret(), expected)
+            }
+            (EncryptionAlgorithm::Aes256Gcm, EncryptionConfig::Aes256Gcm(key)) => {
+                assert_eq!(key.secret(), expected)
+            }
+            (_, EncryptionConfig::Plain) => panic!("expected encrypted config"),
+            (expected_algorithm, actual_config) => {
+                panic!("expected {expected_algorithm:?}, got {actual_config:?}")
+            }
         }
     }
 
@@ -229,37 +241,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_header_valid_aegis() {
-        let config = format!("aegis-256; {KEY_B64}")
+    #[rstest]
+    #[case("aegis-256", EncryptionAlgorithm::Aegis256)]
+    #[case("aes-256-gcm", EncryptionAlgorithm::Aes256Gcm)]
+    #[case("AEGIS-256", EncryptionAlgorithm::Aegis256)]
+    #[case("AES-256-GCM", EncryptionAlgorithm::Aes256Gcm)]
+    fn parse_header_valid_encrypted(
+        #[case] algorithm: &str,
+        #[case] expected: EncryptionAlgorithm,
+    ) {
+        let config = format!("{algorithm}; {KEY_B64}")
             .parse::<EncryptionConfig>()
             .unwrap();
-        assert!(matches!(config, EncryptionConfig::Aegis256(_)));
-        assert_key_matches(config, &KEY_BYTES);
-    }
-
-    #[test]
-    fn parse_header_valid_aes() {
-        let config = format!("aes-256-gcm; {KEY_B64}")
-            .parse::<EncryptionConfig>()
-            .unwrap();
-        assert!(matches!(config, EncryptionConfig::Aes256Gcm(_)));
-        assert_key_matches(config, &KEY_BYTES);
-    }
-
-    #[test]
-    fn parse_header_valid_case_insensitive_algorithms() {
-        let aegis = format!("AEGIS-256; {KEY_B64}")
-            .parse::<EncryptionConfig>()
-            .unwrap();
-        assert!(matches!(aegis, EncryptionConfig::Aegis256(_)));
-        assert_key_matches(aegis, &KEY_BYTES);
-
-        let aes = format!("AES-256-GCM; {KEY_B64}")
-            .parse::<EncryptionConfig>()
-            .unwrap();
-        assert!(matches!(aes, EncryptionConfig::Aes256Gcm(_)));
-        assert_key_matches(aes, &KEY_BYTES);
+        assert_encrypted_config(config, expected, &KEY_BYTES);
     }
 
     #[test]
@@ -267,59 +261,28 @@ mod tests {
         let config = format!(" aes-256-gcm ; {KEY_B64} ")
             .parse::<EncryptionConfig>()
             .unwrap();
-        assert!(matches!(config, EncryptionConfig::Aes256Gcm(_)));
+        assert_encrypted_config(config, EncryptionAlgorithm::Aes256Gcm, &KEY_BYTES);
     }
 
-    #[test]
-    fn parse_header_plain_without_key_is_case_insensitive() {
-        for header in ["plain", "PLAIN"] {
-            let config = header.parse::<EncryptionConfig>().unwrap();
-            assert!(matches!(config, EncryptionConfig::Plain));
-        }
-    }
-
-    #[test]
-    fn parse_header_plain_with_empty_key_slot() {
-        let config = "plain; ".parse::<EncryptionConfig>().unwrap();
+    #[rstest]
+    #[case("plain")]
+    #[case("PLAIN")]
+    #[case("plain; ")]
+    fn parse_header_plain_variants(#[case] header: &str) {
+        let config = header.parse::<EncryptionConfig>().unwrap();
         assert!(matches!(config, EncryptionConfig::Plain));
     }
 
-    #[test]
-    fn parse_header_empty_fails() {
-        assert_invalid_parse("");
-    }
-
-    #[test]
-    fn parse_header_encrypted_algorithm_without_key_fails() {
-        assert_invalid_parse("aegis-256");
-    }
-
-    #[test]
-    fn parse_header_too_many_fields_fails() {
-        let header = format!("aegis-256; {KEY_B64}; extra");
-        assert_invalid_parse(&header);
-    }
-
-    #[test]
-    fn parse_header_wrong_key_length_fails() {
-        assert_invalid_parse("aegis-256; 3q2+7w==");
-    }
-
-    #[test]
-    fn parse_header_invalid_base64_fails() {
-        assert_invalid_parse("aegis-256; not-valid-base64!!!");
-    }
-
-    #[test]
-    fn parse_header_unknown_algorithm_fails() {
-        let header = format!("bogus; {KEY_B64}");
-        assert_invalid_parse(&header);
-    }
-
-    #[test]
-    fn parse_header_plain_with_key_fails() {
-        let header = format!("plain; {KEY_B64}");
-        assert_invalid_parse(&header);
+    #[rstest]
+    #[case("")]
+    #[case("aegis-256")]
+    #[case("aegis-256; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=; extra")]
+    #[case("aegis-256; 3q2+7w==")]
+    #[case("aegis-256; not-valid-base64!!!")]
+    #[case("bogus; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=")]
+    #[case("plain; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=")]
+    fn parse_header_invalid_cases(#[case] header: &str) {
+        assert_invalid_parse(header);
     }
 
     #[test]
@@ -339,23 +302,19 @@ mod tests {
         assert!(matches!(parsed, EncryptionConfig::Plain));
     }
 
-    #[test]
-    fn aegis_header_value_roundtrips() {
-        let value = EncryptionConfig::aegis256(KEY_BYTES).to_header_value();
-        assert_eq!(value.to_str().unwrap(), format!("aegis-256; {KEY_B64}"));
+    #[rstest]
+    #[case(EncryptionAlgorithm::Aegis256)]
+    #[case(EncryptionAlgorithm::Aes256Gcm)]
+    fn encrypted_header_value_roundtrips(#[case] algorithm: EncryptionAlgorithm) {
+        let value = match algorithm {
+            EncryptionAlgorithm::Aegis256 => EncryptionConfig::aegis256(KEY_BYTES),
+            EncryptionAlgorithm::Aes256Gcm => EncryptionConfig::aes256_gcm(KEY_BYTES),
+        }
+        .to_header_value();
+        assert_eq!(value.to_str().unwrap(), format!("{algorithm}; {KEY_B64}"));
         assert!(value.is_sensitive());
 
         let parsed = value.to_str().unwrap().parse::<EncryptionConfig>().unwrap();
-        assert_key_matches(parsed, &KEY_BYTES);
-    }
-
-    #[test]
-    fn aes_header_value_roundtrips() {
-        let value = EncryptionConfig::aes256_gcm(KEY_BYTES).to_header_value();
-        assert_eq!(value.to_str().unwrap(), format!("aes-256-gcm; {KEY_B64}"));
-        assert!(value.is_sensitive());
-
-        let parsed = value.to_str().unwrap().parse::<EncryptionConfig>().unwrap();
-        assert_key_matches(parsed, &KEY_BYTES);
+        assert_encrypted_config(parsed, algorithm, &KEY_BYTES);
     }
 }

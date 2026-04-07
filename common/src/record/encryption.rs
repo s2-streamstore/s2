@@ -369,6 +369,7 @@ fn payload_end(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use rstest::rstest;
 
     use super::*;
     use crate::record::{EnvelopeRecord, Header, MeteredExt};
@@ -496,56 +497,30 @@ mod tests {
         assert_eq!(out_body, body);
     }
 
-    #[test]
-    fn encrypted_payload_roundtrips_aegis256() {
-        assert_encrypted_payload_roundtrip(EncryptionAlgorithm::Aegis256);
+    #[rstest]
+    #[case(EncryptionAlgorithm::Aegis256)]
+    #[case(EncryptionAlgorithm::Aes256Gcm)]
+    fn encrypted_payload_roundtrips(#[case] algorithm: EncryptionAlgorithm) {
+        assert_encrypted_payload_roundtrip(algorithm);
     }
 
-    #[test]
-    fn encrypted_payload_roundtrips_aes256gcm() {
-        assert_encrypted_payload_roundtrip(EncryptionAlgorithm::Aes256Gcm);
+    #[rstest]
+    #[case(EncryptionAlgorithm::Aegis256)]
+    #[case(EncryptionAlgorithm::Aes256Gcm)]
+    fn encrypted_payload_roundtrips_with_shared_ciphertext_buffer(
+        #[case] algorithm: EncryptionAlgorithm,
+    ) {
+        assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(algorithm);
     }
 
-    #[test]
-    fn encrypted_payload_roundtrips_aegis256_with_shared_ciphertext_buffer() {
-        assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(
-            EncryptionAlgorithm::Aegis256,
-        );
-    }
-
-    #[test]
-    fn encrypted_payload_roundtrips_aes256gcm_with_shared_ciphertext_buffer() {
-        assert_encrypted_payload_roundtrip_with_shared_ciphertext_buffer(
-            EncryptionAlgorithm::Aes256Gcm,
-        );
-    }
-
-    #[test]
-    fn wrong_key_fails_aegis256() {
+    #[rstest]
+    #[case(EncryptionAlgorithm::Aegis256)]
+    #[case(EncryptionAlgorithm::Aes256Gcm)]
+    fn wrong_key_fails(#[case] algorithm: EncryptionAlgorithm) {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
-        let result = decrypt_payload(
-            ciphertext,
-            &other_test_encryption(EncryptionAlgorithm::Aegis256),
-            &aad,
-        );
-        assert!(matches!(
-            result,
-            Err(RecordDecryptionError::AuthenticationFailed)
-        ));
-    }
-
-    #[test]
-    fn wrong_key_fails_aes256gcm() {
-        let aad = aad();
-        let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aes256Gcm, &aad);
-        let result = decrypt_payload(
-            ciphertext,
-            &other_test_encryption(EncryptionAlgorithm::Aes256Gcm),
-            &aad,
-        );
+        let ciphertext = encrypt_test_payload(&plaintext, algorithm, &aad);
+        let result = decrypt_payload(ciphertext, &other_test_encryption(algorithm), &aad);
         assert!(matches!(
             result,
             Err(RecordDecryptionError::AuthenticationFailed)

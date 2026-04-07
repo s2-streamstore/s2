@@ -3,6 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
+    encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
     record::FencingToken,
     types::{
@@ -16,6 +17,72 @@ use s2_common::{
 use s2_lite::backend::error::{AppendConditionFailedError, AppendError};
 
 use super::common::*;
+
+async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionConfig) {
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
+
+    let expected_bodies = vec![
+        b"batch 1".to_vec(),
+        b"batch 2".to_vec(),
+        b"batch 3".to_vec(),
+    ];
+    let inputs = futures::stream::iter(
+        expected_bodies
+            .iter()
+            .map(|body| AppendInput {
+                records: create_test_record_batch(vec![Bytes::copy_from_slice(body)]),
+                match_seq_num: None,
+                fencing_token: None,
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map(|input| encrypt_input_for_stream(input, &basin_name, &stream_name, encryption));
+
+    let session = backend
+        .clone()
+        .append_session(basin_name.clone(), stream_name.clone(), inputs)
+        .await
+        .expect("Failed to create append session");
+    tokio::pin!(session);
+
+    let mut acks = Vec::new();
+    while let Some(result) = session.next().await {
+        acks.push(result.expect("Append should succeed"));
+    }
+
+    assert_eq!(acks.len(), expected_bodies.len());
+    for (index, ack) in acks.iter().enumerate() {
+        let index = index as u64;
+        assert_eq!(ack.start.seq_num, index);
+        assert_eq!(ack.end.seq_num, index + 1);
+    }
+
+    let tail = backend
+        .check_tail(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to check tail");
+    assert_eq!(tail.seq_num, expected_bodies.len() as u64);
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::ZERO),
+    };
+    let read_session = backend
+        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .await
+        .expect("Failed to create read session");
+    let mut read_session = Box::pin(read_session);
+    let records =
+        collect_records_with_encryption(&mut read_session, &basin_name, &stream_name, encryption)
+            .await;
+    assert_eq!(envelope_bodies(&records), expected_bodies);
+}
 
 #[tokio::test]
 async fn test_append_multiple_records() {
@@ -312,126 +379,14 @@ async fn test_append_with_seq_num_mismatch() {
 
 #[tokio::test]
 async fn test_append_session_basic() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "append-session-basic",
-        "stream",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    let inputs = futures::stream::iter(vec![
-        AppendInput {
-            records: create_test_record_batch(vec![Bytes::from_static(b"batch 1")]),
-            match_seq_num: None,
-            fencing_token: None,
-        },
-        AppendInput {
-            records: create_test_record_batch(vec![Bytes::from_static(b"batch 2")]),
-            match_seq_num: None,
-            fencing_token: None,
-        },
-        AppendInput {
-            records: create_test_record_batch(vec![Bytes::from_static(b"batch 3")]),
-            match_seq_num: None,
-            fencing_token: None,
-        },
-    ]);
-
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
-    tokio::pin!(session);
-
-    let mut acks = Vec::new();
-    while let Some(result) = session.next().await {
-        let ack = result.expect("Append should succeed");
-        acks.push(ack);
-    }
-
-    assert_eq!(acks.len(), 3);
-    assert_eq!(acks[0].start.seq_num, 0);
-    assert_eq!(acks[0].end.seq_num, 1);
-    assert_eq!(acks[1].start.seq_num, 1);
-    assert_eq!(acks[1].end.seq_num, 2);
-    assert_eq!(acks[2].start.seq_num, 2);
-    assert_eq!(acks[2].end.seq_num, 3);
-
-    let tail = backend
-        .check_tail(basin_name, stream_name)
-        .await
-        .expect("Failed to check tail");
-    assert_eq!(tail.seq_num, 3);
+    let encryption = EncryptionConfig::Plain;
+    assert_append_session_roundtrip("append-session-basic", &encryption).await;
 }
 
 #[tokio::test]
 async fn test_append_session_basic_with_encryption() {
     let encryption = aegis256_encryption();
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream("appsess-enc", "stream", OptionalStreamConfig::default()).await;
-
-    let inputs = futures::stream::iter(vec![
-        AppendInput {
-            records: create_test_record_batch(vec![Bytes::from_static(b"batch 1")]),
-            match_seq_num: None,
-            fencing_token: None,
-        },
-        AppendInput {
-            records: create_test_record_batch(vec![Bytes::from_static(b"batch 2")]),
-            match_seq_num: None,
-            fencing_token: None,
-        },
-        AppendInput {
-            records: create_test_record_batch(vec![Bytes::from_static(b"batch 3")]),
-            match_seq_num: None,
-            fencing_token: None,
-        },
-    ])
-    .map(|input| encrypt_input_for_stream(input, &basin_name, &stream_name, &encryption));
-
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create encrypted append session");
-    tokio::pin!(session);
-
-    let mut acks = Vec::new();
-    while let Some(result) = session.next().await {
-        acks.push(result.expect("Encrypted append should succeed"));
-    }
-
-    assert_eq!(acks.len(), 3);
-    assert_eq!(acks[0].start.seq_num, 0);
-    assert_eq!(acks[1].start.seq_num, 1);
-    assert_eq!(acks[2].start.seq_num, 2);
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Unbounded,
-        wait: Some(Duration::ZERO),
-    };
-    let read_session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create encrypted read session");
-    let mut read_session = Box::pin(read_session);
-    let records =
-        collect_records_with_encryption(&mut read_session, &basin_name, &stream_name, &encryption)
-            .await;
-    assert_eq!(
-        envelope_bodies(&records),
-        vec![
-            b"batch 1".to_vec(),
-            b"batch 2".to_vec(),
-            b"batch 3".to_vec()
-        ]
-    );
+    assert_append_session_roundtrip("appsess-enc", &encryption).await;
 }
 
 #[tokio::test]
