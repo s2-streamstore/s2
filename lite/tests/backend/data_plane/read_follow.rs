@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use rstest::rstest;
 use s2_common::{
     encryption::EncryptionConfig,
     read_extent::{ReadLimit, ReadUntil},
@@ -214,16 +215,15 @@ async fn test_follow_mode_heartbeats() {
     assert!(heartbeat_count > 0);
 }
 
+#[rstest]
+#[case::plaintext("follow-new-data", EncryptionConfig::Plain)]
+#[case::encrypted("follow-enc", aegis256_encryption())]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_follow_mode_receives_new_data() {
-    let encryption = EncryptionConfig::Plain;
-    assert_follow_mode_receives_new_data("follow-new-data", &encryption).await;
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_follow_mode_receives_new_encrypted_data() {
-    let encryption = aegis256_encryption();
-    assert_follow_mode_receives_new_data("follow-enc", &encryption).await;
+async fn test_follow_mode_receives_new_data(
+    #[case] test_suffix: &str,
+    #[case] encryption: EncryptionConfig,
+) {
+    assert_follow_mode_receives_new_data(test_suffix, &encryption).await;
 }
 
 #[tokio::test]

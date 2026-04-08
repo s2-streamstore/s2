@@ -63,6 +63,7 @@ utoipa = { version = "5.4", optional = true, features = ["time"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
+rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 tower = "0.5"
 uuid = { workspace = true, features = ["v4"] }
