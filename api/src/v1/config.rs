@@ -255,7 +255,6 @@ impl From<types::config::DeleteOnEmptyReconfiguration> for DeleteOnEmptyReconfig
     }
 }
 
-#[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]

@@ -21,6 +21,7 @@ use s2_common::{
     types::{
         ValidationError,
         basin::BasinName,
+        config::OptionalStreamConfig,
         stream::{
             ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StoredReadSessionOutput,
             StreamName,
@@ -28,7 +29,11 @@ use s2_common::{
     },
 };
 
-use crate::{backend::Backend, handlers::v1::error::ServiceError, stream_id::StreamId};
+use crate::{
+    backend::{Backend, error::GetStreamConfigError},
+    handlers::v1::error::ServiceError,
+    stream_id::StreamId,
+};
 
 async fn validate_encryption_mode(
     backend: &Backend,
@@ -36,9 +41,14 @@ async fn validate_encryption_mode(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> Result<(), ServiceError> {
-    let stream_config = backend
+    let stream_config = match backend
         .get_stream_config(basin.clone(), stream.clone())
-        .await?;
+        .await
+    {
+        Ok(config) => config,
+        Err(GetStreamConfigError::StreamNotFound(_)) => OptionalStreamConfig::default(),
+        Err(e) => return Err(e.into()),
+    };
     let basin_config = backend.get_basin_config(basin.clone()).await?;
     let resolved = stream_config.merge(basin_config.default_stream_config);
     let mode = encryption.mode();
