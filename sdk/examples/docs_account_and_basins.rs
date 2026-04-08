@@ -15,10 +15,10 @@ use s2_sdk::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let token = std::env::var("S2_ACCESS_TOKEN")?;
+    let access_token = std::env::var("S2_ACCESS_TOKEN")?;
     let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
 
-    let client = S2::new(S2Config::new(token))?;
+    let client = S2::new(S2Config::new(access_token))?;
 
     // ANCHOR: basin-operations
     // List basins
@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Create a stream
+    // Optionally, pass `.with_config(StreamConfig { .. })` to CreateStreamInput.
     basin
         .create_stream(CreateStreamInput::new("user-actions".parse()?))
         .await?;
@@ -102,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     // ANCHOR_END: access-token-restricted
 
-    // Pagination example - not executed by default
+    // Pagination examples - not executed by default
     if false {
         // ANCHOR: pagination
         // Iterate through all streams with automatic pagination
@@ -112,6 +113,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", info.name);
         }
         // ANCHOR_END: pagination
+
+        // ANCHOR: pagination-filtering
+        // List streams with a prefix filter
+        let input = ListAllStreamsInput::new().with_prefix("events/".parse()?);
+        let mut stream = basin.list_all_streams(input);
+        while let Some(info) = stream.next().await {
+            println!("{}", info?.name);
+        }
+        // ANCHOR_END: pagination-filtering
+
+        // ANCHOR: pagination-deleted
+        // Include streams that are being deleted
+        let input = ListAllStreamsInput::new().with_include_deleted(true);
+        let mut stream = basin.list_all_streams(input);
+        while let Some(info) = stream.next().await {
+            let info = info?;
+            println!("{} {:?}", info.name, info.deleted_at);
+        }
+        // ANCHOR_END: pagination-deleted
     }
 
     Ok(())

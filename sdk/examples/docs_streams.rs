@@ -18,10 +18,10 @@ use s2_sdk::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let token = std::env::var("S2_ACCESS_TOKEN")?;
+    let access_token = std::env::var("S2_ACCESS_TOKEN")?;
     let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
 
-    let client = S2::new(S2Config::new(token))?;
+    let client = S2::new(S2Config::new(access_token))?;
     let basin = client.basin(basin_name);
 
     // Create a temporary stream for examples
@@ -39,12 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: simple-append
     let stream = basin.stream(stream_name.clone());
 
-    let records = AppendRecordBatch::try_from_iter([
-        AppendRecord::new("first event")?,
-        AppendRecord::new("second event")?,
-    ])?;
-
-    let ack = stream.append(AppendInput::new(records)).await?;
+    let ack = stream
+        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+            AppendRecord::new("first event")?,
+            AppendRecord::new("second event")?,
+        ])?))
+        .await?;
 
     // ack tells us where the records landed
     println!(
