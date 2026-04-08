@@ -23,6 +23,7 @@ utoipa = ["dep:utoipa", "s2-api/utoipa", "s2-common/utoipa"]
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 aws-config = { workspace = true }
+enumset = { workspace = true }
 aws-credential-types = { workspace = true }
 axum = { workspace = true, features = ["macros"] }
 axum-server = { workspace = true, features = ["tls-rustls"] }

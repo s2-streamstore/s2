@@ -1,13 +1,31 @@
 use s2_common::{
     bash::Bash,
+    encryption::{ALL_ENCRYPTION_MODES, EncryptionMode},
     record::StreamPosition,
     types::{
+        ValidationError,
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
         resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
+
+fn validate_encryption_modes_subset(
+    stream_modes: &Option<enumset::EnumSet<EncryptionMode>>,
+    basin_modes: Option<enumset::EnumSet<EncryptionMode>>,
+) -> Result<(), ValidationError> {
+    if let Some(stream_modes) = stream_modes {
+        let basin_modes = basin_modes.unwrap_or(ALL_ENCRYPTION_MODES);
+        if !stream_modes.is_subset(basin_modes) {
+            return Err(ValidationError(
+                "stream encryption_modes must be a subset of basin default encryption_modes"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
 use slatedb::{
     IsolationLevel,
     config::{DurabilityLevel, ScanOptions, WriteOptions},
@@ -161,20 +179,10 @@ impl Backend {
         let basin_defaults = &basin_meta.config.default_stream_config;
         let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
 
-        if let Some(ref stream_modes) = resolved.encryption_modes {
-            let basin_modes = basin_defaults
-                .encryption_modes
-                .as_ref()
-                .copied()
-                .unwrap_or(s2_common::encryption::ALL_ENCRYPTION_MODES);
-            if !stream_modes.is_subset(basin_modes) {
-                return Err(s2_common::types::ValidationError(
-                    "stream encryption_modes must be a subset of basin default encryption_modes"
-                        .to_owned(),
-                )
-                .into());
-            }
-        }
+        validate_encryption_modes_subset(
+            &resolved.encryption_modes,
+            basin_defaults.encryption_modes,
+        )?;
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
@@ -308,7 +316,7 @@ impl Backend {
 
         meta.config = meta.config.reconfigure(reconfig);
 
-        if let Some(ref stream_modes) = meta.config.encryption_modes {
+        if meta.config.encryption_modes.is_some() {
             let basin_meta = db_txn_get(
                 &txn,
                 kv::basin_meta::ser_key(&basin),
@@ -319,18 +327,10 @@ impl Backend {
                 basin: basin.clone(),
                 stream: stream.clone(),
             })?;
-            let basin_modes = basin_meta
-                .config
-                .default_stream_config
-                .encryption_modes
-                .unwrap_or(s2_common::encryption::ALL_ENCRYPTION_MODES);
-            if !stream_modes.is_subset(basin_modes) {
-                return Err(s2_common::types::ValidationError(
-                    "stream encryption_modes must be a subset of basin default encryption_modes"
-                        .to_owned(),
-                )
-                .into());
-            }
+            validate_encryption_modes_subset(
+                &meta.config.encryption_modes,
+                basin_meta.config.default_stream_config.encryption_modes,
+            )?;
         }
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;

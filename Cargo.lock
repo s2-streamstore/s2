@@ -4768,6 +4768,7 @@ dependencies = [
  "compact_str",
  "dashmap",
  "enum-ordinalize",
+ "enumset",
  "eyre",
  "futures",
  "http 1.4.0",
