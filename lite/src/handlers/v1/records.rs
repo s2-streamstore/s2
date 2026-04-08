@@ -229,7 +229,6 @@ pub struct ReadArgs {
 ))]
 pub async fn read(
     State(backend): State<Backend>,
-    headers: http::HeaderMap,
     ReadArgs {
         basin,
         stream,
@@ -415,7 +414,6 @@ pub struct AppendArgs {
 ))]
 pub async fn append(
     State(backend): State<Backend>,
-    headers: http::HeaderMap,
     AppendArgs {
         basin,
         stream,
