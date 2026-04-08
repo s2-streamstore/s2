@@ -118,6 +118,14 @@
               "type": "null"
             }
           ]
+        },
+        "encryption_modes": {
+          "description": "Allowed encryption modes. If empty, all modes are permitted.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EncryptionModeSpec"
+          },
+          "default": []
         }
       },
       "additionalProperties": false
@@ -197,6 +205,15 @@
       "examples": [
         "1day",
         "2h 30m"
+      ]
+    },
+    "EncryptionModeSpec": {
+      "description": "Encryption mode.",
+      "type": "string",
+      "enum": [
+        "plain",
+        "aegis-256",
+        "aes-256-gcm"
       ]
     },
     "StreamSpec": {

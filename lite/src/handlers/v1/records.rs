@@ -527,10 +527,6 @@ mod tests {
         Backend::new(db, ByteSize::mib(10))
     }
 
-    async fn setup_app(test_suffix: &str) -> (axum::Router, Backend, BasinName, StreamName) {
-        setup_app_with_config(test_suffix, OptionalStreamConfig::default()).await
-    }
-
     async fn setup_app_with_config(
         test_suffix: &str,
         stream_config: OptionalStreamConfig,
