@@ -217,6 +217,13 @@ impl StoredRecord {
         }
     }
 
+    pub fn encryption_mode(&self) -> crate::encryption::EncryptionMode {
+        match self {
+            Self::Plaintext(_) => crate::encryption::EncryptionMode::Plain,
+            Self::Encrypted { record, .. } => record.algorithm().into(),
+        }
+    }
+
     fn record_type(&self) -> RecordType {
         match self {
             Self::Plaintext(Record::Command(_)) => RecordType::Command,

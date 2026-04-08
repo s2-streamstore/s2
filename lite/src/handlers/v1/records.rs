@@ -28,37 +28,7 @@ use s2_common::{
     },
 };
 
-use crate::{
-    backend::{Backend, error::GetStreamConfigError},
-    handlers::v1::error::ServiceError,
-    stream_id::StreamId,
-};
-
-async fn validate_encryption_mode(
-    backend: &Backend,
-    basin: &BasinName,
-    stream: &StreamName,
-    encryption: &EncryptionConfig,
-) -> Result<(), ServiceError> {
-    let encryption_modes = match backend
-        .get_stream_config(basin.clone(), stream.clone())
-        .await
-    {
-        Ok(config) => config
-            .encryption_modes
-            .unwrap_or(s2_common::encryption::ALL_ENCRYPTION_MODES),
-        Err(GetStreamConfigError::StreamNotFound(_)) => s2_common::encryption::ALL_ENCRYPTION_MODES,
-        Err(e) => return Err(e.into()),
-    };
-    let mode = encryption.mode();
-    if !encryption_modes.contains(mode) {
-        return Err(ServiceError::Validation(ValidationError(format!(
-            "encryption mode '{}' is not allowed on this stream",
-            mode,
-        ))));
-    }
-    Ok(())
-}
+use crate::{backend::Backend, handlers::v1::error::ServiceError, stream_id::StreamId};
 
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{get, post};
@@ -237,7 +207,6 @@ pub async fn read(
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
-    validate_encryption_mode(&backend, &basin, &stream, request.encryption()).await?;
     let start: ReadStart = start.try_into()?;
     let stream_id = StreamId::new(&basin, &stream);
     match request {
@@ -420,7 +389,6 @@ pub async fn append(
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
-    validate_encryption_mode(&backend, &basin, &stream, request.encryption()).await?;
     let stream_id = StreamId::new(&basin, &stream);
     match request {
         v1t::stream::AppendRequest::Unary {
@@ -525,7 +493,7 @@ mod tests {
         },
     };
 
-    fn encrypted_stream_config() -> OptionalStreamConfig {
+    fn permissive_stream_config() -> OptionalStreamConfig {
         OptionalStreamConfig {
             encryption_modes: Some(
                 [
@@ -711,7 +679,7 @@ mod tests {
     async fn unary_append_with_encryption_header_persists_encrypted_record() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
         let (app, backend, basin, stream) =
-            setup_app_with_config("append-unary-encrypted", encrypted_stream_config()).await;
+            setup_app_with_config("append-unary-encrypted", permissive_stream_config()).await;
 
         let input = proto::AppendInput {
             records: vec![proto::AppendRecord {
@@ -766,7 +734,7 @@ mod tests {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
         let wrong_key = EncryptionConfig::aegis256([0x24; 32]);
         let (app, backend, basin, stream) =
-            setup_app_with_config("read-unary-bad-key", encrypted_stream_config()).await;
+            setup_app_with_config("read-unary-bad-key", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
@@ -786,7 +754,8 @@ mod tests {
     #[tokio::test]
     async fn sse_read_with_plain_header_emits_error_event_and_terminates() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("read-sse-plain").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-sse-plain", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
@@ -822,7 +791,8 @@ mod tests {
     #[tokio::test]
     async fn s2s_read_with_plain_header_returns_terminal_invalid_frame() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("read-s2s-plain").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-s2s-plain", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
@@ -854,7 +824,7 @@ mod tests {
     async fn s2s_read_with_correct_encryption_returns_batch_frame() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
         let (app, backend, basin, stream) =
-            setup_app_with_config("read-s2s-ok", encrypted_stream_config()).await;
+            setup_app_with_config("read-s2s-ok", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(

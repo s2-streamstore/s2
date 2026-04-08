@@ -43,6 +43,15 @@ pub enum EncryptionMode {
 
 pub const ALL_ENCRYPTION_MODES: enumset::EnumSet<EncryptionMode> = enumset::EnumSet::all();
 
+impl From<EncryptionAlgorithm> for EncryptionMode {
+    fn from(alg: EncryptionAlgorithm) -> Self {
+        match alg {
+            EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Aegis256Key(EncryptionKey<32>);
 

@@ -4,7 +4,7 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::{EncryptionConfig, EncryptionMode},
     record::{CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp},
     types::{
         basin::BasinName,
@@ -130,6 +130,20 @@ pub async fn setup_backend_with_stream(
     let basin_name = create_test_basin(&backend, basin_suffix, BasinConfig::default()).await;
     let stream_name = create_test_stream(&backend, &basin_name, stream_suffix, stream_config).await;
     (backend, basin_name, stream_name)
+}
+
+pub fn permissive_stream_config() -> OptionalStreamConfig {
+    OptionalStreamConfig {
+        encryption_modes: Some(
+            [
+                EncryptionMode::Plain,
+                EncryptionMode::Aegis256,
+                EncryptionMode::Aes256Gcm,
+            ]
+            .into(),
+        ),
+        ..Default::default()
+    }
 }
 
 pub async fn append_payloads(

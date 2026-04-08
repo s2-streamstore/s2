@@ -15,8 +15,13 @@ use s2_lite::backend::FOLLOWER_MAX_LAG;
 use super::common::*;
 
 async fn assert_follow_mode_receives_new_data(test_suffix: &str, encryption: &EncryptionConfig) {
+    let config = if matches!(encryption, EncryptionConfig::Plain) {
+        OptionalStreamConfig::default()
+    } else {
+        permissive_stream_config()
+    };
     let (backend, basin_name, stream_name) =
-        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
+        setup_backend_with_stream(test_suffix, "stream", config).await;
 
     append_payloads_with_encryption(
         &backend,
