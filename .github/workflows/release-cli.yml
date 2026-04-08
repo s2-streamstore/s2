@@ -20,14 +20,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
         id: generate-token
         with:
           app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           ref: main
@@ -110,7 +110,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -133,7 +133,7 @@ jobs:
           echo "${{ secrets.MACOS_CERTIFICATE_DER }}" | base64 -d -o certificate.der
       - name: Sign macos binary
         if: matrix.os == 'macos-latest'
-        uses: indygreg/apple-code-sign-action@v1
+        uses: indygreg/apple-code-sign-action@44d0985b7f4363198e80b6fea63ac3e9dd3e9957 # v1.1
         with:
           input_path: target/${{ matrix.target }}/release/s2
           pem_file: macos.pem
@@ -154,14 +154,14 @@ jobs:
         run: echo "${{ secrets.APP_STORE_CONNECT_API_KEY }}" | base64 -d -o app_store_connect_api_key.json
       - name: Notarize macos binary
         if: matrix.os == 'macos-latest'
-        uses: indygreg/apple-code-sign-action@v1
+        uses: indygreg/apple-code-sign-action@44d0985b7f4363198e80b6fea63ac3e9dd3e9957 # v1.1
         with:
           input_path: s2-${{ matrix.target }}.zip
           sign: false
           notarize: true
           app_store_connect_api_key_json_file: app_store_connect_api_key.json
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.target }}
           path: |
@@ -182,29 +182,29 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Get version
         id: version
-        uses: SebRollen/toml-action@v1.2.0
+        uses: SebRollen/toml-action@b1b3628f55fc3a28208d4203ada8b737e9687876 # v1.2.0
         with:
           file: cli/Cargo.toml
           field: package.version
 
       - name: Build and push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
           file: Dockerfile
@@ -220,21 +220,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Get version
         id: version
-        uses: SebRollen/toml-action@v1.2.0
+        uses: SebRollen/toml-action@b1b3628f55fc3a28208d4203ada8b737e9687876 # v1.2.0
         with:
           file: cli/Cargo.toml
           field: package.version
@@ -256,15 +256,15 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Get version
         id: version
-        uses: SebRollen/toml-action@v1.2.0
+        uses: SebRollen/toml-action@b1b3628f55fc3a28208d4203ada8b737e9687876 # v1.2.0
         with:
           file: cli/Cargo.toml
           field: package.version
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: '*-*-*'
       - name: Upload to release
@@ -279,15 +279,15 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Get version
         id: version
-        uses: SebRollen/toml-action@v1.2.0
+        uses: SebRollen/toml-action@b1b3628f55fc3a28208d4203ada8b737e9687876 # v1.2.0
         with:
           file: cli/Cargo.toml
           field: package.version
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: '*-*-*'
       - name: Calculate checksums
@@ -301,7 +301,7 @@ jobs:
           MAC_ARM_SHA256=$(shasum -a 256 aarch64-apple-darwin/s2-aarch64-apple-darwin.zip | awk '{print $1}')
           echo "MAC_ARM_SHA256=$MAC_ARM_SHA256" >> $GITHUB_ENV
       - name: Checkout homebrew repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: 's2-streamstore/homebrew-s2'
           token: ${{ secrets.HOMEBREW_PAT }}
