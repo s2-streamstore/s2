@@ -152,6 +152,9 @@ pub struct StreamConfig {
     #[clap(flatten)]
     /// Delete-on-empty configuration.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
+    #[arg(long, value_delimiter = ',')]
+    /// Allowed encryption modes (comma-separated). If empty, all modes are permitted.
+    pub encryption_modes: Vec<EncryptionMode>,
 }
 
 impl StreamConfig {
@@ -161,12 +164,22 @@ impl StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption_modes,
         } = self;
         storage_class.is_none()
             && retention_policy.is_none()
             && timestamping.is_none()
             && delete_on_empty.is_none()
+            && encryption_modes.is_empty()
     }
+}
+
+#[derive(ValueEnum, Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EncryptionMode {
+    Plain,
+    Aegis256,
+    Aes256Gcm,
 }
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
@@ -260,6 +273,26 @@ impl From<BasinConfig> for sdk::types::BasinConfig {
     }
 }
 
+impl From<EncryptionMode> for sdk::types::EncryptionMode {
+    fn from(mode: EncryptionMode) -> Self {
+        match mode {
+            EncryptionMode::Plain => Self::Plain,
+            EncryptionMode::Aegis256 => Self::Aegis256,
+            EncryptionMode::Aes256Gcm => Self::Aes256Gcm,
+        }
+    }
+}
+
+impl From<sdk::types::EncryptionMode> for EncryptionMode {
+    fn from(mode: sdk::types::EncryptionMode) -> Self {
+        match mode {
+            sdk::types::EncryptionMode::Plain => Self::Plain,
+            sdk::types::EncryptionMode::Aegis256 => Self::Aegis256,
+            sdk::types::EncryptionMode::Aes256Gcm => Self::Aes256Gcm,
+        }
+    }
+}
+
 impl From<StreamConfig> for sdk::types::StreamConfig {
     fn from(config: StreamConfig) -> Self {
         let mut stream_config = sdk::types::StreamConfig::new();
@@ -274,6 +307,15 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
         }
         if let Some(delete_on_empty) = config.delete_on_empty {
             stream_config = stream_config.with_delete_on_empty(delete_on_empty.into());
+        }
+        if !config.encryption_modes.is_empty() {
+            stream_config = stream_config.with_encryption_modes(
+                config
+                    .encryption_modes
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            );
         }
         stream_config
     }
@@ -379,6 +421,11 @@ impl From<sdk::types::StreamConfig> for StreamConfig {
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),
+            encryption_modes: config
+                .encryption_modes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -398,6 +445,15 @@ impl From<StreamConfig> for sdk::types::StreamReconfiguration {
         }
         if let Some(delete_on_empty) = config.delete_on_empty {
             reconfig = reconfig.with_delete_on_empty(delete_on_empty.into());
+        }
+        if !config.encryption_modes.is_empty() {
+            reconfig = reconfig.with_encryption_modes(
+                config
+                    .encryption_modes
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            );
         }
         reconfig
     }
