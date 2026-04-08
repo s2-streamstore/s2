@@ -27,14 +27,15 @@
 //! conversions represent "set the config to exactly this state", not "update only
 //! the fields that are set."
 
-use std::{collections::BTreeSet, time::Duration};
+use std::time::Duration;
 
 use enum_ordinalize::Ordinalize;
+use enumset::EnumSet;
 
 use crate::{encryption::EncryptionMode, maybe::Maybe};
 
-pub fn default_encryption_modes() -> BTreeSet<EncryptionMode> {
-    BTreeSet::from([EncryptionMode::Plain])
+pub fn default_encryption_modes() -> EnumSet<EncryptionMode> {
+    EnumSet::only(EncryptionMode::Plain)
 }
 
 #[derive(
@@ -110,7 +111,7 @@ pub struct StreamConfig {
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
-    pub encryption_modes: BTreeSet<EncryptionMode>,
+    pub encryption_modes: EnumSet<EncryptionMode>,
 }
 
 impl Default for StreamConfig {
@@ -142,7 +143,7 @@ pub struct StreamReconfiguration {
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
-    pub encryption_modes: Maybe<Option<BTreeSet<EncryptionMode>>>,
+    pub encryption_modes: Maybe<Option<EnumSet<EncryptionMode>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -248,7 +249,7 @@ pub struct OptionalStreamConfig {
     pub retention_policy: Option<RetentionPolicy>,
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,
-    pub encryption_modes: Option<BTreeSet<EncryptionMode>>,
+    pub encryption_modes: Option<EnumSet<EncryptionMode>>,
 }
 
 impl OptionalStreamConfig {

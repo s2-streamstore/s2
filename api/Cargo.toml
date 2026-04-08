@@ -20,6 +20,7 @@ base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }
 enum-ordinalize = { workspace = true }
+enumset = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }

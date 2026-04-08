@@ -376,7 +376,12 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
                     "encryption_modes must not be empty".to_owned(),
                 ));
             }
-            Some(modes) => Some(modes.into_iter().map(Into::into).collect()),
+            Some(modes) => Some(
+                modes
+                    .into_iter()
+                    .map(encryption::EncryptionMode::from)
+                    .collect(),
+            ),
             None => None,
         };
 
@@ -435,7 +440,12 @@ impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
                     "encryption_modes must not be empty".to_owned(),
                 ));
             }
-            _ => encryption_modes.map_opt(|modes| modes.into_iter().map(Into::into).collect()),
+            _ => encryption_modes.map_opt(|modes| {
+                modes
+                    .into_iter()
+                    .map(encryption::EncryptionMode::from)
+                    .collect()
+            }),
         };
 
         Ok(Self {

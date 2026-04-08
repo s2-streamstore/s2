@@ -163,6 +163,7 @@ impl ServiceError {
                 CreateStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
+                CreateStreamError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::GetStreamConfig(e) => match e {
                 GetStreamConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -197,6 +198,9 @@ impl ServiceError {
                 }
                 ReconfigureStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
+                }
+                ReconfigureStreamError::Validation(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
                 }
             },
             ServiceError::CheckTail(e) => match e {

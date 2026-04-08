@@ -4649,6 +4649,7 @@ dependencies = [
  "bytes",
  "compact_str",
  "enum-ordinalize",
+ "enumset",
  "flate2",
  "futures",
  "http 1.4.0",

@@ -29,8 +29,9 @@ pub enum EncryptionAlgorithm {
 /// Encryption mode for stream configuration.
 ///
 /// Represents the allowed encryption modes on a stream, including plaintext.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, enumset::EnumSetType)]
 #[strum(ascii_case_insensitive)]
+#[enumset(no_super_impls)]
 pub enum EncryptionMode {
     #[strum(serialize = "plain")]
     Plain,
@@ -39,6 +40,8 @@ pub enum EncryptionMode {
     #[strum(serialize = "aes-256-gcm")]
     Aes256Gcm,
 }
+
+pub const ALL_ENCRYPTION_MODES: enumset::EnumSet<EncryptionMode> = enumset::EnumSet::all();
 
 #[derive(Debug, Clone)]
 pub struct Aegis256Key(EncryptionKey<32>);

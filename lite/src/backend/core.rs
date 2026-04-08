@@ -310,6 +310,9 @@ impl Backend {
                             CreateStreamError::BasinDeletionPending(e) => Err(e)?,
                             CreateStreamError::StreamDeletionPending(e) => Err(e)?,
                             CreateStreamError::BasinNotFound(e) => Err(e)?,
+                            CreateStreamError::Validation(_) => {
+                                unreachable!("auto-create uses default config")
+                            }
                             CreateStreamError::StreamAlreadyExists(_) => {}
                         }
                     }

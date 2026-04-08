@@ -158,9 +158,23 @@ impl Backend {
                 OffsetDateTime::now_utc(),
             ),
         };
-        let resolved: OptionalStreamConfig = resolved
-            .merge(basin_meta.config.default_stream_config)
-            .into();
+        let basin_defaults = &basin_meta.config.default_stream_config;
+        let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
+
+        if let Some(ref stream_modes) = resolved.encryption_modes {
+            let basin_modes = basin_defaults
+                .encryption_modes
+                .as_ref()
+                .copied()
+                .unwrap_or(s2_common::encryption::ALL_ENCRYPTION_MODES);
+            if !stream_modes.is_subset(basin_modes) {
+                return Err(s2_common::types::ValidationError(
+                    "stream encryption_modes must be a subset of basin default encryption_modes"
+                        .to_owned(),
+                )
+                .into());
+            }
+        }
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
@@ -293,6 +307,31 @@ impl Backend {
             .filter(|age| !age.is_zero());
 
         meta.config = meta.config.reconfigure(reconfig);
+
+        if let Some(ref stream_modes) = meta.config.encryption_modes {
+            let basin_meta = db_txn_get(
+                &txn,
+                kv::basin_meta::ser_key(&basin),
+                kv::basin_meta::deser_value,
+            )
+            .await?
+            .ok_or_else(|| StreamNotFoundError {
+                basin: basin.clone(),
+                stream: stream.clone(),
+            })?;
+            let basin_modes = basin_meta
+                .config
+                .default_stream_config
+                .encryption_modes
+                .unwrap_or(s2_common::encryption::ALL_ENCRYPTION_MODES);
+            if !stream_modes.is_subset(basin_modes) {
+                return Err(s2_common::types::ValidationError(
+                    "stream encryption_modes must be a subset of basin default encryption_modes"
+                        .to_owned(),
+                )
+                .into());
+            }
+        }
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 

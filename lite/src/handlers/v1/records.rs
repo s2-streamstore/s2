@@ -21,7 +21,6 @@ use s2_common::{
     types::{
         ValidationError,
         basin::BasinName,
-        config::OptionalStreamConfig,
         stream::{
             ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StoredReadSessionOutput,
             StreamName,
@@ -41,18 +40,18 @@ async fn validate_encryption_mode(
     stream: &StreamName,
     encryption: &EncryptionConfig,
 ) -> Result<(), ServiceError> {
-    let stream_config = match backend
+    let encryption_modes = match backend
         .get_stream_config(basin.clone(), stream.clone())
         .await
     {
-        Ok(config) => config,
-        Err(GetStreamConfigError::StreamNotFound(_)) => OptionalStreamConfig::default(),
+        Ok(config) => config
+            .encryption_modes
+            .unwrap_or(s2_common::encryption::ALL_ENCRYPTION_MODES),
+        Err(GetStreamConfigError::StreamNotFound(_)) => s2_common::encryption::ALL_ENCRYPTION_MODES,
         Err(e) => return Err(e.into()),
     };
-    let basin_config = backend.get_basin_config(basin.clone()).await?;
-    let resolved = stream_config.merge(basin_config.default_stream_config);
     let mode = encryption.mode();
-    if !resolved.encryption_modes.contains(&mode) {
+    if !encryption_modes.contains(mode) {
         return Err(ServiceError::Validation(ValidationError(format!(
             "encryption mode '{}' is not allowed on this stream",
             mode,

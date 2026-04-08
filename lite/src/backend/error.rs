@@ -281,6 +281,8 @@ pub enum CreateStreamError {
     StreamAlreadyExists(#[from] StreamAlreadyExistsError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error(transparent)]
+    Validation(#[from] s2_common::types::ValidationError),
 }
 
 impl From<slatedb::Error> for CreateStreamError {
@@ -420,6 +422,8 @@ pub enum ReconfigureStreamError {
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error(transparent)]
+    Validation(#[from] s2_common::types::ValidationError),
 }
 
 impl From<slatedb::Error> for ReconfigureStreamError {
