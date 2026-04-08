@@ -713,7 +713,7 @@ pub struct StreamConfig {
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
     /// Allowed encryption modes for the stream.
     ///
-    /// If empty, all encryption modes are permitted.
+    /// Leave empty to use the default plain-only policy.
     pub encryption_modes: Vec<EncryptionMode>,
 }
 
@@ -771,19 +771,27 @@ impl From<api::config::StreamConfig> for StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption_modes: value.encryption_modes.into_iter().map(Into::into).collect(),
+            encryption_modes: value
+                .encryption_modes
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
 
 impl From<StreamConfig> for api::config::StreamConfig {
     fn from(value: StreamConfig) -> Self {
+        let encryption_modes = (!value.encryption_modes.is_empty())
+            .then(|| value.encryption_modes.into_iter().map(Into::into).collect());
+
         Self {
             storage_class: value.storage_class.map(Into::into),
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption_modes: value.encryption_modes.into_iter().map(Into::into).collect(),
+            encryption_modes,
         }
     }
 }
@@ -1333,14 +1341,20 @@ impl StreamReconfiguration {
 
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
     fn from(value: StreamReconfiguration) -> Self {
+        let encryption_modes = match value.encryption_modes {
+            Maybe::Specified(modes) if modes.is_empty() => Maybe::Specified(None),
+            Maybe::Specified(modes) => {
+                Maybe::Specified(Some(modes.into_iter().map(Into::into).collect()))
+            }
+            Maybe::Unspecified => Maybe::Unspecified,
+        };
+
         Self {
             storage_class: value.storage_class.map(|m| m.map(Into::into)),
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
-            encryption_modes: value
-                .encryption_modes
-                .map(|modes| modes.into_iter().map(Into::into).collect()),
+            encryption_modes,
         }
     }
 }

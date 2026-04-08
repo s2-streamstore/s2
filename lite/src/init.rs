@@ -74,7 +74,7 @@ pub struct StreamConfigSpec {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptySpec>,
-    /// Allowed encryption modes. If empty, all modes are permitted.
+    /// Allowed encryption modes. Defaults to `plain` if unspecified.
     #[serde(default)]
     pub encryption_modes: Vec<EncryptionModeSpec>,
 }

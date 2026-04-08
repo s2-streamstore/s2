@@ -302,9 +302,9 @@ pub struct StreamConfig {
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
     /// Allowed encryption modes for the stream.
-    /// If empty, all encryption modes are permitted.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub encryption_modes: Vec<EncryptionMode>,
+    /// Defaults to `["plain"]` (plaintext only) if unspecified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_modes: Option<Vec<EncryptionMode>>,
 }
 
 impl StreamConfig {
@@ -323,8 +323,7 @@ impl StreamConfig {
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
             encryption_modes: encryption_modes
-                .map(|modes| modes.into_iter().map(Into::into).collect())
-                .unwrap_or_default(),
+                .map(|modes| modes.into_iter().map(Into::into).collect()),
         };
         if config == Self::default() {
             None
@@ -349,7 +348,7 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
-            encryption_modes: encryption_modes.into_iter().map(Into::into).collect(),
+            encryption_modes: Some(encryption_modes.into_iter().map(Into::into).collect()),
         }
     }
 }
@@ -371,15 +370,19 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             Some(policy) => Some(policy.try_into()?),
         };
 
-        let encryption_modes = if encryption_modes.is_empty() {
-            None
-        } else {
-            Some(
-                encryption_modes
+        let encryption_modes = match encryption_modes {
+            Some(modes) if modes.is_empty() => {
+                return Err(types::ValidationError(
+                    "encryption_modes must not be empty".to_owned(),
+                ));
+            }
+            Some(modes) => Some(
+                modes
                     .into_iter()
                     .map(encryption::EncryptionMode::from)
                     .collect(),
-            )
+            ),
+            None => None,
         };
 
         Ok(Self {
@@ -414,10 +417,9 @@ pub struct StreamReconfiguration {
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<DeleteOnEmptyReconfiguration>))]
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
     /// Allowed encryption modes for the stream.
-    /// If empty, all encryption modes are permitted.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<Vec<EncryptionMode>>))]
-    pub encryption_modes: Maybe<Vec<EncryptionMode>>,
+    pub encryption_modes: Maybe<Option<Vec<EncryptionMode>>>,
 }
 
 impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
@@ -432,18 +434,19 @@ impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
             encryption_modes,
         } = value;
 
-        let encryption_modes = encryption_modes.map(|modes| {
-            if modes.is_empty() {
-                None
-            } else {
-                Some(
-                    modes
-                        .into_iter()
-                        .map(encryption::EncryptionMode::from)
-                        .collect(),
-                )
+        let encryption_modes = match &encryption_modes {
+            Maybe::Specified(Some(modes)) if modes.is_empty() => {
+                return Err(types::ValidationError(
+                    "encryption_modes must not be empty".to_owned(),
+                ));
             }
-        });
+            _ => encryption_modes.map_opt(|modes| {
+                modes
+                    .into_iter()
+                    .map(encryption::EncryptionMode::from)
+                    .collect()
+            }),
+        };
 
         Ok(Self {
             storage_class: storage_class.map_opt(Into::into),
@@ -470,10 +473,8 @@ impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
             retention_policy: retention_policy.map_opt(Into::into),
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
-            encryption_modes: encryption_modes.map(|opt| {
-                opt.map(|modes| modes.into_iter().map(Into::into).collect())
-                    .unwrap_or_default()
-            }),
+            encryption_modes: encryption_modes
+                .map_opt(|modes| modes.into_iter().map(Into::into).collect()),
         }
     }
 }
@@ -633,7 +634,7 @@ mod tests {
                     retention_policy,
                     timestamping,
                     delete_on_empty,
-                    encryption_modes: vec![],
+                    encryption_modes: None,
                 },
             )
     }
