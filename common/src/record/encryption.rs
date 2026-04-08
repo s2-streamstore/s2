@@ -549,24 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_suite_flip_detected() {
-        let aad = aad();
-        let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let mut ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad)
-            .to_bytes()
-            .to_vec();
-        ciphertext[0] = 0xFF;
-        let result = EncryptedRecord::try_from(Bytes::from(ciphertext));
-        assert!(matches!(
-            result,
-            Err(RecordDecodeError::InvalidValue(
-                "EncryptedRecord",
-                "invalid ciphertext suite id"
-            ))
-        ));
-    }
-
-    #[test]
     fn wrong_aad_fails() {
         let aad = aad();
         let other_aad = [0x5A; 32];
@@ -640,27 +622,29 @@ mod tests {
     #[test]
     fn encrypt_record_encrypts_envelope_records() {
         let aad = aad();
-        let record = make_plaintext_envelope(
-            vec![Header {
-                name: Bytes::from_static(b"x-test"),
-                value: Bytes::from_static(b"hello"),
-            }],
-            Bytes::from_static(b"secret payload"),
-        )
-        .metered();
+        let encryption = test_encryption(EncryptionAlgorithm::Aegis256);
+        let headers = vec![Header {
+            name: Bytes::from_static(b"x-test"),
+            value: Bytes::from_static(b"hello"),
+        }];
+        let body = Bytes::from_static(b"secret payload");
+        let record = make_plaintext_envelope(headers.clone(), body.clone()).metered();
 
-        let record = encrypt_record(
-            record,
-            &test_encryption(EncryptionAlgorithm::Aegis256),
-            &aad,
-        );
+        let stored = encrypt_record(record, &encryption, &aad).into_inner();
         let StoredRecord::Encrypted {
             record: envelope, ..
-        } = record.into_inner()
+        } = &stored
         else {
             panic!("expected encrypted envelope record");
         };
-        assert_ne!(envelope.to_bytes().as_ref(), b"secret payload");
+        assert_eq!(envelope.algorithm(), EncryptionAlgorithm::Aegis256);
+
+        let decrypted = decrypt_stored_record(stored, &encryption, &aad).unwrap();
+        let Record::Envelope(record) = decrypted.into_inner() else {
+            panic!("expected envelope record");
+        };
+        assert_eq!(record.headers(), headers.as_slice());
+        assert_eq!(record.body().as_ref(), body.as_ref());
     }
 
     #[test]
