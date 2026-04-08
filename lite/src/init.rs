@@ -293,6 +293,7 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                     })
                 })
                 .map_or(Maybe::Unspecified, Maybe::Specified),
+            encryption_modes: Maybe::Unspecified,
         }
     }
 }

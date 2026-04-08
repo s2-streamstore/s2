@@ -229,6 +229,16 @@ pub enum ReadRequest {
     },
 }
 
+impl ReadRequest {
+    pub fn encryption(&self) -> &EncryptionConfig {
+        match self {
+            Self::Unary { encryption, .. }
+            | Self::EventStream { encryption, .. }
+            | Self::S2s { encryption, .. } => encryption,
+        }
+    }
+}
+
 pub enum AppendRequest {
     /// Unary
     Unary {
@@ -242,6 +252,14 @@ pub enum AppendRequest {
         inputs: BoxStream<'static, Result<types::stream::AppendInput, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,
     },
+}
+
+impl AppendRequest {
+    pub fn encryption(&self) -> &EncryptionConfig {
+        match self {
+            Self::Unary { encryption, .. } | Self::S2s { encryption, .. } => encryption,
+        }
+    }
 }
 
 impl std::fmt::Debug for AppendRequest {

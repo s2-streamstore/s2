@@ -23,6 +23,8 @@ pub use s2_common::caps::RECORD_BATCH_MAX;
 pub use s2_common::encryption::EncryptionAlgorithm;
 /// Encryption configuration for stream operations.
 pub use s2_common::encryption::EncryptionConfig;
+/// Encryption mode for stream configuration.
+pub use s2_common::encryption::EncryptionMode;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.
@@ -709,6 +711,10 @@ pub struct StreamConfig {
     ///
     /// See [`DeleteOnEmptyConfig`] for defaults.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
+    /// Allowed encryption modes for the stream.
+    ///
+    /// Defaults to `[Plain]` (plaintext only).
+    pub encryption_modes: Option<Vec<EncryptionMode>>,
 }
 
 impl StreamConfig {
@@ -748,6 +754,14 @@ impl StreamConfig {
             ..self
         }
     }
+
+    /// Set the allowed encryption modes for the stream.
+    pub fn with_encryption_modes(self, encryption_modes: Vec<EncryptionMode>) -> Self {
+        Self {
+            encryption_modes: Some(encryption_modes),
+            ..self
+        }
+    }
 }
 
 impl From<api::config::StreamConfig> for StreamConfig {
@@ -757,6 +771,9 @@ impl From<api::config::StreamConfig> for StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
+            encryption_modes: value
+                .encryption_modes
+                .map(|modes| modes.into_iter().map(Into::into).collect()),
         }
     }
 }
@@ -768,6 +785,9 @@ impl From<StreamConfig> for api::config::StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
+            encryption_modes: value
+                .encryption_modes
+                .map(|modes| modes.into_iter().map(Into::into).collect()),
         }
     }
 }
@@ -1264,6 +1284,8 @@ pub struct StreamReconfiguration {
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     /// Override for the existing [`delete_on_empty`](StreamConfig::delete_on_empty).
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
+    /// Override for the existing [`encryption_modes`](StreamConfig::encryption_modes).
+    pub encryption_modes: Maybe<Option<Vec<EncryptionMode>>>,
 }
 
 impl StreamReconfiguration {
@@ -1303,6 +1325,14 @@ impl StreamReconfiguration {
             ..self
         }
     }
+
+    /// Set the override for the existing [`encryption_modes`](StreamConfig::encryption_modes).
+    pub fn with_encryption_modes(self, encryption_modes: Vec<EncryptionMode>) -> Self {
+        Self {
+            encryption_modes: Maybe::Specified(Some(encryption_modes)),
+            ..self
+        }
+    }
 }
 
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
@@ -1312,6 +1342,9 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
+            encryption_modes: value
+                .encryption_modes
+                .map(|m| m.map(|modes| modes.into_iter().map(Into::into).collect())),
         }
     }
 }

@@ -26,6 +26,20 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
+/// Encryption mode for stream configuration.
+///
+/// Represents the allowed encryption modes on a stream, including plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, EnumString)]
+#[strum(ascii_case_insensitive)]
+pub enum EncryptionMode {
+    #[strum(serialize = "plain")]
+    Plain,
+    #[strum(serialize = "aegis-256")]
+    Aegis256,
+    #[strum(serialize = "aes-256-gcm")]
+    Aes256Gcm,
+}
+
 #[derive(Debug, Clone)]
 pub struct Aegis256Key(EncryptionKey<32>);
 
@@ -81,6 +95,14 @@ impl EncryptionConfig {
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
         Self::Aes256Gcm(Aes256GcmKey::new(key))
+    }
+
+    pub fn mode(&self) -> EncryptionMode {
+        match self {
+            Self::Plain => EncryptionMode::Plain,
+            Self::Aegis256(_) => EncryptionMode::Aegis256,
+            Self::Aes256Gcm(_) => EncryptionMode::Aes256Gcm,
+        }
     }
 
     pub fn to_header_value(&self) -> HeaderValue {

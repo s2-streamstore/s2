@@ -27,11 +27,15 @@
 //! conversions represent "set the config to exactly this state", not "update only
 //! the fields that are set."
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use enum_ordinalize::Ordinalize;
 
-use crate::maybe::Maybe;
+use crate::{encryption::EncryptionMode, maybe::Maybe};
+
+pub fn default_encryption_modes() -> BTreeSet<EncryptionMode> {
+    BTreeSet::from([EncryptionMode::Plain])
+}
 
 #[derive(
     Debug,
@@ -100,12 +104,25 @@ pub struct DeleteOnEmptyConfig {
     pub min_age: Duration,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamConfig {
     pub storage_class: StorageClass,
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
+    pub encryption_modes: BTreeSet<EncryptionMode>,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            storage_class: StorageClass::default(),
+            retention_policy: RetentionPolicy::default(),
+            timestamping: TimestampingConfig::default(),
+            delete_on_empty: DeleteOnEmptyConfig::default(),
+            encryption_modes: default_encryption_modes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -125,6 +142,7 @@ pub struct StreamReconfiguration {
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
+    pub encryption_modes: Maybe<Option<BTreeSet<EncryptionMode>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -230,6 +248,7 @@ pub struct OptionalStreamConfig {
     pub retention_policy: Option<RetentionPolicy>,
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,
+    pub encryption_modes: Option<BTreeSet<EncryptionMode>>,
 }
 
 impl OptionalStreamConfig {
@@ -239,6 +258,7 @@ impl OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption_modes,
         } = reconfiguration;
         if let Maybe::Specified(storage_class) = storage_class {
             self.storage_class = storage_class;
@@ -255,6 +275,9 @@ impl OptionalStreamConfig {
             self.delete_on_empty = delete_on_empty_reconfig
                 .map(|reconfig| self.delete_on_empty.reconfigure(reconfig))
                 .unwrap_or_default();
+        }
+        if let Maybe::Specified(encryption_modes) = encryption_modes {
+            self.encryption_modes = encryption_modes;
         }
         self
     }
@@ -274,11 +297,17 @@ impl OptionalStreamConfig {
 
         let delete_on_empty = self.delete_on_empty.merge(basin_defaults.delete_on_empty);
 
+        let encryption_modes = self
+            .encryption_modes
+            .or(basin_defaults.encryption_modes)
+            .unwrap_or_else(default_encryption_modes);
+
         StreamConfig {
             storage_class,
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption_modes,
         }
     }
 }
@@ -290,6 +319,7 @@ impl From<OptionalStreamConfig> for StreamReconfiguration {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption_modes,
         } = value;
 
         Self {
@@ -297,6 +327,7 @@ impl From<OptionalStreamConfig> for StreamReconfiguration {
             retention_policy: retention_policy.into(),
             timestamping: Some(timestamping.into()).into(),
             delete_on_empty: Some(delete_on_empty.into()).into(),
+            encryption_modes: encryption_modes.into(),
         }
     }
 }
@@ -308,6 +339,7 @@ impl From<OptionalStreamConfig> for StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption_modes,
         } = value;
 
         Self {
@@ -315,6 +347,7 @@ impl From<OptionalStreamConfig> for StreamConfig {
             retention_policy: retention_policy.unwrap_or_default(),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
+            encryption_modes: encryption_modes.unwrap_or_else(default_encryption_modes),
         }
     }
 }
@@ -326,6 +359,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption_modes,
         } = value;
 
         Self {
@@ -333,6 +367,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
             retention_policy: Some(retention_policy),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
+            encryption_modes: Some(encryption_modes),
         }
     }
 }

@@ -30,6 +30,27 @@ use s2_common::{
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError, stream_id::StreamId};
 
+async fn validate_encryption_mode(
+    backend: &Backend,
+    basin: &BasinName,
+    stream: &StreamName,
+    encryption: &EncryptionConfig,
+) -> Result<(), ServiceError> {
+    let stream_config = backend
+        .get_stream_config(basin.clone(), stream.clone())
+        .await?;
+    let basin_config = backend.get_basin_config(basin.clone()).await?;
+    let resolved = stream_config.merge(basin_config.default_stream_config);
+    let mode = encryption.mode();
+    if !resolved.encryption_modes.contains(&mode) {
+        return Err(ServiceError::Validation(ValidationError(format!(
+            "encryption mode '{}' is not allowed on this stream",
+            mode,
+        ))));
+    }
+    Ok(())
+}
+
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{get, post};
     axum::Router::new()
@@ -208,6 +229,7 @@ pub async fn read(
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
+    validate_encryption_mode(&backend, &basin, &stream, request.encryption()).await?;
     let start: ReadStart = start.try_into()?;
     let stream_id = StreamId::new(&basin, &stream);
     match request {
@@ -391,6 +413,7 @@ pub async fn append(
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
+    validate_encryption_mode(&backend, &basin, &stream, request.encryption()).await?;
     let stream_id = StreamId::new(&basin, &stream);
     match request {
         v1t::stream::AppendRequest::Unary {
@@ -481,7 +504,7 @@ mod tests {
         s2s::{FrameDecoder, SessionMessage, TerminalMessage},
     };
     use s2_common::{
-        encryption::{EncryptionAlgorithm, EncryptionConfig, S2_ENCRYPTION_HEADER},
+        encryption::{EncryptionAlgorithm, EncryptionConfig, EncryptionMode, S2_ENCRYPTION_HEADER},
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record, RecordDecryptionError},
         types::{
@@ -494,6 +517,20 @@ mod tests {
             },
         },
     };
+
+    fn encrypted_stream_config() -> OptionalStreamConfig {
+        OptionalStreamConfig {
+            encryption_modes: Some(
+                [
+                    EncryptionMode::Plain,
+                    EncryptionMode::Aegis256,
+                    EncryptionMode::Aes256Gcm,
+                ]
+                .into(),
+            ),
+            ..Default::default()
+        }
+    }
     use slatedb::{Db, config::Settings, object_store::memory::InMemory};
     use tokio_util::codec::Decoder as _;
     use tower::ServiceExt as _;
@@ -516,6 +553,13 @@ mod tests {
     }
 
     async fn setup_app(test_suffix: &str) -> (axum::Router, Backend, BasinName, StreamName) {
+        setup_app_with_config(test_suffix, OptionalStreamConfig::default()).await
+    }
+
+    async fn setup_app_with_config(
+        test_suffix: &str,
+        stream_config: OptionalStreamConfig,
+    ) -> (axum::Router, Backend, BasinName, StreamName) {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
@@ -531,7 +575,7 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
+                stream_config,
                 CreateMode::CreateOnly(None),
             )
             .await
@@ -659,7 +703,8 @@ mod tests {
     #[tokio::test]
     async fn unary_append_with_encryption_header_persists_encrypted_record() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("append-unary-encrypted").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("append-unary-encrypted", encrypted_stream_config()).await;
 
         let input = proto::AppendInput {
             records: vec![proto::AppendRecord {
@@ -713,7 +758,8 @@ mod tests {
     async fn unary_read_with_wrong_key_returns_invalid_error() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
         let wrong_key = EncryptionConfig::aegis256([0x24; 32]);
-        let (app, backend, basin, stream) = setup_app("read-unary-bad-key").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-unary-bad-key", encrypted_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
@@ -800,7 +846,8 @@ mod tests {
     #[tokio::test]
     async fn s2s_read_with_correct_encryption_returns_batch_frame() {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("read-s2s-ok").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-s2s-ok", encrypted_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
