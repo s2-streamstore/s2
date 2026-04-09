@@ -4782,6 +4782,7 @@ dependencies = [
  "prost",
  "rand 0.10.0",
  "rcgen",
+ "rstest",
  "rustls",
  "s2-api",
  "s2-common",
