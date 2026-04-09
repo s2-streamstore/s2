@@ -52,6 +52,7 @@ pub(crate) enum EncryptedRecordFormat {
 }
 
 impl EncryptedRecordFormat {
+    /// Current write format for newly encrypted records with this algorithm.
     const fn current_for_algorithm(algorithm: EncryptionAlgorithm) -> Self {
         match algorithm {
             EncryptionAlgorithm::Aegis256 => Self::Aegis256V1,
@@ -306,6 +307,9 @@ fn decrypt_payload(
 ) -> Result<Bytes, RecordDecryptionError> {
     let format = record.format;
     let expected = encryption.mode();
+    let (mut encoded, payload_start, payload_end) = decryption_layout(record, format)?;
+    let plaintext_len = payload_end - payload_start;
+
     match format {
         EncryptedRecordFormat::Aegis256V1 => {
             let key = match encryption {
@@ -317,11 +321,6 @@ fn decrypt_payload(
                     });
                 }
             };
-            let payload_start = FORMAT_ID_LEN + format.nonce_len();
-            let tag_len = format.tag_len();
-            let mut encoded = record.into_mut_encoded();
-            let payload_end = payload_end(encoded.len(), payload_start, tag_len)?;
-            let plaintext_len = payload_end - payload_start;
             let nonce: [u8; 32] = encoded
                 .get(FORMAT_ID_LEN..payload_start)
                 .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
@@ -353,11 +352,6 @@ fn decrypt_payload(
                     });
                 }
             };
-            let payload_start = FORMAT_ID_LEN + format.nonce_len();
-            let tag_len = format.tag_len();
-            let mut encoded = record.into_mut_encoded();
-            let payload_end = payload_end(encoded.len(), payload_start, tag_len)?;
-            let plaintext_len = payload_end - payload_start;
             let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.secret()));
             let nonce = aes_gcm::Nonce::clone_from_slice(
                 encoded
@@ -380,6 +374,15 @@ fn decrypt_payload(
             Ok(encoded.freeze())
         }
     }
+}
+
+fn decryption_layout(
+    record: EncryptedRecord,
+    format: EncryptedRecordFormat,
+) -> Result<(BytesMut, usize, usize), RecordDecryptionError> {
+    let payload_start = FORMAT_ID_LEN + format.nonce_len();
+    let payload_end = payload_end(record.encoded.len(), payload_start, format.tag_len())?;
+    Ok((record.into_mut_encoded(), payload_start, payload_end))
 }
 
 fn payload_end(
