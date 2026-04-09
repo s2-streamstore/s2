@@ -759,7 +759,7 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("utf8 sse body");
         assert!(body.contains("event: error"));
         assert!(body.contains("\"code\":\"invalid\""));
-        assert!(body.contains("ciphertext encryption mode mismatch"));
+        assert!(body.contains("record encryption mode mismatch"));
         assert!(!body.contains("event: ping"));
         assert!(!body.contains("[DONE]"));
     }
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY.as_u16());
         let info: serde_json::Value =
             serde_json::from_str(&body).expect("terminal json error info");
-        assert_invalid_error(&info, "ciphertext encryption mode mismatch");
+        assert_invalid_error(&info, "record encryption mode mismatch");
     }
 
     #[tokio::test]

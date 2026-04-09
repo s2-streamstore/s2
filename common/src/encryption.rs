@@ -84,7 +84,7 @@ impl Aes256GcmKey {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum EncryptionSpecError {
     #[error("Invalid encryption spec: {0}")]
-    InvalidConfig(String),
+    InvalidSpec(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -136,13 +136,13 @@ impl FromStr for EncryptionSpec {
         let alg_str = parts.next().unwrap_or_default().trim();
         let key_b64 = parts.next().map(str::trim);
         if parts.next().is_some() {
-            return Err(EncryptionSpecError::InvalidConfig(
+            return Err(EncryptionSpecError::InvalidSpec(
                 "expected '<alg>; <key>' or 'plain'".to_owned(),
             ));
         }
 
         if alg_str.is_empty() {
-            return Err(EncryptionSpecError::InvalidConfig(
+            return Err(EncryptionSpecError::InvalidSpec(
                 "missing algorithm".to_owned(),
             ));
         }
@@ -150,19 +150,19 @@ impl FromStr for EncryptionSpec {
         let key_b64 = key_b64.filter(|key| !key.is_empty());
         match (parse_mode(alg_str)?, key_b64) {
             (EncryptionMode::Plain, None) => Ok(Self::Plain),
-            (EncryptionMode::Plain, Some(_)) => Err(EncryptionSpecError::InvalidConfig(
+            (EncryptionMode::Plain, Some(_)) => Err(EncryptionSpecError::InvalidSpec(
                 "key is not allowed when algorithm is 'plain'".to_owned(),
             )),
             (EncryptionMode::Aegis256, Some(key_b64)) => {
                 Ok(Self::Aegis256(Aegis256Key::from_base64(key_b64)?))
             }
-            (EncryptionMode::Aegis256, None) => Err(EncryptionSpecError::InvalidConfig(
+            (EncryptionMode::Aegis256, None) => Err(EncryptionSpecError::InvalidSpec(
                 "missing key for 'aegis-256'".to_owned(),
             )),
             (EncryptionMode::Aes256Gcm, Some(key_b64)) => {
                 Ok(Self::Aes256Gcm(Aes256GcmKey::from_base64(key_b64)?))
             }
-            (EncryptionMode::Aes256Gcm, None) => Err(EncryptionSpecError::InvalidConfig(
+            (EncryptionMode::Aes256Gcm, None) => Err(EncryptionSpecError::InvalidSpec(
                 "missing key for 'aes-256-gcm'".to_owned(),
             )),
         }
@@ -186,7 +186,7 @@ fn parse_encryption_key<const N: usize>(
         Ok(decoded) => decoded,
         Err(e) => {
             key.as_mut().zeroize();
-            return Err(EncryptionSpecError::InvalidConfig(format!(
+            return Err(EncryptionSpecError::InvalidSpec(format!(
                 "key is not valid base64: {e}"
             )));
         }
@@ -195,7 +195,7 @@ fn parse_encryption_key<const N: usize>(
     if decoded.len() != N {
         let len = decoded.len();
         key.as_mut().zeroize();
-        return Err(EncryptionSpecError::InvalidConfig(format!(
+        return Err(EncryptionSpecError::InvalidSpec(format!(
             "key must be exactly {N} bytes, got {len} bytes"
         )));
     }
@@ -217,7 +217,7 @@ fn header_value_for_key(algorithm: EncryptionAlgorithm, key: &[u8; 32]) -> Heade
 
 fn parse_mode(mode_str: &str) -> Result<EncryptionMode, EncryptionSpecError> {
     mode_str.parse::<EncryptionMode>().map_err(|_| {
-        EncryptionSpecError::InvalidConfig(format!(
+        EncryptionSpecError::InvalidSpec(format!(
             "unknown encryption mode {mode_str:?}; expected 'plain', 'aegis-256', or 'aes-256-gcm'"
         ))
     })
@@ -258,7 +258,7 @@ mod tests {
     fn assert_invalid_parse(header: &str) {
         let result = header.parse::<EncryptionSpec>();
         assert!(
-            matches!(result, Err(EncryptionSpecError::InvalidConfig(_))),
+            matches!(result, Err(EncryptionSpecError::InvalidSpec(_))),
             "expected invalid spec for {header:?}, got {result:?}"
         );
     }

@@ -25,8 +25,8 @@
 //! plaintext [`EnvelopeRecord`](super::EnvelopeRecord) encoding.
 //!
 //! The stored `metered_size` remains the logical plaintext metered size rather
-//! than the ciphertext size, so protection does not change append/read
-//! metering, limits, or accounting.
+//! than the encoded encrypted record size, so protection does not change
+//! append/read metering, limits, or accounting.
 
 use aegis::aegis256::Aegis256;
 use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
@@ -108,7 +108,7 @@ impl EncryptedRecordFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordDecryptionError {
-    #[error("ciphertext encryption mode mismatch")]
+    #[error("record encryption mode mismatch")]
     ModeMismatch {
         expected: EncryptionMode,
         actual: EncryptionMode,
@@ -406,7 +406,7 @@ mod tests {
         }
     }
 
-    fn encrypt_test_payload(
+    fn encrypt_test_record(
         plaintext: &(impl Encodable + ?Sized),
         alg: EncryptionAlgorithm,
         aad: &[u8],
@@ -459,7 +459,7 @@ mod tests {
         let plaintext = make_envelope(headers, body);
         let encrypted = match encryption {
             EncryptionSpec::Plain => {
-                unreachable!("plain encryption should not produce ciphertext")
+                unreachable!("plain mode should not produce an encrypted record")
             }
             EncryptionSpec::Aegis256(key) => {
                 encrypt_payload(&plaintext, EncryptionAlgorithm::Aegis256, key.secret(), aad)
@@ -481,7 +481,7 @@ mod tests {
     #[case::aes_shared(EncryptionAlgorithm::Aes256Gcm, true)]
     fn encrypted_payload_roundtrips(
         #[case] algorithm: EncryptionAlgorithm,
-        #[case] shared_ciphertext_buffer: bool,
+        #[case] shared_encoded_record_buffer: bool,
     ) {
         let headers = vec![Header {
             name: Bytes::from_static(b"x-test"),
@@ -492,14 +492,14 @@ mod tests {
         let aad = aad();
         let plaintext = make_envelope(headers.clone(), body.clone());
         let encryption = test_encryption(algorithm);
-        let ciphertext = encrypt_test_payload(&plaintext, algorithm, &aad);
-        let ciphertext = if shared_ciphertext_buffer {
-            let shared = ciphertext.encoded.clone();
+        let encrypted_record = encrypt_test_record(&plaintext, algorithm, &aad);
+        let encrypted_record = if shared_encoded_record_buffer {
+            let shared = encrypted_record.encoded.clone();
             EncryptedRecord::try_from(shared).unwrap()
         } else {
-            ciphertext
+            encrypted_record
         };
-        let decrypted = decrypt_payload(ciphertext, &encryption, &aad).unwrap();
+        let decrypted = decrypt_payload(encrypted_record, &encryption, &aad).unwrap();
         let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
 
         assert_eq!(out_headers, headers);
@@ -512,8 +512,8 @@ mod tests {
     fn wrong_key_fails(#[case] algorithm: EncryptionAlgorithm) {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_test_payload(&plaintext, algorithm, &aad);
-        let result = decrypt_payload(ciphertext, &other_test_encryption(algorithm), &aad);
+        let encrypted_record = encrypt_test_record(&plaintext, algorithm, &aad);
+        let result = decrypt_payload(encrypted_record, &other_test_encryption(algorithm), &aad);
         assert!(matches!(
             result,
             Err(RecordDecryptionError::AuthenticationFailed)
@@ -533,10 +533,10 @@ mod tests {
     fn format_id_byte_present() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
-        let encoded = ciphertext.to_bytes();
-        assert_eq!(ciphertext.format, EncryptedRecordFormat::Aegis256V1);
-        assert_eq!(ciphertext.algorithm(), EncryptionAlgorithm::Aegis256);
+        let encrypted_record = encrypt_test_record(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
+        let encoded = encrypted_record.to_bytes();
+        assert_eq!(encrypted_record.format, EncryptedRecordFormat::Aegis256V1);
+        assert_eq!(encrypted_record.algorithm(), EncryptionAlgorithm::Aegis256);
         assert_eq!(encoded[0], 0x01);
     }
 
@@ -544,14 +544,15 @@ mod tests {
     fn format_id_flip_detected() {
         let aad = aad();
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let mut ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad)
-            .to_bytes()
-            .to_vec();
-        assert_eq!(ciphertext[0], 0x01);
-        ciphertext[0] = 0x02;
-        let ciphertext = EncryptedRecord::try_from(Bytes::from(ciphertext)).unwrap();
+        let mut encoded_record =
+            encrypt_test_record(&plaintext, EncryptionAlgorithm::Aegis256, &aad)
+                .to_bytes()
+                .to_vec();
+        assert_eq!(encoded_record[0], 0x01);
+        encoded_record[0] = 0x02;
+        let encrypted_record = EncryptedRecord::try_from(Bytes::from(encoded_record)).unwrap();
         let result = decrypt_payload(
-            ciphertext,
+            encrypted_record,
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &aad,
         );
@@ -569,9 +570,9 @@ mod tests {
         let aad = aad();
         let other_aad = [0x5A; 32];
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
-        let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
+        let encrypted_record = encrypt_test_record(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let result = decrypt_payload(
-            ciphertext,
+            encrypted_record,
             &test_encryption(EncryptionAlgorithm::Aegis256),
             &other_aad,
         );
