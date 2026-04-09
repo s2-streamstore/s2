@@ -137,8 +137,8 @@ impl EncryptedRecord {
         Self { encoded, format }
     }
 
-    pub(crate) fn format(&self) -> EncryptedRecordFormat {
-        self.format
+    pub fn algorithm(&self) -> EncryptionAlgorithm {
+        self.format.algorithm()
     }
 
     pub(crate) fn nonce(&self) -> &[u8] {
@@ -304,7 +304,7 @@ fn decrypt_payload(
     encryption: &EncryptionSpec,
     aad: &[u8],
 ) -> Result<Bytes, RecordDecryptionError> {
-    let format = record.format();
+    let format = record.format;
     let algorithm = format.algorithm();
     let expected = encryption.mode();
     let actual = EncryptionMode::from(algorithm);
@@ -535,11 +535,8 @@ mod tests {
         let plaintext = make_envelope(vec![], Bytes::from_static(b"data"));
         let ciphertext = encrypt_test_payload(&plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let encoded = ciphertext.to_bytes();
-        assert_eq!(ciphertext.format(), EncryptedRecordFormat::Aegis256V1);
-        assert_eq!(
-            ciphertext.format().algorithm(),
-            EncryptionAlgorithm::Aegis256
-        );
+        assert_eq!(ciphertext.format, EncryptedRecordFormat::Aegis256V1);
+        assert_eq!(ciphertext.algorithm(), EncryptionAlgorithm::Aegis256);
         assert_eq!(encoded[0], 0x01);
     }
 
@@ -617,7 +614,7 @@ mod tests {
         let decoded = EncryptedRecord::try_from(bytes).unwrap();
 
         assert_eq!(decoded, record);
-        assert_eq!(decoded.format(), EncryptedRecordFormat::Aes256GcmV1);
+        assert_eq!(decoded.format, EncryptedRecordFormat::Aes256GcmV1);
         assert_eq!(decoded.encoded[0], FORMAT_ID_AES256GCM_V1);
         assert_eq!(decoded.nonce(), b"0123456789ab");
         assert_eq!(decoded.ciphertext(), b"ciphertext");
@@ -660,8 +657,8 @@ mod tests {
         else {
             panic!("expected encrypted envelope record");
         };
-        assert_eq!(envelope.format(), EncryptedRecordFormat::Aegis256V1);
-        assert_eq!(envelope.format().algorithm(), EncryptionAlgorithm::Aegis256);
+        assert_eq!(envelope.format, EncryptedRecordFormat::Aegis256V1);
+        assert_eq!(envelope.algorithm(), EncryptionAlgorithm::Aegis256);
 
         let decrypted = decrypt_stored_record(stored, &encryption, &aad).unwrap();
         let Record::Envelope(record) = decrypted.into_inner() else {
