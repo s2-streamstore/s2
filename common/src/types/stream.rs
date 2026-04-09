@@ -555,12 +555,6 @@ mod test {
 
     const TEST_AAD: &[u8] = b"test-stream-aad";
 
-    #[derive(Clone, Copy)]
-    enum StoredAppendInputCase {
-        Encrypt,
-        Into,
-    }
-
     fn sample_append_input() -> AppendInput {
         let record = Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
@@ -581,13 +575,14 @@ mod test {
     }
 
     #[rstest]
-    #[case::encrypt(StoredAppendInputCase::Encrypt)]
-    #[case::into(StoredAppendInputCase::Into)]
-    fn append_input_to_stored_preserves_metadata(#[case] case: StoredAppendInputCase) {
+    #[case::encrypt(true)]
+    #[case::into(false)]
+    fn append_input_to_stored_preserves_metadata(#[case] encrypt: bool) {
         let encryption = EncryptionConfig::aegis256([0x42; 32]);
-        let mapped = match case {
-            StoredAppendInputCase::Encrypt => sample_append_input().encrypt(&encryption, TEST_AAD),
-            StoredAppendInputCase::Into => sample_append_input().into(),
+        let mapped = if encrypt {
+            sample_append_input().encrypt(&encryption, TEST_AAD)
+        } else {
+            sample_append_input().into()
         };
 
         assert_eq!(mapped.match_seq_num, Some(7));
@@ -605,14 +600,7 @@ mod test {
         assert_eq!(append_record.timestamp, Some(42));
 
         let stored_record = append_record.record.into_inner();
-        match case {
-            StoredAppendInputCase::Encrypt => {
-                assert!(matches!(&stored_record, StoredRecord::Encrypted { .. }));
-            }
-            StoredAppendInputCase::Into => {
-                assert!(matches!(&stored_record, StoredRecord::Plaintext(_)));
-            }
-        }
+        assert_eq!(matches!(&stored_record, StoredRecord::Encrypted { .. }), encrypt);
 
         let decrypted = decrypt_stored_record(stored_record, &encryption, TEST_AAD).unwrap();
         let Record::Envelope(record) = decrypted.into_inner() else {
