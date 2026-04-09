@@ -307,9 +307,8 @@ impl Backend {
                 kv::basin_meta::deser_value,
             )
             .await?
-            .ok_or_else(|| StreamNotFoundError {
+            .ok_or_else(|| BasinNotFoundError {
                 basin: basin.clone(),
-                stream: stream.clone(),
             })?;
             validate_encryption_modes_subset(
                 &meta.config.encryption.allowed_modes,

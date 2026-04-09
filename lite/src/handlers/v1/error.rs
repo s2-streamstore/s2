@@ -193,6 +193,9 @@ impl ServiceError {
                 ReconfigureStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
+                ReconfigureStreamError::BasinNotFound(e) => {
+                    standard(ErrorCode::BasinNotFound, e.to_string())
+                }
                 ReconfigureStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }

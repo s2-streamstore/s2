@@ -426,6 +426,8 @@ pub enum ReconfigureStreamError {
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
+    BasinNotFound(#[from] BasinNotFoundError),
+    #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
