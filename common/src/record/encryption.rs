@@ -305,11 +305,18 @@ fn decrypt_payload(
     aad: &[u8],
 ) -> Result<Bytes, RecordDecryptionError> {
     let format = record.format;
-    let algorithm = format.algorithm();
     let expected = encryption.mode();
-    let actual = EncryptionMode::from(algorithm);
-    match (encryption, format) {
-        (EncryptionSpec::Aegis256(key), EncryptedRecordFormat::Aegis256V1) => {
+    match format {
+        EncryptedRecordFormat::Aegis256V1 => {
+            let key = match encryption {
+                EncryptionSpec::Aegis256(key) => key,
+                _ => {
+                    return Err(RecordDecryptionError::ModeMismatch {
+                        expected,
+                        actual: EncryptionMode::Aegis256,
+                    });
+                }
+            };
             let payload_start = FORMAT_ID_LEN + format.nonce_len();
             let tag_len = format.tag_len();
             let mut encoded = record.into_mut_encoded();
@@ -336,7 +343,16 @@ fn decrypt_payload(
             encoded.truncate(plaintext_len);
             Ok(encoded.freeze())
         }
-        (EncryptionSpec::Aes256Gcm(key), EncryptedRecordFormat::Aes256GcmV1) => {
+        EncryptedRecordFormat::Aes256GcmV1 => {
+            let key = match encryption {
+                EncryptionSpec::Aes256Gcm(key) => key,
+                _ => {
+                    return Err(RecordDecryptionError::ModeMismatch {
+                        expected,
+                        actual: EncryptionMode::Aes256Gcm,
+                    });
+                }
+            };
             let payload_start = FORMAT_ID_LEN + format.nonce_len();
             let tag_len = format.tag_len();
             let mut encoded = record.into_mut_encoded();
@@ -363,7 +379,6 @@ fn decrypt_payload(
             encoded.truncate(plaintext_len);
             Ok(encoded.freeze())
         }
-        _ => Err(RecordDecryptionError::ModeMismatch { expected, actual }),
     }
 }
 
