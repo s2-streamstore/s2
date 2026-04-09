@@ -142,29 +142,6 @@
         "express"
       ]
     },
-    "EncryptionConfigSpec": {
-      "type": "object",
-      "properties": {
-        "allowed_modes": {
-          "description": "Allowed encryption modes. If empty, all modes are permitted.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/EncryptionModeSpec"
-          },
-          "default": []
-        }
-      },
-      "additionalProperties": false
-    },
-    "EncryptionModeSpec": {
-      "description": "Encryption mode for stream records.",
-      "type": "string",
-      "enum": [
-        "plain",
-        "aegis-256",
-        "aes-256-gcm"
-      ]
-    },
     "RetentionPolicySpec": {
       "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically trim records older than the given duration (e.g. \"7days\", \"1week\").",
       "type": "string",
@@ -232,6 +209,29 @@
       "examples": [
         "1day",
         "2h 30m"
+      ]
+    },
+    "EncryptionConfigSpec": {
+      "type": "object",
+      "properties": {
+        "allowed_modes": {
+          "description": "Allowed encryption modes. If empty, all modes are permitted.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EncryptionModeSpec"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "EncryptionModeSpec": {
+      "description": "Allowed encryption mode.",
+      "type": "string",
+      "enum": [
+        "plain",
+        "aegis-256",
+        "aes-256-gcm"
       ]
     },
     "StreamSpec": {
