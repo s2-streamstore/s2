@@ -553,7 +553,7 @@ mod test {
             .expect_err("expected validation error");
     }
 
-    type StoredAppendInputMapper = fn(AppendInput) -> StoredAppendInput;
+    const TEST_AAD: &[u8] = b"test-stream-aad";
 
     fn sample_append_input() -> AppendInput {
         let record = Record::Envelope(
@@ -574,34 +574,42 @@ mod test {
         }
     }
 
-    fn encrypt_append_input(input: AppendInput) -> StoredAppendInput {
-        input.encrypt(&crate::encryption::EncryptionConfig::Plain, &[])
-    }
+    #[rstest]
+    #[case::encrypt(true)]
+    #[case::into(false)]
+    fn append_input_to_stored_preserves_metadata(#[case] encrypt: bool) {
+        let encryption = EncryptionConfig::aegis256([0x42; 32]);
+        let mapped = if encrypt {
+            sample_append_input().encrypt(&encryption, TEST_AAD)
+        } else {
+            sample_append_input().into()
+        };
 
-    fn into_stored_append_input(input: AppendInput) -> StoredAppendInput {
-        input.into()
-    }
-
-    fn assert_stored_append_input_metadata(mapped: StoredAppendInput) {
         assert_eq!(mapped.match_seq_num, Some(7));
         assert_eq!(
             mapped.fencing_token.as_ref().map(|token| token.as_ref()),
             Some("fence")
         );
-        let record: AppendRecordParts<StoredRecord> =
-            mapped.records.into_iter().next().unwrap().into_parts();
-        assert_eq!(record.timestamp, Some(42));
-        assert!(matches!(
-            record.record.into_inner(),
-            StoredRecord::Plaintext(_)
-        ));
-    }
 
-    #[rstest]
-    #[case::encrypt(encrypt_append_input as StoredAppendInputMapper)]
-    #[case::into(into_stored_append_input as StoredAppendInputMapper)]
-    fn append_input_to_stored_preserves_metadata(#[case] map: StoredAppendInputMapper) {
-        assert_stored_append_input_metadata(map(sample_append_input()));
+        let append_record: AppendRecordParts<StoredRecord> = mapped
+            .records
+            .into_iter()
+            .next()
+            .expect("sample append input should contain a single record")
+            .into_parts();
+        assert_eq!(append_record.timestamp, Some(42));
+
+        let stored_record = append_record.record.into_inner();
+        assert_eq!(
+            matches!(&stored_record, StoredRecord::Encrypted { .. }),
+            encrypt
+        );
+
+        let decrypted = decrypt_stored_record(stored_record, &encryption, TEST_AAD).unwrap();
+        let Record::Envelope(record) = decrypted.into_inner() else {
+            panic!("expected envelope record");
+        };
+        assert_eq!(record.body().as_ref(), b"hello");
     }
 
     #[test]
