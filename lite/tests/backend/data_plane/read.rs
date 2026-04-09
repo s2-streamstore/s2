@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
-    encryption::{EncryptionAlgorithm, EncryptionConfig},
+    encryption::{EncryptionMode, EncryptionSpec},
     read_extent::{ReadLimit, ReadUntil},
     record::{MeteredSize, RecordDecryptionError, StreamPosition},
     types::{
@@ -168,11 +168,11 @@ async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
 
     let batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
     assert!(matches!(
-        batch.decrypt(&EncryptionConfig::Plain, &[]),
-        Err(RecordDecryptionError::AlgorithmMismatch {
-            expected: None,
+        batch.decrypt(&EncryptionSpec::Plain, &[]),
+        Err(RecordDecryptionError::ModeMismatch {
+            expected: EncryptionMode::Plain,
             actual,
-        }) if actual == EncryptionAlgorithm::Aegis256
+        }) if actual == EncryptionMode::Aegis256
     ));
 }
 

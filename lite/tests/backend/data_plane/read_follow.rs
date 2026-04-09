@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
     types::{
         config::OptionalStreamConfig,
@@ -15,8 +15,8 @@ use s2_lite::backend::FOLLOWER_MAX_LAG;
 
 use super::common::*;
 
-async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionConfig) {
-    let config = if matches!(encryption, EncryptionConfig::Plain) {
+async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionSpec) {
+    let config = if matches!(encryption, EncryptionSpec::Plain) {
         OptionalStreamConfig::default()
     } else {
         permissive_stream_config()
@@ -221,12 +221,12 @@ async fn test_follow_mode_heartbeats() {
 }
 
 #[rstest]
-#[case::plaintext("follow-new-data", EncryptionConfig::Plain)]
+#[case::plaintext("follow-new-data", EncryptionSpec::Plain)]
 #[case::encrypted("follow-enc", aegis256_encryption())]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_receives_new_data(
     #[case] test_suffix: &str,
-    #[case] encryption: EncryptionConfig,
+    #[case] encryption: EncryptionSpec,
 ) {
     run_follow_mode_receives_new_data_case(test_suffix, &encryption).await;
 }

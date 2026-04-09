@@ -3,7 +3,7 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionConfig, FencingToken, StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionSpec, FencingToken, StreamNamePrefix, StreamNameStartAfter,
 };
 
 use crate::{
@@ -480,7 +480,7 @@ pub struct EncryptionArgs {
         value_name = "SPEC",
         group = "encryption_source"
     )]
-    pub encryption: Option<EncryptionConfig>,
+    pub encryption: Option<EncryptionSpec>,
 
     /// Read an encryption spec from file.
     #[arg(

@@ -40,7 +40,7 @@ use crate::{
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression,
-        EncryptionConfig, RetryConfig, S2Config, S2Endpoints, StreamName,
+        EncryptionSpec, RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
 
@@ -346,7 +346,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         input: AppendInput,
-        encryption: Option<&EncryptionConfig>,
+        encryption: Option<&EncryptionSpec>,
         append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
         let url = self
@@ -384,7 +384,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
-        encryption: Option<&EncryptionConfig>,
+        encryption: Option<&EncryptionSpec>,
     ) -> Result<ReadBatch, ApiError> {
         let url = self
             .base_url
@@ -412,7 +412,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         inputs: I,
-        encryption: Option<&EncryptionConfig>,
+        encryption: Option<&EncryptionSpec>,
         frame_signal: Option<FrameSignal>,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
@@ -481,7 +481,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
-        encryption: Option<&EncryptionConfig>,
+        encryption: Option<&EncryptionSpec>,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self
             .base_url
@@ -909,7 +909,7 @@ impl BaseClient {
     }
 }
 
-fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionConfig>) {
+fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionSpec>) {
     if let Some(encryption) = encryption {
         request
             .headers_mut()

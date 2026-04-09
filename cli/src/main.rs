@@ -33,7 +33,7 @@ use s2_sdk::{
     S2,
     types::{
         AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
-        EncryptionConfig, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
+        EncryptionSpec, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
         StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig, TimestampingMode,
     },
 };
@@ -801,14 +801,14 @@ fn print_metrics(metrics: &[Metric]) {
     }
 }
 
-fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
+fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionSpec>, CliError> {
     match (&args.encryption, &args.encryption_file) {
         (Some(config), _) => Ok(Some(config.clone())),
         (_, Some(path)) => {
             let contents = std::fs::read_to_string(path).map_err(|e| {
                 CliError::InvalidArgs(miette::miette!("cannot read encryption spec file: {e}"))
             })?;
-            Ok(Some(contents.trim().parse::<EncryptionConfig>().map_err(
+            Ok(Some(contents.trim().parse::<EncryptionSpec>().map_err(
                 |e| CliError::InvalidArgs(miette::miette!("{e}")),
             )?))
         }

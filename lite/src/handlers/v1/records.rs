@@ -14,7 +14,7 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
-    encryption::EncryptionConfig,
+    encryption::EncryptionSpec,
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
@@ -40,7 +40,7 @@ pub fn router() -> axum::Router<Backend> {
 
 fn decrypt_session<S>(
     session: S,
-    encryption: EncryptionConfig,
+    encryption: EncryptionSpec,
     stream_id: StreamId,
 ) -> impl Stream<Item = Result<ReadSessionOutput, ServiceError>>
 where
@@ -479,7 +479,7 @@ mod tests {
         s2s::{FrameDecoder, SessionMessage, TerminalMessage},
     };
     use s2_common::{
-        encryption::{EncryptionAlgorithm, EncryptionConfig, EncryptionMode, S2_ENCRYPTION_HEADER},
+        encryption::{EncryptionMode, EncryptionSpec, S2_ENCRYPTION_HEADER},
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record, RecordDecryptionError},
         types::{
@@ -577,7 +577,7 @@ mod tests {
         basin: &BasinName,
         stream: &StreamName,
         body: &'static [u8],
-        encryption: &EncryptionConfig,
+        encryption: &EncryptionSpec,
     ) {
         let stream_id = StreamId::new(basin, stream);
         let input = append_input(body).encrypt(encryption, stream_id.as_bytes());
@@ -673,7 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn unary_append_with_encryption_header_persists_encrypted_record() {
-        let encryption = EncryptionConfig::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) =
             setup_app_with_config("append-unary-encrypted", permissive_stream_config()).await;
 
@@ -706,10 +706,10 @@ mod tests {
         let stored_batch = first_stored_batch(&backend, &basin, &stream).await;
 
         assert!(matches!(
-            stored_batch.clone().decrypt(&EncryptionConfig::Plain, &[]),
-            Err(RecordDecryptionError::AlgorithmMismatch {
-                expected: None,
-                actual: EncryptionAlgorithm::Aegis256,
+            stored_batch.clone().decrypt(&EncryptionSpec::Plain, &[]),
+            Err(RecordDecryptionError::ModeMismatch {
+                expected: EncryptionMode::Plain,
+                actual: EncryptionMode::Aegis256,
             })
         ));
 
@@ -727,8 +727,8 @@ mod tests {
 
     #[tokio::test]
     async fn unary_read_with_wrong_key_returns_invalid_error() {
-        let encryption = EncryptionConfig::aegis256([0x42; 32]);
-        let wrong_key = EncryptionConfig::aegis256([0x24; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
+        let wrong_key = EncryptionSpec::aegis256([0x24; 32]);
         let (app, backend, basin, stream) =
             setup_app_with_config("read-unary-bad-key", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
@@ -749,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn sse_read_with_plain_header_emits_error_event_and_terminates() {
-        let encryption = EncryptionConfig::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) =
             setup_app_with_config("read-sse-plain", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
@@ -764,7 +764,7 @@ mod tests {
             .header(header::ACCEPT, "text/event-stream")
             .header(
                 S2_ENCRYPTION_HEADER.as_str(),
-                EncryptionConfig::Plain.to_header_value(),
+                EncryptionSpec::Plain.to_header_value(),
             )
             .body(Body::empty())
             .unwrap(),
@@ -779,14 +779,14 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("utf8 sse body");
         assert!(body.contains("event: error"));
         assert!(body.contains("\"code\":\"invalid\""));
-        assert!(body.contains("ciphertext algorithm mismatch"));
+        assert!(body.contains("record encryption mode mismatch"));
         assert!(!body.contains("event: ping"));
         assert!(!body.contains("[DONE]"));
     }
 
     #[tokio::test]
     async fn s2s_read_with_plain_header_returns_terminal_invalid_frame() {
-        let encryption = EncryptionConfig::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) =
             setup_app_with_config("read-s2s-plain", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
@@ -797,7 +797,7 @@ mod tests {
                 .header(header::CONTENT_TYPE, "s2s/proto")
                 .header(
                     S2_ENCRYPTION_HEADER.as_str(),
-                    EncryptionConfig::Plain.to_header_value(),
+                    EncryptionSpec::Plain.to_header_value(),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -813,12 +813,12 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY.as_u16());
         let info: serde_json::Value =
             serde_json::from_str(&body).expect("terminal json error info");
-        assert_invalid_error(&info, "ciphertext algorithm mismatch");
+        assert_invalid_error(&info, "record encryption mode mismatch");
     }
 
     #[tokio::test]
     async fn s2s_read_with_correct_encryption_returns_batch_frame() {
-        let encryption = EncryptionConfig::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) =
             setup_app_with_config("read-s2s-ok", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
