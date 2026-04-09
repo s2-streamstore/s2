@@ -119,13 +119,17 @@
             }
           ]
         },
-        "encryption_modes": {
-          "description": "Allowed encryption modes. If empty or unspecified, all modes are permitted.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/EncryptionModeSpec"
-          },
-          "default": []
+        "encryption": {
+          "description": "Encryption configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EncryptionConfigSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -137,6 +141,20 @@
         "standard",
         "express"
       ]
+    },
+    "EncryptionConfigSpec": {
+      "type": "object",
+      "properties": {
+        "allowed_modes": {
+          "description": "Allowed encryption modes. If empty, all modes are permitted.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EncryptionModeSpec"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
     },
     "EncryptionModeSpec": {
       "description": "Encryption mode for stream records.",

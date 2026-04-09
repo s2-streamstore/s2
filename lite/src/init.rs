@@ -74,9 +74,9 @@ pub struct StreamConfigSpec {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptySpec>,
-    /// Allowed encryption modes for the stream.
+    /// Encryption configuration.
     #[serde(default)]
-    pub encryption_modes: Vec<EncryptionModeSpec>,
+    pub encryption: Option<EncryptionConfigSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -129,6 +129,14 @@ impl schemars::JsonSchema for EncryptionModeSpec {
             "enum": ["plain", "aegis-256", "aes-256-gcm"]
         })
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptionConfigSpec {
+    /// Allowed encryption modes. If empty, all modes are permitted.
+    #[serde(default)]
+    pub allowed_modes: Vec<EncryptionModeSpec>,
 }
 
 impl From<EncryptionModeSpec> for s2_common::encryption::EncryptionMode {
@@ -328,16 +336,23 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                     })
                 })
                 .map_or(Maybe::Unspecified, Maybe::Specified),
-            encryption_modes: if s.encryption_modes.is_empty() {
-                Maybe::Unspecified
-            } else {
-                Maybe::Specified(Some(
-                    s.encryption_modes
-                        .into_iter()
-                        .map(s2_common::encryption::EncryptionMode::from)
-                        .collect(),
-                ))
-            },
+            encryption: s
+                .encryption
+                .map(|enc| {
+                    if enc.allowed_modes.is_empty() {
+                        s2_common::types::config::EncryptionReconfiguration::default()
+                    } else {
+                        s2_common::types::config::EncryptionReconfiguration {
+                            allowed_modes: Maybe::Specified(Some(
+                                enc.allowed_modes
+                                    .into_iter()
+                                    .map(s2_common::encryption::EncryptionMode::from)
+                                    .collect(),
+                            )),
+                        }
+                    }
+                })
+                .map_or(Maybe::Unspecified, |r| Maybe::Specified(Some(r))),
         }
     }
 }
@@ -678,7 +693,7 @@ mod tests {
             retention_policy: Some(RetentionPolicySpec(RetentionPolicy::Infinite())),
             timestamping: None,
             delete_on_empty: None,
-            encryption_modes: vec![],
+            encryption: None,
         };
         let reconfig = StreamReconfiguration::from(spec);
         assert!(matches!(

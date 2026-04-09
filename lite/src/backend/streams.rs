@@ -164,8 +164,8 @@ impl Backend {
         let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
 
         validate_encryption_modes_subset(
-            &resolved.encryption_modes,
-            basin_defaults.encryption_modes,
+            &resolved.encryption.allowed_modes,
+            basin_defaults.encryption.allowed_modes,
         )?;
 
         let meta = kv::stream_meta::StreamMeta {
@@ -300,7 +300,7 @@ impl Backend {
 
         meta.config = meta.config.reconfigure(reconfig);
 
-        if meta.config.encryption_modes.is_some() {
+        if meta.config.encryption.allowed_modes.is_some() {
             let basin_meta = db_txn_get(
                 &txn,
                 kv::basin_meta::ser_key(&basin),
@@ -312,8 +312,12 @@ impl Backend {
                 stream: stream.clone(),
             })?;
             validate_encryption_modes_subset(
-                &meta.config.encryption_modes,
-                basin_meta.config.default_stream_config.encryption_modes,
+                &meta.config.encryption.allowed_modes,
+                basin_meta
+                    .config
+                    .default_stream_config
+                    .encryption
+                    .allowed_modes,
             )?;
         }
 

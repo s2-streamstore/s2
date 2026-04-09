@@ -500,15 +500,18 @@ mod tests {
     use crate::{backend::Backend, handlers, stream_id::StreamId};
 
     fn permissive_stream_config() -> OptionalStreamConfig {
+        use s2_common::types::config::OptionalEncryptionConfig;
         OptionalStreamConfig {
-            encryption_modes: Some(
-                [
-                    EncryptionMode::Plain,
-                    EncryptionMode::Aegis256,
-                    EncryptionMode::Aes256Gcm,
-                ]
-                .into(),
-            ),
+            encryption: OptionalEncryptionConfig {
+                allowed_modes: Some(
+                    [
+                        EncryptionMode::Plain,
+                        EncryptionMode::Aegis256,
+                        EncryptionMode::Aes256Gcm,
+                    ]
+                    .into(),
+                ),
+            },
             ..Default::default()
         }
     }

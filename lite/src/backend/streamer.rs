@@ -235,7 +235,7 @@ impl Streamer {
             first_seq_num,
             next_assignable_pos.timestamp,
             &self.config.timestamping,
-            self.config.encryption_modes.as_ref(),
+            self.config.encryption.allowed_modes.as_ref(),
         )
     }
 
