@@ -211,19 +211,6 @@ impl Streamer {
             fencing_token,
         }: StoredAppendInput,
     ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
-        if let Some(ref allowed_modes) = self.config.encryption_modes {
-            for record in records.iter() {
-                let mode = record
-                    .parts()
-                    .record
-                    .as_ref()
-                    .into_inner()
-                    .encryption_mode();
-                if !allowed_modes.contains(mode) {
-                    return Err(AppendErrorInternal::EncryptionModeNotAllowed(mode));
-                }
-            }
-        }
         if let Some(provided_token) = fencing_token
             && provided_token != self.fencing_token.state
         {
@@ -248,6 +235,7 @@ impl Streamer {
             first_seq_num,
             next_assignable_pos.timestamp,
             &self.config.timestamping,
+            self.config.encryption_modes.as_ref(),
         )
     }
 
@@ -723,6 +711,7 @@ fn sequenced_records(
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
+    allowed_encryption_modes: Option<&enumset::EnumSet<s2_common::encryption::EncryptionMode>>,
 ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
     let mode = config.mode.unwrap_or_default();
     let uncapped = config.uncapped.unwrap_or_default();
@@ -734,6 +723,12 @@ fn sequenced_records(
         .map(|record| record.into_parts())
         .enumerate()
     {
+        if let Some(allowed_modes) = allowed_encryption_modes {
+            let enc_mode = record.as_ref().into_inner().encryption_mode();
+            if !allowed_modes.contains(enc_mode) {
+                return Err(AppendErrorInternal::EncryptionModeNotAllowed(enc_mode));
+            }
+        }
         let mut timestamp = match mode {
             TimestampingMode::ClientPrefer => timestamp.unwrap_or(now),
             TimestampingMode::ClientRequire => timestamp.ok_or(AppendTimestampRequiredError)?,
@@ -853,7 +848,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -877,7 +872,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -897,7 +892,7 @@ mod tests {
             .try_into()
             .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config);
+        let result = sequenced_records(records, 100, 0, &config, None);
 
         assert!(matches!(
             result,
@@ -919,7 +914,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 900);
@@ -941,7 +936,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(result[0].position().timestamp >= now);
@@ -963,7 +958,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -985,7 +980,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 1000, &config).unwrap();
+        let result = sequenced_records(records, 100, 1000, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -1006,7 +1001,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].position().timestamp <= now + 100);
@@ -1026,7 +1021,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].position().timestamp, future);
@@ -1044,7 +1039,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 42, 0, &config).unwrap();
+        let result = sequenced_records(records, 42, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().seq_num, 42);
