@@ -15,7 +15,7 @@ use s2_lite::backend::FOLLOWER_MAX_LAG;
 
 use super::common::*;
 
-async fn assert_follow_mode_receives_new_data(test_suffix: &str, encryption: &EncryptionConfig) {
+async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionConfig) {
     let (backend, basin_name, stream_name) =
         setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
 
@@ -223,7 +223,7 @@ async fn test_follow_mode_receives_new_data(
     #[case] test_suffix: &str,
     #[case] encryption: EncryptionConfig,
 ) {
-    assert_follow_mode_receives_new_data(test_suffix, &encryption).await;
+    run_follow_mode_receives_new_data_case(test_suffix, &encryption).await;
 }
 
 #[tokio::test]
