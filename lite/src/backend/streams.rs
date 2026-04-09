@@ -1,7 +1,9 @@
 use s2_common::{
     bash::Bash,
+    encryption::{ALL_ENCRYPTION_MODES, EncryptionMode},
     record::StreamPosition,
     types::{
+        ValidationError,
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
         resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
@@ -158,9 +160,13 @@ impl Backend {
                 OffsetDateTime::now_utc(),
             ),
         };
-        let resolved: OptionalStreamConfig = resolved
-            .merge(basin_meta.config.default_stream_config)
-            .into();
+        let basin_defaults = &basin_meta.config.default_stream_config;
+        let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
+
+        validate_encryption_modes_subset(
+            &resolved.encryption_modes,
+            basin_defaults.encryption_modes,
+        )?;
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
@@ -294,6 +300,23 @@ impl Backend {
 
         meta.config = meta.config.reconfigure(reconfig);
 
+        if meta.config.encryption_modes.is_some() {
+            let basin_meta = db_txn_get(
+                &txn,
+                kv::basin_meta::ser_key(&basin),
+                kv::basin_meta::deser_value,
+            )
+            .await?
+            .ok_or_else(|| StreamNotFoundError {
+                basin: basin.clone(),
+                stream: stream.clone(),
+            })?;
+            validate_encryption_modes_subset(
+                &meta.config.encryption_modes,
+                basin_meta.config.default_stream_config.encryption_modes,
+            )?;
+        }
+
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
         let stream_id = StreamId::new(&basin, &stream);
@@ -369,6 +392,22 @@ impl Backend {
 
         Ok(())
     }
+}
+
+fn validate_encryption_modes_subset(
+    stream_modes: &Option<enumset::EnumSet<EncryptionMode>>,
+    basin_modes: Option<enumset::EnumSet<EncryptionMode>>,
+) -> Result<(), ValidationError> {
+    if let Some(stream_modes) = stream_modes {
+        let basin_modes = basin_modes.unwrap_or(ALL_ENCRYPTION_MODES);
+        if !stream_modes.is_subset(basin_modes) {
+            return Err(ValidationError(
+                "stream encryption_modes must be a subset of basin default encryption_modes"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn creation_idempotency_key(req_token: &RequestToken, config: &OptionalStreamConfig) -> Bash {

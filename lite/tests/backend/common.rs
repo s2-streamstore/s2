@@ -4,7 +4,7 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use s2_common::{
-    encryption::EncryptionSpec,
+    encryption::{EncryptionMode, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp},
     types::{
         basin::BasinName,
@@ -45,6 +45,20 @@ pub fn test_basin_name(suffix: &str) -> BasinName {
 
 pub fn test_stream_name(suffix: &str) -> StreamName {
     format!("test-stream-{}", suffix).parse().unwrap()
+}
+
+pub fn permissive_stream_config() -> OptionalStreamConfig {
+    OptionalStreamConfig {
+        encryption_modes: Some(
+            [
+                EncryptionMode::Plain,
+                EncryptionMode::Aegis256,
+                EncryptionMode::Aes256Gcm,
+            ]
+            .into(),
+        ),
+        ..Default::default()
+    }
 }
 
 pub fn aegis256_encryption() -> EncryptionSpec {

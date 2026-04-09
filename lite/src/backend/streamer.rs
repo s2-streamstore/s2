@@ -211,6 +211,19 @@ impl Streamer {
             fencing_token,
         }: StoredAppendInput,
     ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
+        if let Some(ref allowed_modes) = self.config.encryption_modes {
+            for record in records.iter() {
+                let mode = record
+                    .parts()
+                    .record
+                    .as_ref()
+                    .into_inner()
+                    .encryption_mode();
+                if !allowed_modes.contains(mode) {
+                    return Err(AppendErrorInternal::EncryptionModeNotAllowed(mode));
+                }
+            }
+        }
         if let Some(provided_token) = fencing_token
             && provided_token != self.fencing_token.state
         {
@@ -626,6 +639,9 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
+                AppendErrorInternal::EncryptionModeNotAllowed(_) => {
+                    unreachable!("terminal append is plaintext command record")
+                }
             }),
         }
     }

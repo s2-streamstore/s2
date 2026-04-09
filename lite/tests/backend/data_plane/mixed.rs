@@ -200,6 +200,7 @@ async fn test_concurrent_reconfigure_during_append() {
         retention_policy: s2_common::maybe::Maybe::from(Some(RetentionPolicy::Infinite())),
         timestamping: s2_common::maybe::Maybe::default(),
         delete_on_empty: s2_common::maybe::Maybe::default(),
+        encryption_modes: s2_common::maybe::Maybe::default(),
     };
 
     let updated_config = backend

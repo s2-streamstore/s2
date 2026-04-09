@@ -102,6 +102,8 @@ pub(super) enum AppendErrorInternal {
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
+    #[error("encryption mode '{0}' is not allowed on this stream")]
+    EncryptionModeNotAllowed(s2_common::encryption::EncryptionMode),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -154,6 +156,8 @@ pub enum AppendError {
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
+    #[error("encryption mode '{0}' is not allowed on this stream")]
+    EncryptionModeNotAllowed(s2_common::encryption::EncryptionMode),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -166,6 +170,9 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
+            AppendErrorInternal::EncryptionModeNotAllowed(m) => {
+                AppendError::EncryptionModeNotAllowed(m)
+            }
         }
     }
 }
@@ -281,6 +288,8 @@ pub enum CreateStreamError {
     StreamAlreadyExists(#[from] StreamAlreadyExistsError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error(transparent)]
+    Validation(#[from] s2_common::types::ValidationError),
 }
 
 impl From<slatedb::Error> for CreateStreamError {
@@ -420,6 +429,8 @@ pub enum ReconfigureStreamError {
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error(transparent)]
+    Validation(#[from] s2_common::types::ValidationError),
 }
 
 impl From<slatedb::Error> for ReconfigureStreamError {

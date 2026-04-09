@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use rstest::rstest;
 use s2_common::{
     encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
@@ -15,9 +14,14 @@ use s2_lite::backend::FOLLOWER_MAX_LAG;
 
 use super::common::*;
 
-async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionSpec) {
+async fn assert_follow_mode_receives_new_data(test_suffix: &str, encryption: &EncryptionSpec) {
+    let config = if matches!(encryption, EncryptionSpec::Plain) {
+        OptionalStreamConfig::default()
+    } else {
+        permissive_stream_config()
+    };
     let (backend, basin_name, stream_name) =
-        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
+        setup_backend_with_stream(test_suffix, "stream", config).await;
 
     append_payloads_with_encryption(
         &backend,
@@ -71,36 +75,19 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
     });
 
     let mut all_records = Vec::new();
-    while all_records.len() < 3 {
-        let output = {
-            let mut pinned_session = session.as_mut();
-            let next = pinned_session.next();
-            tokio::pin!(next);
-            let mut advanced = Duration::ZERO;
+    let timeout = Duration::from_secs(4);
+    let start_time = tokio::time::Instant::now();
 
-            loop {
-                tokio::select! {
-                    output = &mut next => break output,
-                    () = tokio::time::advance(Duration::from_millis(100)) => {
-                        advanced += Duration::from_millis(100);
-                        assert!(
-                            advanced <= Duration::from_secs(4),
-                            "timed out waiting for follow-mode output"
-                        );
-                        tokio::task::yield_now().await;
-                    }
-                }
-            }
-        };
-
-        match output {
-            Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
+    while start_time.elapsed() < timeout && all_records.len() < 3 {
+        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
+            Ok(Some(Ok(StoredReadSessionOutput::Batch(batch)))) => {
                 let batch = decrypt_batch_for_stream(batch, &basin_name, &stream_name, encryption);
                 all_records.extend(batch.records.iter().cloned());
             }
-            Some(Ok(StoredReadSessionOutput::Heartbeat(_))) => {}
-            Some(Err(e)) => panic!("Read error: {:?}", e),
-            None => break,
+            Ok(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => continue,
+            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
+            Ok(None) => break,
+            Err(_) => continue,
         }
     }
 
@@ -215,15 +202,16 @@ async fn test_follow_mode_heartbeats() {
     assert!(heartbeat_count > 0);
 }
 
-#[rstest]
-#[case::plaintext("follow-new-data", EncryptionSpec::Plain)]
-#[case::encrypted("follow-enc", aegis256_encryption())]
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_follow_mode_receives_new_data(
-    #[case] test_suffix: &str,
-    #[case] encryption: EncryptionSpec,
-) {
-    run_follow_mode_receives_new_data_case(test_suffix, &encryption).await;
+#[tokio::test]
+async fn test_follow_mode_receives_new_data() {
+    let encryption = EncryptionSpec::Plain;
+    assert_follow_mode_receives_new_data("follow-new-data", &encryption).await;
+}
+
+#[tokio::test]
+async fn test_follow_mode_receives_new_encrypted_data() {
+    let encryption = aegis256_encryption();
+    assert_follow_mode_receives_new_data("follow-enc", &encryption).await;
 }
 
 #[tokio::test]

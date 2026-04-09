@@ -33,6 +33,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 compact_str = { workspace = true }
 dashmap = { workspace = true }
 enum-ordinalize = { workspace = true }
+enumset = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
@@ -63,7 +64,6 @@ utoipa = { version = "5.4", optional = true, features = ["time"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
-rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 tower = "0.5"
 uuid = { workspace = true, features = ["v4"] }

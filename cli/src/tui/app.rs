@@ -1064,6 +1064,7 @@ fn build_basin_config(
             retention_policy: retention,
             timestamping,
             delete_on_empty,
+            encryption_modes: vec![],
         },
         create_stream_on_append,
         create_stream_on_read,
@@ -1112,6 +1113,7 @@ fn build_stream_config(
         retention_policy: retention,
         timestamping,
         delete_on_empty,
+        encryption_modes: vec![],
     }
 }
 
@@ -5060,6 +5062,7 @@ impl App {
                 retention_policy,
                 timestamping,
                 delete_on_empty: None,
+                encryption_modes: vec![],
             };
 
             let args = ReconfigureBasinArgs {
@@ -5134,6 +5137,7 @@ impl App {
                     retention_policy,
                     timestamping,
                     delete_on_empty,
+                    encryption_modes: vec![],
                 },
             };
             match ops::reconfigure_stream(&s2, args).await {

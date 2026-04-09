@@ -240,6 +240,13 @@ impl StoredRecord {
             Self::Encrypted { record, .. } => record.encode_into(buf),
         }
     }
+
+    pub fn encryption_mode(&self) -> crate::encryption::EncryptionMode {
+        match self {
+            Self::Plaintext(_) => crate::encryption::EncryptionMode::Plain,
+            Self::Encrypted { record, .. } => record.algorithm().into(),
+        }
+    }
 }
 
 impl DeepSize for StoredRecord {

@@ -12,6 +12,8 @@ use crate::http::ParseableHeader;
 
 pub static S2_ENCRYPTION_HEADER: HeaderName = HeaderName::from_static("s2-encryption");
 
+pub const ALL_ENCRYPTION_MODES: enumset::EnumSet<EncryptionMode> = enumset::EnumSet::all();
+
 type EncryptionKey<const N: usize> = Arc<SecretBox<[u8; N]>>;
 
 /// Encryption algorithm.
@@ -26,9 +28,12 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
-/// Encryption mode, including plaintext.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+/// Encryption mode for stream configuration.
+///
+/// Represents the allowed encryption modes on a stream, including plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, enumset::EnumSetType)]
 #[strum(ascii_case_insensitive)]
+#[enumset(no_super_impls)]
 pub enum EncryptionMode {
     #[strum(serialize = "plain")]
     Plain,

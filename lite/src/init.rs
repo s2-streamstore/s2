@@ -74,6 +74,9 @@ pub struct StreamConfigSpec {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptySpec>,
+    /// Allowed encryption modes for the stream.
+    #[serde(default)]
+    pub encryption_modes: Vec<EncryptionModeSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -102,6 +105,38 @@ impl From<StorageClassSpec> for StorageClass {
         match s {
             StorageClassSpec::Standard => StorageClass::Standard,
             StorageClassSpec::Express => StorageClass::Express,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EncryptionModeSpec {
+    Plain,
+    Aegis256,
+    Aes256Gcm,
+}
+
+impl schemars::JsonSchema for EncryptionModeSpec {
+    fn schema_name() -> Cow<'static, str> {
+        "EncryptionModeSpec".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Allowed encryption mode.",
+            "enum": ["plain", "aegis-256", "aes-256-gcm"]
+        })
+    }
+}
+
+impl From<EncryptionModeSpec> for s2_common::encryption::EncryptionMode {
+    fn from(m: EncryptionModeSpec) -> Self {
+        match m {
+            EncryptionModeSpec::Plain => Self::Plain,
+            EncryptionModeSpec::Aegis256 => Self::Aegis256,
+            EncryptionModeSpec::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
@@ -293,6 +328,16 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                     })
                 })
                 .map_or(Maybe::Unspecified, Maybe::Specified),
+            encryption_modes: if s.encryption_modes.is_empty() {
+                Maybe::Unspecified
+            } else {
+                Maybe::Specified(Some(
+                    s.encryption_modes
+                        .into_iter()
+                        .map(s2_common::encryption::EncryptionMode::from)
+                        .collect(),
+                ))
+            },
         }
     }
 }
@@ -633,6 +678,7 @@ mod tests {
             retention_policy: Some(RetentionPolicySpec(RetentionPolicy::Infinite())),
             timestamping: None,
             delete_on_empty: None,
+            encryption_modes: vec![],
         };
         let reconfig = StreamReconfiguration::from(spec);
         assert!(matches!(

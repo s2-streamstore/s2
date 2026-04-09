@@ -118,6 +118,14 @@
               "type": "null"
             }
           ]
+        },
+        "encryption_modes": {
+          "description": "Allowed encryption modes. If empty or unspecified, all modes are permitted.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EncryptionModeSpec"
+          },
+          "default": []
         }
       },
       "additionalProperties": false
@@ -128,6 +136,15 @@
       "enum": [
         "standard",
         "express"
+      ]
+    },
+    "EncryptionModeSpec": {
+      "description": "Encryption mode for stream records.",
+      "type": "string",
+      "enum": [
+        "plain",
+        "aegis-256",
+        "aes-256-gcm"
       ]
     },
     "RetentionPolicySpec": {

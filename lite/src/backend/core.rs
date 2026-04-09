@@ -311,6 +311,9 @@ impl Backend {
                             CreateStreamError::StreamDeletionPending(e) => Err(e)?,
                             CreateStreamError::BasinNotFound(e) => Err(e)?,
                             CreateStreamError::StreamAlreadyExists(_) => {}
+                            CreateStreamError::Validation(_) => {
+                                unreachable!("auto-create uses default config")
+                            }
                         }
                     }
                     Ok(self.streamer_client(basin, stream).await?)

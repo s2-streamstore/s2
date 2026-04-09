@@ -499,6 +499,20 @@ mod tests {
 
     use crate::{backend::Backend, handlers, stream_id::StreamId};
 
+    fn permissive_stream_config() -> OptionalStreamConfig {
+        OptionalStreamConfig {
+            encryption_modes: Some(
+                [
+                    EncryptionMode::Plain,
+                    EncryptionMode::Aegis256,
+                    EncryptionMode::Aes256Gcm,
+                ]
+                .into(),
+            ),
+            ..Default::default()
+        }
+    }
+
     async fn create_backend() -> Backend {
         let object_store = Arc::new(InMemory::new());
         let db_path = format!("/tmp/records-handler-test-{}", Uuid::new_v4());
@@ -513,7 +527,10 @@ mod tests {
         Backend::new(db, ByteSize::mib(10))
     }
 
-    async fn setup_app(test_suffix: &str) -> (axum::Router, Backend, BasinName, StreamName) {
+    async fn setup_app_with_config(
+        test_suffix: &str,
+        stream_config: OptionalStreamConfig,
+    ) -> (axum::Router, Backend, BasinName, StreamName) {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
@@ -529,7 +546,7 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
+                stream_config,
                 CreateMode::CreateOnly(None),
             )
             .await
@@ -657,7 +674,8 @@ mod tests {
     #[tokio::test]
     async fn unary_append_with_encryption_header_persists_encrypted_record() {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("append-unary-encrypted").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("append-unary-encrypted", permissive_stream_config()).await;
 
         let input = proto::AppendInput {
             records: vec![proto::AppendRecord {
@@ -711,7 +729,8 @@ mod tests {
     async fn unary_read_with_wrong_key_returns_invalid_error() {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let wrong_key = EncryptionSpec::aegis256([0x24; 32]);
-        let (app, backend, basin, stream) = setup_app("read-unary-bad-key").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-unary-bad-key", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
@@ -731,7 +750,8 @@ mod tests {
     #[tokio::test]
     async fn sse_read_with_plain_header_emits_error_event_and_terminates() {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("read-sse-plain").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-sse-plain", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
@@ -767,7 +787,8 @@ mod tests {
     #[tokio::test]
     async fn s2s_read_with_plain_header_returns_terminal_invalid_frame() {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("read-s2s-plain").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-s2s-plain", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
@@ -798,7 +819,8 @@ mod tests {
     #[tokio::test]
     async fn s2s_read_with_correct_encryption_returns_batch_frame() {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
-        let (app, backend, basin, stream) = setup_app("read-s2s-ok").await;
+        let (app, backend, basin, stream) =
+            setup_app_with_config("read-s2s-ok", permissive_stream_config()).await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
 
         let response = send(
