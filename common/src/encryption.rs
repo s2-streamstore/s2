@@ -26,6 +26,27 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
+/// Encryption mode, including plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+#[strum(ascii_case_insensitive)]
+pub enum EncryptionMode {
+    #[strum(serialize = "plain")]
+    Plain,
+    #[strum(serialize = "aegis-256")]
+    Aegis256,
+    #[strum(serialize = "aes-256-gcm")]
+    Aes256Gcm,
+}
+
+impl From<EncryptionAlgorithm> for EncryptionMode {
+    fn from(value: EncryptionAlgorithm) -> Self {
+        match value {
+            EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Aegis256Key(EncryptionKey<32>);
 
@@ -83,6 +104,14 @@ impl EncryptionSpec {
         Self::Aes256Gcm(Aes256GcmKey::new(key))
     }
 
+    pub fn mode(&self) -> EncryptionMode {
+        match self {
+            Self::Plain => EncryptionMode::Plain,
+            Self::Aegis256(_) => EncryptionMode::Aegis256,
+            Self::Aes256Gcm(_) => EncryptionMode::Aes256Gcm,
+        }
+    }
+
     pub fn to_header_value(&self) -> HeaderValue {
         let mut value = match self {
             Self::Plain => HeaderValue::from_static("plain"),
@@ -119,23 +148,23 @@ impl FromStr for EncryptionSpec {
         }
 
         let key_b64 = key_b64.filter(|key| !key.is_empty());
-        match (parse_algorithm(alg_str)?, key_b64) {
-            (None, None) => Ok(Self::Plain),
-            (None, Some(_)) => Err(EncryptionSpecError::InvalidConfig(
+        match (parse_mode(alg_str)?, key_b64) {
+            (EncryptionMode::Plain, None) => Ok(Self::Plain),
+            (EncryptionMode::Plain, Some(_)) => Err(EncryptionSpecError::InvalidConfig(
                 "key is not allowed when algorithm is 'plain'".to_owned(),
             )),
-            (Some(EncryptionAlgorithm::Aegis256), Some(key_b64)) => {
+            (EncryptionMode::Aegis256, Some(key_b64)) => {
                 Ok(Self::Aegis256(Aegis256Key::from_base64(key_b64)?))
             }
-            (Some(EncryptionAlgorithm::Aegis256), None) => Err(EncryptionSpecError::InvalidConfig(
+            (EncryptionMode::Aegis256, None) => Err(EncryptionSpecError::InvalidConfig(
                 "missing key for 'aegis-256'".to_owned(),
             )),
-            (Some(EncryptionAlgorithm::Aes256Gcm), Some(key_b64)) => {
+            (EncryptionMode::Aes256Gcm, Some(key_b64)) => {
                 Ok(Self::Aes256Gcm(Aes256GcmKey::from_base64(key_b64)?))
             }
-            (Some(EncryptionAlgorithm::Aes256Gcm), None) => Err(
-                EncryptionSpecError::InvalidConfig("missing key for 'aes-256-gcm'".to_owned()),
-            ),
+            (EncryptionMode::Aes256Gcm, None) => Err(EncryptionSpecError::InvalidConfig(
+                "missing key for 'aes-256-gcm'".to_owned(),
+            )),
         }
     }
 }
@@ -186,19 +215,12 @@ fn header_value_for_key(algorithm: EncryptionAlgorithm, key: &[u8; 32]) -> Heade
     HeaderValue::from_bytes(&value).expect("encryption header value should be ASCII")
 }
 
-fn parse_algorithm(alg_str: &str) -> Result<Option<EncryptionAlgorithm>, EncryptionSpecError> {
-    if alg_str.eq_ignore_ascii_case("plain") {
-        Ok(None)
-    } else {
-        alg_str
-            .parse::<EncryptionAlgorithm>()
-            .map(Some)
-            .map_err(|_| {
-                EncryptionSpecError::InvalidConfig(format!(
-                    "unknown algorithm {alg_str:?}; expected 'plain', 'aegis-256', or 'aes-256-gcm'"
-                ))
-            })
-    }
+fn parse_mode(mode_str: &str) -> Result<EncryptionMode, EncryptionSpecError> {
+    mode_str.parse::<EncryptionMode>().map_err(|_| {
+        EncryptionSpecError::InvalidConfig(format!(
+            "unknown encryption mode {mode_str:?}; expected 'plain', 'aegis-256', or 'aes-256-gcm'"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -271,6 +293,19 @@ mod tests {
     fn parse_header_plain_variants(#[case] header: &str) {
         let config = header.parse::<EncryptionSpec>().unwrap();
         assert!(matches!(config, EncryptionSpec::Plain));
+    }
+
+    #[test]
+    fn spec_mode_matches_variant() {
+        assert_eq!(EncryptionSpec::Plain.mode(), EncryptionMode::Plain);
+        assert_eq!(
+            EncryptionSpec::aegis256(KEY_BYTES).mode(),
+            EncryptionMode::Aegis256
+        );
+        assert_eq!(
+            EncryptionSpec::aes256_gcm(KEY_BYTES).mode(),
+            EncryptionMode::Aes256Gcm
+        );
     }
 
     #[rstest]

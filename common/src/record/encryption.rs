@@ -35,7 +35,7 @@ use rand::random;
 use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, StoredRecord};
 use crate::{
     deep_size::DeepSize,
-    encryption::{EncryptionAlgorithm, EncryptionSpec},
+    encryption::{EncryptionAlgorithm, EncryptionMode, EncryptionSpec},
     record::MeteredExt as _,
 };
 
@@ -46,10 +46,10 @@ const SUITE_ID_AES256GCM_V1: u8 = 0x02;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordDecryptionError {
-    #[error("ciphertext algorithm mismatch")]
-    AlgorithmMismatch {
-        expected: Option<EncryptionAlgorithm>,
-        actual: EncryptionAlgorithm,
+    #[error("ciphertext encryption mode mismatch")]
+    ModeMismatch {
+        expected: EncryptionMode,
+        actual: EncryptionMode,
     },
     #[error("record decryption failed")]
     AuthenticationFailed,
@@ -282,11 +282,9 @@ fn decrypt_payload(
     aad: &[u8],
 ) -> Result<Bytes, RecordDecryptionError> {
     let algorithm = record.algorithm();
+    let expected = encryption.mode();
+    let actual = EncryptionMode::from(algorithm);
     match (encryption, algorithm) {
-        (EncryptionSpec::Plain, actual) => Err(RecordDecryptionError::AlgorithmMismatch {
-            expected: None,
-            actual,
-        }),
         (EncryptionSpec::Aegis256(key), EncryptionAlgorithm::Aegis256) => {
             let payload_start = SUITE_ID_LEN + algorithm.nonce_len();
             let tag_len = algorithm.tag_len();
@@ -341,14 +339,7 @@ fn decrypt_payload(
             encoded.truncate(plaintext_len);
             Ok(encoded.freeze())
         }
-        (EncryptionSpec::Aegis256(_), actual) => Err(RecordDecryptionError::AlgorithmMismatch {
-            expected: Some(EncryptionAlgorithm::Aegis256),
-            actual,
-        }),
-        (EncryptionSpec::Aes256Gcm(_), actual) => Err(RecordDecryptionError::AlgorithmMismatch {
-            expected: Some(EncryptionAlgorithm::Aes256Gcm),
-            actual,
-        }),
+        _ => Err(RecordDecryptionError::ModeMismatch { expected, actual }),
     }
 }
 
@@ -541,9 +532,9 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::AlgorithmMismatch {
-                expected: Some(EncryptionAlgorithm::Aegis256),
-                actual: EncryptionAlgorithm::Aes256Gcm,
+            Err(RecordDecryptionError::ModeMismatch {
+                expected: EncryptionMode::Aegis256,
+                actual: EncryptionMode::Aes256Gcm,
             })
         ));
     }
@@ -710,9 +701,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::AlgorithmMismatch {
-                expected: None,
-                actual: EncryptionAlgorithm::Aegis256,
+            Err(RecordDecryptionError::ModeMismatch {
+                expected: EncryptionMode::Plain,
+                actual: EncryptionMode::Aegis256,
             })
         ));
     }
