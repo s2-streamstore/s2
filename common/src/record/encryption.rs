@@ -321,23 +321,23 @@ fn decrypt_payload(
                     });
                 }
             };
-            let nonce: [u8; 32] = encoded
-                .get(FORMAT_ID_LEN..payload_start)
-                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
-                .try_into()
-                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-            let tag: [u8; 16] = encoded
-                .get(payload_end..)
-                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
-                .try_into()
-                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-            let ciphertext = encoded
-                .get_mut(payload_start..payload_end)
-                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
+            {
+                let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
+                let nonce: &[u8; 32] = prefix
+                    .get(FORMAT_ID_LEN..)
+                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
+                    .try_into()
+                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
+                let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
+                let tag: &[u8; 16] = tag
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
 
-            Aegis256::<16>::new(key.secret(), &nonce)
-                .decrypt_in_place(ciphertext, &tag, aad)
-                .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
+                Aegis256::<16>::new(key.secret(), nonce)
+                    .decrypt_in_place(ciphertext, tag, aad)
+                    .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
+            }
             let _ = encoded.split_to(payload_start);
             encoded.truncate(plaintext_len);
             Ok(encoded.freeze())
@@ -353,22 +353,24 @@ fn decrypt_payload(
                 }
             };
             let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.secret()));
-            let nonce = aes_gcm::Nonce::clone_from_slice(
-                encoded
-                    .get(FORMAT_ID_LEN..payload_start)
-                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?,
-            );
-            let tag = aes_gcm::Tag::clone_from_slice(
-                encoded
-                    .get(payload_end..)
-                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?,
-            );
-            let ciphertext = encoded
-                .get_mut(payload_start..payload_end)
-                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
-            cipher
-                .decrypt_in_place_detached(&nonce, aad, ciphertext, &tag)
-                .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
+            {
+                let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
+                let nonce: &[u8; 12] = prefix
+                    .get(FORMAT_ID_LEN..)
+                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
+                    .try_into()
+                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
+                let nonce = aes_gcm::Nonce::from_slice(nonce);
+                let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
+                let tag: &[u8; 16] = tag
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
+                let tag = aes_gcm::Tag::from_slice(tag);
+                cipher
+                    .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
+                    .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
+            }
             let _ = encoded.split_to(payload_start);
             encoded.truncate(plaintext_len);
             Ok(encoded.freeze())
