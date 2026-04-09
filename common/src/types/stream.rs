@@ -600,7 +600,10 @@ mod test {
         assert_eq!(append_record.timestamp, Some(42));
 
         let stored_record = append_record.record.into_inner();
-        assert_eq!(matches!(&stored_record, StoredRecord::Encrypted { .. }), encrypt);
+        assert_eq!(
+            matches!(&stored_record, StoredRecord::Encrypted { .. }),
+            encrypt
+        );
 
         let decrypted = decrypt_stored_record(stored_record, &encryption, TEST_AAD).unwrap();
         let Record::Envelope(record) = decrypted.into_inner() else {
