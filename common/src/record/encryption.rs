@@ -338,9 +338,7 @@ fn decrypt_payload(
                     .decrypt_in_place(ciphertext, tag, aad)
                     .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             }
-            let _ = encoded.split_to(payload_start);
-            encoded.truncate(plaintext_len);
-            Ok(encoded.freeze())
+            Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
         EncryptedRecordFormat::Aes256GcmV1 => {
             let key = match encryption {
@@ -371,9 +369,7 @@ fn decrypt_payload(
                     .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
                     .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             }
-            let _ = encoded.split_to(payload_start);
-            encoded.truncate(plaintext_len);
-            Ok(encoded.freeze())
+            Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
     }
 }
@@ -392,6 +388,12 @@ fn decryption_layout(
         return Err(RecordDecryptionError::MalformedEncryptedRecord);
     }
     Ok((record.into_mut_encoded(), payload_start, payload_end))
+}
+
+fn decryption_finish(mut encoded: BytesMut, payload_start: usize, plaintext_len: usize) -> Bytes {
+    let _ = encoded.split_to(payload_start);
+    encoded.truncate(plaintext_len);
+    encoded.freeze()
 }
 
 #[cfg(test)]
