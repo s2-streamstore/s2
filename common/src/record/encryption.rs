@@ -381,22 +381,15 @@ fn decryption_layout(
     format: EncryptedRecordFormat,
 ) -> Result<(BytesMut, usize, usize), RecordDecryptionError> {
     let payload_start = FORMAT_ID_LEN + format.nonce_len();
-    let payload_end = payload_end(record.encoded.len(), payload_start, format.tag_len())?;
-    Ok((record.into_mut_encoded(), payload_start, payload_end))
-}
-
-fn payload_end(
-    encoded_len: usize,
-    payload_start: usize,
-    tag_len: usize,
-) -> Result<usize, RecordDecryptionError> {
-    let payload_end = encoded_len
-        .checked_sub(tag_len)
+    let payload_end = record
+        .encoded
+        .len()
+        .checked_sub(format.tag_len())
         .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?;
     if payload_start > payload_end {
         return Err(RecordDecryptionError::MalformedEncryptedRecord);
     }
-    Ok(payload_end)
+    Ok((record.into_mut_encoded(), payload_start, payload_end))
 }
 
 #[cfg(test)]
