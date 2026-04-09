@@ -9,7 +9,7 @@ use s2_sdk::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
         AppendInput, AppendRecord, AppendRecordBatch, BasinInfo, BasinMetricSet, BasinName,
         BasinReconfiguration, CommandRecord, CreateBasinInput, CreateStreamInput, DeleteBasinInput,
-        DeleteStreamInput, EncryptionConfig, FencingToken, GetAccountMetricsInput,
+        DeleteStreamInput, EncryptionSpec, FencingToken, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
         ListStreamsInput, MeteredBytes, Metric, ReadBatch, ReadFrom, ReadInput, ReadLimits,
@@ -22,7 +22,7 @@ use s2_sdk::{
 fn stream_with_encryption(
     s2: &S2,
     uri: S2BasinAndStreamUri,
-    encryption: Option<&EncryptionConfig>,
+    encryption: Option<&EncryptionSpec>,
 ) -> S2Stream {
     let stream = s2.basin(uri.basin).stream(uri.stream);
     match encryption {
@@ -439,7 +439,7 @@ pub async fn fence(s2: &S2, args: FenceArgs) -> Result<AppendAck, CliError> {
 pub async fn read(
     s2: &S2,
     args: &ReadArgs,
-    encryption: Option<&EncryptionConfig>,
+    encryption: Option<&EncryptionSpec>,
 ) -> Result<Streaming<ReadBatch>, CliError> {
     use std::time::SystemTime;
 
@@ -488,7 +488,7 @@ pub fn append<'a, S, E>(
     s2: &'a S2,
     records: S,
     uri: S2BasinAndStreamUri,
-    encryption: Option<&'a EncryptionConfig>,
+    encryption: Option<&'a EncryptionSpec>,
     fencing_token: Option<FencingToken>,
     match_seq_num: Option<u64>,
     linger: Duration,
@@ -586,7 +586,7 @@ where
 pub async fn tail(
     s2: &S2,
     args: &TailArgs,
-    encryption: Option<&EncryptionConfig>,
+    encryption: Option<&EncryptionSpec>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<SequencedRecord, CliError>> + Send>>, CliError> {
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption);
 

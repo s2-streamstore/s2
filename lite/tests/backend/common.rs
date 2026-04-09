@@ -4,7 +4,7 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::EncryptionSpec,
     record::{CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp},
     types::{
         basin::BasinName,
@@ -47,8 +47,8 @@ pub fn test_stream_name(suffix: &str) -> StreamName {
     format!("test-stream-{}", suffix).parse().unwrap()
 }
 
-pub fn aegis256_encryption() -> EncryptionConfig {
-    EncryptionConfig::aegis256([0x42; 32])
+pub fn aegis256_encryption() -> EncryptionSpec {
+    EncryptionSpec::aegis256([0x42; 32])
 }
 
 pub fn create_test_record(body: Bytes) -> AppendRecord {
@@ -138,7 +138,7 @@ pub async fn append_payloads(
     stream: &StreamName,
     payloads: &[&[u8]],
 ) -> s2_common::types::stream::AppendAck {
-    let encryption = EncryptionConfig::Plain;
+    let encryption = EncryptionSpec::Plain;
     append_payloads_with_encryption(backend, basin, stream, payloads, &encryption).await
 }
 
@@ -147,7 +147,7 @@ pub async fn append_payloads_with_encryption(
     basin: &BasinName,
     stream: &StreamName,
     payloads: &[&[u8]],
-    encryption: &EncryptionConfig,
+    encryption: &EncryptionSpec,
 ) -> s2_common::types::stream::AppendAck {
     let bodies = payloads
         .iter()
@@ -170,7 +170,7 @@ pub fn encrypt_input_for_stream(
     input: AppendInput,
     basin: &BasinName,
     stream: &StreamName,
-    encryption: &EncryptionConfig,
+    encryption: &EncryptionSpec,
 ) -> StoredAppendInput {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
     input.encrypt(encryption, stream_id.as_bytes())
@@ -190,7 +190,7 @@ pub async fn append_repeat(
 
 pub fn decrypt_plain_batch(batch: StoredReadBatch) -> ReadBatch {
     batch
-        .decrypt(&EncryptionConfig::Plain, &[])
+        .decrypt(&EncryptionSpec::Plain, &[])
         .expect("Failed to decode batch")
 }
 
@@ -198,7 +198,7 @@ pub fn decrypt_batch_for_stream(
     batch: StoredReadBatch,
     basin: &BasinName,
     stream: &StreamName,
-    encryption: &EncryptionConfig,
+    encryption: &EncryptionSpec,
 ) -> ReadBatch {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
     batch
@@ -228,7 +228,7 @@ pub async fn collect_records_with_encryption<S>(
     session: &mut Pin<Box<S>>,
     basin: &BasinName,
     stream: &StreamName,
-    encryption: &EncryptionConfig,
+    encryption: &EncryptionSpec,
 ) -> Vec<SequencedRecord>
 where
     S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,

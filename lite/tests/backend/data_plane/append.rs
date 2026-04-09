@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
     record::FencingToken,
     types::{
@@ -18,7 +18,7 @@ use s2_lite::backend::error::{AppendConditionFailedError, AppendError};
 
 use super::common::*;
 
-async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionConfig) {
+async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionSpec) {
     let (backend, basin_name, stream_name) =
         setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
 
@@ -379,7 +379,7 @@ async fn test_append_with_seq_num_mismatch() {
 
 #[tokio::test]
 async fn test_append_session_basic() {
-    let encryption = EncryptionConfig::Plain;
+    let encryption = EncryptionSpec::Plain;
     assert_append_session_roundtrip("append-session-basic", &encryption).await;
 }
 

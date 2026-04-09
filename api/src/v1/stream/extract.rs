@@ -6,7 +6,7 @@ use axum::{
 use futures::StreamExt as _;
 use http::{StatusCode, request::Parts};
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::EncryptionSpec,
     http::{ParseableHeader, extract::HeaderRejection},
     types,
 };
@@ -52,7 +52,7 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(req.headers());
-        let encryption = parse_header_opt::<EncryptionConfig>(req.headers())?.unwrap_or_default();
+        let encryption = parse_header_opt::<EncryptionSpec>(req.headers())?.unwrap_or_default();
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
@@ -130,7 +130,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(&parts.headers);
-        let encryption = parse_header_opt::<EncryptionConfig>(&parts.headers)?.unwrap_or_default();
+        let encryption = parse_header_opt::<EncryptionSpec>(&parts.headers)?.unwrap_or_default();
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =

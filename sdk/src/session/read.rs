@@ -9,7 +9,7 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
-    types::{EncryptionConfig, MeteredBytes, ReadBatch, S2Error, StreamName},
+    types::{EncryptionSpec, MeteredBytes, ReadBatch, S2Error, StreamName},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +43,7 @@ pub type Streaming<R> = Pin<Box<dyn Send + futures::Stream<Item = Result<R, Read
 pub async fn read_session(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<EncryptionConfig>,
+    encryption: Option<EncryptionSpec>,
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
@@ -153,7 +153,7 @@ pub async fn read_session(
 async fn session_inner(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<EncryptionConfig>,
+    encryption: Option<EncryptionSpec>,
     start: ReadStart,
     end: ReadEnd,
     ignore_command_records: bool,

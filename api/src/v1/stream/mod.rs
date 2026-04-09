@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use itertools::Itertools as _;
 use s2_common::{
-    encryption::EncryptionConfig,
+    encryption::EncryptionSpec,
     record,
     types::{
         self,
@@ -212,19 +212,19 @@ impl From<ReadEnd> for types::stream::ReadEnd {
 pub enum ReadRequest {
     /// Unary
     Unary {
-        encryption: EncryptionConfig,
+        encryption: EncryptionSpec,
         format: Format,
         response_mime: JsonOrProto,
     },
     /// Server-Sent Events streaming response
     EventStream {
-        encryption: EncryptionConfig,
+        encryption: EncryptionSpec,
         format: Format,
         last_event_id: Option<sse::LastEventId>,
     },
     /// S2S streaming response
     S2s {
-        encryption: EncryptionConfig,
+        encryption: EncryptionSpec,
         response_compression: s2s::CompressionAlgorithm,
     },
 }
@@ -232,13 +232,13 @@ pub enum ReadRequest {
 pub enum AppendRequest {
     /// Unary
     Unary {
-        encryption: EncryptionConfig,
+        encryption: EncryptionSpec,
         input: types::stream::AppendInput,
         response_mime: JsonOrProto,
     },
     /// S2S bi-directional streaming
     S2s {
-        encryption: EncryptionConfig,
+        encryption: EncryptionSpec,
         inputs: BoxStream<'static, Result<types::stream::AppendInput, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,
     },

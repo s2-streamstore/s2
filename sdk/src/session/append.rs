@@ -23,8 +23,8 @@ use crate::{
     frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, EncryptionConfig, MeteredBytes, ONE_MIB,
-        S2Error, StreamName, StreamPosition, ValidationError,
+        AppendAck, AppendInput, AppendRetryPolicy, EncryptionSpec, MeteredBytes, ONE_MIB, S2Error,
+        StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -171,7 +171,7 @@ impl AppendSession {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        encryption: Option<EncryptionConfig>,
+        encryption: Option<EncryptionSpec>,
         config: AppendSessionConfig,
     ) -> Self {
         let buffer_size = config
@@ -296,7 +296,7 @@ impl AppendSessionInternal {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        encryption: Option<EncryptionConfig>,
+        encryption: Option<EncryptionSpec>,
     ) -> Self {
         let buffer_size = DEFAULT_CHANNEL_BUFFER_SIZE;
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
@@ -410,7 +410,7 @@ impl AppendPermits {
 async fn run_session_with_retry(
     client: BasinClient,
     stream: StreamName,
-    encryption: Option<EncryptionConfig>,
+    encryption: Option<EncryptionSpec>,
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
@@ -510,7 +510,7 @@ async fn run_session_with_retry(
 async fn run_session(
     client: &BasinClient,
     stream: &StreamName,
-    encryption: Option<&EncryptionConfig>,
+    encryption: Option<&EncryptionSpec>,
     state: &mut SessionState,
     buffer_size: usize,
     frame_signal: &Option<FrameSignal>,
@@ -719,7 +719,7 @@ async fn resend(
 async fn connect(
     client: &BasinClient,
     stream: &StreamName,
-    encryption: Option<&EncryptionConfig>,
+    encryption: Option<&EncryptionSpec>,
     buffer_size: usize,
     frame_signal: Option<FrameSignal>,
 ) -> Result<(mpsc::Sender<AppendInput>, Streaming<AppendAck>), AppendSessionError> {
