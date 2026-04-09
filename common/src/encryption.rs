@@ -91,8 +91,8 @@ pub enum EncryptionSpecError {
         "Invalid encryption spec: unknown encryption mode {mode:?}; expected 'plain', 'aegis-256', or 'aes-256-gcm'"
     )]
     UnknownMode { mode: String },
-    #[error("Invalid encryption spec: key is not allowed when mode is '{mode}'")]
-    UnexpectedKey { mode: EncryptionMode },
+    #[error("Invalid encryption spec: key is not allowed when mode is 'plain'")]
+    UnexpectedKeyForPlain,
     #[error("Invalid encryption spec: missing key for '{mode}'")]
     MissingKey { mode: EncryptionMode },
     #[error("Invalid encryption spec: key is not valid base64")]
@@ -160,9 +160,7 @@ impl FromStr for EncryptionSpec {
         let key_b64 = key_b64.filter(|key| !key.is_empty());
         match (parse_mode(alg_str)?, key_b64) {
             (EncryptionMode::Plain, None) => Ok(Self::Plain),
-            (EncryptionMode::Plain, Some(_)) => Err(EncryptionSpecError::UnexpectedKey {
-                mode: EncryptionMode::Plain,
-            }),
+            (EncryptionMode::Plain, Some(_)) => Err(EncryptionSpecError::UnexpectedKeyForPlain),
             (EncryptionMode::Aegis256, Some(key_b64)) => {
                 Ok(Self::Aegis256(Aegis256Key::from_base64(key_b64)?))
             }
@@ -348,9 +346,7 @@ mod tests {
     )]
     #[case(
         "plain; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
-        EncryptionSpecError::UnexpectedKey {
-            mode: EncryptionMode::Plain
-        }
+        EncryptionSpecError::UnexpectedKeyForPlain
     )]
     fn parse_header_invalid_cases(#[case] header: &str, #[case] expected: EncryptionSpecError) {
         assert_invalid_parse(header, expected);
