@@ -152,9 +152,9 @@ pub struct StreamConfig {
     #[clap(flatten)]
     /// Delete-on-empty configuration.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
-    #[arg(long, value_delimiter = ',')]
-    /// Allowed encryption modes (comma-separated). If empty, all modes are permitted.
-    pub encryption_allowed_modes: Vec<EncryptionMode>,
+    #[clap(flatten)]
+    /// Encryption configuration.
+    pub encryption: Option<EncryptionConfig>,
 }
 
 impl StreamConfig {
@@ -164,13 +164,13 @@ impl StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption_allowed_modes,
+            encryption,
         } = self;
         storage_class.is_none()
             && retention_policy.is_none()
             && timestamping.is_none()
             && delete_on_empty.is_none()
-            && encryption_allowed_modes.is_empty()
+            && encryption.is_none()
     }
 }
 
@@ -264,6 +264,45 @@ impl From<sdk::types::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     }
 }
 
+#[derive(Parser, Debug, Clone, Serialize)]
+pub struct EncryptionConfig {
+    #[arg(long, value_delimiter = ',')]
+    /// Allowed encryption modes (comma-separated). If empty, all modes are permitted.
+    pub encryption_allowed_modes: Vec<EncryptionMode>,
+}
+
+impl From<EncryptionConfig> for sdk::types::EncryptionConfig {
+    fn from(value: EncryptionConfig) -> Self {
+        sdk::types::EncryptionConfig::new().with_allowed_modes(
+            value
+                .encryption_allowed_modes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+    }
+}
+
+impl From<sdk::types::EncryptionConfig> for EncryptionConfig {
+    fn from(value: sdk::types::EncryptionConfig) -> Self {
+        Self {
+            encryption_allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<EncryptionConfig> for sdk::types::EncryptionReconfiguration {
+    fn from(value: EncryptionConfig) -> Self {
+        sdk::types::EncryptionReconfiguration::new().with_allowed_modes(
+            value
+                .encryption_allowed_modes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+    }
+}
+
 impl From<BasinConfig> for sdk::types::BasinConfig {
     fn from(config: BasinConfig) -> Self {
         sdk::types::BasinConfig::new()
@@ -288,16 +327,8 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
         if let Some(delete_on_empty) = config.delete_on_empty {
             stream_config = stream_config.with_delete_on_empty(delete_on_empty.into());
         }
-        if !config.encryption_allowed_modes.is_empty() {
-            stream_config = stream_config.with_encryption(
-                sdk::types::EncryptionConfig::new().with_allowed_modes(
-                    config
-                        .encryption_allowed_modes
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                ),
-            );
+        if let Some(encryption) = config.encryption {
+            stream_config = stream_config.with_encryption(encryption.into());
         }
         stream_config
     }
@@ -423,10 +454,7 @@ impl From<sdk::types::StreamConfig> for StreamConfig {
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),
-            encryption_allowed_modes: config
-                .encryption
-                .map(|enc| enc.allowed_modes.into_iter().map(Into::into).collect())
-                .unwrap_or_default(),
+            encryption: config.encryption.map(Into::into),
         }
     }
 }
@@ -447,16 +475,8 @@ impl From<StreamConfig> for sdk::types::StreamReconfiguration {
         if let Some(delete_on_empty) = config.delete_on_empty {
             reconfig = reconfig.with_delete_on_empty(delete_on_empty.into());
         }
-        if !config.encryption_allowed_modes.is_empty() {
-            reconfig = reconfig.with_encryption(
-                sdk::types::EncryptionReconfiguration::new().with_allowed_modes(
-                    config
-                        .encryption_allowed_modes
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                ),
-            );
+        if let Some(encryption) = config.encryption {
+            reconfig = reconfig.with_encryption(encryption.into());
         }
         reconfig
     }
