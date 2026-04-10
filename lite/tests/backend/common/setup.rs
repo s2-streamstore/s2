@@ -1,22 +1,21 @@
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use futures::StreamExt;
 use s2_common::{
     encryption::EncryptionSpec,
-    record::{CommandRecord, FencingToken, Metered, Record, SequencedRecord, Timestamp},
+    record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
         resources::CreateMode,
         stream::{
-            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch,
-            StoredAppendInput, StoredReadBatch, StoredReadSessionOutput, StreamName,
+            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StoredAppendInput,
+            StreamName,
         },
     },
 };
-use s2_lite::backend::{Backend, error::ReadError};
+use s2_lite::backend::Backend;
 use slatedb::{Db, config::Settings, object_store::memory::InMemory};
 use uuid::Uuid;
 
@@ -166,6 +165,23 @@ pub async fn append_payloads_with_encryption(
         .expect("Failed to append payloads")
 }
 
+pub async fn append_timestamped_payloads(
+    backend: &Backend,
+    basin: &BasinName,
+    stream: &StreamName,
+    payloads: Vec<(Bytes, Timestamp)>,
+) -> s2_common::types::stream::AppendAck {
+    let input = AppendInput {
+        records: create_test_record_batch_with_timestamps(payloads),
+        match_seq_num: None,
+        fencing_token: None,
+    };
+    backend
+        .append(basin.clone(), stream.clone(), input)
+        .await
+        .expect("Failed to append timestamped payloads")
+}
+
 pub fn encrypt_input_for_stream(
     input: AppendInput,
     basin: &BasinName,
@@ -186,73 +202,4 @@ pub async fn append_repeat(
     for _ in 0..count {
         append_payloads(backend, basin, stream, &[payload]).await;
     }
-}
-
-pub fn decrypt_plain_batch(batch: StoredReadBatch) -> ReadBatch {
-    batch
-        .decrypt(&EncryptionSpec::Plain, &[])
-        .expect("Failed to decode batch")
-}
-
-pub fn decrypt_batch_for_stream(
-    batch: StoredReadBatch,
-    basin: &BasinName,
-    stream: &StreamName,
-    encryption: &EncryptionSpec,
-) -> ReadBatch {
-    let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    batch
-        .decrypt(encryption, stream_id.as_bytes())
-        .expect("Failed to decode batch")
-}
-
-pub async fn collect_records<S>(session: &mut Pin<Box<S>>) -> Vec<SequencedRecord>
-where
-    S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
-{
-    let mut records = Vec::new();
-    while let Some(output) = session.as_mut().next().await {
-        match output {
-            Ok(StoredReadSessionOutput::Batch(batch)) => {
-                let batch = decrypt_plain_batch(batch);
-                records.extend(batch.records.iter().cloned());
-            }
-            Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
-            Err(e) => panic!("Read error: {:?}", e),
-        }
-    }
-    records
-}
-
-pub async fn collect_records_with_encryption<S>(
-    session: &mut Pin<Box<S>>,
-    basin: &BasinName,
-    stream: &StreamName,
-    encryption: &EncryptionSpec,
-) -> Vec<SequencedRecord>
-where
-    S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
-{
-    let mut records = Vec::new();
-    while let Some(output) = session.as_mut().next().await {
-        match output {
-            Ok(StoredReadSessionOutput::Batch(batch)) => {
-                let batch = decrypt_batch_for_stream(batch, basin, stream, encryption);
-                records.extend(batch.records.iter().cloned());
-            }
-            Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
-            Err(e) => panic!("Read error: {:?}", e),
-        }
-    }
-    records
-}
-
-pub fn envelope_bodies(records: &[SequencedRecord]) -> Vec<Vec<u8>> {
-    records
-        .iter()
-        .map(|record| match record.inner() {
-            Record::Envelope(envelope) => envelope.body().to_vec(),
-            other => panic!("Unexpected record type: {:?}", other),
-        })
-        .collect()
 }

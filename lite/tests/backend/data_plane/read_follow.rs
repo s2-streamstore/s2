@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{task::Poll, time::Duration};
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -6,14 +6,17 @@ use rstest::rstest;
 use s2_common::{
     encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
+    record::MeteredSize,
     types::{
-        config::OptionalStreamConfig,
+        config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
         stream::{AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadSessionOutput},
     },
 };
 use s2_lite::backend::FOLLOWER_MAX_LAG;
 
 use super::common::*;
+
+const VIRTUAL_TIME_STEP: Duration = Duration::from_millis(50);
 
 async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionSpec) {
     let (backend, basin_name, stream_name) =
@@ -32,10 +35,13 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
         from: ReadFrom::SeqNum(0),
         clamp: false,
     };
+    let wait_duration = Duration::from_millis(200);
+    let first_follow_delay = Duration::from_millis(100);
+    let second_follow_delay = Duration::from_millis(50);
     let end = ReadEnd {
         limit: ReadLimit::Unbounded,
         until: ReadUntil::Unbounded,
-        wait: Some(Duration::from_secs(3)),
+        wait: Some(wait_duration),
     };
 
     let session = backend
@@ -50,7 +56,7 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
     let encryption_clone = encryption.clone();
 
     let append_handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(first_follow_delay).await;
         append_payloads_with_encryption(
             &backend_clone,
             &basin_clone,
@@ -59,7 +65,7 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
             &encryption_clone,
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(second_follow_delay).await;
         append_payloads_with_encryption(
             &backend_clone,
             &basin_clone,
@@ -70,42 +76,31 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
         .await;
     });
 
-    let mut all_records = Vec::new();
-    while all_records.len() < 3 {
-        let output = {
-            let mut pinned_session = session.as_mut();
-            let next = pinned_session.next();
-            tokio::pin!(next);
-            let mut advanced = Duration::ZERO;
-
-            loop {
-                tokio::select! {
-                    output = &mut next => break output,
-                    () = tokio::time::advance(Duration::from_millis(100)) => {
-                        advanced += Duration::from_millis(100);
-                        assert!(
-                            advanced <= Duration::from_secs(4),
-                            "timed out waiting for follow-mode output"
-                        );
-                        tokio::task::yield_now().await;
-                    }
-                }
-            }
-        };
-
-        match output {
-            Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
-                let batch = decrypt_batch_for_stream(batch, &basin_name, &stream_name, encryption);
-                all_records.extend(batch.records.iter().cloned());
-            }
-            Some(Ok(StoredReadSessionOutput::Heartbeat(_))) => {}
-            Some(Err(e)) => panic!("Read error: {:?}", e),
-            None => break,
-        }
-    }
+    let probe_step = Duration::from_millis(1);
+    let started = tokio::time::Instant::now();
+    let outputs = collect_outputs_until_closed_advanced(
+        &mut session,
+        wait_duration + first_follow_delay + second_follow_delay + Duration::from_secs(1),
+        probe_step,
+    )
+    .await;
+    let closed_at = outputs.closed_at;
 
     append_handle.await.unwrap();
 
+    let all_records = outputs
+        .outputs
+        .into_iter()
+        .filter_map(|output| match output {
+            StoredReadSessionOutput::Batch(batch) => Some(batch),
+            StoredReadSessionOutput::Heartbeat(_) => None,
+        })
+        .flat_map(|batch| {
+            decrypt_batch_for_stream(batch, &basin_name, &stream_name, encryption)
+                .records
+                .into_iter()
+        })
+        .collect::<Vec<_>>();
     let bodies = envelope_bodies(&all_records);
     assert_eq!(
         bodies,
@@ -115,67 +110,276 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
             b"follow-2".to_vec()
         ]
     );
+    let final_delivery_at = started + first_follow_delay + second_follow_delay;
+    let close_jitter = Duration::from_millis(20);
+    assert!(closed_at >= final_delivery_at + wait_duration);
+    assert!(closed_at <= final_delivery_at + wait_duration + close_jitter);
 }
 
-#[tokio::test]
-async fn test_follow_mode_wait_duration() {
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_broadcast_lag_resets_wait_after_db_catchup() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "follow-wait-duration",
+        "follow-broadcast-lag",
         "stream",
         OptionalStreamConfig::default(),
     )
     .await;
 
-    append_payloads(&backend, &basin_name, &stream_name, &[b"initial"]).await;
+    let message_count = FOLLOWER_MAX_LAG + 25;
+    let wait_duration = Duration::from_millis(200);
+    let pre_lag_delay = Duration::from_millis(100);
+    let probe_step = Duration::from_millis(1);
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
         clamp: false,
     };
-    let wait_duration = Duration::from_millis(500);
     let end = ReadEnd {
         limit: ReadLimit::Unbounded,
         until: ReadUntil::Unbounded,
         wait: Some(wait_duration),
     };
 
-    let start_time = tokio::time::Instant::now();
     let session = backend
-        .read(basin_name, stream_name, start, end)
+        .read(basin_name.clone(), stream_name.clone(), start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
 
-    let mut batch_count = 0;
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+    advance_time(pre_lag_delay).await;
 
-    while let Some(result) = session.as_mut().next().await {
-        match result {
-            Ok(StoredReadSessionOutput::Batch(_)) => batch_count += 1,
-            Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
-            Err(e) => panic!("Read error: {:?}", e),
-        }
+    let mut expected = Vec::with_capacity(message_count);
+    for i in 0..message_count {
+        let payload = format!("msg-{}", i);
+        expected.push(payload.as_bytes().to_vec());
+        append_payloads(&backend, &basin_name, &stream_name, &[payload.as_bytes()]).await;
     }
 
-    let elapsed = start_time.elapsed();
-    assert_eq!(batch_count, 1);
-    assert!(elapsed >= wait_duration, "Session ended too quickly");
-    assert!(
-        elapsed < wait_duration + Duration::from_secs(1),
-        "Session took too long to end"
-    );
+    let follow = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should deliver the lagged catchup batch")
+        .expect("session should not error");
+    let reset_at = tokio::time::Instant::now();
+    let StoredReadSessionOutput::Batch(batch) = follow else {
+        panic!("expected catchup batch after lagged follow");
+    };
+    let batch = decrypt_plain_batch(batch);
+    assert_eq!(envelope_bodies(&batch.records), expected);
+
+    let outputs = collect_outputs_until_closed_advanced(
+        &mut session,
+        wait_duration + Duration::from_secs(1),
+        probe_step,
+    )
+    .await;
+
+    assert!(outputs.closed_at >= reset_at + wait_duration);
+    assert!(outputs.closed_at <= reset_at + wait_duration + probe_step);
 }
 
-#[tokio::test]
-async fn test_follow_mode_heartbeats() {
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_broadcast_lag_respects_count_limit() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "follow-heartbeat",
+        "follow-broadcast-lag-count-limit",
         "stream",
         OptionalStreamConfig::default(),
     )
     .await;
 
-    append_payloads(&backend, &basin_name, &stream_name, &[b"initial"]).await;
+    let message_count = FOLLOWER_MAX_LAG + 25;
+    let count_limit = 3;
 
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Count(count_limit),
+        until: ReadUntil::Unbounded,
+        wait: Some(Duration::from_secs(3)),
+    };
+
+    let session = backend
+        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .await
+        .expect("Failed to create read session");
+    let mut session = Box::pin(session);
+
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+    advance_time(Duration::from_millis(100)).await;
+
+    let mut expected = Vec::with_capacity(message_count);
+    for i in 0..message_count {
+        let payload = format!("msg-{}", i);
+        expected.push(payload.as_bytes().to_vec());
+        append_payloads(&backend, &basin_name, &stream_name, &[payload.as_bytes()]).await;
+    }
+
+    let records = collect_records_until_closed_advanced(
+        &mut session,
+        Duration::from_secs(2),
+        VIRTUAL_TIME_STEP,
+    )
+    .await;
+    assert_eq!(
+        envelope_bodies(&records),
+        expected.into_iter().take(count_limit).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_broadcast_lag_respects_bytes_limit() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-broadcast-lag-bytes-limit",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
+
+    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    let per_record_bytes = stored_batch.records[0].metered_size();
+    let message_count = FOLLOWER_MAX_LAG + 25;
+    let bytes_limit = per_record_bytes * 3;
+
+    let session = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            ReadStart {
+                from: ReadFrom::TailOffset(0),
+                clamp: false,
+            },
+            ReadEnd {
+                limit: ReadLimit::Bytes(bytes_limit),
+                until: ReadUntil::Unbounded,
+                wait: Some(Duration::from_secs(3)),
+            },
+        )
+        .await
+        .expect("Failed to create read session");
+    let mut session = Box::pin(session);
+
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+    advance_time(Duration::from_millis(100)).await;
+
+    let expected: Vec<_> = (1..=message_count)
+        .map(|i| format!("item-{i:02}").into_bytes())
+        .collect();
+    for body in &expected {
+        append_payloads(&backend, &basin_name, &stream_name, &[body.as_slice()]).await;
+    }
+
+    let records = collect_records_until_closed_advanced(
+        &mut session,
+        Duration::from_secs(2),
+        VIRTUAL_TIME_STEP,
+    )
+    .await;
+
+    assert_eq!(
+        envelope_bodies(&records),
+        expected.into_iter().take(3).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_broadcast_lag_respects_timestamp_until() {
+    let stream_config = OptionalStreamConfig {
+        timestamping: OptionalTimestampingConfig {
+            mode: Some(TimestampingMode::ClientRequire),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream("follow-broadcast-lag-until", "stream", stream_config).await;
+
+    let message_count = FOLLOWER_MAX_LAG + 25;
+    let cutoff = 4_000;
+
+    let session = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            ReadStart {
+                from: ReadFrom::SeqNum(0),
+                clamp: false,
+            },
+            ReadEnd {
+                limit: ReadLimit::Unbounded,
+                until: ReadUntil::Timestamp(cutoff),
+                wait: Some(Duration::from_secs(3)),
+            },
+        )
+        .await
+        .expect("Failed to create read session");
+    let mut session = Box::pin(session);
+
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+    advance_time(Duration::from_millis(100)).await;
+
+    let expected: Vec<_> = (1..=message_count)
+        .map(|i| (format!("ts-{i:03}").into_bytes(), i as u64 * 1_000))
+        .collect();
+    for (body, timestamp) in &expected {
+        append_timestamped_payloads(
+            &backend,
+            &basin_name,
+            &stream_name,
+            vec![(Bytes::from(body.clone()), *timestamp)],
+        )
+        .await;
+    }
+
+    let catchup = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should deliver the lagged catchup batch")
+        .expect("session should not error");
+    let StoredReadSessionOutput::Batch(batch) = catchup else {
+        panic!("expected lagged catchup batch");
+    };
+    let batch = decrypt_plain_batch(batch);
+    assert_eq!(
+        envelope_bodies(&batch.records),
+        expected
+            .iter()
+            .take_while(|(_, timestamp)| *timestamp < cutoff)
+            .map(|(body, _)| body.clone())
+            .collect::<Vec<_>>()
+    );
+
+    tokio::task::yield_now().await;
+    match futures::poll!(session.as_mut().next()) {
+        Poll::Ready(None) => {}
+        Poll::Ready(Some(Ok(output))) => {
+            panic!("unexpected output after timestamp cutoff catchup: {output:?}");
+        }
+        Poll::Ready(Some(Err(e))) => panic!("Read error: {e:?}"),
+        Poll::Pending => {
+            panic!(
+                "session should close immediately once lagged catchup crosses the timestamp cutoff"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_broadcast_lag_resumes_live_follow_after_catchup() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-broadcast-lag-live",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let message_count = FOLLOWER_MAX_LAG + 25;
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
         clamp: false,
@@ -183,36 +387,61 @@ async fn test_follow_mode_heartbeats() {
     let end = ReadEnd {
         limit: ReadLimit::Unbounded,
         until: ReadUntil::Unbounded,
-        wait: Some(Duration::from_secs(1)),
+        wait: Some(Duration::from_millis(300)),
     };
 
     let session = backend
-        .read(basin_name, stream_name, start, end)
+        .read(basin_name.clone(), stream_name.clone(), start, end)
         .await
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
 
-    let mut heartbeat_count = 0;
-    let mut batch_count = 0;
-    let timeout = Duration::from_secs(2);
-    let start_time = tokio::time::Instant::now();
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+    advance_time(Duration::from_millis(100)).await;
 
-    while start_time.elapsed() < timeout {
-        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
-            Ok(Some(Ok(StoredReadSessionOutput::Batch(_)))) => {
-                batch_count += 1;
-            }
-            Ok(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {
-                heartbeat_count += 1;
-            }
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
-            Ok(None) => break,
-            Err(_) => continue,
-        }
+    let mut expected_catchup = Vec::with_capacity(message_count);
+    for i in 0..message_count {
+        let payload = format!("lag-{}", i);
+        expected_catchup.push(payload.as_bytes().to_vec());
+        append_payloads(&backend, &basin_name, &stream_name, &[payload.as_bytes()]).await;
     }
 
-    assert_eq!(batch_count, 1);
-    assert!(heartbeat_count > 0);
+    let catchup = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should deliver the lagged catchup batch")
+        .expect("session should not error");
+    let StoredReadSessionOutput::Batch(batch) = catchup else {
+        panic!("expected catchup batch after lagged follow");
+    };
+    let batch = decrypt_plain_batch(batch);
+    assert_eq!(envelope_bodies(&batch.records), expected_catchup);
+
+    let backend_clone = backend.clone();
+    let basin_clone = basin_name.clone();
+    let stream_clone = stream_name.clone();
+    let append_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        append_payloads(
+            &backend_clone,
+            &basin_clone,
+            &stream_clone,
+            &[b"live-after-lag"],
+        )
+        .await;
+    });
+
+    let live_records =
+        collect_records_until_advanced(&mut session, Duration::from_secs(1), 1, VIRTUAL_TIME_STEP)
+            .await;
+
+    append_handle.await.unwrap();
+
+    assert_eq!(
+        envelope_bodies(&live_records),
+        vec![b"live-after-lag".to_vec()]
+    );
 }
 
 #[rstest]
@@ -226,134 +455,7 @@ async fn test_follow_mode_receives_new_data(
     run_follow_mode_receives_new_data_case(test_suffix, &encryption).await;
 }
 
-#[tokio::test]
-async fn test_follow_mode_with_multiple_appends() {
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream("follow-multiple", "stream", OptionalStreamConfig::default())
-            .await;
-
-    append_payloads(&backend, &basin_name, &stream_name, &[b"initial"]).await;
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Unbounded,
-        wait: Some(Duration::from_secs(3)),
-    };
-
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-
-    let backend_clone = backend.clone();
-    let basin_clone = basin_name.clone();
-    let stream_clone = stream_name.clone();
-
-    let append_handle = tokio::spawn(async move {
-        for i in 0..5 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let payload = format!("follow-{}", i);
-            append_payloads(
-                &backend_clone,
-                &basin_clone,
-                &stream_clone,
-                &[payload.as_bytes()],
-            )
-            .await;
-        }
-    });
-
-    let mut all_records = Vec::new();
-    let timeout = Duration::from_secs(4);
-    let start_time = tokio::time::Instant::now();
-
-    while start_time.elapsed() < timeout && all_records.len() < 6 {
-        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
-            Ok(Some(Ok(StoredReadSessionOutput::Batch(batch)))) => {
-                let batch = decrypt_plain_batch(batch);
-                all_records.extend(batch.records.iter().cloned());
-            }
-            Ok(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
-
-    append_handle.await.unwrap();
-
-    let bodies = envelope_bodies(&all_records);
-    assert_eq!(
-        bodies,
-        vec![
-            b"initial".to_vec(),
-            b"follow-0".to_vec(),
-            b"follow-1".to_vec(),
-            b"follow-2".to_vec(),
-            b"follow-3".to_vec(),
-            b"follow-4".to_vec(),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn test_follow_mode_broadcast_lag_falls_back_to_db_catchup() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "follow-broadcast-lag",
-        "stream",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    let message_count = FOLLOWER_MAX_LAG + 25;
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Count(message_count),
-        until: ReadUntil::Unbounded,
-        wait: Some(Duration::from_secs(3)),
-    };
-
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-
-    let first_output = tokio::time::timeout(Duration::from_secs(1), session.as_mut().next())
-        .await
-        .expect("Timed out waiting for initial heartbeat")
-        .expect("Read session ended unexpectedly")
-        .expect("Read session error");
-    assert!(matches!(
-        first_output,
-        StoredReadSessionOutput::Heartbeat(_)
-    ));
-
-    let mut expected = Vec::with_capacity(message_count);
-    for i in 0..message_count {
-        let payload = format!("msg-{}", i);
-        expected.push(payload.as_bytes().to_vec());
-        append_payloads(&backend, &basin_name, &stream_name, &[payload.as_bytes()]).await;
-    }
-
-    let records = tokio::time::timeout(Duration::from_secs(5), collect_records(&mut session))
-        .await
-        .expect("Timed out waiting for records");
-    let bodies = envelope_bodies(&records);
-
-    assert_eq!(bodies, expected);
-}
-
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_transition_from_catchup_to_follow() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "catchup-to-follow",
@@ -397,22 +499,9 @@ async fn test_transition_from_catchup_to_follow() {
         append_payloads(&backend_clone, &basin_clone, &stream_clone, &[b"live-2"]).await;
     });
 
-    let mut all_records = Vec::new();
-    let timeout = Duration::from_secs(4);
-    let start_time = tokio::time::Instant::now();
-
-    while start_time.elapsed() < timeout && all_records.len() < 5 {
-        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
-            Ok(Some(Ok(StoredReadSessionOutput::Batch(batch)))) => {
-                let batch = decrypt_plain_batch(batch);
-                all_records.extend(batch.records.iter().cloned());
-            }
-            Ok(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
+    let all_records =
+        collect_records_until_advanced(&mut session, Duration::from_secs(4), 5, VIRTUAL_TIME_STEP)
+            .await;
 
     append_handle.await.unwrap();
 
@@ -429,7 +518,7 @@ async fn test_transition_from_catchup_to_follow() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_with_count_limit() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "follow-count-limit",
@@ -471,26 +560,15 @@ async fn test_follow_mode_with_count_limit() {
         .await;
     });
 
-    let mut all_records = Vec::new();
-    let timeout = Duration::from_secs(4);
-    let start_time = tokio::time::Instant::now();
-
-    while start_time.elapsed() < timeout {
-        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
-            Ok(Some(Ok(StoredReadSessionOutput::Batch(batch)))) => {
-                let batch = decrypt_plain_batch(batch);
-                all_records.extend(batch.records.iter().cloned());
-            }
-            Ok(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
+    let all_records = collect_records_until_closed_advanced(
+        &mut session,
+        Duration::from_secs(4),
+        VIRTUAL_TIME_STEP,
+    )
+    .await;
 
     append_handle.await.unwrap();
 
-    assert_eq!(all_records.len(), 3);
     let bodies = envelope_bodies(&all_records);
     assert_eq!(
         bodies,
@@ -502,7 +580,7 @@ async fn test_follow_mode_with_count_limit() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_with_exact_count_limit() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "follow-exact-count-limit",
@@ -542,31 +620,149 @@ async fn test_follow_mode_with_exact_count_limit() {
         .await;
     });
 
-    let mut all_records = Vec::new();
-    let timeout = Duration::from_secs(3);
-    let start_time = tokio::time::Instant::now();
-
-    while start_time.elapsed() < timeout {
-        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
-            Ok(Some(Ok(StoredReadSessionOutput::Batch(batch)))) => {
-                let batch = decrypt_plain_batch(batch);
-                all_records.extend(batch.records.iter().cloned());
-            }
-            Ok(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
+    let all_records = collect_records_until_closed_advanced(
+        &mut session,
+        Duration::from_secs(3),
+        VIRTUAL_TIME_STEP,
+    )
+    .await;
 
     append_handle.await.unwrap();
 
-    assert_eq!(all_records.len(), 2);
     let bodies = envelope_bodies(&all_records);
     assert_eq!(bodies, vec![b"follow-1".to_vec(), b"follow-2".to_vec()]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_with_bytes_limit_truncates_live_batch() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-bytes-limit",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
+
+    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    let per_record_bytes = stored_batch.records[0].metered_size();
+
+    let session = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            ReadStart {
+                from: ReadFrom::TailOffset(0),
+                clamp: false,
+            },
+            ReadEnd {
+                limit: ReadLimit::Bytes(per_record_bytes * 2),
+                until: ReadUntil::Unbounded,
+                wait: Some(Duration::from_secs(2)),
+            },
+        )
+        .await
+        .expect("Failed to create follow read session");
+    let mut session = Box::pin(session);
+
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+
+    let backend_clone = backend.clone();
+    let basin_clone = basin_name.clone();
+    let stream_clone = stream_name.clone();
+    let append_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let input = AppendInput {
+            records: create_test_record_batch(vec![
+                Bytes::from_static(b"item-01"),
+                Bytes::from_static(b"item-02"),
+                Bytes::from_static(b"item-03"),
+            ]),
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        backend_clone
+            .append(basin_clone, stream_clone, input)
+            .await
+            .expect("live append should succeed");
+    });
+
+    let records = collect_records_until_closed_advanced(
+        &mut session,
+        Duration::from_secs(3),
+        VIRTUAL_TIME_STEP,
+    )
+    .await;
+
+    append_handle.await.unwrap();
+
+    assert_eq!(
+        envelope_bodies(&records),
+        vec![b"item-01".to_vec(), b"item-02".to_vec()]
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_with_bytes_limit_smaller_than_first_live_record_closes_without_batch() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-bytes-too-small",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
+
+    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    let per_record_bytes = stored_batch.records[0].metered_size();
+
+    let session = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            ReadStart {
+                from: ReadFrom::TailOffset(0),
+                clamp: false,
+            },
+            ReadEnd {
+                limit: ReadLimit::Bytes(per_record_bytes - 1),
+                until: ReadUntil::Unbounded,
+                wait: Some(Duration::from_secs(2)),
+            },
+        )
+        .await
+        .expect("Failed to create follow read session");
+    let mut session = Box::pin(session);
+
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+
+    let backend_clone = backend.clone();
+    let basin_clone = basin_name.clone();
+    let stream_clone = stream_name.clone();
+    let append_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        append_payloads(&backend_clone, &basin_clone, &stream_clone, &[b"item-01"]).await;
+    });
+
+    let outputs = collect_outputs_until_closed_advanced(
+        &mut session,
+        Duration::from_secs(1),
+        VIRTUAL_TIME_STEP,
+    )
+    .await;
+
+    append_handle.await.unwrap();
+
+    assert!(
+        outputs
+            .outputs
+            .iter()
+            .all(|output| matches!(output, StoredReadSessionOutput::Heartbeat(_))),
+        "live oversize record should close the session without yielding a batch"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_with_timestamp_until() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "follow-timestamp-until",
@@ -575,16 +771,13 @@ async fn test_follow_mode_with_timestamp_until() {
     )
     .await;
 
-    let initial_records = vec![(Bytes::from_static(b"initial"), 1000)];
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(initial_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append initial record");
+    append_timestamped_payloads(
+        &backend,
+        &basin_name,
+        &stream_name,
+        vec![(Bytes::from_static(b"initial"), 1000)],
+    )
+    .await;
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -608,50 +801,33 @@ async fn test_follow_mode_with_timestamp_until() {
 
     let append_handle = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let timestamped_records = vec![(Bytes::from_static(b"before-cutoff"), 2000)];
-        let input = AppendInput {
-            records: create_test_record_batch_with_timestamps(timestamped_records),
-            match_seq_num: None,
-            fencing_token: None,
-        };
-        backend_clone
-            .append(basin_clone.clone(), stream_clone.clone(), input)
-            .await
-            .unwrap();
+        append_timestamped_payloads(
+            &backend_clone,
+            &basin_clone,
+            &stream_clone,
+            vec![(Bytes::from_static(b"before-cutoff"), 2000)],
+        )
+        .await;
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let timestamped_records = vec![(Bytes::from_static(b"after-cutoff"), 3000)];
-        let input = AppendInput {
-            records: create_test_record_batch_with_timestamps(timestamped_records),
-            match_seq_num: None,
-            fencing_token: None,
-        };
-        backend_clone
-            .append(basin_clone, stream_clone, input)
-            .await
-            .unwrap();
+        append_timestamped_payloads(
+            &backend_clone,
+            &basin_clone,
+            &stream_clone,
+            vec![(Bytes::from_static(b"after-cutoff"), 3000)],
+        )
+        .await;
     });
 
-    let mut all_records = Vec::new();
-    let timeout = Duration::from_secs(3);
-    let start_time = tokio::time::Instant::now();
-
-    while start_time.elapsed() < timeout && all_records.len() < 3 {
-        match tokio::time::timeout(Duration::from_millis(500), session.as_mut().next()).await {
-            Ok(Some(Ok(StoredReadSessionOutput::Batch(batch)))) => {
-                let batch = decrypt_plain_batch(batch);
-                all_records.extend(batch.records.iter().cloned());
-            }
-            Ok(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => continue,
-            Ok(Some(Err(e))) => panic!("Read error: {:?}", e),
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
+    let all_records = collect_records_until_closed_advanced(
+        &mut session,
+        Duration::from_secs(3),
+        VIRTUAL_TIME_STEP,
+    )
+    .await;
 
     append_handle.await.unwrap();
 
-    assert_eq!(all_records.len(), 2);
     let bodies = envelope_bodies(&all_records);
     assert_eq!(bodies, vec![b"initial".to_vec(), b"before-cutoff".to_vec()]);
 }

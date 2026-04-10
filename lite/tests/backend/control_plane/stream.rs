@@ -523,7 +523,17 @@ async fn test_list_streams_multiple() {
         .await
         .expect("Failed to list streams");
 
-    assert_eq!(page.values.len(), 5);
+    let names: Vec<_> = page.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "test-stream-list-0",
+            "test-stream-list-1",
+            "test-stream-list-2",
+            "test-stream-list-3",
+            "test-stream-list-4",
+        ]
+    );
     assert!(!page.has_more);
 }
 
@@ -556,8 +566,18 @@ async fn test_list_streams_pagination() {
         .await
         .expect("Failed to list streams page 1");
 
-    assert_eq!(page1.values.len(), 5);
     assert!(page1.has_more);
+    let page1_names: Vec<_> = page1.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page1_names,
+        vec![
+            "test-stream-stream-00",
+            "test-stream-stream-01",
+            "test-stream-stream-02",
+            "test-stream-stream-03",
+            "test-stream-stream-04",
+        ]
+    );
 
     let page2 = backend
         .list_streams(
@@ -573,8 +593,18 @@ async fn test_list_streams_pagination() {
         .await
         .expect("Failed to list streams page 2");
 
-    assert_eq!(page2.values.len(), 5);
     assert!(page2.has_more);
+    let page2_names: Vec<_> = page2.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page2_names,
+        vec![
+            "test-stream-stream-05",
+            "test-stream-stream-06",
+            "test-stream-stream-07",
+            "test-stream-stream-08",
+            "test-stream-stream-09",
+        ]
+    );
 
     let page3 = backend
         .list_streams(
@@ -590,8 +620,12 @@ async fn test_list_streams_pagination() {
         .await
         .expect("Failed to list streams page 3");
 
-    assert_eq!(page3.values.len(), 2);
     assert!(!page3.has_more);
+    let page3_names: Vec<_> = page3.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page3_names,
+        vec!["test-stream-stream-10", "test-stream-stream-11"]
+    );
 }
 
 #[tokio::test]
@@ -642,11 +676,13 @@ async fn test_list_streams_prefix_filter() {
         .await
         .expect("Failed to list streams with prefix");
 
-    assert_eq!(metrics_streams.values.len(), 2);
-    assert!(
-        metrics_streams
-            .values
-            .iter()
-            .all(|s| s.name.as_ref().starts_with("test-stream-metrics-"))
+    let metric_names: Vec<_> = metrics_streams
+        .values
+        .iter()
+        .map(|info| info.name.as_ref())
+        .collect();
+    assert_eq!(
+        metric_names,
+        vec!["test-stream-metrics-cpu", "test-stream-metrics-memory"]
     );
 }

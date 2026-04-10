@@ -2,15 +2,15 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use rstest::rstest;
 use s2_common::{
     encryption::{EncryptionMode, EncryptionSpec},
     read_extent::{ReadLimit, ReadUntil},
     record::{MeteredSize, RecordDecryptionError, StreamPosition},
     types::{
+        basin::BasinName,
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{
-            AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadBatch, StoredReadSessionOutput,
-        },
+        stream::{ReadEnd, ReadFrom, ReadStart, StoredReadSessionOutput, StreamName},
     },
 };
 use s2_lite::backend::{
@@ -20,37 +20,75 @@ use s2_lite::backend::{
 
 use super::common::*;
 
-fn read_all_bounds() -> (ReadStart, ReadEnd) {
-    (
-        ReadStart {
-            from: ReadFrom::SeqNum(0),
-            clamp: false,
+#[derive(Clone, Copy, Debug)]
+enum TailStartCase {
+    TailOffset,
+    SeqNumAtEnd,
+    TimestampAfterEnd,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TailEndCase {
+    CountNoWait,
+    CountZeroWait,
+    TimestampMax,
+}
+
+fn tail_read_from(case: TailStartCase, tail: &StreamPosition) -> ReadFrom {
+    match case {
+        TailStartCase::TailOffset => ReadFrom::TailOffset(0),
+        TailStartCase::SeqNumAtEnd => ReadFrom::SeqNum(tail.seq_num),
+        TailStartCase::TimestampAfterEnd => ReadFrom::Timestamp(tail.timestamp + 1),
+    }
+}
+
+fn tail_read_end(case: TailEndCase) -> ReadEnd {
+    match case {
+        TailEndCase::CountNoWait => ReadEnd {
+            limit: ReadLimit::Count(10),
+            until: ReadUntil::Unbounded,
+            wait: None,
         },
-        ReadEnd {
-            limit: ReadLimit::Unbounded,
+        TailEndCase::CountZeroWait => ReadEnd {
+            limit: ReadLimit::Count(10),
             until: ReadUntil::Unbounded,
             wait: Some(Duration::ZERO),
         },
-    )
+        TailEndCase::TimestampMax => ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Timestamp(u64::MAX),
+            wait: None,
+        },
+    }
 }
 
-async fn first_stored_batch(
-    backend: &Backend,
-    basin: &s2_common::types::basin::BasinName,
-    stream: &s2_common::types::stream::StreamName,
-) -> StoredReadBatch {
-    let (start, end) = read_all_bounds();
-    let read_session = backend
-        .read(basin.clone(), stream.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut read_session = Box::pin(read_session);
-    match read_session.next().await {
-        Some(Ok(StoredReadSessionOutput::Batch(batch))) => batch,
-        Some(Ok(other)) => panic!("Unexpected first output: {other:?}"),
-        Some(Err(err)) => panic!("Unexpected backend read error: {err:?}"),
-        None => panic!("Read session ended without delivering batch"),
-    }
+fn body_vecs(bodies: &[&[u8]]) -> Vec<Vec<u8>> {
+    bodies.iter().map(|body| body.to_vec()).collect()
+}
+
+fn timestamped_payloads(records: &[(&[u8], u64)]) -> Vec<(Bytes, u64)> {
+    records
+        .iter()
+        .map(|(body, timestamp)| (Bytes::copy_from_slice(body), *timestamp))
+        .collect()
+}
+
+async fn seed_timestamped_stream(
+    basin_suffix: &str,
+    stream_suffix: &str,
+    stream_config: OptionalStreamConfig,
+    records: &[(&[u8], u64)],
+) -> (Backend, BasinName, StreamName) {
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream(basin_suffix, stream_suffix, stream_config).await;
+    append_timestamped_payloads(
+        &backend,
+        &basin_name,
+        &stream_name,
+        timestamped_payloads(records),
+    )
+    .await;
+    (backend, basin_name, stream_name)
 }
 
 #[tokio::test]
@@ -97,24 +135,10 @@ async fn test_read_from_beginning() {
 
     append_repeat(&backend, &basin_name, &stream_name, b"test data", 5).await;
 
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Unbounded,
-        wait: Some(Duration::ZERO),
-    };
+    let (start, end) = read_all_bounds();
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert_eq!(records.len(), 5);
+    assert_eq!(envelope_bodies(&records), vec![b"test data".to_vec(); 5]);
 }
 
 #[tokio::test]
@@ -133,13 +157,8 @@ async fn test_read_encrypted_roundtrip() {
     .await;
 
     let (start, end) = read_all_bounds();
-    let read_session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create encrypted read session");
-    let mut read_session = Box::pin(read_session);
     let records =
-        collect_records_with_encryption(&mut read_session, &basin_name, &stream_name, &encryption)
+        read_records_with_encryption(&backend, &basin_name, &stream_name, start, end, &encryption)
             .await;
     assert_eq!(
         envelope_bodies(&records),
@@ -182,7 +201,12 @@ async fn test_read_with_limit() {
         setup_backend_with_stream("read-with-limit", "limit", OptionalStreamConfig::default())
             .await;
 
-    append_repeat(&backend, &basin_name, &stream_name, b"test data", 10).await;
+    let expected_bodies: Vec<_> = (0..10)
+        .map(|i| format!("record-{i}").into_bytes())
+        .collect();
+    for body in &expected_bodies {
+        append_payloads(&backend, &basin_name, &stream_name, &[body.as_slice()]).await;
+    }
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -194,14 +218,12 @@ async fn test_read_with_limit() {
         wait: None,
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
 
-    assert!(records.len() <= 5);
+    assert_eq!(
+        envelope_bodies(&records),
+        expected_bodies.into_iter().take(5).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -240,16 +262,25 @@ async fn test_read_unwritten_clamp_behavior() {
         until: ReadUntil::Unbounded,
         wait: Some(Duration::ZERO),
     };
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("should succeed with clamp");
-    let records = collect_records(&mut Box::pin(session)).await;
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
     assert!(records.is_empty());
 }
 
+#[rstest]
+#[case::tail_offset_no_wait(TailStartCase::TailOffset, TailEndCase::CountNoWait, false)]
+#[case::tail_seq_num_zero_wait(TailStartCase::SeqNumAtEnd, TailEndCase::CountZeroWait, false)]
+#[case::tail_timestamp_max(TailStartCase::TimestampAfterEnd, TailEndCase::TimestampMax, false)]
+#[case::timestamp_after_end_with_clamp(
+    TailStartCase::TimestampAfterEnd,
+    TailEndCase::CountNoWait,
+    true
+)]
 #[tokio::test]
-async fn test_read_at_tail_without_follow_returns_unwritten() {
+async fn test_read_at_tail_without_follow_returns_unwritten(
+    #[case] start_case: TailStartCase,
+    #[case] end_case: TailEndCase,
+    #[case] clamp: bool,
+) {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "read-at-tail-no-follow",
         "stream",
@@ -257,62 +288,36 @@ async fn test_read_at_tail_without_follow_returns_unwritten() {
     )
     .await;
 
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(vec![
+    let ack = append_timestamped_payloads(
+        &backend,
+        &basin_name,
+        &stream_name,
+        vec![
             (Bytes::from_static(b"record 1"), 1000),
             (Bytes::from_static(b"record 2"), 2000),
-        ]),
-        match_seq_num: None,
-        fencing_token: None,
+        ],
+    )
+    .await;
+
+    let start = ReadStart {
+        from: tail_read_from(start_case, &ack.end),
+        clamp,
     };
-    let ack = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("append");
+    let end = tail_read_end(end_case);
+    let result = backend
+        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .await;
 
-    let starts = [
-        ReadFrom::TailOffset(0),
-        ReadFrom::SeqNum(ack.end.seq_num),
-        ReadFrom::Timestamp(ack.end.timestamp + 1),
-    ];
-    let ends = [
-        ReadEnd {
-            limit: ReadLimit::Count(10),
-            until: ReadUntil::Unbounded,
-            wait: None,
-        },
-        ReadEnd {
-            limit: ReadLimit::Count(10),
-            until: ReadUntil::Unbounded,
-            wait: Some(Duration::ZERO),
-        },
-        ReadEnd {
-            limit: ReadLimit::Unbounded,
-            until: ReadUntil::Timestamp(u64::MAX),
-            wait: None,
-        },
-    ];
-
-    for from in starts {
-        for end in ends {
-            for clamp in [false, true] {
-                let start = ReadStart { from, clamp };
-                let result = backend
-                    .read(basin_name.clone(), stream_name.clone(), start, end)
-                    .await;
-                match result {
-                    Err(ReadError::Unwritten(UnwrittenError(tail))) => {
-                        assert_eq!(tail, ack.end);
-                    }
-                    Ok(_) => panic!(
-                        "Expected Unwritten error for {from:?} / clamp={clamp} / {end:?}, got Ok"
-                    ),
-                    Err(e) => panic!(
-                        "Expected Unwritten error for {from:?} / clamp={clamp} / {end:?}, got: {e:?}"
-                    ),
-                }
-            }
+    match result {
+        Err(ReadError::Unwritten(UnwrittenError(tail))) => {
+            assert_eq!(tail, ack.end);
         }
+        Ok(_) => panic!(
+            "Expected Unwritten error for {start_case:?} / clamp={clamp} / {end_case:?}, got Ok"
+        ),
+        Err(e) => panic!(
+            "Expected Unwritten error for {start_case:?} / clamp={clamp} / {end_case:?}, got: {e:?}"
+        ),
     }
 }
 
@@ -339,78 +344,10 @@ async fn test_read_from_tail_offset() {
         wait: Some(Duration::ZERO),
     };
 
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
     let bodies = envelope_bodies(&records);
 
     assert_eq!(bodies, vec![b"record 4".to_vec(), b"record 5".to_vec()]);
-}
-
-#[tokio::test]
-async fn test_read_timestamp_range() {
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream("read-timestamp", "range", OptionalStreamConfig::default()).await;
-
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-100"), 100),
-        (Bytes::from_static(b"ts-200"), 200),
-        (Bytes::from_static(b"ts-300"), 300),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append records with timestamps");
-
-    let start = ReadStart {
-        from: ReadFrom::Timestamp(150),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Timestamp(300),
-        wait: Some(Duration::ZERO),
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-
-    let mut session = Box::pin(session);
-    let records: Vec<_> = loop {
-        let output = tokio::time::timeout(Duration::from_secs(1), session.as_mut().next())
-            .await
-            .expect("Timed out waiting for read output");
-        match output {
-            Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
-                break decrypt_plain_batch(batch).records.iter().cloned().collect();
-            }
-            Some(Ok(StoredReadSessionOutput::Heartbeat(_))) => continue,
-            Some(Err(e)) => panic!("Read error: {:?}", e),
-            None => panic!("Read session ended without delivering expected batch"),
-        }
-    };
-    drop(session);
-
-    let bodies = envelope_bodies(&records);
-
-    assert_eq!(bodies, vec![b"ts-200".to_vec()]);
-    assert!(
-        records
-            .iter()
-            .all(|record| record.position().timestamp < 300)
-    );
 }
 
 #[tokio::test]
@@ -423,24 +360,18 @@ async fn test_read_from_timestamp_includes_duplicate_timestamps() {
         ..Default::default()
     };
 
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream("read-dupe-timestamp", "stream", stream_config).await;
-
     let timestamp = 1000;
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(vec![
-            (Bytes::from_static(b"dup-1"), timestamp),
-            (Bytes::from_static(b"dup-2"), timestamp),
-            (Bytes::from_static(b"dup-3"), timestamp),
-        ]),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append duplicate timestamp records");
+    let (backend, basin_name, stream_name) = seed_timestamped_stream(
+        "read-dupe-timestamp",
+        "stream",
+        stream_config,
+        &[
+            (b"dup-1", timestamp),
+            (b"dup-2", timestamp),
+            (b"dup-3", timestamp),
+        ],
+    )
+    .await;
 
     let start = ReadStart {
         from: ReadFrom::Timestamp(timestamp),
@@ -452,21 +383,15 @@ async fn test_read_from_timestamp_includes_duplicate_timestamps() {
         wait: Some(Duration::ZERO),
     };
 
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
 
-    let bodies = envelope_bodies(&records);
     assert_eq!(
-        bodies,
-        vec![b"dup-1".to_vec(), b"dup-2".to_vec(), b"dup-3".to_vec()]
+        envelope_bodies(&records),
+        body_vecs(&[b"dup-1", b"dup-2", b"dup-3"])
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_read_from_tail_times_out_without_new_data() {
     let (backend, basin_name, stream_name) =
         setup_backend_with_stream("read-tail-wait", "idle", OptionalStreamConfig::default()).await;
@@ -483,34 +408,88 @@ async fn test_read_from_tail_times_out_without_new_data() {
         wait: Some(Duration::from_millis(100)),
     };
 
-    let session = backend
-        .read(basin_name, stream_name, start, end)
+    let mut session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+    let probe_step = Duration::from_millis(1);
+
+    let started = tokio::time::Instant::now();
+    let outputs =
+        collect_outputs_until_closed_advanced(&mut session, Duration::from_secs(1), probe_step)
+            .await;
+
+    assert_eq!(outputs.outputs.len(), 1);
+    assert!(matches!(
+        outputs.outputs.first(),
+        Some(StoredReadSessionOutput::Heartbeat(_))
+    ));
+    let wait = Duration::from_millis(100);
+    assert!(outputs.closed_at >= started + wait);
+    assert!(outputs.closed_at <= started + wait + probe_step);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_read_from_tail_wait_is_reset_by_new_data() {
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream("read-tail-reset", "stream", OptionalStreamConfig::default())
+            .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"seed data"]).await;
+
+    let wait = Duration::from_millis(100);
+    let follow_delay = Duration::from_millis(40);
+    let probe_step = Duration::from_millis(1);
+    let start = ReadStart {
+        from: ReadFrom::TailOffset(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Unbounded,
+        until: ReadUntil::Unbounded,
+        wait: Some(wait),
+    };
+
+    let mut session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+
+    let first = session
+        .as_mut()
+        .next()
         .await
-        .expect("Failed to create read session");
-    tokio::pin!(session);
+        .expect("session should enter follow mode")
+        .expect("session should not error");
+    assert!(matches!(first, StoredReadSessionOutput::Heartbeat(_)));
 
-    let first_output = tokio::time::timeout(Duration::from_secs(1), session.next())
+    advance_time(follow_delay).await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"follow data"]).await;
+
+    let follow = session
+        .as_mut()
+        .next()
         .await
-        .expect("Timed out waiting for initial heartbeat")
-        .expect("Read session ended unexpectedly");
-
-    match first_output {
-        Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
-        other => panic!("Unexpected first output: {:?}", other),
-    }
-
-    let second_output = tokio::time::timeout(Duration::from_secs(1), session.next())
-        .await
-        .expect("Timed out waiting for read session to finish");
-
-    assert!(
-        second_output.is_none(),
-        "Read session produced unexpected additional output"
+        .expect("session should yield the live tail batch")
+        .expect("session should not error");
+    let reset_at = tokio::time::Instant::now();
+    let StoredReadSessionOutput::Batch(batch) = follow else {
+        panic!("expected a batch after appending past tail");
+    };
+    let batch = decrypt_plain_batch(batch);
+    assert_eq!(
+        envelope_bodies(&batch.records),
+        vec![b"follow data".to_vec()]
     );
+
+    let outputs = collect_outputs_until_closed_advanced(
+        &mut session,
+        wait + Duration::from_secs(1),
+        probe_step,
+    )
+    .await;
+
+    assert!(outputs.closed_at >= reset_at + wait);
+    assert!(outputs.closed_at <= reset_at + wait + probe_step);
 }
 
 #[tokio::test]
-async fn test_read_with_bytes_limit() {
+async fn test_read_with_bytes_limit_exact_fit() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "read-bytes-limit",
         "stream",
@@ -518,33 +497,62 @@ async fn test_read_with_bytes_limit() {
     )
     .await;
 
-    let large_body = vec![b'X'; 5000];
-    for _i in 0..10 {
-        append_payloads(&backend, &basin_name, &stream_name, &[&large_body]).await;
-    }
+    append_payloads(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"record-1", b"record-2", b"record-3"],
+    )
+    .await;
+
+    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    let exact_limit =
+        stored_batch.records[0].metered_size() + stored_batch.records[1].metered_size();
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
         clamp: false,
     };
     let end = ReadEnd {
-        limit: ReadLimit::Bytes(15000),
+        limit: ReadLimit::Bytes(exact_limit),
         until: ReadUntil::Unbounded,
         wait: None,
     };
 
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
+    assert_eq!(
+        envelope_bodies(&records),
+        vec![b"record-1".to_vec(), b"record-2".to_vec()]
+    );
+}
 
-    assert!(records.len() >= 2);
-    assert!(records.len() <= 4);
+#[tokio::test]
+async fn test_read_with_bytes_limit_smaller_than_first_record_returns_empty() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-bytes-too-small",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
 
-    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
-    assert!(total_bytes <= 20000);
+    append_payloads(&backend, &basin_name, &stream_name, &[b"oversized"]).await;
+
+    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    let first_size = stored_batch.records[0].metered_size();
+    assert!(first_size > 0);
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let end = ReadEnd {
+        limit: ReadLimit::Bytes(first_size - 1),
+        until: ReadUntil::Unbounded,
+        wait: None,
+    };
+
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
+    assert!(records.is_empty());
 }
 
 #[tokio::test]
@@ -556,9 +564,9 @@ async fn test_read_with_count_or_bytes_limit_count_wins() {
     )
     .await;
 
-    let small_body = vec![b'Y'; 100];
-    for _i in 0..20 {
-        append_payloads(&backend, &basin_name, &stream_name, &[&small_body]).await;
+    let expected_bodies: Vec<_> = (0..20).map(|i| format!("count-{i}").into_bytes()).collect();
+    for body in &expected_bodies {
+        append_payloads(&backend, &basin_name, &stream_name, &[body.as_slice()]).await;
     }
 
     let start = ReadStart {
@@ -571,14 +579,12 @@ async fn test_read_with_count_or_bytes_limit_count_wins() {
         wait: None,
     };
 
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
 
-    assert_eq!(records.len(), 5);
+    assert_eq!(
+        envelope_bodies(&records),
+        expected_bodies.into_iter().take(5).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -590,506 +596,197 @@ async fn test_read_with_count_or_bytes_limit_bytes_wins() {
     )
     .await;
 
-    let large_body = vec![b'Z'; 10000];
-    for _i in 0..20 {
-        append_payloads(&backend, &basin_name, &stream_name, &[&large_body]).await;
-    }
+    append_payloads(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"slot-0", b"slot-1", b"slot-2", b"slot-3", b"slot-4"],
+    )
+    .await;
+
+    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    let per_record_bytes = stored_batch.records[0].metered_size();
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
         clamp: false,
     };
     let end = ReadEnd {
-        limit: ReadLimit::from_count_and_bytes(Some(100), Some(35000)),
+        limit: ReadLimit::from_count_and_bytes(Some(100), Some(per_record_bytes * 3)),
         until: ReadUntil::Unbounded,
         wait: None,
     };
 
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert!(records.len() >= 2);
-    assert!(records.len() <= 5);
-    assert!(records.len() < 100);
-
-    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
-    assert!(total_bytes <= 50000);
-}
-
-#[tokio::test]
-async fn test_read_until_timestamp_basic() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-until-timestamp",
-        "basic",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-1000"), 1000),
-        (Bytes::from_static(b"ts-2000"), 2000),
-        (Bytes::from_static(b"ts-3000"), 3000),
-        (Bytes::from_static(b"ts-4000"), 4000),
-        (Bytes::from_static(b"ts-5000"), 5000),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Timestamp(3500),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    let bodies = envelope_bodies(&records);
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
     assert_eq!(
-        bodies,
-        vec![
-            b"ts-1000".to_vec(),
-            b"ts-2000".to_vec(),
-            b"ts-3000".to_vec()
-        ]
-    );
-    assert!(
-        records
-            .iter()
-            .all(|record| record.position().timestamp < 3500)
+        envelope_bodies(&records),
+        vec![b"slot-0".to_vec(), b"slot-1".to_vec(), b"slot-2".to_vec()]
     );
 }
 
 #[tokio::test]
-async fn test_read_until_timestamp_exact_boundary() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-until-boundary",
-        "exact",
+async fn test_read_until_timestamp_boundaries() {
+    let boundary_records = [
+        (b"ts-1000".as_ref(), 1000),
+        (b"ts-2000-a".as_ref(), 2000),
+        (b"ts-2000-b".as_ref(), 2000),
+        (b"ts-3000".as_ref(), 3000),
+    ];
+    let cases = vec![
+        ("read-until-before", 500, body_vecs(&[])),
+        (
+            "read-until-exact-duplicate-boundary",
+            2000,
+            body_vecs(&[b"ts-1000"]),
+        ),
+        (
+            "read-until-after",
+            5000,
+            body_vecs(&[b"ts-1000", b"ts-2000-a", b"ts-2000-b", b"ts-3000"]),
+        ),
+    ];
+
+    for (suffix, cutoff, expected) in cases {
+        let (backend, basin_name, stream_name) = seed_timestamped_stream(
+            suffix,
+            "boundary",
+            OptionalStreamConfig::default(),
+            &boundary_records,
+        )
+        .await;
+
+        let records = read_records(
+            &backend,
+            &basin_name,
+            &stream_name,
+            ReadStart {
+                from: ReadFrom::SeqNum(0),
+                clamp: false,
+            },
+            ReadEnd {
+                limit: ReadLimit::Unbounded,
+                until: ReadUntil::Timestamp(cutoff),
+                wait: None,
+            },
+        )
+        .await;
+
+        assert_eq!(envelope_bodies(&records), expected, "case {suffix}");
+        assert!(
+            records
+                .iter()
+                .all(|record| record.position().timestamp < cutoff),
+            "case {suffix}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_read_until_with_additional_limits() {
+    let timestamped_records = [
+        (b"ts-1000".as_ref(), 1000),
+        (b"ts-2000".as_ref(), 2000),
+        (b"ts-3000".as_ref(), 3000),
+        (b"ts-4000".as_ref(), 4000),
+        (b"ts-5000".as_ref(), 5000),
+    ];
+    let (backend, basin_name, stream_name) = seed_timestamped_stream(
+        "read-until-limits",
+        "stream",
         OptionalStreamConfig::default(),
+        &timestamped_records,
     )
     .await;
 
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-1000"), 1000),
-        (Bytes::from_static(b"ts-2000"), 2000),
-        (Bytes::from_static(b"ts-3000"), 3000),
-        (Bytes::from_static(b"ts-4000"), 4000),
+    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    let per_record_bytes = stored_batch.records[0].metered_size();
+    let cases = vec![
+        (
+            "count wins",
+            ReadLimit::Count(2),
+            5_000,
+            body_vecs(&[b"ts-1000", b"ts-2000"]),
+        ),
+        (
+            "timestamp beats count",
+            ReadLimit::Count(10),
+            3_500,
+            body_vecs(&[b"ts-1000", b"ts-2000", b"ts-3000"]),
+        ),
+        (
+            "bytes win",
+            ReadLimit::Bytes(per_record_bytes * 2),
+            5_000,
+            body_vecs(&[b"ts-1000", b"ts-2000"]),
+        ),
+        (
+            "timestamp beats bytes",
+            ReadLimit::Bytes(per_record_bytes * 100),
+            3_500,
+            body_vecs(&[b"ts-1000", b"ts-2000", b"ts-3000"]),
+        ),
     ];
 
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
+    for (label, limit, cutoff, expected) in cases {
+        let records = read_records(
+            &backend,
+            &basin_name,
+            &stream_name,
+            ReadStart {
+                from: ReadFrom::SeqNum(0),
+                clamp: false,
+            },
+            ReadEnd {
+                limit,
+                until: ReadUntil::Timestamp(cutoff),
+                wait: None,
+            },
+        )
+        .await;
 
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Timestamp(3000),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    let bodies = envelope_bodies(&records);
-    assert_eq!(bodies, vec![b"ts-1000".to_vec(), b"ts-2000".to_vec()]);
-    assert!(
-        records
-            .iter()
-            .all(|record| record.position().timestamp < 3000)
-    );
-}
-
-#[tokio::test]
-async fn test_read_until_timestamp_before_all_records() {
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream("read-until-before", "all", OptionalStreamConfig::default())
-            .await;
-
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-1000"), 1000),
-        (Bytes::from_static(b"ts-2000"), 2000),
-        (Bytes::from_static(b"ts-3000"), 3000),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Timestamp(500),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert_eq!(records.len(), 0);
-}
-
-#[tokio::test]
-async fn test_read_until_timestamp_after_all_records() {
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream("read-until-after", "all", OptionalStreamConfig::default()).await;
-
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-1000"), 1000),
-        (Bytes::from_static(b"ts-2000"), 2000),
-        (Bytes::from_static(b"ts-3000"), 3000),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Timestamp(5000),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    let bodies = envelope_bodies(&records);
-    assert_eq!(
-        bodies,
-        vec![
-            b"ts-1000".to_vec(),
-            b"ts-2000".to_vec(),
-            b"ts-3000".to_vec()
-        ]
-    );
-}
-
-#[tokio::test]
-async fn test_read_until_with_count_limit_count_wins() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-until-count",
-        "count-wins",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-1000"), 1000),
-        (Bytes::from_static(b"ts-2000"), 2000),
-        (Bytes::from_static(b"ts-3000"), 3000),
-        (Bytes::from_static(b"ts-4000"), 4000),
-        (Bytes::from_static(b"ts-5000"), 5000),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Count(2),
-        until: ReadUntil::Timestamp(5000),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert_eq!(records.len(), 2);
-    let bodies = envelope_bodies(&records);
-    assert_eq!(bodies, vec![b"ts-1000".to_vec(), b"ts-2000".to_vec()]);
-}
-
-#[tokio::test]
-async fn test_read_until_with_count_limit_timestamp_wins() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-until-count",
-        "timestamp-wins",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-1000"), 1000),
-        (Bytes::from_static(b"ts-2000"), 2000),
-        (Bytes::from_static(b"ts-3000"), 3000),
-        (Bytes::from_static(b"ts-4000"), 4000),
-        (Bytes::from_static(b"ts-5000"), 5000),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Count(10),
-        until: ReadUntil::Timestamp(3500),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert_eq!(records.len(), 3);
-    let bodies = envelope_bodies(&records);
-    assert_eq!(
-        bodies,
-        vec![
-            b"ts-1000".to_vec(),
-            b"ts-2000".to_vec(),
-            b"ts-3000".to_vec()
-        ]
-    );
-}
-
-#[tokio::test]
-async fn test_read_until_with_bytes_limit_bytes_wins() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-until-bytes",
-        "bytes-wins",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    let large_body = vec![b'X'; 5000];
-    let timestamped_records = vec![
-        (Bytes::from(large_body.clone()), 1000),
-        (Bytes::from(large_body.clone()), 2000),
-        (Bytes::from(large_body.clone()), 3000),
-        (Bytes::from(large_body.clone()), 4000),
-        (Bytes::from(large_body), 5000),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Bytes(12000),
-        until: ReadUntil::Timestamp(5000),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert!(records.len() >= 2);
-    assert!(records.len() <= 3);
-
-    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
-    assert!(total_bytes <= 15000);
-}
-
-#[tokio::test]
-async fn test_read_until_with_bytes_limit_timestamp_wins() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-until-bytes",
-        "timestamp-wins",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    let small_body = vec![b'Y'; 100];
-    let timestamped_records = vec![
-        (Bytes::from(small_body.clone()), 1000),
-        (Bytes::from(small_body.clone()), 2000),
-        (Bytes::from(small_body.clone()), 3000),
-        (Bytes::from(small_body.clone()), 4000),
-        (Bytes::from(small_body), 5000),
-    ];
-
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Bytes(100000),
-        until: ReadUntil::Timestamp(3500),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert_eq!(records.len(), 3);
-    assert!(
-        records
-            .iter()
-            .all(|record| record.position().timestamp < 3500)
-    );
+        assert_eq!(envelope_bodies(&records), expected, "{label}");
+    }
 }
 
 #[tokio::test]
 async fn test_read_timestamp_range_with_from_and_until() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+    let timestamped_records = [
+        (b"ts-500".as_ref(), 500),
+        (b"ts-2000-a".as_ref(), 2000),
+        (b"ts-2000-b".as_ref(), 2000),
+        (b"ts-2500".as_ref(), 2500),
+        (b"ts-3500".as_ref(), 3500),
+        (b"ts-4500".as_ref(), 4500),
+        (b"ts-5500".as_ref(), 5500),
+    ];
+    let (backend, basin_name, stream_name) = seed_timestamped_stream(
         "read-timestamp-range",
         "from-until",
         OptionalStreamConfig::default(),
+        &timestamped_records,
     )
     .await;
 
-    let timestamped_records = vec![
-        (Bytes::from_static(b"ts-500"), 500),
-        (Bytes::from_static(b"ts-1500"), 1500),
-        (Bytes::from_static(b"ts-2500"), 2500),
-        (Bytes::from_static(b"ts-3500"), 3500),
-        (Bytes::from_static(b"ts-4500"), 4500),
-        (Bytes::from_static(b"ts-5500"), 5500),
-    ];
+    let records = read_records(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::Timestamp(2000),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Timestamp(4500),
+            wait: None,
+        },
+    )
+    .await;
 
-    let input = AppendInput {
-        records: create_test_record_batch_with_timestamps(timestamped_records),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append timestamped records");
-
-    let start = ReadStart {
-        from: ReadFrom::Timestamp(2000),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Unbounded,
-        until: ReadUntil::Timestamp(4500),
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-
-    assert_eq!(records.len(), 2);
-    let bodies = envelope_bodies(&records);
-    assert_eq!(bodies, vec![b"ts-2500".to_vec(), b"ts-3500".to_vec()]);
+    assert_eq!(
+        envelope_bodies(&records),
+        body_vecs(&[b"ts-2000-a", b"ts-2000-b", b"ts-2500", b"ts-3500"])
+    );
     assert!(records.iter().all(|record| {
         let position = record.position();
         position.timestamp >= 2000 && position.timestamp < 4500

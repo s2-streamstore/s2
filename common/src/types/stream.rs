@@ -574,6 +574,13 @@ mod test {
         }
     }
 
+    #[test]
+    fn append_record_batch_rejects_empty_batches() {
+        let empty_batch: Result<AppendRecordBatch, _> = Vec::<AppendRecord>::new().try_into();
+
+        assert_eq!(empty_batch.unwrap_err(), "record batch must not be empty");
+    }
+
     #[rstest]
     #[case::encrypt(true)]
     #[case::into(false)]

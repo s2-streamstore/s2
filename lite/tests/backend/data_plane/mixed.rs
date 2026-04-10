@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use s2_common::{
@@ -9,6 +9,7 @@ use s2_common::{
     },
 };
 use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
+use tokio::sync::Notify;
 
 use super::common::*;
 
@@ -59,14 +60,18 @@ async fn test_concurrent_appends_to_same_stream() {
     )
     .await;
 
+    let expected_bodies: Vec<_> = (0..20)
+        .map(|i| format!("concurrent-{i}").into_bytes())
+        .collect();
     let mut handles = vec![];
-    for i in 0..20 {
+    for body in &expected_bodies {
         let backend = backend.clone();
         let basin_name = basin_name.clone();
         let stream_name = stream_name.clone();
+        let body = body.clone();
         let handle = tokio::spawn(async move {
             let input = AppendInput {
-                records: create_test_record_batch(vec![Bytes::from(format!("concurrent-{}", i))]),
+                records: create_test_record_batch(vec![Bytes::from(body)]),
                 match_seq_num: None,
                 fencing_token: None,
             };
@@ -75,14 +80,12 @@ async fn test_concurrent_appends_to_same_stream() {
         handles.push(handle);
     }
 
-    let mut success_count = 0;
     for handle in handles {
-        if handle.await.unwrap().is_ok() {
-            success_count += 1;
-        }
+        handle
+            .await
+            .unwrap()
+            .expect("Concurrent append should succeed");
     }
-
-    assert_eq!(success_count, 20);
 
     let tail = backend
         .check_tail(basin_name.clone(), stream_name.clone())
@@ -106,65 +109,11 @@ async fn test_concurrent_appends_to_same_stream() {
         .expect("Failed to create read session");
     let mut session = Box::pin(session);
     let records = collect_records(&mut session).await;
-    assert_eq!(records.len(), 20);
-}
-
-#[tokio::test]
-async fn test_read_while_appending() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "read-while-append",
-        "stream",
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    append_payloads(&backend, &basin_name, &stream_name, &[b"initial"]).await;
-
-    let backend_clone = backend.clone();
-    let basin_clone = basin_name.clone();
-    let stream_clone = stream_name.clone();
-
-    let append_handle = tokio::spawn(async move {
-        for i in 0..10 {
-            append_payloads(
-                &backend_clone,
-                &basin_clone,
-                &stream_clone,
-                &[format!("append-{}", i).as_bytes()],
-            )
-            .await;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    });
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    let start = ReadStart {
-        from: ReadFrom::SeqNum(0),
-        clamp: false,
-    };
-    let end = ReadEnd {
-        limit: ReadLimit::Count(5),
-        until: ReadUntil::Unbounded,
-        wait: None,
-    };
-
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
-    let mut session = Box::pin(session);
-    let records = collect_records(&mut session).await;
-    assert!(!records.is_empty());
-    assert!(records.len() <= 5);
-
-    append_handle.await.unwrap();
-
-    let tail = backend
-        .check_tail(basin_name, stream_name)
-        .await
-        .expect("Failed to check tail");
-    assert_eq!(tail.seq_num, 11);
+    let mut actual_bodies = envelope_bodies(&records);
+    let mut expected_bodies = expected_bodies;
+    actual_bodies.sort();
+    expected_bodies.sort();
+    assert_eq!(actual_bodies, expected_bodies);
 }
 
 #[tokio::test]
@@ -179,7 +128,9 @@ async fn test_concurrent_reconfigure_during_append() {
     let backend_append = backend.clone();
     let basin_append = basin_name.clone();
     let stream_append = stream_name.clone();
+    let ready = Arc::new(Notify::new());
 
+    let ready_clone = ready.clone();
     let append_handle = tokio::spawn(async move {
         for i in 0..10 {
             append_payloads(
@@ -189,11 +140,14 @@ async fn test_concurrent_reconfigure_during_append() {
                 &[format!("data-{}", i).as_bytes()],
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            if i == 0 {
+                ready_clone.notify_one();
+            }
+            tokio::task::yield_now().await;
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    ready.notified().await;
 
     let reconfig = StreamReconfiguration {
         storage_class: s2_common::maybe::Maybe::from(Some(StorageClass::Express)),
@@ -211,10 +165,19 @@ async fn test_concurrent_reconfigure_during_append() {
     append_handle.await.unwrap();
 
     let tail = backend
-        .check_tail(basin_name, stream_name)
+        .check_tail(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 10);
+
+    let (start, end) = read_all_bounds();
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
+    assert_eq!(
+        envelope_bodies(&records),
+        (0..10)
+            .map(|i| format!("data-{i}").into_bytes())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -254,13 +217,16 @@ async fn test_concurrent_reads_same_stream() {
             let session = backend.read(basin_name, stream_name, start, end).await?;
             let mut session = Box::pin(session);
             let records = collect_records(&mut session).await;
-            Ok::<usize, ReadError>(records.len())
+            Ok::<Vec<Vec<u8>>, ReadError>(envelope_bodies(&records))
         });
         handles.push(handle);
     }
 
+    let expected_bodies: Vec<_> = (0..20)
+        .map(|i| format!("record-{i}").into_bytes())
+        .collect();
     for handle in handles {
-        let count = handle.await.unwrap().expect("Read should succeed");
-        assert_eq!(count, 20);
+        let bodies = handle.await.unwrap().expect("Read should succeed");
+        assert_eq!(bodies, expected_bodies);
     }
 }
