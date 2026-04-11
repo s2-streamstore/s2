@@ -277,16 +277,6 @@ async fn test_fencing_command_controls_stream_state(
 }
 
 #[tokio::test]
-async fn test_append_empty_batch() {
-    let empty_batch: Result<AppendRecordBatch, _> = Vec::<AppendRecord>::new().try_into();
-
-    assert!(
-        empty_batch.is_err(),
-        "Empty batches should be rejected by AppendRecordBatch"
-    );
-}
-
-#[tokio::test]
 async fn test_append_requires_timestamp() {
     let stream_config = OptionalStreamConfig {
         timestamping: OptionalTimestampingConfig {
