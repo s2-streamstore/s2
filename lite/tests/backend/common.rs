@@ -64,6 +64,13 @@ pub fn permissive_stream_config() -> OptionalStreamConfig {
     }
 }
 
+pub fn permissive_basin_config() -> BasinConfig {
+    BasinConfig {
+        default_stream_config: permissive_stream_config(),
+        ..Default::default()
+    }
+}
+
 pub fn aegis256_encryption() -> EncryptionSpec {
     EncryptionSpec::aegis256([0x42; 32])
 }
@@ -143,8 +150,23 @@ pub async fn setup_backend_with_stream(
     stream_suffix: &str,
     stream_config: OptionalStreamConfig,
 ) -> (Backend, BasinName, StreamName) {
+    setup_backend_with_basin_and_stream(
+        basin_suffix,
+        stream_suffix,
+        BasinConfig::default(),
+        stream_config,
+    )
+    .await
+}
+
+pub async fn setup_backend_with_basin_and_stream(
+    basin_suffix: &str,
+    stream_suffix: &str,
+    basin_config: BasinConfig,
+    stream_config: OptionalStreamConfig,
+) -> (Backend, BasinName, StreamName) {
     let backend = create_backend().await;
-    let basin_name = create_test_basin(&backend, basin_suffix, BasinConfig::default()).await;
+    let basin_name = create_test_basin(&backend, basin_suffix, basin_config).await;
     let stream_name = create_test_stream(&backend, &basin_name, stream_suffix, stream_config).await;
     (backend, basin_name, stream_name)
 }

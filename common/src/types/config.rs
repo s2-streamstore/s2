@@ -101,9 +101,21 @@ pub struct DeleteOnEmptyConfig {
     pub min_age: Duration,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionConfig {
     pub allowed_modes: EnumSet<EncryptionMode>,
+}
+
+pub fn default_allowed_encryption_modes() -> EnumSet<EncryptionMode> {
+    enumset::enum_set!(EncryptionMode::Plain)
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self {
+            allowed_modes: default_allowed_encryption_modes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -254,7 +266,7 @@ impl OptionalEncryptionConfig {
         let allowed_modes = self
             .allowed_modes
             .or(basin_defaults.allowed_modes)
-            .unwrap_or_else(EnumSet::all);
+            .unwrap_or_else(default_allowed_encryption_modes);
         EncryptionConfig { allowed_modes }
     }
 }
@@ -262,7 +274,9 @@ impl OptionalEncryptionConfig {
 impl From<OptionalEncryptionConfig> for EncryptionConfig {
     fn from(value: OptionalEncryptionConfig) -> Self {
         Self {
-            allowed_modes: value.allowed_modes.unwrap_or_else(EnumSet::all),
+            allowed_modes: value
+                .allowed_modes
+                .unwrap_or_else(default_allowed_encryption_modes),
         }
     }
 }
@@ -270,7 +284,7 @@ impl From<OptionalEncryptionConfig> for EncryptionConfig {
 impl From<EncryptionConfig> for OptionalEncryptionConfig {
     fn from(value: EncryptionConfig) -> Self {
         Self {
-            allowed_modes: (value.allowed_modes != EnumSet::all()).then_some(value.allowed_modes),
+            allowed_modes: Some(value.allowed_modes),
         }
     }
 }
@@ -470,21 +484,27 @@ pub struct BasinReconfiguration {
 
 #[cfg(test)]
 mod tests {
-    use super::{EncryptionConfig, OptionalEncryptionConfig};
+    use super::{EncryptionConfig, OptionalEncryptionConfig, default_allowed_encryption_modes};
     use crate::encryption::EncryptionMode;
 
     #[test]
-    fn encryption_config_all_modes_collapse_to_unspecified_optional() {
-        let optional = OptionalEncryptionConfig::from(EncryptionConfig {
-            allowed_modes: enumset::EnumSet::all(),
-        });
+    fn unset_optional_encryption_config_defaults_to_plaintext_only() {
+        let resolved = EncryptionConfig::from(OptionalEncryptionConfig::default());
 
-        assert_eq!(optional.allowed_modes, None);
+        assert_eq!(resolved.allowed_modes, default_allowed_encryption_modes());
     }
 
     #[test]
     fn encryption_config_subset_stays_explicit_in_optional() {
         let allowed_modes = enumset::enum_set!(EncryptionMode::Plain | EncryptionMode::Aegis256);
+        let optional = OptionalEncryptionConfig::from(EncryptionConfig { allowed_modes });
+
+        assert_eq!(optional.allowed_modes, Some(allowed_modes));
+    }
+
+    #[test]
+    fn encryption_config_all_modes_stays_explicit_in_optional() {
+        let allowed_modes = enumset::EnumSet::all();
         let optional = OptionalEncryptionConfig::from(EncryptionConfig { allowed_modes });
 
         assert_eq!(optional.allowed_modes, Some(allowed_modes));

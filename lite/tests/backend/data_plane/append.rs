@@ -19,8 +19,13 @@ use s2_lite::backend::error::{AppendConditionFailedError, AppendError};
 use super::common::*;
 
 async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionSpec) {
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream(test_suffix, "stream", permissive_stream_config()).await;
+    let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
+        test_suffix,
+        "stream",
+        permissive_basin_config(),
+        permissive_stream_config(),
+    )
+    .await;
 
     let expected_bodies = vec![
         b"batch 1".to_vec(),
@@ -197,9 +202,10 @@ async fn test_append_fencing_token_conditions() {
 
 #[tokio::test]
 async fn test_encrypted_fencing_command_controls_stream_state() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+    let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
         "append-fencing-encrypted",
         "stream",
+        permissive_basin_config(),
         permissive_stream_config(),
     )
     .await;

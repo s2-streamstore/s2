@@ -2,11 +2,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
+    encryption::EncryptionMode,
     maybe::Maybe,
     types::{
         config::{
-            BasinConfig, OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy,
-            StorageClass, StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
+            BasinConfig, EncryptionReconfiguration, OptionalEncryptionConfig, OptionalStreamConfig,
+            OptionalTimestampingConfig, RetentionPolicy, StorageClass, StreamReconfiguration,
+            TimestampingMode, TimestampingReconfiguration,
         },
         resources::{CreateMode, ListItemsRequestParts, RequestToken},
         stream::{
@@ -71,6 +73,112 @@ async fn test_create_stream_honors_basin_defaults() {
         config.timestamping.mode,
         Some(TimestampingMode::ClientRequire)
     );
+}
+
+#[tokio::test]
+async fn test_create_stream_defaults_encryption_to_plaintext_only() {
+    let backend = create_backend().await;
+    let basin_name =
+        create_test_basin(&backend, "stream-default-enc", BasinConfig::default()).await;
+    let stream_name = create_test_stream(
+        &backend,
+        &basin_name,
+        "stream-default-enc",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let config = backend
+        .get_stream_config(basin_name, stream_name)
+        .await
+        .expect("Failed to fetch stream config");
+
+    assert_eq!(
+        config.encryption.allowed_modes,
+        Some([EncryptionMode::Plain].into())
+    );
+}
+
+#[tokio::test]
+async fn test_create_stream_rejects_encryption_modes_outside_basin_defaults() {
+    let backend = create_backend().await;
+    let basin_name =
+        create_test_basin(&backend, "stream-encryption-reject", BasinConfig::default()).await;
+    let stream_name = test_stream_name("stream-encryption-reject");
+
+    let result = backend
+        .create_stream(
+            basin_name,
+            stream_name,
+            permissive_stream_config(),
+            CreateMode::CreateOnly(None),
+        )
+        .await;
+
+    assert!(matches!(result, Err(CreateStreamError::Validation(_))));
+}
+
+#[tokio::test]
+async fn test_reconfigure_stream_empty_encryption_uses_basin_defaults() {
+    let backend = create_backend().await;
+    let basin_name = test_basin_name("stream-reconfigure-enc");
+    let basin_config = BasinConfig {
+        default_stream_config: OptionalStreamConfig {
+            encryption: OptionalEncryptionConfig {
+                allowed_modes: Some([EncryptionMode::Plain, EncryptionMode::Aegis256].into()),
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    backend
+        .create_basin(
+            basin_name.clone(),
+            basin_config,
+            CreateMode::CreateOnly(None),
+        )
+        .await
+        .expect("Failed to create basin");
+
+    let stream_name = test_stream_name("stream-reconfigure-enc");
+    backend
+        .create_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            OptionalStreamConfig {
+                encryption: OptionalEncryptionConfig {
+                    allowed_modes: Some([EncryptionMode::Plain].into()),
+                },
+                ..Default::default()
+            },
+            CreateMode::CreateOnly(None),
+        )
+        .await
+        .expect("Failed to create stream");
+
+    let updated = backend
+        .reconfigure_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            StreamReconfiguration {
+                encryption: Maybe::Specified(Some(EncryptionReconfiguration {
+                    allowed_modes: Maybe::Specified(None),
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Failed to reconfigure stream");
+
+    let expected_modes = Some([EncryptionMode::Plain, EncryptionMode::Aegis256].into());
+    assert_eq!(updated.encryption.allowed_modes, expected_modes);
+
+    let fetched = backend
+        .get_stream_config(basin_name, stream_name)
+        .await
+        .expect("Failed to fetch stream config after reconfigure");
+    assert_eq!(fetched.encryption.allowed_modes, expected_modes);
 }
 
 #[tokio::test]

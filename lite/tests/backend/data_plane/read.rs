@@ -120,8 +120,13 @@ async fn test_read_from_beginning() {
 #[tokio::test]
 async fn test_read_encrypted_roundtrip() {
     let encryption = aegis256_encryption();
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream("read-enc", "stream", permissive_stream_config()).await;
+    let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
+        "read-enc",
+        "stream",
+        permissive_basin_config(),
+        permissive_stream_config(),
+    )
+    .await;
 
     append_payloads_with_encryption(
         &backend,
@@ -150,9 +155,10 @@ async fn test_read_encrypted_roundtrip() {
 #[tokio::test]
 async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
     let encryption = aegis256_encryption();
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+    let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
         "read-enc-plain-mismatch",
         "stream",
+        permissive_basin_config(),
         permissive_stream_config(),
     )
     .await;

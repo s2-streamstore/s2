@@ -135,7 +135,7 @@ impl schemars::JsonSchema for EncryptionModeSpec {
 #[serde(deny_unknown_fields)]
 pub struct EncryptionConfigSpec {
     /// Allowed encryption modes.
-    /// If empty, inherit defaults; if none exist, all modes are allowed.
+    /// If empty, use defaults; if none are set, only plaintext is allowed.
     #[serde(default)]
     pub allowed_modes: Vec<EncryptionModeSpec>,
 }

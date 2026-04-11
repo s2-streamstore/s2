@@ -20,6 +20,7 @@ use s2_common::{
     types::{
         config::{
             OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy, TimestampingMode,
+            default_allowed_encryption_modes,
         },
         stream::{
             AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
@@ -230,12 +231,17 @@ impl Streamer {
                 match_seq_num,
             })?;
         }
+        let allowed_encryption_modes = self
+            .config
+            .encryption
+            .allowed_modes
+            .unwrap_or_else(default_allowed_encryption_modes);
         sequenced_records(
             records,
             first_seq_num,
             next_assignable_pos.timestamp,
             &self.config.timestamping,
-            self.config.encryption.allowed_modes.as_ref(),
+            Some(&allowed_encryption_modes),
         )
     }
 

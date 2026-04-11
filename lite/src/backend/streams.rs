@@ -1,11 +1,11 @@
 use s2_common::{
     bash::Bash,
-    encryption::{ALL_ENCRYPTION_MODES, EncryptionMode},
+    encryption::EncryptionMode,
     record::StreamPosition,
     types::{
         ValidationError,
         basin::BasinName,
-        config::{OptionalStreamConfig, StreamReconfiguration},
+        config::{OptionalStreamConfig, StreamReconfiguration, default_allowed_encryption_modes},
         resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
@@ -161,12 +161,13 @@ impl Backend {
             ),
         };
         let basin_defaults = &basin_meta.config.default_stream_config;
-        let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
 
         validate_encryption_modes_subset(
             &resolved.encryption.allowed_modes,
             basin_defaults.encryption.allowed_modes,
         )?;
+
+        let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
@@ -298,9 +299,11 @@ impl Backend {
             .min_age
             .filter(|age| !age.is_zero());
 
+        let encryption_reconfigured =
+            matches!(reconfig.encryption, s2_common::maybe::Maybe::Specified(_));
         meta.config = meta.config.reconfigure(reconfig);
 
-        if meta.config.encryption.allowed_modes.is_some() {
+        if encryption_reconfigured {
             let basin_meta = db_txn_get(
                 &txn,
                 kv::basin_meta::ser_key(&basin),
@@ -310,14 +313,17 @@ impl Backend {
             .ok_or_else(|| BasinNotFoundError {
                 basin: basin.clone(),
             })?;
+            let basin_defaults = &basin_meta.config.default_stream_config;
             validate_encryption_modes_subset(
                 &meta.config.encryption.allowed_modes,
-                basin_meta
-                    .config
-                    .default_stream_config
-                    .encryption
-                    .allowed_modes,
+                basin_defaults.encryption.allowed_modes,
             )?;
+            meta.config.encryption = meta
+                .config
+                .encryption
+                .clone()
+                .merge(basin_defaults.encryption.clone())
+                .into();
         }
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
@@ -402,7 +408,7 @@ fn validate_encryption_modes_subset(
     basin_modes: Option<enumset::EnumSet<EncryptionMode>>,
 ) -> Result<(), ValidationError> {
     if let Some(stream_modes) = stream_modes {
-        let basin_modes = basin_modes.unwrap_or(ALL_ENCRYPTION_MODES);
+        let basin_modes = basin_modes.unwrap_or_else(default_allowed_encryption_modes);
         if !stream_modes.is_subset(basin_modes) {
             return Err(ValidationError(
                 "stream encryption_modes must be a subset of basin default encryption_modes"

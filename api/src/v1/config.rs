@@ -292,7 +292,7 @@ impl From<encryption::EncryptionMode> for EncryptionMode {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct EncryptionConfig {
     /// Allowed encryption modes for the stream.
-    /// If empty, inherit defaults; if none exist, all modes are allowed.
+    /// If empty, use defaults; if none are set, only plaintext is allowed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_modes: Vec<EncryptionMode>,
 }
@@ -344,7 +344,7 @@ impl From<EncryptionConfig> for types::config::OptionalEncryptionConfig {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct EncryptionReconfiguration {
     /// Allowed encryption modes for the stream.
-    /// If empty, clear the override and inherit defaults; if none exist, all modes are allowed.
+    /// If empty, reset to defaults; if none are set, only plaintext is allowed.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<Vec<EncryptionMode>>))]
     pub allowed_modes: Maybe<Vec<EncryptionMode>>,
