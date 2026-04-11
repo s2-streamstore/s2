@@ -77,19 +77,29 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
     });
 
     let probe_step = Duration::from_millis(1);
-    let started = tokio::time::Instant::now();
-    let outputs = collect_outputs_until_closed_advanced(
-        &mut session,
-        wait_duration + first_follow_delay + second_follow_delay + Duration::from_secs(1),
-        probe_step,
-    )
-    .await;
-    let closed_at = outputs.closed_at;
+    let deadline = tokio::time::Instant::now()
+        + wait_duration
+        + first_follow_delay
+        + second_follow_delay
+        + Duration::from_secs(1);
+    let mut outputs = Vec::new();
+    let mut final_delivery_at = None;
+    let closed_at = loop {
+        match poll_session_with_deadline(&mut session, deadline, Some(probe_step)).await {
+            SessionPoll::Output(output) => {
+                if matches!(output, StoredReadSessionOutput::Batch(_)) {
+                    final_delivery_at = Some(tokio::time::Instant::now());
+                }
+                outputs.push(output);
+            }
+            SessionPoll::Closed => break tokio::time::Instant::now(),
+            SessionPoll::TimedOut => panic!("Timed out waiting for read session to close"),
+        }
+    };
 
     append_handle.await.unwrap();
 
     let all_records = outputs
-        .outputs
         .into_iter()
         .filter_map(|output| match output {
             StoredReadSessionOutput::Batch(batch) => Some(batch),
@@ -110,10 +120,10 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
             b"follow-2".to_vec()
         ]
     );
-    let final_delivery_at = started + first_follow_delay + second_follow_delay;
-    let close_jitter = Duration::from_millis(20);
+    let final_delivery_at =
+        final_delivery_at.expect("read session should deliver the initial and follow batches");
     assert!(closed_at >= final_delivery_at + wait_duration);
-    assert!(closed_at <= final_delivery_at + wait_duration + close_jitter);
+    assert!(closed_at <= final_delivery_at + wait_duration + probe_step);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

@@ -73,6 +73,16 @@ fn timestamped_payloads(records: &[(&[u8], u64)]) -> Vec<(Bytes, u64)> {
         .collect()
 }
 
+fn client_timestamp_stream_config() -> OptionalStreamConfig {
+    OptionalStreamConfig {
+        timestamping: OptionalTimestampingConfig {
+            mode: Some(TimestampingMode::ClientRequire),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 async fn seed_timestamped_stream(
     basin_suffix: &str,
     stream_suffix: &str,
@@ -352,19 +362,11 @@ async fn test_read_from_tail_offset() {
 
 #[tokio::test]
 async fn test_read_from_timestamp_includes_duplicate_timestamps() {
-    let stream_config = OptionalStreamConfig {
-        timestamping: OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientRequire),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
     let timestamp = 1000;
     let (backend, basin_name, stream_name) = seed_timestamped_stream(
         "read-dupe-timestamp",
         "stream",
-        stream_config,
+        client_timestamp_stream_config(),
         &[
             (b"dup-1", timestamp),
             (b"dup-2", timestamp),
@@ -652,7 +654,7 @@ async fn test_read_until_timestamp_boundaries() {
         let (backend, basin_name, stream_name) = seed_timestamped_stream(
             suffix,
             "boundary",
-            OptionalStreamConfig::default(),
+            client_timestamp_stream_config(),
             &boundary_records,
         )
         .await;
@@ -695,7 +697,7 @@ async fn test_read_until_with_additional_limits() {
     let (backend, basin_name, stream_name) = seed_timestamped_stream(
         "read-until-limits",
         "stream",
-        OptionalStreamConfig::default(),
+        client_timestamp_stream_config(),
         &timestamped_records,
     )
     .await;
@@ -764,7 +766,7 @@ async fn test_read_timestamp_range_with_from_and_until() {
     let (backend, basin_name, stream_name) = seed_timestamped_stream(
         "read-timestamp-range",
         "from-until",
-        OptionalStreamConfig::default(),
+        client_timestamp_stream_config(),
         &timestamped_records,
     )
     .await;

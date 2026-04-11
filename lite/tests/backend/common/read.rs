@@ -85,7 +85,7 @@ pub fn decrypt_batch_for_stream(
         .expect("Failed to decode batch")
 }
 
-enum SessionPoll {
+pub enum SessionPoll {
     Output(StoredReadSessionOutput),
     Closed,
     TimedOut,
@@ -104,7 +104,7 @@ fn map_session_output(output: Option<Result<StoredReadSessionOutput, ReadError>>
     }
 }
 
-async fn poll_session_with_deadline<S>(
+pub async fn poll_session_with_deadline<S>(
     session: &mut Pin<Box<S>>,
     deadline: tokio::time::Instant,
     advance_step: Option<Duration>,
@@ -140,6 +140,9 @@ where
         }
     }
 
+    // The wall-clock polling path is only used by `collect_records` and
+    // `collect_records_with_encryption`, which intentionally block without their
+    // own timeout budget. Timed callers should use `advance_step` instead.
     loop {
         let now = tokio::time::Instant::now();
         let Some(remaining) = deadline.checked_duration_since(now) else {
