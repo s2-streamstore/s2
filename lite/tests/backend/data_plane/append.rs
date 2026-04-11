@@ -205,8 +205,8 @@ async fn test_encrypted_fencing_command_controls_stream_state() {
     let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
         "append-fencing-encrypted",
         "stream",
-        permissive_basin_config(),
-        permissive_stream_config(),
+        aegis_only_basin_config(),
+        aegis_only_stream_config(),
     )
     .await;
 

@@ -506,6 +506,49 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
 }
 
 #[tokio::test]
+async fn test_delete_stream_allows_plaintext_command_records_on_encrypted_only_stream() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "stream-delete-encrypted-only",
+        aegis_only_basin_config(),
+    )
+    .await;
+    let stream_name = create_test_stream(
+        &backend,
+        &basin_name,
+        "stream-delete-encrypted-only",
+        aegis_only_stream_config(),
+    )
+    .await;
+
+    append_payloads_with_encryption(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"secret"],
+        &aegis256_encryption(),
+    )
+    .await;
+
+    backend
+        .delete_stream(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to delete encrypted-only stream");
+
+    let page = backend
+        .list_streams(basin_name, ListStreamsRequest::default())
+        .await
+        .expect("Failed to list streams");
+    let info = page
+        .values
+        .iter()
+        .find(|info| info.name == stream_name)
+        .expect("Deleted stream should appear in listing");
+    assert!(info.deleted_at.is_some());
+}
+
+#[tokio::test]
 async fn test_delete_stream_blocks_data_operations() {
     let backend = create_backend().await;
 

@@ -729,8 +729,11 @@ fn sequenced_records(
         .map(|record| record.into_parts())
         .enumerate()
     {
-        if let Some(allowed_modes) = allowed_encryption_modes {
-            let enc_mode = record.as_ref().into_inner().encryption_mode();
+        let stored_record = record.as_ref().into_inner();
+        if let Some(allowed_modes) = allowed_encryption_modes
+            && !matches!(stored_record, StoredRecord::Plaintext(Record::Command(_)))
+        {
+            let enc_mode = stored_record.encryption_mode();
             if !allowed_modes.contains(enc_mode) {
                 return Err(AppendErrorInternal::EncryptionModeNotAllowed(enc_mode));
             }
@@ -823,6 +826,7 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
+        encryption::{EncryptionMode, EncryptionSpec},
         record::{EnvelopeRecord, Metered, Record, StoredRecord},
         types::stream::{
             StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
@@ -836,6 +840,26 @@ mod tests {
     fn test_record(body: Bytes, timestamp: Option<Timestamp>) -> StoredAppendRecord {
         let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
         let record = Metered::from(StoredRecord::from(Record::Envelope(envelope)));
+        let parts = StoredAppendRecordParts { timestamp, record };
+        parts.try_into().unwrap()
+    }
+
+    fn test_command_record(
+        command: CommandRecord,
+        timestamp: Option<Timestamp>,
+    ) -> StoredAppendRecord {
+        let record = Metered::from(StoredRecord::from(Record::Command(command)));
+        let parts = StoredAppendRecordParts { timestamp, record };
+        parts.try_into().unwrap()
+    }
+
+    fn test_encrypted_record(body: Bytes, timestamp: Option<Timestamp>) -> StoredAppendRecord {
+        let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
+        let record = s2_common::record::encrypt_record(
+            Metered::from(Record::Envelope(envelope)),
+            &EncryptionSpec::aegis256([0x42; 32]),
+            b"test-streamer",
+        );
         let parts = StoredAppendRecordParts { timestamp, record };
         parts.try_into().unwrap()
     }
@@ -1051,6 +1075,42 @@ mod tests {
         assert_eq!(result[0].position().seq_num, 42);
         assert_eq!(result[1].position().seq_num, 43);
         assert_eq!(result[2].position().seq_num, 44);
+    }
+
+    #[test]
+    fn sequenced_records_skip_encryption_check_for_command_records() {
+        let config = OptionalTimestampingConfig::default();
+        let allowed_modes = [EncryptionMode::Aegis256].into();
+
+        let records: StoredAppendRecordBatch =
+            vec![test_command_record(CommandRecord::Trim(42), None)]
+                .try_into()
+                .unwrap();
+
+        let result = sequenced_records(records, 42, 0, &config, Some(&allowed_modes)).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].position().seq_num, 42);
+    }
+
+    #[test]
+    fn sequenced_records_reject_disallowed_encrypted_envelope_records() {
+        let config = OptionalTimestampingConfig::default();
+        let allowed_modes = [EncryptionMode::Aes256Gcm].into();
+
+        let records: StoredAppendRecordBatch =
+            vec![test_encrypted_record(vec![1, 2, 3].into(), None)]
+                .try_into()
+                .unwrap();
+
+        let result = sequenced_records(records, 42, 0, &config, Some(&allowed_modes));
+
+        assert!(matches!(
+            result,
+            Err(AppendErrorInternal::EncryptionModeNotAllowed(
+                EncryptionMode::Aegis256
+            ))
+        ));
     }
 
     #[test]
