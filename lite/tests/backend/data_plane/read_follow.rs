@@ -634,6 +634,63 @@ async fn test_follow_mode_with_exact_count_limit() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_collect_records_until_advanced_stops_at_target_count_with_multi_record_batch() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-target-count",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"seed"]).await;
+
+    let session = backend
+        .read(
+            basin_name.clone(),
+            stream_name.clone(),
+            ReadStart {
+                from: ReadFrom::TailOffset(0),
+                clamp: false,
+            },
+            ReadEnd {
+                limit: ReadLimit::Unbounded,
+                until: ReadUntil::Unbounded,
+                wait: Some(Duration::from_secs(2)),
+            },
+        )
+        .await
+        .expect("Failed to create follow read session");
+    let mut session = Box::pin(session);
+
+    expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
+
+    let backend_clone = backend.clone();
+    let basin_clone = basin_name.clone();
+    let stream_clone = stream_name.clone();
+    let append_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        append_payloads(
+            &backend_clone,
+            &basin_clone,
+            &stream_clone,
+            &[b"follow-1", b"follow-2", b"follow-3"],
+        )
+        .await;
+    });
+
+    let records =
+        collect_records_until_advanced(&mut session, Duration::from_secs(1), 2, VIRTUAL_TIME_STEP)
+            .await;
+
+    append_handle.await.unwrap();
+
+    assert_eq!(
+        envelope_bodies(&records),
+        vec![b"follow-1".to_vec(), b"follow-2".to_vec()]
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_with_bytes_limit_truncates_live_batch() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "follow-bytes-limit",

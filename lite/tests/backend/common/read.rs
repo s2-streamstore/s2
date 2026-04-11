@@ -192,7 +192,15 @@ where
         match polled {
             SessionPoll::Output(StoredReadSessionOutput::Batch(batch)) => {
                 let batch = decode_batch(batch);
-                records.extend(batch.records.iter().cloned());
+                if let Some(target_count) = target_count {
+                    let remaining = target_count.saturating_sub(records.len());
+                    records.extend(batch.records.iter().take(remaining).cloned());
+                    if batch.records.len() >= remaining {
+                        break;
+                    }
+                } else {
+                    records.extend(batch.records.iter().cloned());
+                }
             }
             SessionPoll::Output(StoredReadSessionOutput::Heartbeat(_)) => {}
             SessionPoll::Closed | SessionPoll::TimedOut => break,
