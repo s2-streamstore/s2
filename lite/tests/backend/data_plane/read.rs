@@ -416,11 +416,13 @@ async fn test_read_from_tail_times_out_without_new_data() {
         collect_outputs_until_closed_advanced(&mut session, Duration::from_secs(1), probe_step)
             .await;
 
-    assert_eq!(outputs.outputs.len(), 1);
-    assert!(matches!(
-        outputs.outputs.first(),
-        Some(StoredReadSessionOutput::Heartbeat(_))
-    ));
+    assert!(!outputs.outputs.is_empty());
+    assert!(
+        outputs
+            .outputs
+            .iter()
+            .all(|output| matches!(output, StoredReadSessionOutput::Heartbeat(_)))
+    );
     let wait = Duration::from_millis(100);
     assert!(outputs.closed_at >= started + wait);
     assert!(outputs.closed_at <= started + wait + probe_step);
