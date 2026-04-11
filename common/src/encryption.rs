@@ -29,9 +29,23 @@ pub enum EncryptionAlgorithm {
 }
 
 /// Encryption mode, including plaintext.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, enumset::EnumSetType)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Display,
+    EnumString,
+    enumset::EnumSetType,
+)]
 #[strum(ascii_case_insensitive)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[enumset(no_super_impls)]
+#[serde(rename_all = "kebab-case")]
 pub enum EncryptionMode {
     #[strum(serialize = "plain")]
     Plain,

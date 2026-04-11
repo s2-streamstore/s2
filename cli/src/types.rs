@@ -4,7 +4,7 @@ use clap::{Args, Parser, ValueEnum};
 use s2_sdk::{
     self as sdk,
     types::{
-        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, StreamName,
+        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, EncryptionMode, StreamName,
         StreamNamePrefix, TimeseriesInterval,
     },
 };
@@ -189,14 +189,6 @@ pub enum TimestampingMode {
     Arrival,
 }
 
-#[derive(ValueEnum, Debug, Clone, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum EncryptionMode {
-    Plain,
-    Aegis256,
-    Aes256Gcm,
-}
-
 #[derive(Parser, Debug, Clone, Serialize)]
 pub struct TimestampingConfig {
     #[arg(long)]
@@ -368,26 +360,6 @@ impl From<sdk::types::TimestampingMode> for TimestampingMode {
             sdk::types::TimestampingMode::ClientPrefer => TimestampingMode::ClientPrefer,
             sdk::types::TimestampingMode::ClientRequire => TimestampingMode::ClientRequire,
             sdk::types::TimestampingMode::Arrival => TimestampingMode::Arrival,
-        }
-    }
-}
-
-impl From<EncryptionMode> for sdk::types::EncryptionMode {
-    fn from(mode: EncryptionMode) -> Self {
-        match mode {
-            EncryptionMode::Plain => Self::Plain,
-            EncryptionMode::Aegis256 => Self::Aegis256,
-            EncryptionMode::Aes256Gcm => Self::Aes256Gcm,
-        }
-    }
-}
-
-impl From<sdk::types::EncryptionMode> for EncryptionMode {
-    fn from(mode: sdk::types::EncryptionMode) -> Self {
-        match mode {
-            sdk::types::EncryptionMode::Plain => Self::Plain,
-            sdk::types::EncryptionMode::Aegis256 => Self::Aegis256,
-            sdk::types::EncryptionMode::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
