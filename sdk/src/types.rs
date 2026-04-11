@@ -697,7 +697,7 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
 pub struct EncryptionConfig {
     /// Allowed encryption modes for the stream.
     ///
-    /// If empty, all encryption modes are permitted.
+    /// If empty, inherit defaults; if none exist, all modes are allowed.
     pub allowed_modes: Vec<EncryptionMode>,
 }
 
@@ -1311,6 +1311,8 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
 #[non_exhaustive]
 pub struct EncryptionReconfiguration {
     /// Override for the existing [`allowed_modes`](EncryptionConfig::allowed_modes).
+    ///
+    /// If empty, clear the override and inherit defaults; if none exist, all modes are allowed.
     pub allowed_modes: Maybe<Vec<EncryptionMode>>,
 }
 

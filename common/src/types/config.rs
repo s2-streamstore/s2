@@ -270,7 +270,7 @@ impl From<OptionalEncryptionConfig> for EncryptionConfig {
 impl From<EncryptionConfig> for OptionalEncryptionConfig {
     fn from(value: EncryptionConfig) -> Self {
         Self {
-            allowed_modes: Some(value.allowed_modes),
+            allowed_modes: (value.allowed_modes != EnumSet::all()).then_some(value.allowed_modes),
         }
     }
 }
@@ -466,4 +466,27 @@ pub struct BasinReconfiguration {
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
     pub create_stream_on_append: Maybe<bool>,
     pub create_stream_on_read: Maybe<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EncryptionConfig, OptionalEncryptionConfig};
+    use crate::encryption::EncryptionMode;
+
+    #[test]
+    fn encryption_config_all_modes_collapse_to_unspecified_optional() {
+        let optional = OptionalEncryptionConfig::from(EncryptionConfig {
+            allowed_modes: enumset::EnumSet::all(),
+        });
+
+        assert_eq!(optional.allowed_modes, None);
+    }
+
+    #[test]
+    fn encryption_config_subset_stays_explicit_in_optional() {
+        let allowed_modes = enumset::enum_set!(EncryptionMode::Plain | EncryptionMode::Aegis256);
+        let optional = OptionalEncryptionConfig::from(EncryptionConfig { allowed_modes });
+
+        assert_eq!(optional.allowed_modes, Some(allowed_modes));
+    }
 }

@@ -259,7 +259,8 @@ impl From<sdk::types::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
 #[derive(Parser, Debug, Clone, Serialize)]
 pub struct EncryptionConfig {
     #[arg(long, value_delimiter = ',')]
-    /// Allowed encryption modes (comma-separated). If empty, all modes are permitted.
+    /// Allowed encryption modes (comma-separated). Omit to inherit defaults; if none exist, all
+    /// modes are allowed.
     pub encryption_allowed_modes: Vec<EncryptionMode>,
 }
 

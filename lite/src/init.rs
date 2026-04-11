@@ -134,7 +134,8 @@ impl schemars::JsonSchema for EncryptionModeSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EncryptionConfigSpec {
-    /// Allowed encryption modes. If empty, all modes are permitted.
+    /// Allowed encryption modes.
+    /// If empty, inherit defaults; if none exist, all modes are allowed.
     #[serde(default)]
     pub allowed_modes: Vec<EncryptionModeSpec>,
 }
@@ -340,7 +341,9 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                 .encryption
                 .map(|enc| {
                     if enc.allowed_modes.is_empty() {
-                        s2_common::types::config::EncryptionReconfiguration::default()
+                        s2_common::types::config::EncryptionReconfiguration {
+                            allowed_modes: Maybe::Specified(None),
+                        }
                     } else {
                         s2_common::types::config::EncryptionReconfiguration {
                             allowed_modes: Maybe::Specified(Some(
@@ -706,5 +709,27 @@ mod tests {
         ));
         assert!(matches!(reconfig.timestamping, Maybe::Unspecified));
         assert!(matches!(reconfig.delete_on_empty, Maybe::Unspecified));
+    }
+
+    #[test]
+    fn stream_config_empty_encryption_modes_clear_override() {
+        let spec = StreamConfigSpec {
+            storage_class: None,
+            retention_policy: None,
+            timestamping: None,
+            delete_on_empty: None,
+            encryption: Some(EncryptionConfigSpec {
+                allowed_modes: vec![],
+            }),
+        };
+
+        let reconfig = StreamReconfiguration::from(spec);
+
+        match reconfig.encryption {
+            Maybe::Specified(Some(encryption)) => {
+                assert!(matches!(encryption.allowed_modes, Maybe::Specified(None)));
+            }
+            other => panic!("expected explicit encryption reconfiguration, got {other:?}"),
+        }
     }
 }
