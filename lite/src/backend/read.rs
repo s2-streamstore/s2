@@ -629,6 +629,7 @@ mod tests {
         };
         assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
 
+        tokio::task::yield_now().await;
         let closed_at = loop {
             match futures::poll!(session.as_mut().next()) {
                 Poll::Ready(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {}
