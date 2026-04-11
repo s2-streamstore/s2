@@ -628,61 +628,67 @@ async fn test_read_with_count_or_bytes_limit_bytes_wins() {
     );
 }
 
+#[rstest]
+#[case::before("read-until-before", 500, vec![])]
+#[case::exact_duplicate_boundary(
+    "read-until-exact-duplicate-boundary",
+    2000,
+    vec![b"ts-1000".to_vec()]
+)]
+#[case::after(
+    "read-until-after",
+    5000,
+    vec![
+        b"ts-1000".to_vec(),
+        b"ts-2000-a".to_vec(),
+        b"ts-2000-b".to_vec(),
+        b"ts-3000".to_vec(),
+    ]
+)]
 #[tokio::test]
-async fn test_read_until_timestamp_boundaries() {
+async fn test_read_until_timestamp_boundaries(
+    #[case] suffix: &str,
+    #[case] cutoff: u64,
+    #[case] expected: Vec<Vec<u8>>,
+) {
     let boundary_records = [
         (b"ts-1000".as_ref(), 1000),
         (b"ts-2000-a".as_ref(), 2000),
         (b"ts-2000-b".as_ref(), 2000),
         (b"ts-3000".as_ref(), 3000),
     ];
-    let cases = vec![
-        ("read-until-before", 500, body_vecs(&[])),
-        (
-            "read-until-exact-duplicate-boundary",
-            2000,
-            body_vecs(&[b"ts-1000"]),
-        ),
-        (
-            "read-until-after",
-            5000,
-            body_vecs(&[b"ts-1000", b"ts-2000-a", b"ts-2000-b", b"ts-3000"]),
-        ),
-    ];
 
-    for (suffix, cutoff, expected) in cases {
-        let (backend, basin_name, stream_name) = seed_timestamped_stream(
-            suffix,
-            "boundary",
-            client_timestamp_stream_config(),
-            &boundary_records,
-        )
-        .await;
+    let (backend, basin_name, stream_name) = seed_timestamped_stream(
+        suffix,
+        "boundary",
+        client_timestamp_stream_config(),
+        &boundary_records,
+    )
+    .await;
 
-        let records = read_records(
-            &backend,
-            &basin_name,
-            &stream_name,
-            ReadStart {
-                from: ReadFrom::SeqNum(0),
-                clamp: false,
-            },
-            ReadEnd {
-                limit: ReadLimit::Unbounded,
-                until: ReadUntil::Timestamp(cutoff),
-                wait: None,
-            },
-        )
-        .await;
+    let records = read_records(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Timestamp(cutoff),
+            wait: None,
+        },
+    )
+    .await;
 
-        assert_eq!(envelope_bodies(&records), expected, "case {suffix}");
-        assert!(
-            records
-                .iter()
-                .all(|record| record.position().timestamp < cutoff),
-            "case {suffix}"
-        );
-    }
+    assert_eq!(envelope_bodies(&records), expected, "case {suffix}");
+    assert!(
+        records
+            .iter()
+            .all(|record| record.position().timestamp < cutoff),
+        "case {suffix}"
+    );
 }
 
 #[tokio::test]
