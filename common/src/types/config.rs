@@ -484,23 +484,7 @@ pub struct BasinReconfiguration {
 
 #[cfg(test)]
 mod tests {
-    use super::{EncryptionConfig, OptionalEncryptionConfig, default_allowed_encryption_modes};
-    use crate::encryption::EncryptionMode;
-
-    #[test]
-    fn unset_optional_encryption_config_defaults_to_plaintext_only() {
-        let resolved = EncryptionConfig::from(OptionalEncryptionConfig::default());
-
-        assert_eq!(resolved.allowed_modes, default_allowed_encryption_modes());
-    }
-
-    #[test]
-    fn encryption_config_subset_stays_explicit_in_optional() {
-        let allowed_modes = enumset::enum_set!(EncryptionMode::Plain | EncryptionMode::Aegis256);
-        let optional = OptionalEncryptionConfig::from(EncryptionConfig { allowed_modes });
-
-        assert_eq!(optional.allowed_modes, Some(allowed_modes));
-    }
+    use super::{EncryptionConfig, OptionalEncryptionConfig};
 
     #[test]
     fn encryption_config_all_modes_stays_explicit_in_optional() {

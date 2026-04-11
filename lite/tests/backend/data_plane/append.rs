@@ -7,7 +7,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, AppendRecord, AppendRecordBatch, ListStreamsRequest, StreamName},
+        stream::{AppendInput, AppendRecordBatch, ListStreamsRequest, StreamName},
     },
 };
 use s2_lite::backend::{

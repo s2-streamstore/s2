@@ -682,20 +682,70 @@ mod tests {
         any::<u64>().prop_map(|min_age_secs| DeleteOnEmptyConfig { min_age_secs })
     }
 
+    fn gen_encryption_mode() -> impl Strategy<Value = EncryptionMode> {
+        prop_oneof![
+            Just(EncryptionMode::Plain),
+            Just(EncryptionMode::Aegis256),
+            Just(EncryptionMode::Aes256Gcm),
+        ]
+    }
+
+    fn gen_encryption_config() -> impl Strategy<Value = EncryptionConfig> {
+        (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(|(plain, aegis, aes)| {
+            let allowed_modes = [
+                (plain, EncryptionMode::Plain),
+                (aegis, EncryptionMode::Aegis256),
+                (aes, EncryptionMode::Aes256Gcm),
+            ]
+            .into_iter()
+            .filter_map(|(include, mode)| include.then_some(mode))
+            .collect();
+            EncryptionConfig { allowed_modes }
+        })
+    }
+
+    fn gen_encryption_reconfiguration() -> impl Strategy<Value = EncryptionReconfiguration> {
+        prop_oneof![
+            Just(Maybe::Unspecified),
+            proptest::collection::vec(gen_encryption_mode(), 0..=3).prop_map(Maybe::Specified),
+        ]
+        .prop_map(|allowed_modes| EncryptionReconfiguration { allowed_modes })
+    }
+
+    fn gen_internal_encryption_modes()
+    -> impl Strategy<Value = enumset::EnumSet<encryption::EncryptionMode>> {
+        (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(|(plain, aegis, aes)| {
+            let mut allowed_modes = enumset::EnumSet::new();
+            if plain {
+                allowed_modes.insert(encryption::EncryptionMode::Plain);
+            }
+            if aegis {
+                allowed_modes.insert(encryption::EncryptionMode::Aegis256);
+            }
+            if aes {
+                allowed_modes.insert(encryption::EncryptionMode::Aes256Gcm);
+            }
+            allowed_modes
+        })
+    }
+
     fn gen_stream_config() -> impl Strategy<Value = StreamConfig> {
         (
             proptest::option::of(gen_storage_class()),
             proptest::option::of(gen_retention_policy()),
             proptest::option::of(gen_timestamping_config()),
             proptest::option::of(gen_delete_on_empty_config()),
+            proptest::option::of(gen_encryption_config()),
         )
             .prop_map(
-                |(storage_class, retention_policy, timestamping, delete_on_empty)| StreamConfig {
-                    storage_class,
-                    retention_policy,
-                    timestamping,
-                    delete_on_empty,
-                    encryption: None,
+                |(storage_class, retention_policy, timestamping, delete_on_empty, encryption)| {
+                    StreamConfig {
+                        storage_class,
+                        retention_policy,
+                        timestamping,
+                        delete_on_empty,
+                        encryption,
+                    }
                 },
             )
     }
@@ -733,15 +783,16 @@ mod tests {
             gen_maybe(gen_retention_policy()),
             gen_maybe(gen_timestamping_reconfiguration()),
             gen_maybe(gen_delete_on_empty_reconfiguration()),
+            gen_maybe(gen_encryption_reconfiguration()),
         )
             .prop_map(
-                |(storage_class, retention_policy, timestamping, delete_on_empty)| {
+                |(storage_class, retention_policy, timestamping, delete_on_empty, encryption)| {
                     StreamReconfiguration {
                         storage_class,
                         retention_policy,
                         timestamping,
                         delete_on_empty,
-                        encryption: Maybe::Unspecified,
+                        encryption,
                     }
                 },
             )
@@ -789,8 +840,9 @@ mod tests {
             proptest::option::of(gen_timestamping_mode()),
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<u64>()),
+            proptest::option::of(gen_internal_encryption_modes()),
         )
-            .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe)| {
+            .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe, encryption)| {
                 types::config::OptionalStreamConfig {
                     storage_class: sc.map(Into::into),
                     retention_policy: rp.map(|rp| match rp {
@@ -806,7 +858,9 @@ mod tests {
                     delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
                         min_age: doe.map(Duration::from_secs),
                     },
-                    encryption: types::config::OptionalEncryptionConfig::default(),
+                    encryption: types::config::OptionalEncryptionConfig {
+                        allowed_modes: encryption,
+                    },
                 }
             })
     }
@@ -881,6 +935,14 @@ mod tests {
                 merged.delete_on_empty.min_age,
                 stream.delete_on_empty.min_age.or(basin.delete_on_empty.min_age).unwrap_or_default()
             );
+            prop_assert_eq!(
+                merged.encryption.allowed_modes,
+                stream
+                    .encryption
+                    .allowed_modes
+                    .or(basin.encryption.allowed_modes)
+                    .unwrap_or_else(types::config::default_allowed_encryption_modes)
+            );
         }
 
         #[test]
@@ -893,6 +955,7 @@ mod tests {
             prop_assert_eq!(result.timestamping.mode, base.timestamping.mode);
             prop_assert_eq!(result.timestamping.uncapped, base.timestamping.uncapped);
             prop_assert_eq!(result.delete_on_empty.min_age, base.delete_on_empty.min_age);
+            prop_assert_eq!(result.encryption.allowed_modes, base.encryption.allowed_modes);
         }
 
         #[test]
@@ -911,6 +974,7 @@ mod tests {
             prop_assert!(result.timestamping.mode.is_none());
             prop_assert!(result.timestamping.uncapped.is_none());
             prop_assert!(result.delete_on_empty.min_age.is_none());
+            prop_assert!(result.encryption.allowed_modes.is_none());
         }
 
         #[test]
@@ -1105,6 +1169,10 @@ mod tests {
         assert!(
             internal.delete_on_empty.min_age.is_none(),
             "delete_on_empty.min_age should be None"
+        );
+        assert!(
+            internal.encryption.allowed_modes.is_none(),
+            "encryption.allowed_modes should be None"
         );
     }
 }
