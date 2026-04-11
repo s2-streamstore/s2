@@ -379,7 +379,7 @@ async fn wait_sleep_until(deadline: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, task::Poll};
 
     use bytesize::ByteSize;
     use futures::StreamExt;
@@ -417,6 +417,41 @@ mod tests {
             records,
             match_seq_num: None,
             fencing_token: None,
+        }
+    }
+
+    fn map_test_output(
+        output: Option<Result<StoredReadSessionOutput, ReadError>>,
+    ) -> Option<StoredReadSessionOutput> {
+        match output {
+            Some(Ok(output)) => Some(output),
+            Some(Err(e)) => panic!("Read error: {e:?}"),
+            None => None,
+        }
+    }
+
+    async fn poll_next_after_advance<S>(
+        session: &mut std::pin::Pin<Box<S>>,
+        advance_by: Duration,
+    ) -> Poll<Option<StoredReadSessionOutput>>
+    where
+        S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
+    {
+        let mut pinned_session = session.as_mut();
+        let next = pinned_session.next();
+        tokio::pin!(next);
+
+        assert!(
+            matches!(futures::poll!(&mut next), Poll::Pending),
+            "session unexpectedly yielded before time advanced"
+        );
+
+        tokio::time::advance(advance_by).await;
+        tokio::task::yield_now().await;
+
+        match futures::poll!(&mut next) {
+            Poll::Ready(output) => Poll::Ready(map_test_output(output)),
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -538,7 +573,7 @@ mod tests {
         assert!(records.into_iter().all(|r| r.is_ok()));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_is_not_extended_by_heartbeats() {
         let object_store = Arc::new(InMemory::new());
         let db = Db::builder("/test", object_store).build().await.unwrap();
@@ -576,21 +611,184 @@ mod tests {
         };
 
         let session = backend.read(basin, stream, start, end).await.unwrap();
-        let started = Instant::now();
-        let outputs = tokio::time::timeout(Duration::from_millis(150), session.collect::<Vec<_>>())
+        let mut session = Box::pin(session);
+        let probe_step = Duration::from_millis(1);
+        let first = session
+            .as_mut()
+            .next()
             .await
-            .expect("read session should close once wait expires");
+            .expect("session should enter follow mode")
+            .expect("session should not error");
+        assert!(matches!(first, StoredReadSessionOutput::Heartbeat(_)));
 
-        assert!(
-            started.elapsed() >= wait,
-            "read session ended before wait elapsed"
+        let started = Instant::now();
+        let second = match poll_next_after_advance(&mut session, wait).await {
+            Poll::Ready(Some(output)) => output,
+            Poll::Ready(None) => panic!("session closed before emitting a follow heartbeat"),
+            Poll::Pending => panic!("expected a follow heartbeat before the wait budget expired"),
+        };
+        assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
+
+        tokio::task::yield_now().await;
+        let closed_at = loop {
+            match futures::poll!(session.as_mut().next()) {
+                Poll::Ready(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {}
+                Poll::Ready(Some(Ok(output))) => {
+                    panic!("unexpected output after wait deadline: {output:?}");
+                }
+                Poll::Ready(Some(Err(e))) => panic!("Read error: {e:?}"),
+                Poll::Ready(None) => break Instant::now(),
+                Poll::Pending => panic!("session should close once the wait budget expires"),
+            }
+        };
+
+        assert!(closed_at >= started + wait);
+        assert!(closed_at <= started + wait + probe_step);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_wait_is_reset_by_delivered_follow_batch() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let initial_input = stored_append_input(
+            Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap(),
         );
-        assert!(
-            outputs.len() > 1,
-            "expected heartbeats before wait deadline; got {} output(s)",
-            outputs.len()
+        backend
+            .append(basin.clone(), stream.clone(), initial_input)
+            .await
+            .unwrap();
+
+        let wait = Duration::from_millis(30);
+        let probe_step = Duration::from_millis(1);
+        let start = ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        };
+        let end = ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: Some(wait),
+        };
+
+        let session = backend
+            .read(basin.clone(), stream.clone(), start, end)
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should yield the initial batch")
+            .expect("session should not error");
+        let StoredReadSessionOutput::Batch(batch) = first else {
+            panic!("expected initial batch");
+        };
+        let initial_record = batch
+            .records
+            .first()
+            .expect("batch should contain one record");
+        let StoredRecord::Plaintext(Record::Envelope(initial_envelope)) = initial_record.inner()
+        else {
+            panic!("expected plaintext envelope record");
+        };
+        assert_eq!(initial_envelope.body().as_ref(), b"initial");
+
+        let second = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should enter follow mode")
+            .expect("session should not error");
+        assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
+
+        tokio::time::advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+
+        let follow_input = stored_append_input(
+            Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap(),
         );
-        assert!(outputs.into_iter().all(|o| o.is_ok()));
+        backend.append(basin, stream, follow_input).await.unwrap();
+
+        let follow = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should deliver the live batch")
+            .expect("session should not error");
+        let reset_at = Instant::now();
+        let StoredReadSessionOutput::Batch(batch) = follow else {
+            panic!("expected live batch after append");
+        };
+        let follow_record = batch
+            .records
+            .first()
+            .expect("batch should contain one record");
+        let StoredRecord::Plaintext(Record::Envelope(follow_envelope)) = follow_record.inner()
+        else {
+            panic!("expected plaintext envelope record");
+        };
+        assert_eq!(follow_envelope.body().as_ref(), b"follow-1");
+
+        tokio::time::advance(wait - probe_step).await;
+        tokio::task::yield_now().await;
+
+        loop {
+            match futures::poll!(session.as_mut().next()) {
+                Poll::Ready(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {}
+                Poll::Ready(Some(Ok(output))) => {
+                    panic!("unexpected output before the reset wait deadline: {output:?}");
+                }
+                Poll::Ready(Some(Err(e))) => panic!("Read error: {e:?}"),
+                Poll::Ready(None) => {
+                    panic!("session closed before the reset wait budget expired");
+                }
+                Poll::Pending => break,
+            }
+        }
+
+        tokio::time::advance(probe_step).await;
+        tokio::task::yield_now().await;
+
+        let closed_at = loop {
+            match futures::poll!(session.as_mut().next()) {
+                Poll::Ready(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {}
+                Poll::Ready(Some(Ok(output))) => {
+                    panic!("unexpected output after the reset wait deadline: {output:?}");
+                }
+                Poll::Ready(Some(Err(e))) => panic!("Read error: {e:?}"),
+                Poll::Ready(None) => break Instant::now(),
+                Poll::Pending => {
+                    panic!("session should close once the reset wait budget expires");
+                }
+            }
+        };
+
+        assert!(closed_at >= reset_at + wait);
+        assert!(closed_at <= reset_at + wait + probe_step);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

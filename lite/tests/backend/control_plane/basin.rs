@@ -362,7 +362,17 @@ async fn test_list_basins_multiple() {
         .await
         .expect("Failed to list basins");
 
-    assert_eq!(page.values.len(), 5);
+    let names: Vec<_> = page.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "test-basin-list-0",
+            "test-basin-list-1",
+            "test-basin-list-2",
+            "test-basin-list-3",
+            "test-basin-list-4",
+        ]
+    );
     assert!(!page.has_more);
 }
 
@@ -392,10 +402,18 @@ async fn test_list_basins_pagination() {
         .await
         .expect("Failed to list basins page 1");
 
-    assert_eq!(page1.values.len(), 5);
     assert!(page1.has_more);
-    assert_eq!(page1.values[0].name.as_ref(), "test-basin-paginated-00");
-    assert_eq!(page1.values[4].name.as_ref(), "test-basin-paginated-04");
+    let page1_names: Vec<_> = page1.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page1_names,
+        vec![
+            "test-basin-paginated-00",
+            "test-basin-paginated-01",
+            "test-basin-paginated-02",
+            "test-basin-paginated-03",
+            "test-basin-paginated-04",
+        ]
+    );
 
     let page2 = backend
         .list_basins(
@@ -410,10 +428,18 @@ async fn test_list_basins_pagination() {
         .await
         .expect("Failed to list basins page 2");
 
-    assert_eq!(page2.values.len(), 5);
     assert!(page2.has_more);
-    assert_eq!(page2.values[0].name.as_ref(), "test-basin-paginated-05");
-    assert_eq!(page2.values[4].name.as_ref(), "test-basin-paginated-09");
+    let page2_names: Vec<_> = page2.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page2_names,
+        vec![
+            "test-basin-paginated-05",
+            "test-basin-paginated-06",
+            "test-basin-paginated-07",
+            "test-basin-paginated-08",
+            "test-basin-paginated-09",
+        ]
+    );
 
     let page3 = backend
         .list_basins(
@@ -428,10 +454,18 @@ async fn test_list_basins_pagination() {
         .await
         .expect("Failed to list basins page 3");
 
-    assert_eq!(page3.values.len(), 5);
     assert!(!page3.has_more);
-    assert_eq!(page3.values[0].name.as_ref(), "test-basin-paginated-10");
-    assert_eq!(page3.values[4].name.as_ref(), "test-basin-paginated-14");
+    let page3_names: Vec<_> = page3.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page3_names,
+        vec![
+            "test-basin-paginated-10",
+            "test-basin-paginated-11",
+            "test-basin-paginated-12",
+            "test-basin-paginated-13",
+            "test-basin-paginated-14",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -456,12 +490,14 @@ async fn test_list_basins_prefix_filter() {
         .await
         .expect("Failed to list basins with prefix");
 
-    assert_eq!(prod_basins.values.len(), 2);
-    assert!(
-        prod_basins
-            .values
-            .iter()
-            .all(|b| b.name.as_ref().starts_with("test-basin-prod-"))
+    let prod_names: Vec<_> = prod_basins
+        .values
+        .iter()
+        .map(|info| info.name.as_ref())
+        .collect();
+    assert_eq!(
+        prod_names,
+        vec!["test-basin-prod-app-1", "test-basin-prod-app-2"]
     );
 }
 
@@ -492,13 +528,16 @@ async fn test_list_basins_prefix_with_pagination() {
         .await
         .expect("Failed to list basins");
 
-    assert_eq!(page1.values.len(), 4);
     assert!(page1.has_more);
-    assert!(
-        page1
-            .values
-            .iter()
-            .all(|b| b.name.as_ref().starts_with("test-basin-prefixed-"))
+    let page1_names: Vec<_> = page1.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page1_names,
+        vec![
+            "test-basin-prefixed-00",
+            "test-basin-prefixed-01",
+            "test-basin-prefixed-02",
+            "test-basin-prefixed-03",
+        ]
     );
 
     let page2 = backend
@@ -514,8 +553,17 @@ async fn test_list_basins_prefix_with_pagination() {
         .await
         .expect("Failed to list basins");
 
-    assert_eq!(page2.values.len(), 4);
     assert!(page2.has_more);
+    let page2_names: Vec<_> = page2.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page2_names,
+        vec![
+            "test-basin-prefixed-04",
+            "test-basin-prefixed-05",
+            "test-basin-prefixed-06",
+            "test-basin-prefixed-07",
+        ]
+    );
 
     let page3 = backend
         .list_basins(
@@ -530,6 +578,10 @@ async fn test_list_basins_prefix_with_pagination() {
         .await
         .expect("Failed to list basins");
 
-    assert_eq!(page3.values.len(), 2);
     assert!(!page3.has_more);
+    let page3_names: Vec<_> = page3.values.iter().map(|info| info.name.as_ref()).collect();
+    assert_eq!(
+        page3_names,
+        vec!["test-basin-prefixed-08", "test-basin-prefixed-09"]
+    );
 }
