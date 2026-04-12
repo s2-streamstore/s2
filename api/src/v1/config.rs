@@ -941,7 +941,7 @@ mod tests {
                     .encryption
                     .allowed_modes
                     .or(basin.encryption.allowed_modes)
-                    .unwrap_or_else(types::config::default_allowed_encryption_modes)
+                    .unwrap_or(types::config::DEFAULT_ALLOWED_ENCRYPTION_MODES)
             );
         }
 

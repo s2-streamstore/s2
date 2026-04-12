@@ -19,8 +19,8 @@ use s2_common::{
     },
     types::{
         config::{
-            OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy, TimestampingMode,
-            default_allowed_encryption_modes,
+            DEFAULT_ALLOWED_ENCRYPTION_MODES, OptionalStreamConfig, OptionalTimestampingConfig,
+            RetentionPolicy, TimestampingMode,
         },
         stream::{
             AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
@@ -235,13 +235,13 @@ impl Streamer {
             .config
             .encryption
             .allowed_modes
-            .unwrap_or_else(default_allowed_encryption_modes);
+            .unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
         sequenced_records(
             records,
             first_seq_num,
             next_assignable_pos.timestamp,
             &self.config.timestamping,
-            Some(&allowed_encryption_modes),
+            allowed_encryption_modes,
         )
     }
 
@@ -717,7 +717,7 @@ fn sequenced_records(
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
-    allowed_encryption_modes: Option<&enumset::EnumSet<s2_common::encryption::EncryptionMode>>,
+    allowed_encryption_modes: enumset::EnumSet<s2_common::encryption::EncryptionMode>,
 ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
     let mode = config.mode.unwrap_or_default();
     let uncapped = config.uncapped.unwrap_or_default();
@@ -730,11 +730,9 @@ fn sequenced_records(
         .enumerate()
     {
         let stored_record = record.as_ref().into_inner();
-        if let Some(allowed_modes) = allowed_encryption_modes
-            && !matches!(stored_record, StoredRecord::Plaintext(Record::Command(_)))
-        {
+        if !matches!(stored_record, StoredRecord::Plaintext(Record::Command(_))) {
             let enc_mode = stored_record.encryption_mode();
-            if !allowed_modes.contains(enc_mode) {
+            if !allowed_encryption_modes.contains(enc_mode) {
                 return Err(AppendErrorInternal::EncryptionModeNotAllowed(enc_mode));
             }
         }
@@ -878,7 +876,8 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -902,7 +901,8 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -922,7 +922,7 @@ mod tests {
             .try_into()
             .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None);
+        let result = sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES);
 
         assert!(matches!(
             result,
@@ -944,7 +944,8 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 900);
@@ -966,7 +967,8 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(result[0].position().timestamp >= now);
@@ -988,7 +990,8 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -1010,7 +1013,14 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 100, 1000, &config, None).unwrap();
+        let result = sequenced_records(
+            records,
+            100,
+            1000,
+            &config,
+            DEFAULT_ALLOWED_ENCRYPTION_MODES,
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -1031,7 +1041,8 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].position().timestamp <= now + 100);
@@ -1051,7 +1062,8 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].position().timestamp, future);
@@ -1069,7 +1081,8 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, 42, 0, &config, None).unwrap();
+        let result =
+            sequenced_records(records, 42, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().seq_num, 42);
@@ -1087,7 +1100,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 42, 0, &config, Some(&allowed_modes)).unwrap();
+        let result = sequenced_records(records, 42, 0, &config, allowed_modes).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].position().seq_num, 42);
@@ -1103,7 +1116,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 42, 0, &config, Some(&allowed_modes));
+        let result = sequenced_records(records, 42, 0, &config, allowed_modes);
 
         assert!(matches!(
             result,

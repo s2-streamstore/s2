@@ -5,7 +5,7 @@ use s2_common::{
     types::{
         ValidationError,
         basin::BasinName,
-        config::{OptionalStreamConfig, StreamReconfiguration, default_allowed_encryption_modes},
+        config::{DEFAULT_ALLOWED_ENCRYPTION_MODES, OptionalStreamConfig, StreamReconfiguration},
         resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
@@ -408,7 +408,7 @@ fn validate_encryption_modes_subset(
     basin_modes: Option<enumset::EnumSet<EncryptionMode>>,
 ) -> Result<(), ValidationError> {
     if let Some(stream_modes) = stream_modes {
-        let basin_modes = basin_modes.unwrap_or_else(default_allowed_encryption_modes);
+        let basin_modes = basin_modes.unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
         if !stream_modes.is_subset(basin_modes) {
             return Err(ValidationError(
                 "stream encryption_modes must be a subset of basin default encryption_modes"

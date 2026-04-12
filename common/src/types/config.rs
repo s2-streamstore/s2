@@ -106,14 +106,13 @@ pub struct EncryptionConfig {
     pub allowed_modes: EnumSet<EncryptionMode>,
 }
 
-pub fn default_allowed_encryption_modes() -> EnumSet<EncryptionMode> {
-    enumset::enum_set!(EncryptionMode::Plain)
-}
+pub const DEFAULT_ALLOWED_ENCRYPTION_MODES: EnumSet<EncryptionMode> =
+    enumset::enum_set!(EncryptionMode::Plain);
 
 impl Default for EncryptionConfig {
     fn default() -> Self {
         Self {
-            allowed_modes: default_allowed_encryption_modes(),
+            allowed_modes: DEFAULT_ALLOWED_ENCRYPTION_MODES,
         }
     }
 }
@@ -266,7 +265,7 @@ impl OptionalEncryptionConfig {
         let allowed_modes = self
             .allowed_modes
             .or(basin_defaults.allowed_modes)
-            .unwrap_or_else(default_allowed_encryption_modes);
+            .unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
         EncryptionConfig { allowed_modes }
     }
 }
@@ -276,7 +275,7 @@ impl From<OptionalEncryptionConfig> for EncryptionConfig {
         Self {
             allowed_modes: value
                 .allowed_modes
-                .unwrap_or_else(default_allowed_encryption_modes),
+                .unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES),
         }
     }
 }
