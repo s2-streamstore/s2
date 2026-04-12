@@ -157,8 +157,8 @@ async fn test_read_encrypted_roundtrip() {
     let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
         "read-enc",
         "stream",
-        permissive_basin_config(),
-        permissive_stream_config(),
+        all_encryption_modes_basin_config(),
+        all_encryption_modes_stream_config(),
     )
     .await;
 
@@ -187,8 +187,8 @@ async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
     let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
         "read-enc-plain-mismatch",
         "stream",
-        permissive_basin_config(),
-        permissive_stream_config(),
+        all_encryption_modes_basin_config(),
+        all_encryption_modes_stream_config(),
     )
     .await;
 

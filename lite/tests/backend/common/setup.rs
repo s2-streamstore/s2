@@ -46,7 +46,7 @@ pub fn test_stream_name(suffix: &str) -> StreamName {
     format!("test-stream-{}", suffix).parse().unwrap()
 }
 
-pub fn permissive_stream_config() -> OptionalStreamConfig {
+pub fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
     use s2_common::types::config::OptionalEncryptionConfig;
     OptionalStreamConfig {
         encryption: OptionalEncryptionConfig {
@@ -63,9 +63,9 @@ pub fn permissive_stream_config() -> OptionalStreamConfig {
     }
 }
 
-pub fn permissive_basin_config() -> BasinConfig {
+pub fn all_encryption_modes_basin_config() -> BasinConfig {
     BasinConfig {
-        default_stream_config: permissive_stream_config(),
+        default_stream_config: all_encryption_modes_stream_config(),
         ..Default::default()
     }
 }

@@ -110,7 +110,7 @@ async fn test_create_stream_rejects_encryption_modes_outside_basin_defaults() {
         .create_stream(
             basin_name,
             stream_name,
-            permissive_stream_config(),
+            all_encryption_modes_stream_config(),
             CreateMode::CreateOnly(None),
         )
         .await;

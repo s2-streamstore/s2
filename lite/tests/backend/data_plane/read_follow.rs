@@ -22,8 +22,8 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
     let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
         test_suffix,
         "stream",
-        permissive_basin_config(),
-        permissive_stream_config(),
+        all_encryption_modes_basin_config(),
+        all_encryption_modes_stream_config(),
     )
     .await;
 
