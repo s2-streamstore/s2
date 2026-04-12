@@ -461,7 +461,7 @@ async fn test_follow_mode_broadcast_lag_resumes_live_follow_after_catchup() {
 
 #[rstest]
 #[case::plaintext("follow-new-data", EncryptionSpec::Plain)]
-#[case::encrypted("follow-enc", aegis256_encryption())]
+#[case::encrypted("follow-enc", aegis256_encryption_spec())]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_receives_new_data(
     #[case] test_suffix: &str,

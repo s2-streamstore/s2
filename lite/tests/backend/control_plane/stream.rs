@@ -511,14 +511,14 @@ async fn test_delete_stream_allows_plaintext_command_records_on_encrypted_only_s
     let basin_name = create_test_basin(
         &backend,
         "stream-delete-encrypted-only",
-        aegis_only_basin_config(),
+        aegis_only_encryption_basin_config(),
     )
     .await;
     let stream_name = create_test_stream(
         &backend,
         &basin_name,
         "stream-delete-encrypted-only",
-        aegis_only_stream_config(),
+        aegis_only_encryption_stream_config(),
     )
     .await;
 
@@ -527,7 +527,7 @@ async fn test_delete_stream_allows_plaintext_command_records_on_encrypted_only_s
         &basin_name,
         &stream_name,
         &[b"secret"],
-        &aegis256_encryption(),
+        &aegis256_encryption_spec(),
     )
     .await;
 

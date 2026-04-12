@@ -165,8 +165,8 @@ async fn assert_fencing_command_controls_stream_state(
         setup_backend_with_basin_and_stream(
             test_suffix,
             "stream",
-            aegis_only_basin_config(),
-            aegis_only_stream_config(),
+            aegis_only_encryption_basin_config(),
+            aegis_only_encryption_stream_config(),
         )
         .await
     } else {
@@ -259,12 +259,12 @@ async fn test_append_multiple_records() {
 #[case::plaintext_seeded("append-fencing", None, FencingBootstrap::SeedWithData)]
 #[case::encrypted_seeded(
     "append-fencing-encrypted",
-    Some(aegis256_encryption()),
+    Some(aegis256_encryption_spec()),
     FencingBootstrap::SeedWithData
 )]
 #[case::encrypted_command_first(
     "fence-enc-first",
-    Some(aegis256_encryption()),
+    Some(aegis256_encryption_spec()),
     FencingBootstrap::CommandFirst
 )]
 #[tokio::test]
@@ -391,7 +391,7 @@ async fn test_append_with_seq_num_mismatch() {
 
 #[rstest]
 #[case::plaintext("append-session-basic", EncryptionSpec::Plain)]
-#[case::encrypted("appsess-enc", aegis256_encryption())]
+#[case::encrypted("appsess-enc", aegis256_encryption_spec())]
 #[tokio::test]
 async fn test_append_session_roundtrip(
     #[case] test_suffix: &str,

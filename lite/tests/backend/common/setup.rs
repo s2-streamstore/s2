@@ -70,7 +70,7 @@ pub fn all_encryption_modes_basin_config() -> BasinConfig {
     }
 }
 
-pub fn aegis_only_stream_config() -> OptionalStreamConfig {
+pub fn aegis_only_encryption_stream_config() -> OptionalStreamConfig {
     use s2_common::types::config::OptionalEncryptionConfig;
     OptionalStreamConfig {
         encryption: OptionalEncryptionConfig {
@@ -80,14 +80,14 @@ pub fn aegis_only_stream_config() -> OptionalStreamConfig {
     }
 }
 
-pub fn aegis_only_basin_config() -> BasinConfig {
+pub fn aegis_only_encryption_basin_config() -> BasinConfig {
     BasinConfig {
-        default_stream_config: aegis_only_stream_config(),
+        default_stream_config: aegis_only_encryption_stream_config(),
         ..Default::default()
     }
 }
 
-pub fn aegis256_encryption() -> EncryptionSpec {
+pub fn aegis256_encryption_spec() -> EncryptionSpec {
     EncryptionSpec::aegis256([0x42; 32])
 }
 
