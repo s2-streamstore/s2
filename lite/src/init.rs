@@ -339,15 +339,17 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                 .map_or(Maybe::Unspecified, Maybe::Specified),
             encryption: s
                 .encryption
-                .map(|enc| s2_common::types::config::EncryptionReconfiguration {
-                    allowed_modes: Maybe::Specified(
-                        enc.allowed_modes
-                            .into_iter()
-                            .map(s2_common::encryption::EncryptionMode::from)
-                            .collect(),
-                    ),
+                .map(|enc| {
+                    Some(s2_common::types::config::EncryptionReconfiguration {
+                        allowed_modes: Maybe::Specified(
+                            enc.allowed_modes
+                                .into_iter()
+                                .map(s2_common::encryption::EncryptionMode::from)
+                                .collect(),
+                        ),
+                    })
                 })
-                .map_or(Maybe::Unspecified, |r| Maybe::Specified(Some(r))),
+                .map_or(Maybe::Unspecified, Maybe::Specified),
         }
     }
 }
