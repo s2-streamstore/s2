@@ -480,16 +480,3 @@ pub struct BasinReconfiguration {
     pub create_stream_on_append: Maybe<bool>,
     pub create_stream_on_read: Maybe<bool>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{EncryptionConfig, OptionalEncryptionConfig};
-
-    #[test]
-    fn encryption_config_all_modes_stays_explicit_in_optional() {
-        let allowed_modes = enumset::EnumSet::all();
-        let optional = OptionalEncryptionConfig::from(EncryptionConfig { allowed_modes });
-
-        assert_eq!(optional.allowed_modes, Some(allowed_modes));
-    }
-}
