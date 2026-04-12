@@ -77,6 +77,10 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
+#[error("encryption mode '{0}' is not allowed on this stream")]
+pub struct EncryptionModeNotAllowedError(pub s2_common::encryption::EncryptionMode);
+
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("transaction conflict occurred – this is usually retriable")]
 pub struct TransactionConflictError;
 
@@ -102,8 +106,8 @@ pub(super) enum AppendErrorInternal {
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
-    #[error("encryption mode '{0}' is not allowed on this stream")]
-    EncryptionModeNotAllowed(s2_common::encryption::EncryptionMode),
+    #[error(transparent)]
+    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -156,8 +160,8 @@ pub enum AppendError {
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
-    #[error("encryption mode '{0}' is not allowed on this stream")]
-    EncryptionModeNotAllowed(s2_common::encryption::EncryptionMode),
+    #[error(transparent)]
+    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -170,8 +174,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptionModeNotAllowed(m) => {
-                AppendError::EncryptionModeNotAllowed(m)
+            AppendErrorInternal::EncryptionModeNotAllowed(e) => {
+                AppendError::EncryptionModeNotAllowed(e)
             }
         }
     }

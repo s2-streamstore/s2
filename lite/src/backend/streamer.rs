@@ -44,7 +44,8 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, RequestDroppedError, StreamerMissingInActionError,
+            DeleteStreamError, EncryptionModeNotAllowedError, RequestDroppedError,
+            StreamerMissingInActionError,
         },
         kv,
     },
@@ -734,7 +735,7 @@ fn sequenced_records(
             sr @ StoredRecord::Plaintext(_) | sr @ StoredRecord::Encrypted { .. } => {
                 let mode = sr.encryption_mode();
                 if !allowed_encryption_modes.contains(mode) {
-                    return Err(AppendErrorInternal::EncryptionModeNotAllowed(mode));
+                    return Err(EncryptionModeNotAllowedError(mode).into());
                 }
             }
         }
@@ -1123,7 +1124,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(AppendErrorInternal::EncryptionModeNotAllowed(
-                EncryptionMode::Aegis256
+                EncryptionModeNotAllowedError(EncryptionMode::Aegis256)
             ))
         ));
     }
