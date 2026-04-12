@@ -119,6 +119,39 @@ async fn test_create_stream_rejects_encryption_modes_outside_basin_defaults() {
 }
 
 #[tokio::test]
+async fn test_reconfigure_stream_rejects_encryption_modes_outside_basin_defaults() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "stream-reconfigure-encryption-reject",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name = create_test_stream(
+        &backend,
+        &basin_name,
+        "stream-reconfigure-encryption-reject",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let result = backend
+        .reconfigure_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            StreamReconfiguration {
+                encryption: Maybe::Specified(Some(EncryptionReconfiguration {
+                    allowed_modes: Maybe::Specified([EncryptionMode::Aegis256].into()),
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(ReconfigureStreamError::Validation(_))));
+}
+
+#[tokio::test]
 async fn test_reconfigure_stream_empty_encryption_uses_basin_defaults() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("stream-reconfigure-enc");
