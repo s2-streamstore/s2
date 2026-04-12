@@ -12,8 +12,6 @@ use crate::http::ParseableHeader;
 
 pub static S2_ENCRYPTION_HEADER: HeaderName = HeaderName::from_static("s2-encryption");
 
-pub const ALL_ENCRYPTION_MODES: enumset::EnumSet<EncryptionMode> = enumset::EnumSet::all();
-
 type EncryptionKey<const N: usize> = Arc<SecretBox<[u8; N]>>;
 
 /// Encryption algorithm.
