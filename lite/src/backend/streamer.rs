@@ -729,11 +729,13 @@ fn sequenced_records(
         .map(|record| record.into_parts())
         .enumerate()
     {
-        let stored_record = record.as_ref().into_inner();
-        if !matches!(stored_record, StoredRecord::Plaintext(Record::Command(_))) {
-            let enc_mode = stored_record.encryption_mode();
-            if !allowed_encryption_modes.contains(enc_mode) {
-                return Err(AppendErrorInternal::EncryptionModeNotAllowed(enc_mode));
+        match record.as_ref().into_inner() {
+            StoredRecord::Plaintext(Record::Command(_)) => {}
+            sr @ StoredRecord::Plaintext(_) | sr @ StoredRecord::Encrypted { .. } => {
+                let mode = sr.encryption_mode();
+                if !allowed_encryption_modes.contains(mode) {
+                    return Err(AppendErrorInternal::EncryptionModeNotAllowed(mode));
+                }
             }
         }
         let mut timestamp = match mode {
