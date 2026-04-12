@@ -266,33 +266,22 @@ pub struct EncryptionConfig {
 
 impl From<EncryptionConfig> for sdk::types::EncryptionConfig {
     fn from(value: EncryptionConfig) -> Self {
-        sdk::types::EncryptionConfig::new().with_allowed_modes(
-            value
-                .encryption_allowed_modes
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        )
+        sdk::types::EncryptionConfig::new().with_allowed_modes(value.encryption_allowed_modes)
     }
 }
 
 impl From<sdk::types::EncryptionConfig> for EncryptionConfig {
     fn from(value: sdk::types::EncryptionConfig) -> Self {
         Self {
-            encryption_allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
+            encryption_allowed_modes: value.allowed_modes,
         }
     }
 }
 
 impl From<EncryptionConfig> for sdk::types::EncryptionReconfiguration {
     fn from(value: EncryptionConfig) -> Self {
-        sdk::types::EncryptionReconfiguration::new().with_allowed_modes(
-            value
-                .encryption_allowed_modes
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        )
+        sdk::types::EncryptionReconfiguration::new()
+            .with_allowed_modes(value.encryption_allowed_modes)
     }
 }
 
