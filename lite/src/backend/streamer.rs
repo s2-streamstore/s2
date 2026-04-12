@@ -8,11 +8,13 @@ use std::{
     time::Duration,
 };
 
+use enumset::EnumSet;
 use futures::{
     FutureExt as _,
     future::{BoxFuture, OptionFuture},
 };
 use s2_common::{
+    encryption::EncryptionMode,
     record::{
         CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
         StoredRecord, StoredSequencedRecord, StreamPosition, Timestamp,
@@ -718,7 +720,7 @@ fn sequenced_records(
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
-    allowed_encryption_modes: enumset::EnumSet<s2_common::encryption::EncryptionMode>,
+    allowed_encryption_modes: EnumSet<EncryptionMode>,
 ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
     let mode = config.mode.unwrap_or_default();
     let uncapped = config.uncapped.unwrap_or_default();
@@ -735,7 +737,7 @@ fn sequenced_records(
             sr @ StoredRecord::Plaintext(_) | sr @ StoredRecord::Encrypted { .. } => {
                 let mode = sr.encryption_mode();
                 if !allowed_encryption_modes.contains(mode) {
-                    return Err(EncryptionModeNotAllowedError(mode).into());
+                    Err(EncryptionModeNotAllowedError(mode))?;
                 }
             }
         }
