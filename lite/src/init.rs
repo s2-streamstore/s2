@@ -342,16 +342,16 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                 .map(|enc| {
                     if enc.allowed_modes.is_empty() {
                         s2_common::types::config::EncryptionReconfiguration {
-                            allowed_modes: Maybe::Specified(None),
+                            allowed_modes: Maybe::Specified(Default::default()),
                         }
                     } else {
                         s2_common::types::config::EncryptionReconfiguration {
-                            allowed_modes: Maybe::Specified(Some(
+                            allowed_modes: Maybe::Specified(
                                 enc.allowed_modes
                                     .into_iter()
                                     .map(s2_common::encryption::EncryptionMode::from)
                                     .collect(),
-                            )),
+                            ),
                         }
                     }
                 })
@@ -727,7 +727,10 @@ mod tests {
 
         match reconfig.encryption {
             Maybe::Specified(Some(encryption)) => {
-                assert!(matches!(encryption.allowed_modes, Maybe::Specified(None)));
+                assert!(matches!(
+                    encryption.allowed_modes,
+                    Maybe::Specified(modes) if modes.is_empty()
+                ));
             }
             other => panic!("expected explicit encryption reconfiguration, got {other:?}"),
         }

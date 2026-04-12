@@ -10,9 +10,10 @@
 //!   `Option<T>` where `None` means "not set at this layer, fall back to defaults."
 //!
 //! - Reconfiguration (`StreamReconfiguration`, `TimestampingReconfiguration`,
-//!   `DeleteOnEmptyReconfiguration`): Partial updates with PATCH semantics. Fields are
+//!   `DeleteOnEmptyReconfiguration`): Partial updates with PATCH semantics. Most fields are
 //!   `Maybe<Option<T>>` with three states: `Unspecified` (don't change), `Specified(None)` (clear
-//!   to default), `Specified(Some(v))` (set to value). Applied using `reconfigure()`.
+//!   to default), `Specified(Some(v))` (set to value). Collection-valued fields may instead use an
+//!   empty collection to mean "clear to default". Applied using `reconfigure()`.
 //!
 //! Reconfiguration of nested fields (e.g. `timestamping`, `delete_on_empty`,
 //! `default_stream_config`) is applied recursively: `Specified(Some(inner_reconfig))`
@@ -23,9 +24,8 @@
 //! stream-level → basin-level → system default (via `Option::or` chaining).
 //!
 //! The `From<Optional*> for *Reconfiguration` conversions treat every field as
-//! `Specified` (including `None` → `Specified(None)`). These
-//! conversions represent "set the config to exactly this state", not "update only
-//! the fields that are set."
+//! `Specified`. These conversions represent "set the config to exactly this state",
+//! not "update only the fields that are set."
 
 use std::time::Duration;
 
@@ -139,7 +139,7 @@ pub struct DeleteOnEmptyReconfiguration {
 
 #[derive(Debug, Clone, Default)]
 pub struct EncryptionReconfiguration {
-    pub allowed_modes: Maybe<Option<EnumSet<EncryptionMode>>>,
+    pub allowed_modes: Maybe<EnumSet<EncryptionMode>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -256,7 +256,7 @@ pub struct OptionalEncryptionConfig {
 impl OptionalEncryptionConfig {
     pub fn reconfigure(mut self, reconfiguration: EncryptionReconfiguration) -> Self {
         if let Maybe::Specified(allowed_modes) = reconfiguration.allowed_modes {
-            self.allowed_modes = allowed_modes;
+            self.allowed_modes = (!allowed_modes.is_empty()).then_some(allowed_modes);
         }
         self
     }
@@ -291,7 +291,7 @@ impl From<EncryptionConfig> for OptionalEncryptionConfig {
 impl From<OptionalEncryptionConfig> for EncryptionReconfiguration {
     fn from(value: OptionalEncryptionConfig) -> Self {
         Self {
-            allowed_modes: value.allowed_modes.into(),
+            allowed_modes: Maybe::Specified(value.allowed_modes.unwrap_or_default()),
         }
     }
 }

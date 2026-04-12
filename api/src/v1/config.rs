@@ -354,16 +354,10 @@ impl From<EncryptionReconfiguration> for types::config::EncryptionReconfiguratio
     fn from(value: EncryptionReconfiguration) -> Self {
         Self {
             allowed_modes: value.allowed_modes.map(|modes| {
-                if modes.is_empty() {
-                    None
-                } else {
-                    Some(
-                        modes
-                            .into_iter()
-                            .map(encryption::EncryptionMode::from)
-                            .collect(),
-                    )
-                }
+                modes
+                    .into_iter()
+                    .map(encryption::EncryptionMode::from)
+                    .collect()
             }),
         }
     }
@@ -372,10 +366,9 @@ impl From<EncryptionReconfiguration> for types::config::EncryptionReconfiguratio
 impl From<types::config::EncryptionReconfiguration> for EncryptionReconfiguration {
     fn from(value: types::config::EncryptionReconfiguration) -> Self {
         Self {
-            allowed_modes: value.allowed_modes.map(|opt| {
-                opt.map(|modes| modes.into_iter().map(Into::into).collect())
-                    .unwrap_or_default()
-            }),
+            allowed_modes: value
+                .allowed_modes
+                .map(|modes| modes.into_iter().map(Into::into).collect()),
         }
     }
 }

@@ -163,7 +163,7 @@ async fn test_reconfigure_stream_empty_encryption_uses_basin_defaults() {
             stream_name.clone(),
             StreamReconfiguration {
                 encryption: Maybe::Specified(Some(EncryptionReconfiguration {
-                    allowed_modes: Maybe::Specified(None),
+                    allowed_modes: Maybe::Specified(Default::default()),
                 })),
                 ..Default::default()
             },
