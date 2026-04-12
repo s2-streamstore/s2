@@ -215,7 +215,7 @@
       "type": "object",
       "properties": {
         "allowed_modes": {
-          "description": "Allowed encryption modes. If empty, all modes are permitted.",
+          "description": "Allowed encryption modes.\nIf empty, use defaults. If no default is configured, only plaintext is allowed.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/EncryptionModeSpec"
