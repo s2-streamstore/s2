@@ -26,8 +26,8 @@ use s2_common::{
             RetentionPolicy, TimestampingMode,
         },
         stream::{
-            AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
-            StoredAppendRecordParts,
+            AppendAck, AppendInput, AppendRecord, AppendRecordParts, StoredAppendInput,
+            StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
         },
     },
 };
@@ -40,6 +40,7 @@ use tokio::{
     time::Instant,
 };
 
+use super::PersistedStreamTail;
 use crate::{
     backend::{
         append,
@@ -108,8 +109,7 @@ pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: OptionalStreamConfig,
-    pub tail_pos: StreamPosition,
-    pub tail_write_timestamp: kv::timestamp::TimestampSecs,
+    pub tail: PersistedStreamTail,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
     pub append_inflight_bytes_sema: Arc<Semaphore>,
@@ -123,14 +123,17 @@ impl Spawner {
             db,
             stream_id,
             config,
-            tail_pos,
-            tail_write_timestamp,
+            tail,
             fencing_token,
             trim_point,
             append_inflight_bytes_sema,
             durability_notifier,
             bgtask_trigger_tx,
         } = self;
+        let PersistedStreamTail {
+            tail: tail_pos,
+            write_timestamp: tail_write_timestamp,
+        } = tail;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let streamer = Streamer {
@@ -392,7 +395,7 @@ impl Streamer {
             fencing_token: None,
         };
         let (append_reply_tx, append_reply_rx) = oneshot::channel();
-        self.handle_append(input, None, append_reply_tx, AppendType::Terminal);
+        self.handle_append(input.into(), None, append_reply_tx, AppendType::Terminal);
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
                 Ok(Ok(_)) => Ok(true),
@@ -945,7 +948,10 @@ async fn db_submit_append(
     }
     wb.put(
         kv::stream_tail_position::ser_key(stream_id),
-        kv::stream_tail_position::ser_value(next_pos(&records), write_timestamp_secs),
+        kv::stream_tail_position::ser_value(PersistedStreamTail {
+            tail: next_pos(&records),
+            write_timestamp: write_timestamp_secs,
+        }),
     );
     static WRITE_OPTS: WriteOptions = WriteOptions {
         await_durable: false,

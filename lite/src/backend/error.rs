@@ -353,6 +353,9 @@ impl From<AppendErrorInternal> for DeleteStreamError {
             AppendErrorInternal::RequestDroppedError(e) => Self::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
             AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
+            AppendErrorInternal::EncryptionModeNotAllowed(_) => {
+                unreachable!("plaintext trim command used")
+            }
         }
     }
 }

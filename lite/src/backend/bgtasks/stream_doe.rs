@@ -10,6 +10,8 @@ use slatedb::{
 };
 use tracing::instrument;
 
+#[cfg(test)]
+use crate::backend::PersistedStreamTail;
 use crate::{
     backend::{
         Backend,
@@ -291,13 +293,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition {
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition {
                         seq_num: 1,
                         timestamp: 1234,
                     },
                     write_timestamp,
-                ),
+                }),
             )
             .await
             .unwrap();
@@ -349,7 +351,10 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition::MIN, write_timestamp),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition::MIN,
+                    write_timestamp,
+                }),
             )
             .await
             .unwrap();
@@ -399,13 +404,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition {
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition {
                         seq_num: 1,
                         timestamp: 1234,
                     },
                     write_timestamp,
-                ),
+                }),
             )
             .await
             .unwrap();
@@ -595,13 +600,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition {
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition {
                         seq_num: 1,
                         timestamp: 1234,
                     },
-                    TimestampSecs::from_secs(1_050),
-                ),
+                    write_timestamp: TimestampSecs::from_secs(1_050),
+                }),
             )
             .await
             .unwrap();
@@ -645,7 +650,10 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition::MIN, write_timestamp),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition::MIN,
+                    write_timestamp,
+                }),
             )
             .await
             .unwrap();
@@ -708,7 +716,10 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(pos, TimestampSecs::now()),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: pos,
+                    write_timestamp: TimestampSecs::now(),
+                }),
             )
             .await
             .unwrap();

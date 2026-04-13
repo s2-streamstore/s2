@@ -12,6 +12,8 @@ use slatedb::{
 };
 use tracing::instrument;
 
+#[cfg(test)]
+use crate::backend::PersistedStreamTail;
 use crate::{
     backend::{Backend, error::StorageError, kv, store::db_txn_get},
     stream_id::StreamId,
@@ -312,13 +314,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition {
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition {
                         seq_num: 10,
                         timestamp: 1234,
                     },
-                    kv::timestamp::TimestampSecs::from_secs(10),
-                ),
+                    write_timestamp: kv::timestamp::TimestampSecs::from_secs(10),
+                }),
             )
             .await
             .unwrap();

@@ -18,7 +18,7 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend, CreatedOrReconfigured,
+    Backend, CreatedOrReconfigured, PersistedStreamTail,
     store::db_txn_get,
     streamer::{DeleteOnEmptyEntry, doe_arm_delay, retention_age_or_zero},
 };
@@ -193,10 +193,10 @@ impl Backend {
             };
             txn.put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition::MIN,
-                    kv::timestamp::TimestampSecs::from_secs(created_secs),
-                ),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition::MIN,
+                    write_timestamp: kv::timestamp::TimestampSecs::from_secs(created_secs),
+                }),
             )?;
         }
         if let Some(min_age) = meta
