@@ -189,6 +189,10 @@ pub mod extract {
                 status: http::StatusCode::UNPROCESSABLE_ENTITY,
                 message: err.to_string().into(),
             },
+            Category::Io => JsonExtractionRejection::Other {
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: err.to_string().into(),
+            },
             _ => JsonExtractionRejection::SyntaxError {
                 status: http::StatusCode::BAD_REQUEST,
                 message: err.to_string().into(),
@@ -333,8 +337,8 @@ pub mod extract {
             let cases: &[(&[u8], http::StatusCode)] = &[
                 // Syntax errors → 400
                 (b"not json", http::StatusCode::BAD_REQUEST),
-                // `{}` is valid JSON but missing `records` — axum reports data error
-                // before checking trailing chars.
+                // `{}` is valid JSON but missing `records` — the data error is
+                // reported before checking trailing chars.
                 (b"{} trailing", http::StatusCode::UNPROCESSABLE_ENTITY),
                 (b"", http::StatusCode::BAD_REQUEST),
                 (b"{truncated", http::StatusCode::BAD_REQUEST),
