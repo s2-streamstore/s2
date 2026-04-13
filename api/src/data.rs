@@ -409,8 +409,9 @@ pub mod extract {
             });
 
             // StreamReconfiguration: exercises Maybe<T> in all three states
-            use crate::v1::config::{StorageClass, TimestampingMode, TimestampingReconfiguration};
             use s2_common::maybe::Maybe;
+
+            use crate::v1::config::{StorageClass, TimestampingMode, TimestampingReconfiguration};
 
             // All fields unspecified (empty JSON object)
             assert_roundtrip(&StreamReconfiguration {
