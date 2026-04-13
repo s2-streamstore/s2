@@ -8,8 +8,8 @@ use std::{
     time::Duration,
 };
 
-use enumset::EnumSet;
 use enum_ordinalize::Ordinalize;
+use enumset::EnumSet;
 use futures::{
     FutureExt as _,
     future::{BoxFuture, OptionFuture},
@@ -47,8 +47,8 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, EncryptionModeNotAllowedError, RequestDroppedError,
-            StorageError, StreamerMissingInActionError,
+            DeleteStreamError, EncryptionModeNotAllowedError, RequestDroppedError, StorageError,
+            StreamerMissingInActionError,
         },
         kv,
     },
@@ -835,6 +835,7 @@ async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<boo
         max_fetch_tasks: 1,
     };
     let mut it = db.scan_with_options(start_key.., &SCAN_OPTS).await?;
+    // TODO: post-filtering on TTL, because SL8 0.12+ will stop doing it at query-time.
     let Some(kv) = it.next().await? else {
         return Ok(false);
     };
