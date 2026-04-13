@@ -182,25 +182,17 @@ pub mod extract {
         }
     }
 
-    // TODO: remove when we stop delegating to axum::Json.
-    impl From<axum::extract::rejection::JsonRejection> for JsonExtractionRejection {
-        fn from(rej: axum::extract::rejection::JsonRejection) -> Self {
-            use axum::extract::rejection::JsonRejection::*;
-            match rej {
-                JsonDataError(e) => Self::DataError {
-                    status: e.status(),
-                    message: e.body_text().into(),
-                },
-                JsonSyntaxError(e) => Self::SyntaxError {
-                    status: e.status(),
-                    message: e.body_text().into(),
-                },
-                MissingJsonContentType(_) => Self::MissingContentType,
-                other => Self::Other {
-                    status: other.status(),
-                    message: other.body_text().into(),
-                },
-            }
+    fn classify_sonic_error(err: sonic_rs::Error) -> JsonExtractionRejection {
+        use sonic_rs::error::Category;
+        match err.classify() {
+            Category::TypeUnmatched | Category::NotFound => JsonExtractionRejection::DataError {
+                status: http::StatusCode::UNPROCESSABLE_ENTITY,
+                message: err.to_string().into(),
+            },
+            _ => JsonExtractionRejection::SyntaxError {
+                status: http::StatusCode::BAD_REQUEST,
+                message: err.to_string().into(),
+            },
         }
     }
 
@@ -212,10 +204,24 @@ pub mod extract {
         type Rejection = JsonExtractionRejection;
 
         async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-            let axum::Json(value) = <axum::Json<T> as FromRequest<S>>::from_request(req, state)
-                .await
-                .map_err(JsonExtractionRejection::from)?;
-            Ok(Self(value))
+            let Some(ctype) = req.headers().get(http::header::CONTENT_TYPE) else {
+                return Err(JsonExtractionRejection::MissingContentType);
+            };
+            if !crate::mime::parse(ctype)
+                .as_ref()
+                .is_some_and(crate::mime::is_json)
+            {
+                return Err(JsonExtractionRejection::MissingContentType);
+            }
+            let bytes = Bytes::from_request(req, state).await.map_err(|e| {
+                JsonExtractionRejection::Other {
+                    status: e.status(),
+                    message: e.body_text().into(),
+                }
+            })?;
+            sonic_rs::from_slice(&bytes)
+                .map(Self)
+                .map_err(classify_sonic_error)
         }
     }
 
@@ -245,10 +251,9 @@ pub mod extract {
             if bytes.is_empty() {
                 return Ok(None);
             }
-            let value = axum::Json::<T>::from_bytes(&bytes)
-                .map_err(JsonExtractionRejection::from)?
-                .0;
-            Ok(Some(Self(value)))
+            sonic_rs::from_slice(&bytes)
+                .map(|v| Some(Self(v)))
+                .map_err(classify_sonic_error)
         }
     }
 
@@ -309,19 +314,20 @@ pub mod extract {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::v1::stream::AppendInput;
+        use crate::v1::{
+            config::{BasinReconfiguration, StreamReconfiguration},
+            stream::{AppendInput, AppendRecord, Header},
+        };
 
         fn classify_json_error<T: DeserializeOwned>(
             json: &[u8],
         ) -> Result<T, JsonExtractionRejection> {
-            axum::Json::<T>::from_bytes(json)
-                .map(|axum::Json(v)| v)
-                .map_err(JsonExtractionRejection::from)
+            sonic_rs::from_slice(json).map_err(classify_sonic_error)
         }
 
         /// Verify that our rejection wrapper preserves axum's status code
-        /// classification for a variety of invalid JSON payloads. This same
-        /// table will be reused when switching to sonic-rs in PR 2.
+        /// classification for a variety of invalid JSON payloads, now using
+        /// sonic-rs as the deserializer.
         #[test]
         fn json_error_classification() {
             let cases: &[(&[u8], http::StatusCode)] = &[
@@ -365,6 +371,73 @@ pub mod extract {
             let input = br#"{"records": [], "match_seq_num": null}"#;
             let result = classify_json_error::<AppendInput>(input);
             assert!(result.is_ok());
+        }
+
+        /// Differential test: serialize with serde_json, deserialize with
+        /// both serde_json and sonic_rs, assert semantic equality.
+        #[test]
+        fn serde_json_sonic_rs_roundtrip() {
+            fn assert_roundtrip<T>(input: &T)
+            where
+                T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+            {
+                let json = serde_json::to_vec(input).unwrap();
+                let from_serde: T = serde_json::from_slice(&json).unwrap();
+                let from_sonic: T = sonic_rs::from_slice(&json).unwrap();
+                assert_eq!(
+                    format!("{from_serde:?}"),
+                    format!("{from_sonic:?}"),
+                    "roundtrip mismatch for {}",
+                    String::from_utf8_lossy(&json),
+                );
+            }
+
+            // AppendInput variants
+            assert_roundtrip(&AppendInput {
+                records: vec![],
+                match_seq_num: None,
+                fencing_token: None,
+            });
+            assert_roundtrip(&AppendInput {
+                records: vec![AppendRecord {
+                    timestamp: None,
+                    headers: vec![Header("key".into(), "val".into())],
+                    body: "hello world".into(),
+                }],
+                match_seq_num: Some(42),
+                fencing_token: Some("token".parse().unwrap()),
+            });
+
+            // StreamReconfiguration: exercises Maybe<T> in all three states
+            use crate::v1::config::{StorageClass, TimestampingMode, TimestampingReconfiguration};
+            use s2_common::maybe::Maybe;
+
+            // All fields unspecified (empty JSON object)
+            assert_roundtrip(&StreamReconfiguration {
+                storage_class: Maybe::Unspecified,
+                retention_policy: Maybe::Unspecified,
+                timestamping: Maybe::Unspecified,
+                delete_on_empty: Maybe::Unspecified,
+                encryption: Maybe::Unspecified,
+            });
+            // Mix of specified-null and specified-value
+            assert_roundtrip(&StreamReconfiguration {
+                storage_class: Maybe::Specified(Some(StorageClass::Express)),
+                retention_policy: Maybe::Specified(None),
+                timestamping: Maybe::Specified(Some(TimestampingReconfiguration {
+                    mode: Maybe::Specified(Some(TimestampingMode::ClientRequire)),
+                    uncapped: Maybe::Specified(Some(true)),
+                })),
+                delete_on_empty: Maybe::Unspecified,
+                encryption: Maybe::Unspecified,
+            });
+
+            // BasinReconfiguration: nested Maybe<Option<StreamReconfiguration>>
+            assert_roundtrip(&BasinReconfiguration {
+                default_stream_config: Maybe::Specified(None),
+                create_stream_on_append: Maybe::Specified(true),
+                create_stream_on_read: Maybe::Unspecified,
+            });
         }
     }
 }
