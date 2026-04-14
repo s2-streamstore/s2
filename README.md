@@ -181,8 +181,8 @@ SL8_FLUSH_INTERVAL=10ms
 - [CLI](cli/) ✅ v0.26+
 - [TypeScript SDK](https://github.com/s2-streamstore/s2-sdk-typescript) ✅ v0.22+
 - [Go SDK](https://github.com/s2-streamstore/s2-sdk-go) ✅ v0.11+
-- [Rust SDK](https://github.com/s2-streamstore/s2-sdk-rust) ✅ v0.22+
-- [Python](https://github.com/s2-streamstore/s2-sdk-python) 🚧 _being migrated to v1 API_
+- [Rust SDK](sdk/) ✅ v0.22+
+- [Python SDK](https://github.com/s2-streamstore/s2-sdk-python) ✅ v0.1+
 
 ### API Coverage
 
