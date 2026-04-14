@@ -168,10 +168,7 @@ async fn session_inner(
         loop {
             match timeout(Duration::from_secs(20), batches.next()).await {
                 Ok(Some(batch)) => {
-                    let batch = ReadBatch::from_api(batch?);
-                    if !batch.records.is_empty() {
-                        yield batch;
-                    }
+                    yield ReadBatch::from_api(batch?);
                 }
                 Ok(None) => break,
                 Err(_) => Err(ReadSessionError::HeartbeatTimeout)?,
