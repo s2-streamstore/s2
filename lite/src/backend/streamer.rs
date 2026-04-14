@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use enum_ordinalize::Ordinalize;
 use enumset::EnumSet;
 use futures::{
     FutureExt as _,
@@ -25,20 +26,21 @@ use s2_common::{
             RetentionPolicy, TimestampingMode,
         },
         stream::{
-            AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
-            StoredAppendRecordParts,
+            AppendAck, AppendInput, AppendRecord, AppendRecordParts, StoredAppendInput,
+            StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
         },
     },
 };
 use slatedb::{
     WriteBatch,
-    config::{PutOptions, Ttl, WriteOptions},
+    config::{DurabilityLevel, PutOptions, ScanOptions, Ttl, WriteOptions},
 };
 use tokio::{
     sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
     time::Instant,
 };
 
+use super::PersistedStreamTail;
 use crate::{
     backend::{
         append,
@@ -46,7 +48,7 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, EncryptionModeNotAllowedError, RequestDroppedError,
+            DeleteStreamError, EncryptionModeNotAllowedError, RequestDroppedError, StorageError,
             StreamerMissingInActionError,
         },
         kv,
@@ -84,9 +86,9 @@ impl StreamerId {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct DeleteOnEmptyDeadline {
-    deadline: kv::timestamp::TimestampSecs,
-    min_age: Duration,
+pub(super) struct DeleteOnEmptyEntry {
+    pub(super) deadline: kv::timestamp::TimestampSecs,
+    pub(super) min_age: Duration,
 }
 
 #[derive(Debug)]
@@ -95,11 +97,19 @@ struct InFlightAppend {
     records: Vec<Metered<StoredSequencedRecord>>,
 }
 
+struct DbSubmitAppendOptions {
+    retention: RetentionPolicy,
+    doe_deadline: Option<DeleteOnEmptyEntry>,
+    write_timestamp_secs: kv::timestamp::TimestampSecs,
+    fencing_token: Option<FencingToken>,
+    trim_point: Option<RangeTo<SeqNum>>,
+}
+
 pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: OptionalStreamConfig,
-    pub tail_pos: StreamPosition,
+    pub tail: PersistedStreamTail,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
     pub append_inflight_bytes_sema: Arc<Semaphore>,
@@ -113,13 +123,17 @@ impl Spawner {
             db,
             stream_id,
             config,
-            tail_pos,
+            tail,
             fencing_token,
             trim_point,
             append_inflight_bytes_sema,
             durability_notifier,
             bgtask_trigger_tx,
         } = self;
+        let PersistedStreamTail {
+            tail: tail_pos,
+            write_timestamp: tail_write_timestamp,
+        } = tail;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let streamer = Streamer {
@@ -127,6 +141,7 @@ impl Spawner {
             stream_id,
             msg_tx: msg_tx.clone(),
             config,
+            tail_write_timestamp,
             fencing_token: CommandState {
                 state: fencing_token,
                 applied_point: ..tail_pos.seq_num,
@@ -186,6 +201,7 @@ struct Streamer {
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: OptionalStreamConfig,
+    tail_write_timestamp: kv::timestamp::TimestampSecs,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -298,21 +314,28 @@ impl Streamer {
                         self.apply_command(sr.position().seq_num, cmd, append_type);
                     }
                 }
+                let write_timestamp_secs = kv::timestamp::TimestampSecs::now();
+                self.tail_write_timestamp = write_timestamp_secs;
                 let (first_pos, next_pos) = pos_span(&sequenced_records);
                 let seq_num_range = first_pos.seq_num..next_pos.seq_num;
                 self.db_writes_pending.push_back(
                     db_submit_append(
                         self.db.clone(),
                         self.stream_id,
-                        retention,
-                        doe_deadline,
                         sequenced_records,
-                        self.fencing_token
-                            .is_applied_in(&seq_num_range)
-                            .then(|| self.fencing_token.state.clone()),
-                        self.trim_point
-                            .is_applied_in(&seq_num_range)
-                            .then_some(self.trim_point.state),
+                        DbSubmitAppendOptions {
+                            retention,
+                            doe_deadline,
+                            write_timestamp_secs,
+                            fencing_token: self
+                                .fencing_token
+                                .is_applied_in(&seq_num_range)
+                                .then(|| self.fencing_token.state.clone()),
+                            trim_point: self
+                                .trim_point
+                                .is_applied_in(&seq_num_range)
+                                .then_some(self.trim_point.state),
+                        },
                     )
                     .boxed(),
                 );
@@ -324,10 +347,71 @@ impl Streamer {
         }
     }
 
+    fn delete_on_empty_is_eligible(&self, pending: &[DeleteOnEmptyEntry]) -> bool {
+        let write_timestamp = u64::from(self.tail_write_timestamp.as_u32());
+        pending.iter().any(|entry| {
+            let deadline_secs = u64::from(entry.deadline.as_u32());
+            write_timestamp
+                .checked_add(entry.min_age.as_secs())
+                .is_some_and(|sum| sum <= deadline_secs)
+        })
+    }
+
+    async fn handle_delete_on_empty(
+        &mut self,
+        pending: Vec<DeleteOnEmptyEntry>,
+        reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
+    ) {
+        let eligible = if self.next_assignable_pos().seq_num != self.stable_pos.seq_num {
+            Ok(false)
+        } else {
+            match stream_has_records(&self.db, self.stream_id).await {
+                Ok(true) => Ok(false),
+                Ok(false) => Ok(self.delete_on_empty_is_eligible(&pending)),
+                Err(err) => Err(err.into()),
+            }
+        };
+        let eligible = match eligible {
+            Ok(eligible) => eligible,
+            Err(err) => {
+                let _ = reply_tx.send(Err(err));
+                return;
+            }
+        };
+        if !eligible {
+            let _ = reply_tx.send(Ok(false));
+            return;
+        }
+
+        let record: AppendRecord = AppendRecordParts {
+            timestamp: Some(Timestamp::MAX),
+            record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
+        }
+        .try_into()
+        .expect("valid append record");
+        let input = AppendInput {
+            records: vec![record].try_into().expect("valid append batch"),
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        let (append_reply_tx, append_reply_rx) = oneshot::channel();
+        self.handle_append(input.into(), None, append_reply_tx, AppendType::Terminal);
+        tokio::spawn(async move {
+            let result = match append_reply_rx.await {
+                Ok(Ok(_)) => Ok(true),
+                Ok(Err(err)) => Err(err.into()),
+                Err(_) => Err(DeleteStreamError::StreamerMissingInActionError(
+                    StreamerMissingInActionError,
+                )),
+            };
+            let _ = reply_tx.send(result);
+        });
+    }
+
     fn maybe_doe_deadline(
         &mut self,
         retention_age: Option<Duration>,
-    ) -> Option<DeleteOnEmptyDeadline> {
+    ) -> Option<DeleteOnEmptyEntry> {
         let retention_age = retention_age?;
         let min_age = self
             .config
@@ -342,7 +426,7 @@ impl Streamer {
             self.last_doe_deadline_at = Some(now);
             let deadline =
                 kv::timestamp::TimestampSecs::after(doe_arm_delay(retention_age, min_age));
-            Some(DeleteOnEmptyDeadline { deadline, min_age })
+            Some(DeleteOnEmptyEntry { deadline, min_age })
         } else {
             None
         }
@@ -436,6 +520,9 @@ impl Streamer {
                                 );
                             }
                         }
+                        Message::DeleteOnEmpty { pending, reply_tx } => {
+                            self.handle_delete_on_empty(pending, reply_tx).await;
+                        }
                         Message::Follow {
                             start_seq_num,
                             reply_tx,
@@ -497,6 +584,10 @@ enum Message {
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
+    },
+    DeleteOnEmpty {
+        pending: Vec<DeleteOnEmptyEntry>,
+        reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
     },
     Follow {
         start_seq_num: SeqNum,
@@ -642,6 +733,21 @@ impl StreamerClient {
             }),
         }
     }
+
+    pub async fn terminal_trim_if_delete_on_empty_eligible(
+        &self,
+        pending: Vec<DeleteOnEmptyEntry>,
+    ) -> Result<bool, DeleteStreamError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.msg_tx
+            .send(Message::DeleteOnEmpty { pending, reply_tx })
+            .map_err(|_| {
+                DeleteStreamError::StreamerMissingInActionError(StreamerMissingInActionError)
+            })?;
+        reply_rx.await.map_err(|_| {
+            DeleteStreamError::StreamerMissingInActionError(StreamerMissingInActionError)
+        })?
+    }
 }
 
 fn timestamp_now() -> Timestamp {
@@ -715,6 +821,34 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
     }
 }
 
+async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<bool, StorageError> {
+    let start_key = kv::stream_record_timestamp::ser_key(
+        stream_id,
+        StreamPosition {
+            seq_num: SeqNum::MIN,
+            timestamp: Timestamp::MIN,
+        },
+    );
+    // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
+    static SCAN_OPTS: ScanOptions = ScanOptions {
+        durability_filter: DurabilityLevel::Memory,
+        dirty: false,
+        read_ahead_bytes: 1,
+        cache_blocks: false,
+        max_fetch_tasks: 1,
+    };
+    let mut it = db.scan_with_options(start_key.., &SCAN_OPTS).await?;
+    // TODO: post-filtering on TTL, because SL8 0.12+ will stop doing it at query-time.
+    let Some(kv) = it.next().await? else {
+        return Ok(false);
+    };
+    if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp.ordinal()) {
+        return Ok(false);
+    }
+    let (candidate_stream_id, _pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
+    Ok(candidate_stream_id == stream_id)
+}
+
 fn sequenced_records(
     batch: StoredAppendRecordBatch,
     first_seq_num: SeqNum,
@@ -766,12 +900,16 @@ fn sequenced_records(
 async fn db_submit_append(
     db: slatedb::Db,
     stream_id: StreamId,
-    retention: RetentionPolicy,
-    doe_deadline: Option<DeleteOnEmptyDeadline>,
     records: Vec<Metered<StoredSequencedRecord>>,
-    fencing_token: Option<FencingToken>,
-    trim_point: Option<RangeTo<SeqNum>>,
+    options: DbSubmitAppendOptions,
 ) -> Result<InFlightAppend, slatedb::Error> {
+    let DbSubmitAppendOptions {
+        retention,
+        doe_deadline,
+        write_timestamp_secs,
+        fencing_token,
+        trim_point,
+    } = options;
     let ttl = match retention {
         RetentionPolicy::Age(age) => Ttl::ExpireAfter(age.as_millis() as u64),
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
@@ -808,10 +946,12 @@ async fn db_submit_append(
             kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
-    let write_timestamp_secs = kv::timestamp::TimestampSecs::now();
     wb.put(
         kv::stream_tail_position::ser_key(stream_id),
-        kv::stream_tail_position::ser_value(next_pos(&records), write_timestamp_secs),
+        kv::stream_tail_position::ser_value(PersistedStreamTail {
+            tail: next_pos(&records),
+            write_timestamp: write_timestamp_secs,
+        }),
     );
     static WRITE_OPTS: WriteOptions = WriteOptions {
         await_durable: false,
@@ -1166,6 +1306,7 @@ mod tests {
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
             config: OptionalStreamConfig::default(),
+            tail_write_timestamp: kv::timestamp::TimestampSecs::from_secs(0),
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,

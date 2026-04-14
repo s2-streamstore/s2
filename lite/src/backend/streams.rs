@@ -18,9 +18,9 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend, CreatedOrReconfigured,
+    Backend, CreatedOrReconfigured, PersistedStreamTail,
     store::db_txn_get,
-    streamer::{doe_arm_delay, retention_age_or_zero},
+    streamer::{DeleteOnEmptyEntry, doe_arm_delay, retention_age_or_zero},
 };
 use crate::{
     backend::{
@@ -193,10 +193,10 @@ impl Backend {
             };
             txn.put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition::MIN,
-                    kv::timestamp::TimestampSecs::from_secs(created_secs),
-                ),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition::MIN,
+                    write_timestamp: kv::timestamp::TimestampSecs::from_secs(created_secs),
+                }),
             )?;
         }
         if let Some(min_age) = meta
@@ -382,6 +382,44 @@ impl Backend {
             }
         }
 
+        self.mark_stream_deleted(basin, stream).await
+    }
+
+    pub(super) async fn delete_stream_if_doe_eligible(
+        &self,
+        basin: BasinName,
+        stream: StreamName,
+        pending: Vec<DeleteOnEmptyEntry>,
+    ) -> Result<(), DeleteStreamError> {
+        let should_mark_deleted = match self.streamer_client(&basin, &stream).await {
+            Ok(client) => {
+                client
+                    .terminal_trim_if_delete_on_empty_eligible(pending)
+                    .await?
+            }
+            Err(StreamerError::Storage(e)) => {
+                return Err(DeleteStreamError::Storage(e));
+            }
+            Err(StreamerError::StreamNotFound(e)) => {
+                return Err(DeleteStreamError::StreamNotFound(e));
+            }
+            Err(StreamerError::StreamDeletionPending(e)) => {
+                assert_eq!(e.basin, basin);
+                assert_eq!(e.stream, stream);
+                true
+            }
+        };
+        if should_mark_deleted {
+            self.mark_stream_deleted(basin, stream).await?;
+        }
+        Ok(())
+    }
+
+    async fn mark_stream_deleted(
+        &self,
+        basin: BasinName,
+        stream: StreamName,
+    ) -> Result<(), DeleteStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
         let mut meta = db_txn_get(&txn, &meta_key, kv::stream_meta::deser_value)

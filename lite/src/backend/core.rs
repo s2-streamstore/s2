@@ -22,6 +22,8 @@ use s2_common::{
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
+#[cfg(test)]
+use super::PersistedStreamTail;
 use super::{
     durability_notifier::DurabilityNotifier,
     error::{
@@ -100,7 +102,7 @@ impl Backend {
     ) -> Result<StreamerClient, StreamerError> {
         let stream_id = StreamId::new(&basin, &stream);
 
-        let (meta, tail_pos, fencing_token, trim_point) = tokio::try_join!(
+        let (meta, persisted_tail, fencing_token, trim_point) = tokio::try_join!(
             self.db_get(
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
@@ -123,8 +125,9 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let tail_pos = tail_pos.map(|(pos, _)| pos).unwrap_or(StreamPosition::MIN);
-        self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
+        let persisted_tail = persisted_tail.unwrap_or_default();
+
+        self.assert_no_records_following_tail(stream_id, &basin, &stream, persisted_tail.tail)
             .await?;
 
         let fencing_token = fencing_token.unwrap_or_default();
@@ -138,7 +141,7 @@ impl Backend {
             db: self.db.clone(),
             stream_id,
             config: meta.config,
-            tail_pos,
+            tail: persisted_tail,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
             append_inflight_bytes_sema: self.append_inflight_bytes_sema.clone(),
@@ -385,10 +388,10 @@ mod tests {
         );
         wb.put(
             kv::stream_tail_position::ser_key(stream_id),
-            kv::stream_tail_position::ser_value(
-                tail_pos,
-                kv::timestamp::TimestampSecs::from_secs(1),
-            ),
+            kv::stream_tail_position::ser_value(PersistedStreamTail {
+                tail: tail_pos,
+                write_timestamp: kv::timestamp::TimestampSecs::from_secs(1),
+            }),
         );
         wb.put(
             kv::stream_record_data::ser_key(stream_id, record_pos),

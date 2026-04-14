@@ -1,9 +1,8 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_ordinalize::Ordinalize;
-use s2_common::record::StreamPosition;
 
 use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
-use crate::stream_id::StreamId;
+use crate::{backend::PersistedStreamTail, stream_id::StreamId};
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
 const VALUE_LEN: usize = 8 + 8 + 4;
@@ -27,23 +26,23 @@ pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
     Ok(stream_id_bytes.into())
 }
 
-pub fn ser_value(pos: StreamPosition, write_timestamp_secs: TimestampSecs) -> Bytes {
+pub fn ser_value(persisted_tail: PersistedStreamTail) -> Bytes {
     let mut buf = BytesMut::with_capacity(VALUE_LEN);
-    buf.put_u64(pos.seq_num);
-    buf.put_u64(pos.timestamp);
-    buf.put_u32(write_timestamp_secs.as_u32());
+    buf.put_u64(persisted_tail.tail.seq_num);
+    buf.put_u64(persisted_tail.tail.timestamp);
+    buf.put_u32(persisted_tail.write_timestamp.as_u32());
     debug_assert_eq!(buf.len(), VALUE_LEN, "serialized length mismatch");
     buf.freeze()
 }
 
-pub fn deser_value(
-    mut bytes: Bytes,
-) -> Result<(StreamPosition, TimestampSecs), DeserializationError> {
+pub fn deser_value(mut bytes: Bytes) -> Result<PersistedStreamTail, DeserializationError> {
     check_exact_size(&bytes, VALUE_LEN)?;
     let seq_num = bytes.get_u64();
     let timestamp = bytes.get_u64();
-    let write_timestamp_secs = TimestampSecs::from_secs(bytes.get_u32());
-    Ok((StreamPosition { seq_num, timestamp }, write_timestamp_secs))
+    Ok(PersistedStreamTail {
+        tail: s2_common::record::StreamPosition { seq_num, timestamp },
+        write_timestamp: TimestampSecs::from_secs(bytes.get_u32()),
+    })
 }
 
 #[cfg(test)]
@@ -53,7 +52,10 @@ mod tests {
     use s2_common::record::{SeqNum, Timestamp};
 
     use crate::{
-        backend::kv::{DeserializationError, timestamp::TimestampSecs},
+        backend::{
+            PersistedStreamTail,
+            kv::{DeserializationError, timestamp::TimestampSecs},
+        },
         stream_id::StreamId,
     };
 
@@ -84,12 +86,13 @@ mod tests {
             timestamp in any::<Timestamp>(),
             write_ts_secs in any::<u32>(),
         ) {
-            let pos = s2_common::record::StreamPosition { seq_num, timestamp };
-            let write_timestamp_secs = TimestampSecs::from_secs(write_ts_secs);
-            let bytes = super::ser_value(pos, write_timestamp_secs);
+            let persisted_tail = PersistedStreamTail {
+                tail: s2_common::record::StreamPosition { seq_num, timestamp },
+                write_timestamp: TimestampSecs::from_secs(write_ts_secs),
+            };
+            let bytes = super::ser_value(persisted_tail);
             let decoded = super::deser_value(bytes).unwrap();
-            prop_assert_eq!(pos, decoded.0);
-            prop_assert_eq!(write_timestamp_secs, decoded.1);
+            prop_assert_eq!(persisted_tail, decoded);
         }
     }
 }

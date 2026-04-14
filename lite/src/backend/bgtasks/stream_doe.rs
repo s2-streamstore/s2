@@ -1,25 +1,23 @@
 use std::time::Duration;
 
-use enum_ordinalize::Ordinalize;
 use futures::{StreamExt, stream};
 use indexmap::IndexMap;
 use itertools::Itertools;
-use s2_common::{
-    record::{SeqNum, StreamPosition, Timestamp},
-    types::resources::Page,
-};
+use s2_common::types::resources::Page;
 use slatedb::{
     WriteBatch,
     config::{DurabilityLevel, PutOptions, ScanOptions, WriteOptions},
 };
 use tracing::instrument;
 
+#[cfg(test)]
+use crate::backend::PersistedStreamTail;
 use crate::{
     backend::{
         Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
         kv::{self, timestamp::TimestampSecs},
-        streamer::{doe_arm_delay, retention_age_or_zero},
+        streamer::{DeleteOnEmptyEntry, doe_arm_delay, retention_age_or_zero},
     },
     stream_id::StreamId,
 };
@@ -92,42 +90,24 @@ impl Backend {
         stream_id: StreamId,
         pending: Vec<PendingDoeEntry>,
     ) -> Result<(), StreamDeleteOnEmptyError> {
-        let should_delete = if self.stream_has_records(stream_id).await? {
-            false
-        } else {
-            self.stream_doe_is_eligible(stream_id, &pending).await?
-        };
-        if should_delete && let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? {
-            match self.delete_stream(basin, stream).await {
+        if let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? {
+            let pending = pending
+                .iter()
+                .map(|entry| DeleteOnEmptyEntry {
+                    deadline: entry.deadline,
+                    min_age: entry.min_age,
+                })
+                .collect();
+            match self
+                .delete_stream_if_doe_eligible(basin, stream, pending)
+                .await
+            {
                 Ok(()) | Err(DeleteStreamError::StreamNotFound(_)) => {}
                 Err(err) => return Err(err.into()),
             }
         }
         self.clear_doe_deadlines(stream_id, &pending).await?;
         Ok(())
-    }
-
-    async fn stream_doe_is_eligible(
-        &self,
-        stream_id: StreamId,
-        pending: &[PendingDoeEntry],
-    ) -> Result<bool, StorageError> {
-        let Some((_, write_timestamp)) = self
-            .db_get(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::deser_value,
-            )
-            .await?
-        else {
-            return Ok(false);
-        };
-        let write_timestamp = u64::from(write_timestamp.as_u32());
-        Ok(pending.iter().any(|entry| {
-            let deadline_secs = u64::from(entry.deadline.as_u32());
-            write_timestamp
-                .checked_add(entry.min_age.as_secs())
-                .is_some_and(|sum| sum <= deadline_secs)
-        }))
     }
 
     #[instrument(ret, err, skip(self, pending), fields(num_deadlines = pending.len()))]
@@ -145,34 +125,6 @@ impl Backend {
         };
         self.db.write_with_options(batch, &WRITE_OPTS).await?;
         Ok(())
-    }
-
-    #[instrument(ret, err, skip(self))]
-    async fn stream_has_records(&self, stream_id: StreamId) -> Result<bool, StorageError> {
-        let start_key = kv::stream_record_timestamp::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: SeqNum::MIN,
-                timestamp: Timestamp::MIN,
-            },
-        );
-        // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
-        static SCAN_OPTS: ScanOptions = ScanOptions {
-            durability_filter: DurabilityLevel::Memory,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-        };
-        let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
-        let Some(kv) = it.next().await? else {
-            return Ok(false);
-        };
-        if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp.ordinal()) {
-            return Ok(false);
-        }
-        let (candidate_stream_id, _pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
-        Ok(candidate_stream_id == stream_id)
     }
 
     pub(super) async fn arm_doe_maybe(&self, stream_id: StreamId) -> Result<(), StorageError> {
@@ -215,16 +167,18 @@ impl Backend {
 mod tests {
     use std::{str::FromStr, time::Duration};
 
+    use bytes::Bytes;
+    use futures::poll;
     use s2_common::{
         maybe::Maybe,
-        record::StreamPosition,
+        record::{Metered, Record, StreamPosition},
         types::{
             basin::BasinName,
             config::{
                 DeleteOnEmptyReconfiguration, OptionalStreamConfig, RetentionPolicy,
                 StreamReconfiguration,
             },
-            stream::StreamName,
+            stream::{AppendInput, AppendRecordBatch, AppendRecordParts, StreamName},
         },
     };
     use slatedb::config::{DurabilityLevel, ScanOptions};
@@ -284,6 +238,23 @@ mod tests {
         stream_id
     }
 
+    fn append_input(body: &[u8]) -> AppendInput {
+        let record = Record::try_from_parts(vec![], Bytes::copy_from_slice(body)).unwrap();
+        let metered: Metered<Record> = record.into();
+        let append_record = AppendRecordParts {
+            timestamp: None,
+            record: metered,
+        }
+        .try_into()
+        .unwrap();
+        let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
+        AppendInput {
+            records: batch,
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
+
     async fn list_doe_entries(backend: &Backend) -> Vec<(TimestampSecs, StreamId, Duration)> {
         static SCAN_OPTS: ScanOptions = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
@@ -322,13 +293,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition {
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition {
                         seq_num: 1,
                         timestamp: 1234,
                     },
                     write_timestamp,
-                ),
+                }),
             )
             .await
             .unwrap();
@@ -380,7 +351,10 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition::MIN, write_timestamp),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition::MIN,
+                    write_timestamp,
+                }),
             )
             .await
             .unwrap();
@@ -430,13 +404,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition {
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition {
                         seq_num: 1,
                         timestamp: 1234,
                     },
                     write_timestamp,
-                ),
+                }),
             )
             .await
             .unwrap();
@@ -626,13 +600,13 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition {
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition {
                         seq_num: 1,
                         timestamp: 1234,
                     },
-                    TimestampSecs::from_secs(1_050),
-                ),
+                    write_timestamp: TimestampSecs::from_secs(1_050),
+                }),
             )
             .await
             .unwrap();
@@ -664,6 +638,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_doe_skips_append_already_serialized_in_streamer() {
+        let backend = test_backend().await;
+        let basin = BasinName::from_str("doe-basin-race").unwrap();
+        let stream = StreamName::from_str("doe-stream-race").unwrap();
+        let stream_id = seed_stream(&backend, &basin, &stream).await;
+        let deadline = TimestampSecs::from_secs(10_000);
+        let write_timestamp = TimestampSecs::from_secs(9_000);
+
+        backend
+            .db
+            .put(
+                kv::stream_tail_position::ser_key(stream_id),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: StreamPosition::MIN,
+                    write_timestamp,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let client = backend.streamer_client(&basin, &stream).await.unwrap();
+        let permit = client.append_permit(append_input(b"live")).await.unwrap();
+        let mut append_fut = std::pin::pin!(permit.submit());
+        assert!(poll!(append_fut.as_mut()).is_pending());
+
+        backend
+            .process_stream_doe(
+                stream_id,
+                vec![super::PendingDoeEntry {
+                    deadline,
+                    min_age: MIN_AGE,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let ack = append_fut.await.unwrap();
+        let meta = backend
+            .db
+            .get(kv::stream_meta::ser_key(&basin, &stream))
+            .await
+            .unwrap()
+            .expect("stream meta should remain");
+        let decoded = kv::stream_meta::deser_value(meta).unwrap();
+        assert!(decoded.deleted_at.is_none());
+
+        let timestamp_key = backend
+            .db
+            .get(kv::stream_record_timestamp::ser_key(stream_id, ack.start))
+            .await
+            .unwrap();
+        assert!(timestamp_key.is_some());
+    }
+
+    #[tokio::test]
     async fn reconfigure_enabling_doe_on_nonempty_retained_stream_arms_future_deadline() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-enable").unwrap();
@@ -687,7 +716,10 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(pos, TimestampSecs::now()),
+                kv::stream_tail_position::ser_value(PersistedStreamTail {
+                    tail: pos,
+                    write_timestamp: TimestampSecs::now(),
+                }),
             )
             .await
             .unwrap();
