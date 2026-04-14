@@ -429,7 +429,11 @@ impl S2Stream {
                 self.encryption.as_ref(),
             )
             .await?;
-        Ok(ReadBatch::from_api(batch, input.ignore_command_records))
+        let mut batch = ReadBatch::from_api(batch);
+        if input.ignore_command_records {
+            batch.records.retain(|r| !r.is_command_record());
+        }
+        Ok(batch)
     }
 
     /// Create an append session for submitting [`AppendInput`]s.

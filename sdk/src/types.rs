@@ -3587,17 +3587,9 @@ pub struct ReadBatch {
 }
 
 impl ReadBatch {
-    pub(crate) fn from_api(
-        batch: api::stream::proto::ReadBatch,
-        ignore_command_records: bool,
-    ) -> Self {
+    pub(crate) fn from_api(batch: api::stream::proto::ReadBatch) -> Self {
         Self {
-            records: batch
-                .records
-                .into_iter()
-                .map(Into::into)
-                .filter(|sr: &SequencedRecord| !ignore_command_records || !sr.is_command_record())
-                .collect(),
+            records: batch.records.into_iter().map(Into::into).collect(),
             tail: batch.tail.map(Into::into),
         }
     }

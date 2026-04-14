@@ -60,7 +60,6 @@ pub async fn read_session(
             encryption.clone(),
             start.clone(),
             end.clone(),
-            ignore_command_records,
         )
         .await
         {
@@ -89,7 +88,6 @@ pub async fn read_session(
                     encryption.clone(),
                     start.clone(),
                     end.clone(),
-                    ignore_command_records,
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
@@ -108,7 +106,7 @@ pub async fn read_session(
                 .next()
                 .await
             {
-                Some(Ok(batch)) => {
+                Some(Ok(mut batch)) => {
                     if retry_backoff.used() > 0 {
                         retry_backoff.reset();
                     }
@@ -134,7 +132,13 @@ pub async fn read_session(
                         )
                     }
 
-                    yield Ok(batch);
+                    if ignore_command_records {
+                        batch.records.retain(|r| !r.is_command_record());
+                    }
+
+                    if !batch.records.is_empty() {
+                        yield Ok(batch);
+                    }
                 }
                 Some(Err(err)) => {
                     batches = None;
@@ -156,7 +160,6 @@ async fn session_inner(
     encryption: Option<EncryptionSpec>,
     start: ReadStart,
     end: ReadEnd,
-    ignore_command_records: bool,
 ) -> Result<Streaming<ReadBatch>, ReadSessionError> {
     let mut batches = client
         .read_session(&name, start, end, encryption.as_ref())
@@ -165,7 +168,7 @@ async fn session_inner(
         loop {
             match timeout(Duration::from_secs(20), batches.next()).await {
                 Ok(Some(batch)) => {
-                    let batch = ReadBatch::from_api(batch?, ignore_command_records);
+                    let batch = ReadBatch::from_api(batch?);
                     if !batch.records.is_empty() {
                         yield batch;
                     }
