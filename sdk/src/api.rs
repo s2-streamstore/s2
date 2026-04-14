@@ -11,7 +11,6 @@ use http::{
 use prost::{self, Message};
 #[cfg(feature = "_hidden")]
 use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
-use s2_common::encryption::S2_ENCRYPTION_HEADER;
 use s2_api::v1::{
     access::{
         AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
@@ -29,6 +28,7 @@ use s2_api::v1::{
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
 };
+use s2_common::encryption::S2_ENCRYPTION_HEADER;
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
@@ -39,8 +39,8 @@ use crate::{
     frame_signal::FrameSignal,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
-        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression,
-        EncryptionSpec, RetryConfig, S2Config, S2Endpoints, StreamName,
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionSpec,
+        RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
 
@@ -473,6 +473,11 @@ impl BasinClient {
                     }
                 }
             }
+            if !buffer.is_empty() {
+                Err(ClientError::UnexpectedEof(
+                    format!("not all bytes were consumed from the buffer, {} remaining", buffer.len()),
+                ))?;
+            }
         }))
     }
 
@@ -526,6 +531,11 @@ impl BasinClient {
                         Err(err) => Err(err)?,
                     }
                 }
+            }
+            if !buffer.is_empty() {
+                Err(ClientError::UnexpectedEof(
+                    format!("not all bytes were consumed from the buffer, {} remaining", buffer.len()),
+                ))?;
             }
         }))
     }
@@ -1197,7 +1207,9 @@ mod tests {
         // Server errors that do NOT guarantee no mutation.
         assert!(!server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal").has_no_side_effects());
         assert!(!server_error(StatusCode::BAD_GATEWAY, "other").has_no_side_effects());
-        assert!(!server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects());
+        assert!(
+            !server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects()
+        );
     }
 
     #[test]
