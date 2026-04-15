@@ -175,7 +175,7 @@ pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
         .unwrap_or(sdk::types::Compression::None);
 
     let mut sdk_config = S2Config::new(access_token)
-        .with_user_agent("s2-cli")
+        .with_user_agent(format!("s2-cli/{}", env!("CARGO_PKG_VERSION")))
         .expect("valid user agent")
         .with_request_timeout(Duration::from_secs(30))
         .with_compression(compression);
