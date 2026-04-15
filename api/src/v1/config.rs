@@ -300,10 +300,7 @@ pub struct EncryptionConfig {
 impl EncryptionConfig {
     pub fn to_opt(config: types::config::OptionalEncryptionConfig) -> Option<Self> {
         let config = EncryptionConfig {
-            allowed_modes: config
-                .allowed_modes
-                .map(|modes| modes.into_iter().map(Into::into).collect())
-                .unwrap_or_default(),
+            allowed_modes: config.allowed_modes.into_iter().map(Into::into).collect(),
         };
         if config == Self::default() {
             None
@@ -324,17 +321,11 @@ impl From<types::config::EncryptionConfig> for EncryptionConfig {
 impl From<EncryptionConfig> for types::config::OptionalEncryptionConfig {
     fn from(value: EncryptionConfig) -> Self {
         Self {
-            allowed_modes: if value.allowed_modes.is_empty() {
-                None
-            } else {
-                Some(
-                    value
-                        .allowed_modes
-                        .into_iter()
-                        .map(encryption::EncryptionMode::from)
-                        .collect(),
-                )
-            },
+            allowed_modes: value
+                .allowed_modes
+                .into_iter()
+                .map(encryption::EncryptionMode::from)
+                .collect(),
         }
     }
 }
@@ -833,7 +824,7 @@ mod tests {
             proptest::option::of(gen_timestamping_mode()),
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<u64>()),
-            proptest::option::of(gen_internal_encryption_modes()),
+            gen_internal_encryption_modes(),
         )
             .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe, encryption)| {
                 types::config::OptionalStreamConfig {
@@ -930,11 +921,13 @@ mod tests {
             );
             prop_assert_eq!(
                 merged.encryption.allowed_modes,
-                stream
-                    .encryption
-                    .allowed_modes
-                    .or(basin.encryption.allowed_modes)
-                    .unwrap_or(types::config::DEFAULT_ALLOWED_ENCRYPTION_MODES)
+                if !stream.encryption.allowed_modes.is_empty() {
+                    stream.encryption.allowed_modes
+                } else if !basin.encryption.allowed_modes.is_empty() {
+                    basin.encryption.allowed_modes
+                } else {
+                    types::config::DEFAULT_ALLOWED_ENCRYPTION_MODES
+                }
             );
         }
 
@@ -967,7 +960,7 @@ mod tests {
             prop_assert!(result.timestamping.mode.is_none());
             prop_assert!(result.timestamping.uncapped.is_none());
             prop_assert!(result.delete_on_empty.min_age.is_none());
-            prop_assert!(result.encryption.allowed_modes.is_none());
+            prop_assert!(result.encryption.allowed_modes.is_empty());
         }
 
         #[test]
@@ -1164,8 +1157,8 @@ mod tests {
             "delete_on_empty.min_age should be None"
         );
         assert!(
-            internal.encryption.allowed_modes.is_none(),
-            "encryption.allowed_modes should be None"
+            internal.encryption.allowed_modes.is_empty(),
+            "encryption.allowed_modes should be empty"
         );
     }
 }

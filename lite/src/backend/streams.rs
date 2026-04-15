@@ -404,18 +404,26 @@ impl Backend {
 }
 
 fn validate_encryption_modes_subset(
-    stream_modes: &Option<enumset::EnumSet<EncryptionMode>>,
-    basin_modes: Option<enumset::EnumSet<EncryptionMode>>,
+    stream_modes: &enumset::EnumSet<EncryptionMode>,
+    basin_modes: enumset::EnumSet<EncryptionMode>,
 ) -> Result<(), ValidationError> {
-    if let Some(stream_modes) = stream_modes {
-        let basin_modes = basin_modes.unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
-        if !stream_modes.is_subset(basin_modes) {
-            return Err(ValidationError(
-                "stream encryption_modes must be a subset of basin default encryption_modes"
-                    .to_owned(),
-            ));
-        }
+    if stream_modes.is_empty() {
+        return Ok(());
     }
+
+    let basin_modes = if basin_modes.is_empty() {
+        DEFAULT_ALLOWED_ENCRYPTION_MODES
+    } else {
+        basin_modes
+    };
+
+    if !stream_modes.is_subset(basin_modes) {
+        return Err(ValidationError(
+            "stream encryption modes must be a subset of the default encryption modes for the basin"
+                .to_owned(),
+        ));
+    }
+
     Ok(())
 }
 

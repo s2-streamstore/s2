@@ -93,10 +93,8 @@ async fn test_create_stream_defaults_encryption_to_plaintext_only() {
         .await
         .expect("Failed to fetch stream config");
 
-    assert_eq!(
-        config.encryption.allowed_modes,
-        Some([EncryptionMode::Plain].into())
-    );
+    let expected_modes: enumset::EnumSet<EncryptionMode> = [EncryptionMode::Plain].into();
+    assert_eq!(config.encryption.allowed_modes, expected_modes);
 }
 
 #[tokio::test]
@@ -158,7 +156,7 @@ async fn test_reconfigure_stream_empty_encryption_uses_basin_defaults() {
     let basin_config = BasinConfig {
         default_stream_config: OptionalStreamConfig {
             encryption: OptionalEncryptionConfig {
-                allowed_modes: Some([EncryptionMode::Plain, EncryptionMode::Aegis256].into()),
+                allowed_modes: [EncryptionMode::Plain, EncryptionMode::Aegis256].into(),
             },
             ..Default::default()
         },
@@ -181,7 +179,7 @@ async fn test_reconfigure_stream_empty_encryption_uses_basin_defaults() {
             stream_name.clone(),
             OptionalStreamConfig {
                 encryption: OptionalEncryptionConfig {
-                    allowed_modes: Some([EncryptionMode::Plain].into()),
+                    allowed_modes: [EncryptionMode::Plain].into(),
                 },
                 ..Default::default()
             },
@@ -204,7 +202,8 @@ async fn test_reconfigure_stream_empty_encryption_uses_basin_defaults() {
         .await
         .expect("Failed to reconfigure stream");
 
-    let expected_modes = Some([EncryptionMode::Plain, EncryptionMode::Aegis256].into());
+    let expected_modes: enumset::EnumSet<EncryptionMode> =
+        [EncryptionMode::Plain, EncryptionMode::Aegis256].into();
     assert_eq!(updated.encryption.allowed_modes, expected_modes);
 
     let fetched = backend

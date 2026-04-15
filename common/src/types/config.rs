@@ -250,22 +250,25 @@ impl From<OptionalDeleteOnEmptyConfig> for DeleteOnEmptyReconfiguration {
 
 #[derive(Debug, Clone, Default)]
 pub struct OptionalEncryptionConfig {
-    pub allowed_modes: Option<EnumSet<EncryptionMode>>,
+    pub allowed_modes: EnumSet<EncryptionMode>,
 }
 
 impl OptionalEncryptionConfig {
     pub fn reconfigure(mut self, reconfiguration: EncryptionReconfiguration) -> Self {
         if let Maybe::Specified(allowed_modes) = reconfiguration.allowed_modes {
-            self.allowed_modes = (!allowed_modes.is_empty()).then_some(allowed_modes);
+            self.allowed_modes = allowed_modes;
         }
         self
     }
 
     pub fn merge(self, basin_defaults: Self) -> EncryptionConfig {
-        let allowed_modes = self
-            .allowed_modes
-            .or(basin_defaults.allowed_modes)
-            .unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
+        let allowed_modes = if !self.allowed_modes.is_empty() {
+            self.allowed_modes
+        } else if !basin_defaults.allowed_modes.is_empty() {
+            basin_defaults.allowed_modes
+        } else {
+            DEFAULT_ALLOWED_ENCRYPTION_MODES
+        };
         EncryptionConfig { allowed_modes }
     }
 }
@@ -273,9 +276,7 @@ impl OptionalEncryptionConfig {
 impl From<OptionalEncryptionConfig> for EncryptionConfig {
     fn from(value: OptionalEncryptionConfig) -> Self {
         Self {
-            allowed_modes: value
-                .allowed_modes
-                .unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES),
+            allowed_modes: value.allowed_modes,
         }
     }
 }
@@ -283,7 +284,7 @@ impl From<OptionalEncryptionConfig> for EncryptionConfig {
 impl From<EncryptionConfig> for OptionalEncryptionConfig {
     fn from(value: EncryptionConfig) -> Self {
         Self {
-            allowed_modes: Some(value.allowed_modes),
+            allowed_modes: value.allowed_modes,
         }
     }
 }
@@ -291,7 +292,7 @@ impl From<EncryptionConfig> for OptionalEncryptionConfig {
 impl From<OptionalEncryptionConfig> for EncryptionReconfiguration {
     fn from(value: OptionalEncryptionConfig) -> Self {
         Self {
-            allowed_modes: Maybe::Specified(value.allowed_modes.unwrap_or_default()),
+            allowed_modes: Maybe::Specified(value.allowed_modes),
         }
     }
 }

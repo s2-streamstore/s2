@@ -503,14 +503,12 @@ mod tests {
         use s2_common::types::config::OptionalEncryptionConfig;
         OptionalStreamConfig {
             encryption: OptionalEncryptionConfig {
-                allowed_modes: Some(
-                    [
-                        EncryptionMode::Plain,
-                        EncryptionMode::Aegis256,
-                        EncryptionMode::Aes256Gcm,
-                    ]
-                    .into(),
-                ),
+                allowed_modes: [
+                    EncryptionMode::Plain,
+                    EncryptionMode::Aegis256,
+                    EncryptionMode::Aes256Gcm,
+                ]
+                .into(),
             },
             ..Default::default()
         }

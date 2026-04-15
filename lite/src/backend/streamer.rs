@@ -234,11 +234,11 @@ impl Streamer {
                 match_seq_num,
             })?;
         }
-        let allowed_encryption_modes = self
-            .config
-            .encryption
-            .allowed_modes
-            .unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
+        let allowed_encryption_modes = if self.config.encryption.allowed_modes.is_empty() {
+            DEFAULT_ALLOWED_ENCRYPTION_MODES
+        } else {
+            self.config.encryption.allowed_modes
+        };
         sequenced_records(
             records,
             first_seq_num,

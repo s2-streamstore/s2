@@ -50,14 +50,12 @@ pub fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
     use s2_common::types::config::OptionalEncryptionConfig;
     OptionalStreamConfig {
         encryption: OptionalEncryptionConfig {
-            allowed_modes: Some(
-                [
-                    EncryptionMode::Plain,
-                    EncryptionMode::Aegis256,
-                    EncryptionMode::Aes256Gcm,
-                ]
-                .into(),
-            ),
+            allowed_modes: [
+                EncryptionMode::Plain,
+                EncryptionMode::Aegis256,
+                EncryptionMode::Aes256Gcm,
+            ]
+            .into(),
         },
         ..Default::default()
     }
@@ -74,7 +72,7 @@ pub fn aegis_only_encryption_stream_config() -> OptionalStreamConfig {
     use s2_common::types::config::OptionalEncryptionConfig;
     OptionalStreamConfig {
         encryption: OptionalEncryptionConfig {
-            allowed_modes: Some([EncryptionMode::Aegis256].into()),
+            allowed_modes: [EncryptionMode::Aegis256].into(),
         },
         ..Default::default()
     }
