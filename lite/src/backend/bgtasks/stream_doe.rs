@@ -9,7 +9,7 @@ use s2_common::{
     types::resources::Page,
 };
 use slatedb::{
-    WriteBatch,
+    IterationOrder, WriteBatch,
     config::{DurabilityLevel, PutOptions, ScanOptions, WriteOptions},
 };
 use tracing::instrument;
@@ -62,6 +62,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self
             .db
@@ -163,6 +164,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
         let Some(kv) = it.next().await? else {
@@ -227,7 +229,10 @@ mod tests {
             stream::StreamName,
         },
     };
-    use slatedb::config::{DurabilityLevel, ScanOptions};
+    use slatedb::{
+        IterationOrder,
+        config::{DurabilityLevel, ScanOptions},
+    };
     use time::OffsetDateTime;
 
     use super::{super::tests::test_backend, TimestampSecs};
@@ -291,6 +296,7 @@ mod tests {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = backend
             .db

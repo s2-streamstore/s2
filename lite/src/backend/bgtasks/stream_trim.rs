@@ -7,7 +7,7 @@ use s2_common::{
     types::resources::Page,
 };
 use slatedb::{
-    WriteBatch,
+    IterationOrder, WriteBatch,
     config::{DurabilityLevel, ScanOptions, WriteOptions},
 };
 use tracing::instrument;
@@ -48,6 +48,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self
             .db
@@ -97,6 +98,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
         let mut batch = WriteBatch::new();

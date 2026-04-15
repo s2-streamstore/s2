@@ -8,7 +8,7 @@ use s2_common::{
     },
 };
 use slatedb::{
-    IsolationLevel,
+    IsolationLevel, IterationOrder,
     config::{DurabilityLevel, ScanOptions, WriteOptions},
 };
 use time::OffsetDateTime;
@@ -44,6 +44,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self.db.scan_with_options(key_range, &SCAN_OPTS).await?;
 

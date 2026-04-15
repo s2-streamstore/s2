@@ -8,8 +8,11 @@ use super::Backend;
 use crate::backend::{error::StorageError, kv};
 
 impl Backend {
-    pub fn db_status(&self) -> Result<(), slatedb::Error> {
-        self.db.status()
+    pub fn db_status(&self) -> Result<(), slatedb::CloseReason> {
+        match self.db.status().close_reason {
+            None => Ok(()),
+            Some(reason) => Err(reason),
+        }
     }
 
     pub(super) async fn db_get<K: AsRef<[u8]> + Send, V>(

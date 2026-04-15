@@ -12,7 +12,10 @@ use s2_common::{
         },
     },
 };
-use slatedb::config::{DurabilityLevel, ScanOptions};
+use slatedb::{
+    IterationOrder,
+    config::{DurabilityLevel, ScanOptions},
+};
 use tokio::{sync::broadcast, time::Instant};
 
 use super::Backend;
@@ -131,6 +134,7 @@ impl Backend {
                         read_ahead_bytes: 1024 * 1024,
                         cache_blocks: true,
                         max_fetch_tasks: 8,
+                        order: IterationOrder::Ascending,
                     };
                     let mut it = db
                         .scan_with_options(start_key..end_key, &SCAN_OPTS)
@@ -273,6 +277,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self
             .db

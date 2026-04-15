@@ -19,7 +19,10 @@ use s2_common::{
         stream::StreamName,
     },
 };
-use slatedb::config::{DurabilityLevel, ScanOptions};
+use slatedb::{
+    IterationOrder,
+    config::{DurabilityLevel, ScanOptions},
+};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
@@ -172,6 +175,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
         let Some(kv) = it.next().await? else {

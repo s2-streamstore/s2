@@ -5,7 +5,7 @@ use s2_common::types::{
     stream::{ListStreamsRequest, StreamNamePrefix, StreamNameStartAfter},
 };
 use slatedb::{
-    WriteBatch,
+    IterationOrder, WriteBatch,
     config::{DurabilityLevel, ScanOptions, WriteOptions},
 };
 use tracing::instrument;
@@ -47,6 +47,7 @@ impl Backend {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         };
         let mut it = self
             .db
