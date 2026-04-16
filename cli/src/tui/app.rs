@@ -2794,7 +2794,7 @@ impl App {
                         KeyCode::Delete if *cursor < field.len() => {
                             field.remove(*cursor);
                         }
-                        KeyCode::Char(c) if (!digits_only || c.is_ascii_digit()) => {
+                        KeyCode::Char(c) if !digits_only || c.is_ascii_digit() => {
                             if *selected == 6 && !c.is_ascii_alphanumeric() {
                                 // delete_on_empty_min_age only accepts alphanumeric
                             } else {
@@ -3140,32 +3140,28 @@ impl App {
                     KeyCode::Down | KeyCode::Char('j') if *selected < 2 => {
                         *selected += 1;
                     }
-                    KeyCode::Enter => {
-                        match *selected {
-                            0 => {
-                                *cursor = new_token.len();
-                                *editing = true;
-                            }
-                            1 => {
-                                *cursor = current_token.len();
-                                *editing = true;
-                            }
-                            2
-                                // Submit fence
-                                if !new_token.is_empty() => {
-                                    let b = basin.clone();
-                                    let s = stream.clone();
-                                    let nt = new_token.clone();
-                                    let ct = if current_token.is_empty() {
-                                        None
-                                    } else {
-                                        Some(current_token.clone())
-                                    };
-                                    self.fence_stream(b, s, nt, ct, tx.clone());
-                                }
-                            _ => {}
+                    KeyCode::Enter => match *selected {
+                        0 => {
+                            *cursor = new_token.len();
+                            *editing = true;
                         }
-                    }
+                        1 => {
+                            *cursor = current_token.len();
+                            *editing = true;
+                        }
+                        2 if !new_token.is_empty() => {
+                            let b = basin.clone();
+                            let s = stream.clone();
+                            let nt = new_token.clone();
+                            let ct = if current_token.is_empty() {
+                                None
+                            } else {
+                                Some(current_token.clone())
+                            };
+                            self.fence_stream(b, s, nt, ct, tx.clone());
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -3208,7 +3204,7 @@ impl App {
                         KeyCode::Delete if *cursor < field.len() => {
                             field.remove(*cursor);
                         }
-                        KeyCode::Char(c) if (!digits_only || c.is_ascii_digit()) => {
+                        KeyCode::Char(c) if !digits_only || c.is_ascii_digit() => {
                             field.insert(*cursor, c);
                             *cursor += 1;
                         }
@@ -3329,35 +3325,29 @@ impl App {
                                 f.remove(*cursor);
                             }
                         }
-                        KeyCode::Char(c) => {
-                            match *selected {
-                                0
-                                    // Token ID: letters, numbers, hyphens, underscores
-                                    if (c.is_ascii_alphanumeric() || c == '-' || c == '_') => {
-                                        id.insert(*cursor, c);
-                                        *cursor += 1;
-                                    }
-                                2
-                                    // Custom expiry: e.g., "30d", "1w", "24h"
-                                    if c.is_ascii_alphanumeric() => {
-                                        expiry_custom.insert(*cursor, c);
-                                        *cursor += 1;
-                                    }
-                                4 => {
-                                    basins_value.insert(*cursor, c);
-                                    *cursor += 1;
-                                }
-                                6 => {
-                                    streams_value.insert(*cursor, c);
-                                    *cursor += 1;
-                                }
-                                8 => {
-                                    tokens_value.insert(*cursor, c);
-                                    *cursor += 1;
-                                }
-                                _ => {}
+                        KeyCode::Char(c) => match *selected {
+                            0 if c.is_ascii_alphanumeric() || c == '-' || c == '_' => {
+                                id.insert(*cursor, c);
+                                *cursor += 1;
                             }
-                        }
+                            2 if c.is_ascii_alphanumeric() => {
+                                expiry_custom.insert(*cursor, c);
+                                *cursor += 1;
+                            }
+                            4 => {
+                                basins_value.insert(*cursor, c);
+                                *cursor += 1;
+                            }
+                            6 => {
+                                streams_value.insert(*cursor, c);
+                                *cursor += 1;
+                            }
+                            8 => {
+                                tokens_value.insert(*cursor, c);
+                                *cursor += 1;
+                            }
+                            _ => {}
+                        },
                         _ => {}
                     }
                     return;
