@@ -758,10 +758,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let info = response_json(response, "read error body").await;
         assert_eq!(info["code"], "decryption_failed");
-        assert!(info["message"]
-            .as_str()
-            .expect("error message string")
-            .contains("record decryption failed"));
+        assert!(
+            info["message"]
+                .as_str()
+                .expect("error message string")
+                .contains("record decryption failed")
+        );
     }
 
     #[tokio::test]
