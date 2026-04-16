@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unary_read_with_wrong_key_returns_invalid_error() {
+    async fn unary_read_with_wrong_key_returns_decryption_failed_error() {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let wrong_key = EncryptionSpec::aegis256([0x24; 32]);
         let (app, backend, basin, stream) = setup_app_with_config(
@@ -755,9 +755,13 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let info = response_json(response, "read error body").await;
-        assert_invalid_error(&info, "record decryption failed");
+        assert_eq!(info["code"], "decryption_failed");
+        assert!(info["message"]
+            .as_str()
+            .expect("error message string")
+            .contains("record decryption failed"));
     }
 
     #[tokio::test]

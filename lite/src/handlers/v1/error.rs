@@ -97,9 +97,11 @@ impl ServiceError {
             },
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
             ServiceError::RecordDecryption(e) => match e {
-                RecordDecryptionError::ModeMismatch { .. }
-                | RecordDecryptionError::AuthenticationFailed => {
+                RecordDecryptionError::ModeMismatch { .. } => {
                     standard(ErrorCode::Invalid, e.to_string())
+                }
+                RecordDecryptionError::AuthenticationFailed => {
+                    standard(ErrorCode::DecryptionFailed, e.to_string())
                 }
                 RecordDecryptionError::MalformedEncryptedRecord
                 | RecordDecryptionError::MeteredSizeMismatch { .. }
