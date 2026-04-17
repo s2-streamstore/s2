@@ -14,12 +14,8 @@ pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-en
 
 type SecretKeyMaterial = Arc<SecretBox<[u8]>>;
 
-const CURRENT_ENCRYPTION_KEY_LEN: usize = 32;
-const MAX_ENCRYPTION_KEY_HEADER_LEN: usize = base64_encoded_len(CURRENT_ENCRYPTION_KEY_LEN);
-
-const fn base64_encoded_len(bytes_len: usize) -> usize {
-    ((bytes_len + 2) / 3) * 4
-}
+// 32 bytes incl padding
+const MAX_ENCRYPTION_KEY_HEADER_LEN: usize = 44;
 
 /// Encryption algorithm.
 #[derive(
@@ -54,17 +50,16 @@ pub enum EncryptionAlgorithm {
 pub struct EncryptionKey(SecretKeyMaterial);
 
 impl EncryptionKey {
-    pub fn new(key: [u8; 32]) -> Self {
-        Self::from_bytes(Box::new(key)).expect("32-byte encryption key should fit header length")
+    pub fn new<const N: usize>(key: [u8; N]) -> Self {
+        Self::from_bytes(Box::new(key))
     }
 
     pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionKeyError> {
         parse_encryption_key_material(key_b64).map(Self)
     }
 
-    pub fn from_bytes(bytes: Box<[u8]>) -> Result<Self, EncryptionKeyError> {
-        validate_key_material_len(base64_encoded_len(bytes.len()))?;
-        Ok(Self(Arc::new(SecretBox::new(bytes))))
+    pub fn from_bytes(bytes: Box<[u8]>) -> Self {
+        Self(Arc::new(SecretBox::new(bytes)))
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -160,7 +155,12 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
     use base64ct::{Base64, Encoding};
     use secrecy::zeroize::Zeroize;
 
-    validate_key_material_len(key_b64.len())?;
+    if key_b64.len() > MAX_ENCRYPTION_KEY_HEADER_LEN {
+        return Err(EncryptionKeyError::TooLong {
+            max: MAX_ENCRYPTION_KEY_HEADER_LEN,
+            actual: key_b64.len(),
+        });
+    }
 
     let mut key = match Base64::decode_vec(key_b64) {
         Ok(decoded) => decoded,
@@ -175,17 +175,6 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
     }
 
     Ok(Arc::new(SecretBox::new(key.into_boxed_slice())))
-}
-
-fn validate_key_material_len(len: usize) -> Result<(), EncryptionKeyError> {
-    if len > MAX_ENCRYPTION_KEY_HEADER_LEN {
-        return Err(EncryptionKeyError::TooLong {
-            max: MAX_ENCRYPTION_KEY_HEADER_LEN,
-            actual: len,
-        });
-    }
-
-    Ok(())
 }
 
 fn validate_key_length(
@@ -289,7 +278,7 @@ mod tests {
     fn resolve_encrypted_validates_key_length_per_algorithm() {
         let err = EncryptionSpec::resolve(
             Some(EncryptionAlgorithm::Aegis256),
-            Some(EncryptionKey::from_bytes(vec![0x42; 4].into_boxed_slice()).unwrap()),
+            Some(EncryptionKey::from_bytes(vec![0x42; 4].into_boxed_slice())),
         )
         .unwrap_err();
         assert_eq!(
@@ -311,18 +300,6 @@ mod tests {
             EncryptionKeyError::TooLong {
                 max: MAX_ENCRYPTION_KEY_HEADER_LEN,
                 actual: MAX_ENCRYPTION_KEY_HEADER_LEN + 1,
-            }
-        );
-    }
-
-    #[test]
-    fn from_bytes_rejects_key_material_that_would_overflow_header_limit() {
-        let result = EncryptionKey::from_bytes(vec![0x42; 34].into_boxed_slice());
-        assert_eq!(
-            result.unwrap_err(),
-            EncryptionKeyError::TooLong {
-                max: MAX_ENCRYPTION_KEY_HEADER_LEN,
-                actual: base64_encoded_len(34),
             }
         );
     }
