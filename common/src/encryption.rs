@@ -12,7 +12,6 @@ use crate::http::ParseableHeader;
 
 pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-encryption-key");
 
-type SecretKey = Arc<SecretBox<[u8; 32]>>;
 type SecretKeyMaterial = Arc<SecretBox<[u8]>>;
 
 /// Encryption algorithm.
@@ -98,17 +97,26 @@ pub enum EncryptionResolutionError {
 }
 
 /// Resolved stream encryption after combining stream metadata with the request key.
-#[derive(Clone, Default)]
-pub struct EncryptionSpec {
-    algorithm: Option<EncryptionAlgorithm>,
-    key: Option<SecretKey>,
+#[derive(Clone)]
+pub enum EncryptionSpec {
+    Plaintext,
+    Aegis256(EncryptionKey),
+    Aes256Gcm(EncryptionKey),
+}
+
+impl Default for EncryptionSpec {
+    fn default() -> Self {
+        Self::Plaintext
+    }
 }
 
 impl std::fmt::Debug for EncryptionSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EncryptionSpec")
-            .field("algorithm", &self.algorithm)
-            .finish()
+        match self {
+            Self::Plaintext => f.write_str("EncryptionSpec::Plaintext"),
+            Self::Aegis256(_) => f.write_str("EncryptionSpec::Aegis256(..)"),
+            Self::Aes256Gcm(_) => f.write_str("EncryptionSpec::Aes256Gcm(..)"),
+        }
     }
 }
 
@@ -123,52 +131,44 @@ impl EncryptionSpec {
     ) -> Result<Self, EncryptionResolutionError> {
         match (algorithm, key) {
             (None, _) => Ok(Self::plain()),
-            (Some(EncryptionAlgorithm::Aegis256), Some(key)) => Ok(Self::with_secret_key(
-                EncryptionAlgorithm::Aegis256,
-                resolve_secret_key(EncryptionAlgorithm::Aegis256, key)?,
-            )),
-            (Some(EncryptionAlgorithm::Aes256Gcm), Some(key)) => Ok(Self::with_secret_key(
-                EncryptionAlgorithm::Aes256Gcm,
-                resolve_secret_key(EncryptionAlgorithm::Aes256Gcm, key)?,
-            )),
+            (Some(EncryptionAlgorithm::Aegis256), Some(key)) => {
+                validate_key_length(EncryptionAlgorithm::Aegis256, &key)?;
+                Ok(Self::Aegis256(key))
+            }
+            (Some(EncryptionAlgorithm::Aes256Gcm), Some(key)) => {
+                validate_key_length(EncryptionAlgorithm::Aes256Gcm, &key)?;
+                Ok(Self::Aes256Gcm(key))
+            }
             (Some(algorithm), None) => Err(EncryptionResolutionError::MissingKey { algorithm }),
         }
     }
 
     pub fn aegis256(key: [u8; 32]) -> Self {
-        Self::with_secret_key(EncryptionAlgorithm::Aegis256, secret_key(key))
+        Self::Aegis256(EncryptionKey::new(key))
     }
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
-        Self::with_secret_key(EncryptionAlgorithm::Aes256Gcm, secret_key(key))
+        Self::Aes256Gcm(EncryptionKey::new(key))
     }
 
     pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
-        self.algorithm
-    }
-
-    pub fn is_plain(&self) -> bool {
-        self.algorithm.is_none()
-    }
-
-    fn with_secret_key(algorithm: EncryptionAlgorithm, key: SecretKey) -> Self {
-        Self {
-            algorithm: Some(algorithm),
-            key: Some(key),
+        match self {
+            Self::Plaintext => None,
+            Self::Aegis256(_) => Some(EncryptionAlgorithm::Aegis256),
+            Self::Aes256Gcm(_) => Some(EncryptionAlgorithm::Aes256Gcm),
         }
     }
 
-    pub(crate) fn secret_key(&self) -> Option<&[u8; 32]> {
-        self.key.as_ref().map(|key| key.as_ref().expose_secret())
+    pub fn is_plain(&self) -> bool {
+        matches!(self, Self::Plaintext)
     }
 
-    pub(crate) fn secret_key_for_algorithm(
-        &self,
-        algorithm: EncryptionAlgorithm,
-    ) -> Option<&[u8; 32]> {
-        (self.algorithm == Some(algorithm))
-            .then(|| self.secret_key())
-            .flatten()
+    pub(crate) fn key_for_algorithm(&self, algorithm: EncryptionAlgorithm) -> Option<&[u8; 32]> {
+        match (self, algorithm) {
+            (Self::Aegis256(key), EncryptionAlgorithm::Aegis256)
+            | (Self::Aes256Gcm(key), EncryptionAlgorithm::Aes256Gcm) => Some(key_bytes_32(key)),
+            _ => None,
+        }
     }
 }
 
@@ -205,12 +205,10 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
     Ok(Arc::new(SecretBox::new(key.into_boxed_slice())))
 }
 
-fn resolve_secret_key(
+fn validate_key_length(
     algorithm: EncryptionAlgorithm,
-    key: EncryptionKey,
-) -> Result<SecretKey, EncryptionResolutionError> {
-    // Parse the request header as opaque bytes and validate the current
-    // algorithm-specific raw key requirement only at resolution time.
+    key: &EncryptionKey,
+) -> Result<(), EncryptionResolutionError> {
     let bytes = key.bytes();
     if bytes.len() != 32 {
         return Err(EncryptionResolutionError::InvalidKeyLength {
@@ -220,9 +218,7 @@ fn resolve_secret_key(
         });
     }
 
-    let mut secret = Box::new([0u8; 32]);
-    secret.copy_from_slice(bytes);
-    Ok(Arc::new(SecretBox::new(secret)))
+    Ok(())
 }
 
 fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
@@ -231,8 +227,10 @@ fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
     HeaderValue::from_bytes(&value).expect("encryption key header value should be ASCII")
 }
 
-fn secret_key(key: [u8; 32]) -> SecretKey {
-    Arc::new(SecretBox::new(Box::new(key)))
+fn key_bytes_32(key: &EncryptionKey) -> &[u8; 32] {
+    key.bytes()
+        .try_into()
+        .expect("encryption key should be 32 bytes after validation")
 }
 
 #[cfg(test)]

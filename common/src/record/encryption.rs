@@ -210,8 +210,8 @@ pub fn encrypt_record(
                 .algorithm()
                 .expect("non-plain encryption should carry an algorithm");
             let key = encryption
-                .secret_key()
-                .expect("non-plain encryption should carry a secret key");
+                .key_for_algorithm(algorithm)
+                .expect("non-plain encryption should carry a matching key");
             let encrypted = encrypt_payload(&envelope, algorithm, key, aad);
             StoredRecord::encrypted(encrypted, metered_size)
         }
@@ -322,8 +322,7 @@ fn decrypt_payload(
 
     match format {
         EncryptedRecordFormat::Aegis256V1 => {
-            let Some(key) = encryption.secret_key_for_algorithm(EncryptionAlgorithm::Aegis256)
-            else {
+            let Some(key) = encryption.key_for_algorithm(EncryptionAlgorithm::Aegis256) else {
                 return Err(RecordDecryptionError::AlgorithmMismatch {
                     expected,
                     actual: Some(EncryptionAlgorithm::Aegis256),
@@ -349,8 +348,7 @@ fn decrypt_payload(
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
         EncryptedRecordFormat::Aes256GcmV1 => {
-            let Some(key) = encryption.secret_key_for_algorithm(EncryptionAlgorithm::Aes256Gcm)
-            else {
+            let Some(key) = encryption.key_for_algorithm(EncryptionAlgorithm::Aes256Gcm) else {
                 return Err(RecordDecryptionError::AlgorithmMismatch {
                     expected,
                     actual: Some(EncryptionAlgorithm::Aes256Gcm),
@@ -482,8 +480,8 @@ mod tests {
             .algorithm()
             .expect("plain mode should not produce an encrypted record");
         let key = encryption
-            .secret_key()
-            .expect("encrypted test record should carry a secret key");
+            .key_for_algorithm(algorithm)
+            .expect("encrypted test record should carry a matching key");
         let encrypted = encrypt_payload(&plaintext, algorithm, key, aad);
         StoredRecord::encrypted(encrypted, metered_size)
     }
