@@ -479,6 +479,7 @@ pub struct EncryptionKeyArgs {
     /// Base64-encoded encryption key material.
     /// Alternatively, set `S2_ENCRYPTION_KEY`.
     #[arg(
+        short = 'k',
         long = "encryption-key",
         env = "S2_ENCRYPTION_KEY",
         hide_env_values = true,
