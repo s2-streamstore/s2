@@ -69,6 +69,35 @@ impl EncryptionKey {
     }
 }
 
+/// Fixed-size customer-supplied encryption key material.
+#[derive(Debug, Clone)]
+pub struct FixedSizeEncryptionKey<const N: usize>(EncryptionKey);
+
+impl<const N: usize> FixedSizeEncryptionKey<N> {
+    pub fn new(key: [u8; N]) -> Self {
+        Self(EncryptionKey::new(key))
+    }
+
+    pub(crate) fn expose_secret(&self) -> &[u8; N] {
+        self.0
+            .expose_secret()
+            .try_into()
+            .expect("fixed-size encryption key length validated at construction")
+    }
+}
+
+impl<const N: usize> TryFrom<EncryptionKey> for FixedSizeEncryptionKey<N> {
+    type Error = usize;
+
+    fn try_from(key: EncryptionKey) -> Result<Self, Self::Error> {
+        let actual = key.expose_secret().len();
+        if actual != N {
+            return Err(actual);
+        }
+        Ok(Self(key))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EncryptionKeyError {
     #[error("invalid encryption key: key is not valid base64")]
@@ -82,16 +111,13 @@ pub enum EncryptionKeyError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EncryptionResolutionError {
-    #[error("missing encryption key for stream encryption algorithm '{algorithm}'")]
-    MissingKey { algorithm: EncryptionAlgorithm },
-    #[error(
-        "invalid encryption key length for stream encryption algorithm '{algorithm}': expected {expected} bytes, got {actual} bytes"
-    )]
+pub enum EncryptionSpecResolutionError {
+    #[error("missing encryption key for stream cipher '{cipher}'")]
+    MissingKey { cipher: EncryptionAlgorithm },
+    #[error("invalid encryption key length for stream cipher '{cipher}': {length}")]
     InvalidKeyLength {
-        algorithm: EncryptionAlgorithm,
-        expected: usize,
-        actual: usize,
+        cipher: EncryptionAlgorithm,
+        length: usize,
     },
 }
 
@@ -101,35 +127,43 @@ pub enum EncryptionResolutionError {
 pub enum EncryptionSpec {
     #[default]
     Plain,
-    Aegis256(EncryptionKey),
-    Aes256Gcm(EncryptionKey),
+    Aegis256(FixedSizeEncryptionKey<32>),
+    Aes256Gcm(FixedSizeEncryptionKey<32>),
 }
 
 impl EncryptionSpec {
     pub fn resolve(
-        algorithm: Option<EncryptionAlgorithm>,
+        cipher: Option<EncryptionAlgorithm>,
         key: Option<EncryptionKey>,
-    ) -> Result<Self, EncryptionResolutionError> {
-        match (algorithm, key) {
+    ) -> Result<Self, EncryptionSpecResolutionError> {
+        match (cipher, key) {
             (None, _) => Ok(Self::Plain),
-            (Some(EncryptionAlgorithm::Aegis256), Some(key)) => {
-                validate_key_length(EncryptionAlgorithm::Aegis256, &key)?;
-                Ok(Self::Aegis256(key))
+            (Some(cipher @ EncryptionAlgorithm::Aegis256), Some(key)) => {
+                Ok(Self::Aegis256(key.try_into().map_err(|actual| {
+                    EncryptionSpecResolutionError::InvalidKeyLength {
+                        cipher,
+                        length: actual,
+                    }
+                })?))
             }
-            (Some(EncryptionAlgorithm::Aes256Gcm), Some(key)) => {
-                validate_key_length(EncryptionAlgorithm::Aes256Gcm, &key)?;
-                Ok(Self::Aes256Gcm(key))
+            (Some(cipher @ EncryptionAlgorithm::Aes256Gcm), Some(key)) => {
+                Ok(Self::Aes256Gcm(key.try_into().map_err(|actual| {
+                    EncryptionSpecResolutionError::InvalidKeyLength {
+                        cipher,
+                        length: actual,
+                    }
+                })?))
             }
-            (Some(algorithm), None) => Err(EncryptionResolutionError::MissingKey { algorithm }),
+            (Some(cipher), None) => Err(EncryptionSpecResolutionError::MissingKey { cipher }),
         }
     }
 
     pub fn aegis256(key: [u8; 32]) -> Self {
-        Self::Aegis256(EncryptionKey::new(key))
+        Self::Aegis256(FixedSizeEncryptionKey::new(key))
     }
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
-        Self::Aes256Gcm(EncryptionKey::new(key))
+        Self::Aes256Gcm(FixedSizeEncryptionKey::new(key))
     }
 }
 
@@ -169,24 +203,6 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
     }
 
     Ok(Arc::new(SecretBox::new(key.into_boxed_slice())))
-}
-
-fn validate_key_length(
-    algorithm: EncryptionAlgorithm,
-    key: &EncryptionKey,
-) -> Result<(), EncryptionResolutionError> {
-    let expected = match algorithm {
-        EncryptionAlgorithm::Aegis256 | EncryptionAlgorithm::Aes256Gcm => 32,
-    };
-    let actual = key.0.expose_secret().len();
-    if expected != actual {
-        return Err(EncryptionResolutionError::InvalidKeyLength {
-            algorithm,
-            expected,
-            actual,
-        });
-    }
-    Ok(())
 }
 
 fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
@@ -248,8 +264,8 @@ mod tests {
         let err = EncryptionSpec::resolve(Some(EncryptionAlgorithm::Aegis256), None).unwrap_err();
         assert_eq!(
             err,
-            EncryptionResolutionError::MissingKey {
-                algorithm: EncryptionAlgorithm::Aegis256,
+            EncryptionSpecResolutionError::MissingKey {
+                cipher: EncryptionAlgorithm::Aegis256,
             }
         );
     }
@@ -263,12 +279,25 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            EncryptionResolutionError::InvalidKeyLength {
-                algorithm: EncryptionAlgorithm::Aegis256,
-                expected: 32,
-                actual: 4,
+            EncryptionSpecResolutionError::InvalidKeyLength {
+                cipher: EncryptionAlgorithm::Aegis256,
+                length: 4,
             }
         );
+    }
+
+    #[test]
+    fn resolve_encrypted_reuses_decoded_key_material() {
+        let key = EncryptionKey::new(KEY_BYTES);
+        let secret_ptr = key.0.expose_secret().as_ptr();
+
+        let encryption = EncryptionSpec::resolve(Some(EncryptionAlgorithm::Aegis256), Some(key))
+            .expect("resolve typed encryption key");
+
+        let EncryptionSpec::Aegis256(key) = encryption else {
+            panic!("expected AEGIS-256 encryption");
+        };
+        assert_eq!(key.expose_secret().as_ptr(), secret_ptr);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use s2_api::{
     },
 };
 use s2_common::{
-    encryption::EncryptionResolutionError, http::extract::HeaderRejection,
+    encryption::EncryptionSpecResolutionError, http::extract::HeaderRejection,
     record::RecordDecryptionError, types::ValidationError,
 };
 
@@ -80,8 +80,8 @@ impl From<AppendRequestRejection> for ServiceError {
     }
 }
 
-impl From<EncryptionResolutionError> for ServiceError {
-    fn from(e: EncryptionResolutionError) -> Self {
+impl From<EncryptionSpecResolutionError> for ServiceError {
+    fn from(e: EncryptionSpecResolutionError) -> Self {
         ServiceError::Validation(ValidationError(e.to_string()))
     }
 }
