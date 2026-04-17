@@ -1,20 +1,16 @@
 //! Stream and basin configuration types.
 //!
-//! Each config area (stream, timestamping, delete-on-empty, basin-level stream encryption) has
-//! three type tiers:
+//! Stream configuration uses three representations:
 //!
-//! - Resolved (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`): All fields are
-//!   concrete values. Produced by merging optional configs with defaults using `merge()`.
+//! - Resolved (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`): concrete values,
+//!   produced by merging optional configs with defaults using `merge()`.
 //!
 //! - Optional (`OptionalStreamConfig`, `OptionalTimestampingConfig`,
-//!   `OptionalDeleteOnEmptyConfig`): The internal representation, stored in metadata. Fields are
-//!   `Option<T>` where `None` means "not set at this layer, fall back to defaults."
+//!   `OptionalDeleteOnEmptyConfig`): stored metadata, where `None` means "not set at this layer;
+//!   fall back to defaults."
 //!
 //! - Reconfiguration (`StreamReconfiguration`, `TimestampingReconfiguration`,
-//!   `DeleteOnEmptyReconfiguration`, `BasinReconfiguration`): Partial updates with PATCH semantics.
-//!   Most fields are `Maybe<Option<T>>` with three states: `Unspecified` (don't change),
-//!   `Specified(None)` (clear to default), `Specified(Some(v))` (set to value). Applied using
-//!   `reconfigure()`.
+//!   `DeleteOnEmptyReconfiguration`): PATCH-style updates applied with `reconfigure()`.
 //!
 //! Reconfiguration of nested fields (e.g. `timestamping`, `delete_on_empty`,
 //! `default_stream_config`) is applied recursively: `Specified(Some(inner_reconfig))`
@@ -24,9 +20,8 @@
 //! `merge()` resolves optional configs into resolved configs with precedence:
 //! stream-level → basin-level → system default (via `Option::or` chaining).
 //!
-//! The `From<Optional*> for *Reconfiguration` conversions treat every field as
-//! `Specified`. These conversions represent "set the config to exactly this state",
-//! not "update only the fields that are set."
+//! Basin config also carries basin-level knobs like `stream_cipher`,
+//! `create_stream_on_append`, and `create_stream_on_read`.
 
 use std::time::Duration;
 
