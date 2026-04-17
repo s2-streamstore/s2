@@ -104,7 +104,7 @@ pub enum EncryptionResolutionError {
 #[derive(Debug, Clone, Default)]
 pub enum EncryptionSpec {
     #[default]
-    Plaintext,
+    Plain,
     Aegis256(EncryptionKey),
     Aes256Gcm(EncryptionKey),
 }
@@ -115,7 +115,7 @@ impl EncryptionSpec {
         key: Option<EncryptionKey>,
     ) -> Result<Self, EncryptionResolutionError> {
         match (algorithm, key) {
-            (None, _) => Ok(Self::Plaintext),
+            (None, _) => Ok(Self::Plain),
             (Some(EncryptionAlgorithm::Aegis256), Some(key)) => {
                 validate_key_length(EncryptionAlgorithm::Aegis256, &key)?;
                 Ok(Self::Aegis256(key))
@@ -260,7 +260,7 @@ mod tests {
     fn resolve_plain_ignores_key() {
         let encryption =
             EncryptionSpec::resolve(None, Some(EncryptionKey::new(KEY_BYTES))).unwrap();
-        assert!(matches!(encryption, EncryptionSpec::Plaintext));
+        assert!(matches!(encryption, EncryptionSpec::Plain));
     }
 
     #[test]

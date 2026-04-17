@@ -17,7 +17,7 @@ use s2_lite::backend::{Backend, error::ReadError};
 
 pub fn decrypt_plain_batch(batch: StoredReadBatch) -> ReadBatch {
     batch
-        .decrypt(&EncryptionSpec::Plaintext, &[])
+        .decrypt(&EncryptionSpec::Plain, &[])
         .expect("Failed to decode batch")
 }
 

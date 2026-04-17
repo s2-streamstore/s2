@@ -204,9 +204,7 @@ pub fn encrypt_record(
     let metered_size = record.metered_size();
     let record = match (record.into_inner(), encryption) {
         (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
-        (record @ Record::Envelope(_), EncryptionSpec::Plaintext) => {
-            StoredRecord::Plaintext(record)
-        }
+        (record @ Record::Envelope(_), EncryptionSpec::Plain) => StoredRecord::Plaintext(record),
         (Record::Envelope(envelope), EncryptionSpec::Aegis256(key)) => {
             let encrypted = encrypt_payload(
                 &envelope,
@@ -293,7 +291,7 @@ pub fn decrypt_stored_record(
     match record {
         StoredRecord::Plaintext(record @ Record::Command(_)) => Ok(record.metered()),
         StoredRecord::Plaintext(record @ Record::Envelope(_)) => match encryption {
-            EncryptionSpec::Plaintext => Ok(record.metered()),
+            EncryptionSpec::Plain => Ok(record.metered()),
             EncryptionSpec::Aegis256(_) => Err(RecordDecryptionError::AlgorithmMismatch {
                 expected: Some(EncryptionAlgorithm::Aegis256),
                 actual: None,
@@ -351,7 +349,7 @@ fn decrypt_payload(
             }
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
-        (EncryptedRecordFormat::Aegis256V1, EncryptionSpec::Plaintext) => {
+        (EncryptedRecordFormat::Aegis256V1, EncryptionSpec::Plain) => {
             Err(RecordDecryptionError::AlgorithmMismatch {
                 expected: None,
                 actual: Some(EncryptionAlgorithm::Aegis256),
@@ -385,7 +383,7 @@ fn decrypt_payload(
             }
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
-        (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Plaintext) => {
+        (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Plain) => {
             Err(RecordDecryptionError::AlgorithmMismatch {
                 expected: None,
                 actual: Some(EncryptionAlgorithm::Aes256Gcm),
@@ -505,7 +503,7 @@ mod tests {
         let metered_size = make_plaintext_envelope(headers.clone(), body.clone()).metered_size();
         let plaintext = make_envelope(headers, body);
         let encrypted = match encryption {
-            EncryptionSpec::Plaintext => {
+            EncryptionSpec::Plain => {
                 panic!("plain mode should not produce an encrypted record")
             }
             EncryptionSpec::Aegis256(key) => encrypt_payload(
@@ -776,7 +774,7 @@ mod tests {
             &aad,
         );
 
-        let result = decrypt_stored_record(record, &EncryptionSpec::Plaintext, &aad);
+        let result = decrypt_stored_record(record, &EncryptionSpec::Plain, &aad);
 
         assert!(matches!(
             result,

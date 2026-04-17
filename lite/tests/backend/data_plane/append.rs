@@ -19,7 +19,7 @@ use super::common::*;
 
 async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionSpec) {
     let (backend, basin_name, stream_name) = match encryption {
-        EncryptionSpec::Plaintext => {
+        EncryptionSpec::Plain => {
             setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
         }
         EncryptionSpec::Aegis256(_) | EncryptionSpec::Aes256Gcm(_) => {
@@ -397,7 +397,7 @@ async fn test_append_with_seq_num_mismatch() {
 }
 
 #[rstest]
-#[case::plaintext("append-session-basic", EncryptionSpec::Plaintext)]
+#[case::plaintext("append-session-basic", EncryptionSpec::Plain)]
 #[case::encrypted("appsess-enc", aegis256_encryption_spec())]
 #[tokio::test]
 async fn test_append_session_roundtrip(

@@ -755,9 +755,7 @@ mod tests {
         let stored_batch = first_stored_batch(&backend, &basin, &stream).await;
 
         assert!(matches!(
-            stored_batch
-                .clone()
-                .decrypt(&EncryptionSpec::Plaintext, &[]),
+            stored_batch.clone().decrypt(&EncryptionSpec::Plain, &[]),
             Err(RecordDecryptionError::AlgorithmMismatch {
                 expected: None,
                 actual: Some(EncryptionAlgorithm::Aegis256),
