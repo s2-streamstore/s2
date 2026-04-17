@@ -289,6 +289,7 @@ mod tests {
 
         let meta = kv::stream_meta::StreamMeta {
             config: OptionalStreamConfig::default(),
+            encryption_algorithm: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
             creation_idempotency_key: None,

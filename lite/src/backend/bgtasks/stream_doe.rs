@@ -253,6 +253,7 @@ mod tests {
     ) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
             config,
+            encryption_algorithm: None,
             created_at,
             deleted_at: None,
             creation_idempotency_key: None,

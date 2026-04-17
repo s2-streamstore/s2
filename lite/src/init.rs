@@ -50,6 +50,9 @@ pub struct StreamSpec {
 pub struct BasinConfigSpec {
     #[serde(default)]
     pub default_stream_config: Option<StreamConfigSpec>,
+    /// Encryption algorithm materialized into streams created in the basin.
+    #[serde(default)]
+    pub stream_encryption_algorithm: Option<EncryptionAlgorithmSpec>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
     pub create_stream_on_append: Option<bool>,
@@ -74,9 +77,6 @@ pub struct StreamConfigSpec {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptySpec>,
-    /// Encryption configuration.
-    #[serde(default)]
-    pub encryption: Option<EncryptionConfigSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -110,44 +110,32 @@ impl From<StorageClassSpec> for StorageClass {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum EncryptionModeSpec {
-    #[serde(rename = "plain")]
-    Plain,
+pub enum EncryptionAlgorithmSpec {
     #[serde(rename = "aegis-256")]
     Aegis256,
     #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
 }
 
-impl schemars::JsonSchema for EncryptionModeSpec {
+impl schemars::JsonSchema for EncryptionAlgorithmSpec {
     fn schema_name() -> Cow<'static, str> {
-        "EncryptionModeSpec".into()
+        "EncryptionAlgorithmSpec".into()
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Allowed encryption mode.",
-            "enum": ["plain", "aegis-256", "aes-256-gcm"]
+            "description": "Encryption algorithm materialized into streams created in the basin.",
+            "enum": ["aegis-256", "aes-256-gcm"]
         })
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct EncryptionConfigSpec {
-    /// Allowed encryption modes.
-    /// If empty, use defaults. If no default is configured, only plaintext is allowed.
-    #[serde(default)]
-    pub allowed_modes: Vec<EncryptionModeSpec>,
-}
-
-impl From<EncryptionModeSpec> for s2_common::encryption::EncryptionMode {
-    fn from(m: EncryptionModeSpec) -> Self {
+impl From<EncryptionAlgorithmSpec> for s2_common::encryption::EncryptionAlgorithm {
+    fn from(m: EncryptionAlgorithmSpec) -> Self {
         match m {
-            EncryptionModeSpec::Plain => Self::Plain,
-            EncryptionModeSpec::Aegis256 => Self::Aegis256,
-            EncryptionModeSpec::Aes256Gcm => Self::Aes256Gcm,
+            EncryptionAlgorithmSpec::Aegis256 => Self::Aegis256,
+            EncryptionAlgorithmSpec::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
@@ -292,6 +280,10 @@ impl From<BasinConfigSpec> for BasinReconfiguration {
                 .default_stream_config
                 .map(|dsc| Some(StreamReconfiguration::from(dsc)))
                 .map_or(Maybe::Unspecified, Maybe::Specified),
+            stream_encryption_algorithm: s
+                .stream_encryption_algorithm
+                .map(|algorithm| Some(algorithm.into()))
+                .map_or(Maybe::Unspecified, Maybe::Specified),
             create_stream_on_append: s
                 .create_stream_on_append
                 .map_or(Maybe::Unspecified, Maybe::Specified),
@@ -336,19 +328,6 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                             .min_age
                             .map(|h| Some(h.0))
                             .map_or(Maybe::Unspecified, Maybe::Specified),
-                    })
-                })
-                .map_or(Maybe::Unspecified, Maybe::Specified),
-            encryption: s
-                .encryption
-                .map(|enc| {
-                    Some(s2_common::types::config::EncryptionReconfiguration {
-                        allowed_modes: Maybe::Specified(
-                            enc.allowed_modes
-                                .into_iter()
-                                .map(s2_common::encryption::EncryptionMode::from)
-                                .collect(),
-                        ),
                     })
                 })
                 .map_or(Maybe::Unspecified, Maybe::Specified),
@@ -595,6 +574,7 @@ mod tests {
     fn basin_config_conversion() {
         let spec = BasinConfigSpec {
             default_stream_config: None,
+            stream_encryption_algorithm: None,
             create_stream_on_append: Some(true),
             create_stream_on_read: None,
         };
@@ -692,7 +672,6 @@ mod tests {
             retention_policy: Some(RetentionPolicySpec(RetentionPolicy::Infinite())),
             timestamping: None,
             delete_on_empty: None,
-            encryption: None,
         };
         let reconfig = StreamReconfiguration::from(spec);
         assert!(matches!(
@@ -708,27 +687,18 @@ mod tests {
     }
 
     #[test]
-    fn stream_config_empty_encryption_modes_clear_override() {
-        let spec = StreamConfigSpec {
-            storage_class: None,
-            retention_policy: None,
-            timestamping: None,
-            delete_on_empty: None,
-            encryption: Some(EncryptionConfigSpec {
-                allowed_modes: vec![],
-            }),
+    fn basin_config_conversion_includes_stream_encryption_algorithm() {
+        let spec = BasinConfigSpec {
+            default_stream_config: None,
+            stream_encryption_algorithm: Some(EncryptionAlgorithmSpec::Aegis256),
+            create_stream_on_append: None,
+            create_stream_on_read: None,
         };
 
-        let reconfig = StreamReconfiguration::from(spec);
-
-        match reconfig.encryption {
-            Maybe::Specified(Some(encryption)) => {
-                assert!(matches!(
-                    encryption.allowed_modes,
-                    Maybe::Specified(modes) if modes.is_empty()
-                ));
-            }
-            other => panic!("expected explicit encryption reconfiguration, got {other:?}"),
-        }
+        let reconfig = BasinReconfiguration::from(spec);
+        assert!(matches!(
+            reconfig.stream_encryption_algorithm,
+            Maybe::Specified(Some(s2_common::encryption::EncryptionAlgorithm::Aegis256))
+        ));
     }
 }

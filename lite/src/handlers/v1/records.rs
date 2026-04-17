@@ -14,7 +14,7 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
-    encryption::EncryptionSpec,
+    encryption::Encryption,
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
@@ -40,7 +40,7 @@ pub fn router() -> axum::Router<Backend> {
 
 fn decrypt_session<S>(
     session: S,
-    encryption: EncryptionSpec,
+    encryption: Encryption,
     stream_id: StreamId,
 ) -> impl Stream<Item = Result<ReadSessionOutput, ServiceError>>
 where
@@ -211,10 +211,18 @@ pub async fn read(
     let stream_id = StreamId::new(&basin, &stream);
     match request {
         v1t::stream::ReadRequest::Unary {
-            encryption,
+            encryption_key,
             format,
             response_mime,
         } => {
+            let encryption_algorithm = backend
+                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::ReadError>(
+                    &basin,
+                    &stream,
+                    |config| config.create_stream_on_read,
+                )
+                .await?;
+            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend.read(basin, stream, start, end).await?;
             let session = decrypt_session(session, encryption, stream_id);
@@ -231,10 +239,18 @@ pub async fn read(
             }
         }
         v1t::stream::ReadRequest::EventStream {
-            encryption,
+            encryption_key,
             format,
             last_event_id,
         } => {
+            let encryption_algorithm = backend
+                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::ReadError>(
+                    &basin,
+                    &stream,
+                    |config| config.create_stream_on_read,
+                )
+                .await?;
+            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
@@ -276,9 +292,17 @@ pub async fn read(
             Ok(axum::response::Sse::new(events).into_response())
         }
         v1t::stream::ReadRequest::S2s {
-            encryption,
+            encryption_key,
             response_compression,
         } => {
+            let encryption_algorithm = backend
+                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::ReadError>(
+                    &basin,
+                    &stream,
+                    |config| config.create_stream_on_read,
+                )
+                .await?;
+            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
             let s2s_stream =
@@ -392,10 +416,18 @@ pub async fn append(
     let stream_id = StreamId::new(&basin, &stream);
     match request {
         v1t::stream::AppendRequest::Unary {
-            encryption,
+            encryption_key,
             input,
             response_mime,
         } => {
+            let encryption_algorithm = backend
+                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::AppendError>(
+                    &basin,
+                    &stream,
+                    |config| config.create_stream_on_append,
+                )
+                .await?;
+            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
             let input = input.encrypt(&encryption, stream_id.as_bytes());
             let ack = backend.append(basin, stream, input).await?;
             match response_mime {
@@ -410,10 +442,18 @@ pub async fn append(
             }
         }
         v1t::stream::AppendRequest::S2s {
-            encryption,
+            encryption_key,
             inputs,
             response_compression,
         } => {
+            let encryption_algorithm = backend
+                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::AppendError>(
+                    &basin,
+                    &stream,
+                    |config| config.create_stream_on_append,
+                )
+                .await?;
+            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
             let inputs = async_stream::stream! {
@@ -476,10 +516,13 @@ mod tests {
     use prost::Message as _;
     use s2_api::v1::stream::{
         proto,
-        s2s::{FrameDecoder, SessionMessage, TerminalMessage},
+        s2s::{FrameDecoder, SessionMessage},
     };
     use s2_common::{
-        encryption::{EncryptionMode, EncryptionSpec, S2_ENCRYPTION_HEADER},
+        encryption::{
+            Encryption, EncryptionAlgorithm, EncryptionKey, EncryptionMode,
+            S2_ENCRYPTION_KEY_HEADER,
+        },
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record, RecordDecryptionError},
         types::{
@@ -500,25 +543,19 @@ mod tests {
     use crate::{backend::Backend, handlers, stream_id::StreamId};
 
     fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
-        use s2_common::types::config::OptionalEncryptionConfig;
-        OptionalStreamConfig {
-            encryption: OptionalEncryptionConfig {
-                allowed_modes: [
-                    EncryptionMode::Plain,
-                    EncryptionMode::Aegis256,
-                    EncryptionMode::Aes256Gcm,
-                ]
-                .into(),
-            },
-            ..Default::default()
-        }
+        OptionalStreamConfig::default()
     }
 
     fn all_encryption_modes_basin_config() -> BasinConfig {
         BasinConfig {
             default_stream_config: all_encryption_modes_stream_config(),
+            stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
             ..Default::default()
         }
+    }
+
+    fn aegis_key(byte: u8) -> EncryptionKey {
+        EncryptionKey::new([byte; 32])
     }
 
     async fn create_backend() -> Backend {
@@ -582,7 +619,7 @@ mod tests {
         basin: &BasinName,
         stream: &StreamName,
         body: &'static [u8],
-        encryption: &EncryptionSpec,
+        encryption: &Encryption,
     ) {
         let stream_id = StreamId::new(basin, stream);
         let input = append_input(body).encrypt(encryption, stream_id.as_bytes());
@@ -678,7 +715,8 @@ mod tests {
 
     #[tokio::test]
     async fn unary_append_with_encryption_header_persists_encrypted_record() {
-        let encryption = EncryptionSpec::aegis256([0x42; 32]);
+        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption_key = aegis_key(0x42);
         let (app, backend, basin, stream) = setup_app_with_config(
             "append-unary-encrypted",
             all_encryption_modes_basin_config(),
@@ -701,7 +739,10 @@ mod tests {
             request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
                 .header(header::CONTENT_TYPE, "application/protobuf")
                 .header(header::ACCEPT, "application/protobuf")
-                .header(S2_ENCRYPTION_HEADER.as_str(), encryption.to_header_value())
+                .header(
+                    S2_ENCRYPTION_KEY_HEADER.as_str(),
+                    encryption_key.to_header_value(),
+                )
                 .body(Body::from(input.encode_to_vec()))
                 .unwrap(),
         )
@@ -715,7 +756,7 @@ mod tests {
         let stored_batch = first_stored_batch(&backend, &basin, &stream).await;
 
         assert!(matches!(
-            stored_batch.clone().decrypt(&EncryptionSpec::Plain, &[]),
+            stored_batch.clone().decrypt(&Encryption::Plain, &[]),
             Err(RecordDecryptionError::ModeMismatch {
                 expected: EncryptionMode::Plain,
                 actual: EncryptionMode::Aegis256,
@@ -736,8 +777,8 @@ mod tests {
 
     #[tokio::test]
     async fn unary_read_with_wrong_key_returns_decryption_failed_error() {
-        let encryption = EncryptionSpec::aegis256([0x42; 32]);
-        let wrong_key = EncryptionSpec::aegis256([0x24; 32]);
+        let encryption = Encryption::aegis256([0x42; 32]);
+        let wrong_key = aegis_key(0x24);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-unary-bad-key",
             all_encryption_modes_basin_config(),
@@ -749,7 +790,10 @@ mod tests {
         let response = send(
             &app,
             request_builder("GET", read_uri(&stream), &basin)
-                .header(S2_ENCRYPTION_HEADER.as_str(), wrong_key.to_header_value())
+                .header(
+                    S2_ENCRYPTION_KEY_HEADER.as_str(),
+                    wrong_key.to_header_value(),
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -767,8 +811,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sse_read_with_plain_header_emits_error_event_and_terminates() {
-        let encryption = EncryptionSpec::aegis256([0x42; 32]);
+    async fn sse_read_without_key_header_emits_error_event_and_terminates() {
+        let encryption = Encryption::aegis256([0x42; 32]);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-sse-plain",
             all_encryption_modes_basin_config(),
@@ -785,31 +829,19 @@ mod tests {
                 &basin,
             )
             .header(header::ACCEPT, "text/event-stream")
-            .header(
-                S2_ENCRYPTION_HEADER.as_str(),
-                EncryptionSpec::Plain.to_header_value(),
-            )
             .body(Body::empty())
             .unwrap(),
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body =
-            tokio::time::timeout(Duration::from_secs(1), response_bytes(response, "sse body"))
-                .await
-                .expect("sse body should terminate after the first error event");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 sse body");
-        assert!(body.contains("event: error"));
-        assert!(body.contains("\"code\":\"invalid\""));
-        assert!(body.contains("record encryption mode mismatch"));
-        assert!(!body.contains("event: ping"));
-        assert!(!body.contains("[DONE]"));
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let info = response_json(response, "sse read error body").await;
+        assert_invalid_error(&info, "missing encryption key");
     }
 
     #[tokio::test]
-    async fn s2s_read_with_plain_header_returns_terminal_invalid_frame() {
-        let encryption = EncryptionSpec::aegis256([0x42; 32]);
+    async fn s2s_read_without_key_header_returns_terminal_invalid_frame() {
+        let encryption = Encryption::aegis256([0x42; 32]);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-s2s-plain",
             all_encryption_modes_basin_config(),
@@ -822,30 +854,20 @@ mod tests {
             &app,
             request_builder("GET", read_uri(&stream), &basin)
                 .header(header::CONTENT_TYPE, "s2s/proto")
-                .header(
-                    S2_ENCRYPTION_HEADER.as_str(),
-                    EncryptionSpec::Plain.to_header_value(),
-                )
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_bytes(response, "s2s body").await;
-        let frame = decode_single_frame(body, "terminal frame");
-        let SessionMessage::Terminal(TerminalMessage { status, body }) = frame else {
-            panic!("expected terminal frame");
-        };
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY.as_u16());
-        let info: serde_json::Value =
-            serde_json::from_str(&body).expect("terminal json error info");
-        assert_invalid_error(&info, "record encryption mode mismatch");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let info = response_json(response, "s2s read error body").await;
+        assert_invalid_error(&info, "missing encryption key");
     }
 
     #[tokio::test]
     async fn s2s_read_with_correct_encryption_returns_batch_frame() {
-        let encryption = EncryptionSpec::aegis256([0x42; 32]);
+        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption_key = aegis_key(0x42);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-s2s-ok",
             all_encryption_modes_basin_config(),
@@ -858,7 +880,10 @@ mod tests {
             &app,
             request_builder("GET", read_uri(&stream), &basin)
                 .header(header::CONTENT_TYPE, "s2s/proto")
-                .header(S2_ENCRYPTION_HEADER.as_str(), encryption.to_header_value())
+                .header(
+                    S2_ENCRYPTION_KEY_HEADER.as_str(),
+                    encryption_key.to_header_value(),
+                )
                 .body(Body::empty())
                 .unwrap(),
         )

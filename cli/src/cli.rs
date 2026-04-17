@@ -3,7 +3,8 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionSpec, FencingToken, StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamNamePrefix,
+    StreamNameStartAfter,
 };
 
 use crate::{
@@ -273,6 +274,10 @@ pub struct ReconfigureBasinArgs {
     /// Name of the basin to reconfigure.
     pub basin: S2BasinUri,
 
+    /// Encryption algorithm materialized into streams created in this basin.
+    #[arg(long)]
+    pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
+
     /// Create stream on append with basin defaults if it doesn't exist.
     #[arg(long)]
     pub create_stream_on_append: Option<bool>,
@@ -471,21 +476,21 @@ pub struct AppendArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct EncryptionArgs {
-    /// Encryption spec. Use `plain` or `<alg>; <base64-key>`.
-    /// Alternatively, set `S2_ENCRYPTION`.
+    /// Base64-encoded 32-byte encryption key.
+    /// Alternatively, set `S2_ENCRYPTION_KEY`.
     #[arg(
         long,
-        env = "S2_ENCRYPTION",
+        env = "S2_ENCRYPTION_KEY",
         hide_env_values = true,
-        value_name = "SPEC",
+        value_name = "KEY",
         group = "encryption_source"
     )]
-    pub encryption: Option<EncryptionSpec>,
+    pub encryption_key: Option<EncryptionKey>,
 
-    /// Read an encryption spec from file.
+    /// Read a base64-encoded encryption key from file.
     #[arg(
         long,
-        conflicts_with = "encryption",
+        conflicts_with = "encryption_key",
         value_name = "FILE",
         group = "encryption_source"
     )]

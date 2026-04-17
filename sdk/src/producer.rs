@@ -21,7 +21,7 @@ use crate::{
     batching::{AppendInputs, AppendRecordBatches, BatchingConfig},
     session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
     types::{
-        AppendAck, AppendRecord, EncryptionSpec, FencingToken, MeteredBytes, ONE_MIB, S2Error,
+        AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, S2Error,
         StreamName, ValidationError,
     },
 };
@@ -144,7 +144,7 @@ impl Producer {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        encryption: Option<EncryptionSpec>,
+        encryption: Option<EncryptionKey>,
         config: ProducerConfig,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(RECORD_BATCH_MAX.count);

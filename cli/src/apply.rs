@@ -12,9 +12,9 @@ use s2_sdk::{
     types::{
         BasinConfig, BasinName, BasinReconfiguration, CreateOrReconfigureBasinInput,
         CreateOrReconfigureStreamInput, CreateOrReconfigured, DeleteOnEmptyConfig,
-        DeleteOnEmptyReconfiguration, ErrorResponse, RetentionPolicy, S2Error, StorageClass,
-        StreamConfig, StreamName, StreamReconfiguration, TimestampingConfig, TimestampingMode,
-        TimestampingReconfiguration,
+        DeleteOnEmptyReconfiguration, EncryptionAlgorithm, ErrorResponse, RetentionPolicy, S2Error,
+        StorageClass, StreamConfig, StreamName, StreamReconfiguration, TimestampingConfig,
+        TimestampingMode, TimestampingReconfiguration,
     },
 };
 
@@ -37,6 +37,22 @@ fn timestamping_mode_from_spec(m: TimestampingModeSpec) -> TimestampingMode {
         TimestampingModeSpec::ClientPrefer => TimestampingMode::ClientPrefer,
         TimestampingModeSpec::ClientRequire => TimestampingMode::ClientRequire,
         TimestampingModeSpec::Arrival => TimestampingMode::Arrival,
+    }
+}
+
+fn encryption_algorithm_from_spec(
+    a: s2_lite::init::EncryptionAlgorithmSpec,
+) -> EncryptionAlgorithm {
+    match a {
+        s2_lite::init::EncryptionAlgorithmSpec::Aegis256 => EncryptionAlgorithm::Aegis256,
+        s2_lite::init::EncryptionAlgorithmSpec::Aes256Gcm => EncryptionAlgorithm::Aes256Gcm,
+    }
+}
+
+fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
+    match algorithm {
+        EncryptionAlgorithm::Aegis256 => "aegis-256",
+        EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm",
     }
 }
 
@@ -82,6 +98,9 @@ fn basin_reconfiguration_from_spec(s: BasinConfigSpec) -> BasinReconfiguration {
     let mut r = BasinReconfiguration::new();
     if let Some(dsc) = s.default_stream_config {
         r = r.with_default_stream_config(stream_reconfiguration_from_spec(dsc));
+    }
+    if let Some(algorithm) = s.stream_encryption_algorithm {
+        r = r.with_stream_encryption_algorithm(encryption_algorithm_from_spec(algorithm));
     }
     if let Some(v) = s.create_stream_on_append {
         r = r.with_create_stream_on_append(v);
@@ -253,6 +272,23 @@ fn effective_delete_on_empty_min_age_secs(doe: Option<&DeleteOnEmptyConfig>) -> 
 fn diff_basin_config(existing: &BasinConfig, spec: &BasinConfigSpec) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
+    if let Some(algorithm) = spec
+        .stream_encryption_algorithm
+        .clone()
+        .map(encryption_algorithm_from_spec)
+        && existing.stream_encryption_algorithm != Some(algorithm)
+    {
+        diffs.push(FieldDiff {
+            field: "stream_encryption_algorithm",
+            old: existing
+                .stream_encryption_algorithm
+                .map(format_encryption_algorithm)
+                .unwrap_or("none")
+                .to_string(),
+            new: format_encryption_algorithm(algorithm).to_string(),
+        });
+    }
+
     if let Some(v) = spec.create_stream_on_append
         && existing.create_stream_on_append != v
     {
@@ -360,6 +396,17 @@ fn diff_stream_config(existing: &StreamConfig, spec: &StreamConfigSpec) -> Vec<F
 fn spec_basin_fields(spec: &BasinConfigSpec) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
 
+    if let Some(algorithm) = spec
+        .stream_encryption_algorithm
+        .clone()
+        .map(encryption_algorithm_from_spec)
+    {
+        fields.push(FieldDiff {
+            field: "stream_encryption_algorithm",
+            old: String::new(),
+            new: format_encryption_algorithm(algorithm).to_string(),
+        });
+    }
     if let Some(v) = spec.create_stream_on_append {
         fields.push(FieldDiff {
             field: "create_stream_on_append",

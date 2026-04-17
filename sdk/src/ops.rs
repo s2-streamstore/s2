@@ -12,7 +12,7 @@ use crate::{
     session::{self, AppendSession, AppendSessionConfig},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionSpec,
+        CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
         GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
         ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput,
         ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
@@ -386,12 +386,12 @@ impl S2Basin {
 pub struct S2Stream {
     client: BasinClient,
     name: StreamName,
-    encryption: Option<EncryptionSpec>,
+    encryption: Option<EncryptionKey>,
 }
 
 impl S2Stream {
-    /// Set the encryption spec for this stream handle.
-    pub fn with_encryption(self, encryption: EncryptionSpec) -> Self {
+    /// Set the encryption key for this stream handle.
+    pub fn with_encryption_key(self, encryption: EncryptionKey) -> Self {
         Self {
             encryption: Some(encryption),
             ..self

@@ -165,6 +165,7 @@ mod tests {
     fn stream_meta(deleted_at: Option<OffsetDateTime>) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
             config: Default::default(),
+            encryption_algorithm: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at,
             creation_idempotency_key: None,

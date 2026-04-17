@@ -11,7 +11,8 @@ use s2_api::{
     },
 };
 use s2_common::{
-    http::extract::HeaderRejection, record::RecordDecryptionError, types::ValidationError,
+    encryption::EncryptionResolutionError, http::extract::HeaderRejection,
+    record::RecordDecryptionError, types::ValidationError,
 };
 
 use crate::backend::error::{
@@ -36,6 +37,8 @@ pub enum ServiceError {
     AppendInputStream(#[from] AppendInputStreamError),
     #[error(transparent)]
     Validation(#[from] ValidationError),
+    #[error(transparent)]
+    EncryptionResolution(#[from] EncryptionResolutionError),
     #[error(transparent)]
     RecordDecryption(#[from] RecordDecryptionError),
     #[error(transparent)]
@@ -96,6 +99,7 @@ impl ServiceError {
                 }
             },
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
+            ServiceError::EncryptionResolution(e) => standard(ErrorCode::Invalid, e.to_string()),
             ServiceError::RecordDecryption(e) => match e {
                 RecordDecryptionError::ModeMismatch { .. } => {
                     standard(ErrorCode::Invalid, e.to_string())
@@ -261,7 +265,7 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
-                AppendError::EncryptionModeNotAllowed(e) => {
+                AppendError::EncryptionModeMismatch(e) => {
                     standard(ErrorCode::Invalid, e.to_string())
                 }
             },

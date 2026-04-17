@@ -28,7 +28,7 @@ use s2_api::v1::{
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
 };
-use s2_common::encryption::S2_ENCRYPTION_HEADER;
+use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
@@ -39,7 +39,7 @@ use crate::{
     frame_signal::FrameSignal,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
-        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionSpec,
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
         RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
@@ -346,7 +346,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         input: AppendInput,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
         append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
         let url = self
@@ -384,7 +384,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
     ) -> Result<ReadBatch, ApiError> {
         let url = self
             .base_url
@@ -412,7 +412,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         inputs: I,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
         frame_signal: Option<FrameSignal>,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
@@ -486,7 +486,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self
             .base_url
@@ -919,11 +919,11 @@ impl BaseClient {
     }
 }
 
-fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionSpec>) {
+fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionKey>) {
     if let Some(encryption) = encryption {
         request
             .headers_mut()
-            .insert(S2_ENCRYPTION_HEADER.clone(), encryption.to_header_value());
+            .insert(S2_ENCRYPTION_KEY_HEADER.clone(), encryption.to_header_value());
     }
 }
 

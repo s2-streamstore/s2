@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use s2_common::{
-    encryption::{EncryptionMode, EncryptionSpec},
+    encryption::{Encryption, EncryptionAlgorithm},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     types::{
         basin::BasinName,
@@ -47,46 +47,31 @@ pub fn test_stream_name(suffix: &str) -> StreamName {
 }
 
 pub fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
-    use s2_common::types::config::OptionalEncryptionConfig;
-    OptionalStreamConfig {
-        encryption: OptionalEncryptionConfig {
-            allowed_modes: [
-                EncryptionMode::Plain,
-                EncryptionMode::Aegis256,
-                EncryptionMode::Aes256Gcm,
-            ]
-            .into(),
-        },
-        ..Default::default()
-    }
+    OptionalStreamConfig::default()
 }
 
 pub fn all_encryption_modes_basin_config() -> BasinConfig {
     BasinConfig {
         default_stream_config: all_encryption_modes_stream_config(),
+        stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
         ..Default::default()
     }
 }
 
 pub fn aegis_only_encryption_stream_config() -> OptionalStreamConfig {
-    use s2_common::types::config::OptionalEncryptionConfig;
-    OptionalStreamConfig {
-        encryption: OptionalEncryptionConfig {
-            allowed_modes: [EncryptionMode::Aegis256].into(),
-        },
-        ..Default::default()
-    }
+    OptionalStreamConfig::default()
 }
 
 pub fn aegis_only_encryption_basin_config() -> BasinConfig {
     BasinConfig {
         default_stream_config: aegis_only_encryption_stream_config(),
+        stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
         ..Default::default()
     }
 }
 
-pub fn aegis256_encryption_spec() -> EncryptionSpec {
-    EncryptionSpec::aegis256([0x42; 32])
+pub fn aegis256_encryption_spec() -> Encryption {
+    Encryption::aegis256([0x42; 32])
 }
 
 pub fn create_test_record(body: Bytes) -> AppendRecord {
@@ -191,7 +176,7 @@ pub async fn append_payloads(
     stream: &StreamName,
     payloads: &[&[u8]],
 ) -> s2_common::types::stream::AppendAck {
-    let encryption = EncryptionSpec::Plain;
+    let encryption = Encryption::Plain;
     append_payloads_with_encryption(backend, basin, stream, payloads, &encryption).await
 }
 
@@ -200,7 +185,7 @@ pub async fn append_payloads_with_encryption(
     basin: &BasinName,
     stream: &StreamName,
     payloads: &[&[u8]],
-    encryption: &EncryptionSpec,
+    encryption: &Encryption,
 ) -> s2_common::types::stream::AppendAck {
     let bodies = payloads
         .iter()
@@ -240,7 +225,7 @@ pub fn encrypt_input_for_stream(
     input: AppendInput,
     basin: &BasinName,
     stream: &StreamName,
-    encryption: &EncryptionSpec,
+    encryption: &Encryption,
 ) -> StoredAppendInput {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
     input.encrypt(encryption, stream_id.as_bytes())

@@ -1,6 +1,7 @@
 //! Stream and basin configuration types.
 //!
-//! Each config area (stream, timestamping, delete-on-empty) has three type tiers:
+//! Each config area (stream, timestamping, delete-on-empty, basin-level stream encryption) has
+//! three type tiers:
 //!
 //! - Resolved (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`): All fields are
 //!   concrete values. Produced by merging optional configs with defaults using `merge()`.
@@ -10,10 +11,10 @@
 //!   `Option<T>` where `None` means "not set at this layer, fall back to defaults."
 //!
 //! - Reconfiguration (`StreamReconfiguration`, `TimestampingReconfiguration`,
-//!   `DeleteOnEmptyReconfiguration`): Partial updates with PATCH semantics. Most fields are
-//!   `Maybe<Option<T>>` with three states: `Unspecified` (don't change), `Specified(None)` (clear
-//!   to default), `Specified(Some(v))` (set to value). Collection-valued fields may instead use an
-//!   empty collection to mean "clear to default". Applied using `reconfigure()`.
+//!   `DeleteOnEmptyReconfiguration`, `BasinReconfiguration`): Partial updates with PATCH semantics.
+//!   Most fields are `Maybe<Option<T>>` with three states: `Unspecified` (don't change),
+//!   `Specified(None)` (clear to default), `Specified(Some(v))` (set to value). Applied using
+//!   `reconfigure()`.
 //!
 //! Reconfiguration of nested fields (e.g. `timestamping`, `delete_on_empty`,
 //! `default_stream_config`) is applied recursively: `Specified(Some(inner_reconfig))`
@@ -30,9 +31,8 @@
 use std::time::Duration;
 
 use enum_ordinalize::Ordinalize;
-use enumset::EnumSet;
 
-use crate::{encryption::EncryptionMode, maybe::Maybe};
+use crate::{encryption::EncryptionAlgorithm, maybe::Maybe};
 
 #[derive(
     Debug,
@@ -101,29 +101,12 @@ pub struct DeleteOnEmptyConfig {
     pub min_age: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncryptionConfig {
-    pub allowed_modes: EnumSet<EncryptionMode>,
-}
-
-pub const DEFAULT_ALLOWED_ENCRYPTION_MODES: EnumSet<EncryptionMode> =
-    enumset::enum_set!(EncryptionMode::Plain);
-
-impl Default for EncryptionConfig {
-    fn default() -> Self {
-        Self {
-            allowed_modes: DEFAULT_ALLOWED_ENCRYPTION_MODES,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamConfig {
     pub storage_class: StorageClass,
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
-    pub encryption: EncryptionConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,17 +121,11 @@ pub struct DeleteOnEmptyReconfiguration {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct EncryptionReconfiguration {
-    pub allowed_modes: Maybe<EnumSet<EncryptionMode>>,
-}
-
-#[derive(Debug, Clone, Default)]
 pub struct StreamReconfiguration {
     pub storage_class: Maybe<Option<StorageClass>>,
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
-    pub encryption: Maybe<Option<EncryptionReconfiguration>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -249,61 +226,11 @@ impl From<OptionalDeleteOnEmptyConfig> for DeleteOnEmptyReconfiguration {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct OptionalEncryptionConfig {
-    pub allowed_modes: EnumSet<EncryptionMode>,
-}
-
-impl OptionalEncryptionConfig {
-    pub fn reconfigure(mut self, reconfiguration: EncryptionReconfiguration) -> Self {
-        if let Maybe::Specified(allowed_modes) = reconfiguration.allowed_modes {
-            self.allowed_modes = allowed_modes;
-        }
-        self
-    }
-
-    pub fn merge(self, basin_defaults: Self) -> EncryptionConfig {
-        let allowed_modes = if !self.allowed_modes.is_empty() {
-            self.allowed_modes
-        } else if !basin_defaults.allowed_modes.is_empty() {
-            basin_defaults.allowed_modes
-        } else {
-            DEFAULT_ALLOWED_ENCRYPTION_MODES
-        };
-        EncryptionConfig { allowed_modes }
-    }
-}
-
-impl From<OptionalEncryptionConfig> for EncryptionConfig {
-    fn from(value: OptionalEncryptionConfig) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes,
-        }
-    }
-}
-
-impl From<EncryptionConfig> for OptionalEncryptionConfig {
-    fn from(value: EncryptionConfig) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes,
-        }
-    }
-}
-
-impl From<OptionalEncryptionConfig> for EncryptionReconfiguration {
-    fn from(value: OptionalEncryptionConfig) -> Self {
-        Self {
-            allowed_modes: Maybe::Specified(value.allowed_modes),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
 pub struct OptionalStreamConfig {
     pub storage_class: Option<StorageClass>,
     pub retention_policy: Option<RetentionPolicy>,
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,
-    pub encryption: OptionalEncryptionConfig,
 }
 
 impl OptionalStreamConfig {
@@ -313,7 +240,6 @@ impl OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = reconfiguration;
         if let Maybe::Specified(storage_class) = storage_class {
             self.storage_class = storage_class;
@@ -329,11 +255,6 @@ impl OptionalStreamConfig {
         if let Maybe::Specified(delete_on_empty_reconfig) = delete_on_empty {
             self.delete_on_empty = delete_on_empty_reconfig
                 .map(|reconfig| self.delete_on_empty.reconfigure(reconfig))
-                .unwrap_or_default();
-        }
-        if let Maybe::Specified(encryption) = encryption {
-            self.encryption = encryption
-                .map(|enc| self.encryption.reconfigure(enc))
                 .unwrap_or_default();
         }
         self
@@ -354,14 +275,11 @@ impl OptionalStreamConfig {
 
         let delete_on_empty = self.delete_on_empty.merge(basin_defaults.delete_on_empty);
 
-        let encryption = self.encryption.merge(basin_defaults.encryption);
-
         StreamConfig {
             storage_class,
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         }
     }
 }
@@ -373,7 +291,6 @@ impl From<OptionalStreamConfig> for StreamReconfiguration {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = value;
 
         Self {
@@ -381,7 +298,6 @@ impl From<OptionalStreamConfig> for StreamReconfiguration {
             retention_policy: retention_policy.into(),
             timestamping: Some(timestamping.into()).into(),
             delete_on_empty: Some(delete_on_empty.into()).into(),
-            encryption: Some(encryption.into()).into(),
         }
     }
 }
@@ -393,7 +309,6 @@ impl From<OptionalStreamConfig> for StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = value;
 
         Self {
@@ -401,7 +316,6 @@ impl From<OptionalStreamConfig> for StreamConfig {
             retention_policy: retention_policy.unwrap_or_default(),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
-            encryption: encryption.into(),
         }
     }
 }
@@ -413,7 +327,6 @@ impl From<StreamConfig> for OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = value;
 
         Self {
@@ -421,7 +334,6 @@ impl From<StreamConfig> for OptionalStreamConfig {
             retention_policy: Some(retention_policy),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
-            encryption: encryption.into(),
         }
     }
 }
@@ -429,6 +341,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
 #[derive(Debug, Clone, Default)]
 pub struct BasinConfig {
     pub default_stream_config: OptionalStreamConfig,
+    pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
     pub create_stream_on_append: bool,
     pub create_stream_on_read: bool,
 }
@@ -437,6 +350,7 @@ impl BasinConfig {
     pub fn reconfigure(mut self, reconfiguration: BasinReconfiguration) -> Self {
         let BasinReconfiguration {
             default_stream_config,
+            stream_encryption_algorithm,
             create_stream_on_append,
             create_stream_on_read,
         } = reconfiguration;
@@ -445,6 +359,10 @@ impl BasinConfig {
             self.default_stream_config = default_stream_config
                 .map(|reconfig| self.default_stream_config.reconfigure(reconfig))
                 .unwrap_or_default();
+        }
+
+        if let Maybe::Specified(stream_encryption_algorithm) = stream_encryption_algorithm {
+            self.stream_encryption_algorithm = stream_encryption_algorithm;
         }
 
         if let Maybe::Specified(create_stream_on_append) = create_stream_on_append {
@@ -463,12 +381,14 @@ impl From<BasinConfig> for BasinReconfiguration {
     fn from(value: BasinConfig) -> Self {
         let BasinConfig {
             default_stream_config,
+            stream_encryption_algorithm,
             create_stream_on_append,
             create_stream_on_read,
         } = value;
 
         Self {
             default_stream_config: Some(default_stream_config.into()).into(),
+            stream_encryption_algorithm: stream_encryption_algorithm.into(),
             create_stream_on_append: create_stream_on_append.into(),
             create_stream_on_read: create_stream_on_read.into(),
         }
@@ -478,6 +398,7 @@ impl From<BasinConfig> for BasinReconfiguration {
 #[derive(Debug, Clone, Default)]
 pub struct BasinReconfiguration {
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
+    pub stream_encryption_algorithm: Maybe<Option<EncryptionAlgorithm>>,
     pub create_stream_on_append: Maybe<bool>,
     pub create_stream_on_read: Maybe<bool>,
 }

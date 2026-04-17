@@ -1,28 +1,44 @@
-//! Encryption spec parsing, header parsing, and key parsing.
+//! Encryption algorithm, key parsing, and key-only header handling.
 
 use core::str::FromStr;
 use std::sync::Arc;
 
 use base64ct::Encoding;
 use http::{HeaderName, HeaderValue};
-use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroizing};
+use secrecy::{ExposeSecret, SecretBox};
 use strum::{Display, EnumString};
 
 use crate::http::ParseableHeader;
 
-pub static S2_ENCRYPTION_HEADER: HeaderName = HeaderName::from_static("s2-encryption");
+pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-encryption-key");
 
-type EncryptionKey<const N: usize> = Arc<SecretBox<[u8; N]>>;
+type SecretKey = Arc<SecretBox<[u8; 32]>>;
 
 /// Encryption algorithm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Display,
+    EnumString,
+)]
 #[strum(ascii_case_insensitive)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum EncryptionAlgorithm {
     /// AEGIS-256
     #[strum(serialize = "aegis-256")]
+    #[serde(rename = "aegis-256")]
+    #[cfg_attr(feature = "clap", value(name = "aegis-256"))]
     Aegis256,
     /// AES-256-GCM
     #[strum(serialize = "aes-256-gcm")]
+    #[serde(rename = "aes-256-gcm")]
+    #[cfg_attr(feature = "clap", value(name = "aes-256-gcm"))]
     Aes256Gcm,
 }
 
@@ -66,75 +82,72 @@ impl From<EncryptionAlgorithm> for EncryptionMode {
     }
 }
 
+/// Customer-supplied encryption key shared by all supported algorithms.
 #[derive(Debug, Clone)]
-pub struct Aegis256Key(EncryptionKey<32>);
+pub struct EncryptionKey(SecretKey);
 
-impl Aegis256Key {
+impl EncryptionKey {
     pub fn new(key: [u8; 32]) -> Self {
         Self(Arc::new(SecretBox::new(Box::new(key))))
     }
 
-    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionSpecError> {
-        parse_encryption_key::<32>(key_b64).map(Self)
+    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionKeyError> {
+        parse_encryption_key(key_b64).map(Self)
     }
 
     pub(crate) fn secret(&self) -> &[u8; 32] {
         self.0.as_ref().expose_secret()
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct Aes256GcmKey(EncryptionKey<32>);
-
-impl Aes256GcmKey {
-    pub fn new(key: [u8; 32]) -> Self {
-        Self(Arc::new(SecretBox::new(Box::new(key))))
-    }
-
-    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionSpecError> {
-        parse_encryption_key::<32>(key_b64).map(Self)
-    }
-
-    pub(crate) fn secret(&self) -> &[u8; 32] {
-        self.0.as_ref().expose_secret()
+    pub fn to_header_value(&self) -> HeaderValue {
+        let mut value = header_value_for_key(self.secret());
+        value.set_sensitive(true);
+        value
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EncryptionSpecError {
-    #[error("Invalid encryption spec: expected '<mode>; <key>' or 'plain'")]
-    InvalidSyntax,
-    #[error("Invalid encryption spec: missing encryption mode")]
-    MissingMode,
-    #[error(
-        "Invalid encryption spec: unknown encryption mode {mode:?}; expected 'plain', 'aegis-256', or 'aes-256-gcm'"
-    )]
-    UnknownMode { mode: String },
-    #[error("Invalid encryption spec: key is not allowed when mode is 'plain'")]
-    UnexpectedKeyForPlain,
-    #[error("Invalid encryption spec: missing key for '{mode}'")]
-    MissingKey { mode: EncryptionMode },
-    #[error("Invalid encryption spec: key is not valid base64")]
-    InvalidKeyBase64,
-    #[error("Invalid encryption spec: key must be exactly {expected} bytes, got {actual} bytes")]
-    InvalidKeyLength { expected: usize, actual: usize },
+pub enum EncryptionKeyError {
+    #[error("invalid encryption key: key is not valid base64")]
+    InvalidBase64,
+    #[error("invalid encryption key: key must be exactly {expected} bytes, got {actual} bytes")]
+    InvalidLength { expected: usize, actual: usize },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EncryptionResolutionError {
+    #[error("missing encryption key for stream encryption algorithm '{algorithm}'")]
+    MissingKey { algorithm: EncryptionAlgorithm },
+}
+
+/// Resolved stream encryption after combining stream metadata with the request key.
 #[derive(Debug, Clone, Default)]
-pub enum EncryptionSpec {
+pub enum Encryption {
     #[default]
     Plain,
-    Aegis256(Aegis256Key),
-    Aes256Gcm(Aes256GcmKey),
+    Aegis256(EncryptionKey),
+    Aes256Gcm(EncryptionKey),
 }
 
-impl EncryptionSpec {
+impl Encryption {
+    pub fn resolve(
+        algorithm: Option<EncryptionAlgorithm>,
+        key: Option<EncryptionKey>,
+    ) -> Result<Self, EncryptionResolutionError> {
+        match (algorithm, key) {
+            (None, _) => Ok(Self::Plain),
+            (Some(EncryptionAlgorithm::Aegis256), Some(key)) => Ok(Self::Aegis256(key)),
+            (Some(EncryptionAlgorithm::Aes256Gcm), Some(key)) => Ok(Self::Aes256Gcm(key)),
+            (Some(algorithm), None) => Err(EncryptionResolutionError::MissingKey { algorithm }),
+        }
+    }
+
     pub fn aegis256(key: [u8; 32]) -> Self {
-        Self::Aegis256(Aegis256Key::new(key))
+        Self::Aegis256(EncryptionKey::new(key))
     }
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
-        Self::Aes256Gcm(Aes256GcmKey::new(key))
+        Self::Aes256Gcm(EncryptionKey::new(key))
     }
 
     pub fn mode(&self) -> EncryptionMode {
@@ -144,84 +157,40 @@ impl EncryptionSpec {
             Self::Aes256Gcm(_) => EncryptionMode::Aes256Gcm,
         }
     }
-
-    pub fn to_header_value(&self) -> HeaderValue {
-        let mut value = match self {
-            Self::Plain => HeaderValue::from_static("plain"),
-            Self::Aegis256(key) => {
-                header_value_for_key(EncryptionAlgorithm::Aegis256, key.secret())
-            }
-            Self::Aes256Gcm(key) => {
-                header_value_for_key(EncryptionAlgorithm::Aes256Gcm, key.secret())
-            }
-        };
-        value.set_sensitive(true);
-        value
-    }
 }
 
-impl FromStr for EncryptionSpec {
-    type Err = EncryptionSpecError;
+impl FromStr for EncryptionKey {
+    type Err = EncryptionKeyError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim();
-        let mut parts = s.splitn(3, ';');
-        let mode_str = parts.next().unwrap_or_default().trim();
-        let key_b64 = parts.next().map(str::trim);
-        if parts.next().is_some() {
-            return Err(EncryptionSpecError::InvalidSyntax);
-        }
-
-        if mode_str.is_empty() {
-            return Err(EncryptionSpecError::MissingMode);
-        }
-
-        let key_b64 = key_b64.filter(|key| !key.is_empty());
-        match (parse_mode(mode_str)?, key_b64) {
-            (EncryptionMode::Plain, None) => Ok(Self::Plain),
-            (EncryptionMode::Plain, Some(_)) => Err(EncryptionSpecError::UnexpectedKeyForPlain),
-            (EncryptionMode::Aegis256, Some(key_b64)) => {
-                Ok(Self::Aegis256(Aegis256Key::from_base64(key_b64)?))
-            }
-            (EncryptionMode::Aegis256, None) => Err(EncryptionSpecError::MissingKey {
-                mode: EncryptionMode::Aegis256,
-            }),
-            (EncryptionMode::Aes256Gcm, Some(key_b64)) => {
-                Ok(Self::Aes256Gcm(Aes256GcmKey::from_base64(key_b64)?))
-            }
-            (EncryptionMode::Aes256Gcm, None) => Err(EncryptionSpecError::MissingKey {
-                mode: EncryptionMode::Aes256Gcm,
-            }),
-        }
+        Self::from_base64(s.trim())
     }
 }
 
-impl ParseableHeader for EncryptionSpec {
+impl ParseableHeader for EncryptionKey {
     fn name() -> &'static HeaderName {
-        &S2_ENCRYPTION_HEADER
+        &S2_ENCRYPTION_KEY_HEADER
     }
 }
 
-fn parse_encryption_key<const N: usize>(
-    key_b64: &str,
-) -> Result<EncryptionKey<N>, EncryptionSpecError> {
+fn parse_encryption_key(key_b64: &str) -> Result<SecretKey, EncryptionKeyError> {
     use base64ct::{Base64, Encoding};
     use secrecy::zeroize::Zeroize;
 
-    let mut key = Box::new([0u8; N]);
+    let mut key = Box::new([0u8; 32]);
     let decoded = match Base64::decode(key_b64, key.as_mut()) {
         Ok(decoded) => decoded,
         Err(_) => {
             key.as_mut().zeroize();
-            return Err(EncryptionSpecError::InvalidKeyBase64);
+            return Err(EncryptionKeyError::InvalidBase64);
         }
     };
 
-    if decoded.len() != N {
+    if decoded.len() != 32 {
         let len = decoded.len();
         key.as_mut().zeroize();
-        return Err(EncryptionSpecError::InvalidKeyLength {
-            expected: N,
+        return Err(EncryptionKeyError::InvalidLength {
+            expected: 32,
             actual: len,
         });
     }
@@ -229,24 +198,10 @@ fn parse_encryption_key<const N: usize>(
     Ok(Arc::new(SecretBox::new(key)))
 }
 
-fn header_value_for_key(algorithm: EncryptionAlgorithm, key: &[u8; 32]) -> HeaderValue {
-    let algorithm = algorithm.to_string();
-    let encoded_len = base64ct::Base64::encoded_len(key);
-    let mut value = Zeroizing::new(vec![0u8; algorithm.len() + 2 + encoded_len]);
-    value[..algorithm.len()].copy_from_slice(algorithm.as_bytes());
-    value[algorithm.len()..algorithm.len() + 2].copy_from_slice(b"; ");
-    base64ct::Base64::encode(key, &mut value[algorithm.len() + 2..])
-        .expect("base64 output length should match buffer");
-
-    HeaderValue::from_bytes(&value).expect("encryption header value should be ASCII")
-}
-
-fn parse_mode(mode_str: &str) -> Result<EncryptionMode, EncryptionSpecError> {
-    mode_str
-        .parse::<EncryptionMode>()
-        .map_err(|_| EncryptionSpecError::UnknownMode {
-            mode: mode_str.to_owned(),
-        })
+fn header_value_for_key(key: &[u8; 32]) -> HeaderValue {
+    let mut value = vec![0u8; base64ct::Base64::encoded_len(key)];
+    base64ct::Base64::encode(key, &mut value).expect("base64 output length should match buffer");
+    HeaderValue::from_bytes(&value).expect("encryption key header value should be ASCII")
 }
 
 #[cfg(test)]
@@ -262,76 +217,45 @@ mod tests {
         26, 27, 28, 29, 30, 31, 32,
     ];
 
-    fn assert_encrypted_spec(
-        spec: EncryptionSpec,
-        algorithm: EncryptionAlgorithm,
-        expected: &[u8; 32],
-    ) {
-        match (algorithm, spec) {
-            (EncryptionAlgorithm::Aegis256, EncryptionSpec::Aegis256(key)) => {
-                assert_eq!(key.secret(), expected)
-            }
-            (EncryptionAlgorithm::Aes256Gcm, EncryptionSpec::Aes256Gcm(key)) => {
-                assert_eq!(key.secret(), expected)
-            }
-            (_, EncryptionSpec::Plain) => panic!("expected encrypted spec"),
-            (expected_algorithm, actual_spec) => {
-                panic!("expected {expected_algorithm:?}, got {actual_spec:?}")
-            }
-        }
+    #[test]
+    fn parse_key_header_roundtrips() {
+        let key = KEY_B64.parse::<EncryptionKey>().unwrap();
+        assert_eq!(key.secret(), &KEY_BYTES);
     }
 
-    fn assert_invalid_parse(header: &str, expected: EncryptionSpecError) {
-        let result = header.parse::<EncryptionSpec>();
+    #[test]
+    fn key_header_value_is_sensitive() {
+        let value = EncryptionKey::new([7; 32]).to_header_value();
+        assert!(value.is_sensitive());
+        assert_ne!(value, HeaderValue::from_static("plain"));
+    }
+
+    #[test]
+    fn key_header_value_roundtrips() {
+        let value = EncryptionKey::new(KEY_BYTES).to_header_value();
+        assert_eq!(value.to_str().unwrap(), KEY_B64);
+        assert!(value.is_sensitive());
+
+        let parsed = value.to_str().unwrap().parse::<EncryptionKey>().unwrap();
+        assert_eq!(parsed.secret(), &KEY_BYTES);
+    }
+
+    #[rstest]
+    #[case("", EncryptionKeyError::InvalidLength {
+        expected: 32,
+        actual: 0
+    })]
+    #[case("3q2+7w==", EncryptionKeyError::InvalidLength {
+        expected: 32,
+        actual: 4
+    })]
+    #[case("not-valid-base64!!!", EncryptionKeyError::InvalidBase64)]
+    fn parse_key_header_invalid_cases(#[case] header: &str, #[case] expected: EncryptionKeyError) {
+        let result = header.parse::<EncryptionKey>();
         match result {
             Err(actual) => assert_eq!(actual, expected),
-            Ok(actual) => panic!("expected invalid spec for {header:?}, got {actual:?}"),
+            Ok(_) => panic!("expected invalid key for {header:?}"),
         }
-    }
-
-    #[rstest]
-    #[case("aegis-256", EncryptionAlgorithm::Aegis256)]
-    #[case("aes-256-gcm", EncryptionAlgorithm::Aes256Gcm)]
-    #[case("AEGIS-256", EncryptionAlgorithm::Aegis256)]
-    #[case("AES-256-GCM", EncryptionAlgorithm::Aes256Gcm)]
-    fn parse_header_valid_encrypted(
-        #[case] algorithm: &str,
-        #[case] expected: EncryptionAlgorithm,
-    ) {
-        let spec = format!("{algorithm}; {KEY_B64}")
-            .parse::<EncryptionSpec>()
-            .unwrap();
-        assert_encrypted_spec(spec, expected, &KEY_BYTES);
-    }
-
-    #[test]
-    fn parse_header_aes_with_whitespace() {
-        let spec = format!(" aes-256-gcm ; {KEY_B64} ")
-            .parse::<EncryptionSpec>()
-            .unwrap();
-        assert_encrypted_spec(spec, EncryptionAlgorithm::Aes256Gcm, &KEY_BYTES);
-    }
-
-    #[rstest]
-    #[case("plain")]
-    #[case("PLAIN")]
-    #[case("plain; ")]
-    fn parse_header_plain_variants(#[case] header: &str) {
-        let spec = header.parse::<EncryptionSpec>().unwrap();
-        assert!(matches!(spec, EncryptionSpec::Plain));
-    }
-
-    #[test]
-    fn spec_mode_matches_variant() {
-        assert_eq!(EncryptionSpec::Plain.mode(), EncryptionMode::Plain);
-        assert_eq!(
-            EncryptionSpec::aegis256(KEY_BYTES).mode(),
-            EncryptionMode::Aegis256
-        );
-        assert_eq!(
-            EncryptionSpec::aes256_gcm(KEY_BYTES).mode(),
-            EncryptionMode::Aes256Gcm
-        );
     }
 
     #[rstest]
@@ -346,80 +270,29 @@ mod tests {
     }
 
     #[rstest]
-    #[case(EncryptionMode::Plain, "plain")]
-    #[case(EncryptionMode::Aegis256, "aegis-256")]
-    #[case(EncryptionMode::Aes256Gcm, "aes-256-gcm")]
-    fn mode_display_matches_spec(#[case] mode: EncryptionMode, #[case] expected: &str) {
-        assert_eq!(mode.to_string(), expected);
-    }
-
-    #[rstest]
-    #[case("", EncryptionSpecError::MissingMode)]
-    #[case(
-        "aegis-256",
-        EncryptionSpecError::MissingKey {
-            mode: EncryptionMode::Aegis256
-        }
-    )]
-    #[case(
-        "aegis-256; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=; extra",
-        EncryptionSpecError::InvalidSyntax
-    )]
-    #[case(
-        "aegis-256; 3q2+7w==",
-        EncryptionSpecError::InvalidKeyLength {
-            expected: 32,
-            actual: 4
-        }
-    )]
-    #[case(
-        "aegis-256; not-valid-base64!!!",
-        EncryptionSpecError::InvalidKeyBase64
-    )]
-    #[case(
-        "bogus; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
-        EncryptionSpecError::UnknownMode {
-            mode: "bogus".to_owned()
-        }
-    )]
-    #[case(
-        "plain; AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
-        EncryptionSpecError::UnexpectedKeyForPlain
-    )]
-    fn parse_header_invalid_cases(#[case] header: &str, #[case] expected: EncryptionSpecError) {
-        assert_invalid_parse(header, expected);
+    #[case(EncryptionAlgorithm::Aegis256, "\"aegis-256\"")]
+    #[case(EncryptionAlgorithm::Aes256Gcm, "\"aes-256-gcm\"")]
+    fn algorithm_serde_roundtrip(#[case] algorithm: EncryptionAlgorithm, #[case] expected: &str) {
+        let serialized = serde_json::to_string(&algorithm).unwrap();
+        assert_eq!(serialized, expected);
+        let deserialized: EncryptionAlgorithm = serde_json::from_str(expected).unwrap();
+        assert_eq!(deserialized, algorithm);
     }
 
     #[test]
-    fn header_value_is_sensitive() {
-        let value = EncryptionSpec::aegis256([7; 32]).to_header_value();
-        assert!(value.is_sensitive());
-        assert_ne!(value, HeaderValue::from_static("plain"));
+    fn resolve_plain_ignores_key() {
+        let encryption = Encryption::resolve(None, Some(EncryptionKey::new(KEY_BYTES))).unwrap();
+        assert!(matches!(encryption, Encryption::Plain));
     }
 
     #[test]
-    fn plain_header_value_roundtrips() {
-        let value = EncryptionSpec::Plain.to_header_value();
-        assert_eq!(value.to_str().unwrap(), "plain");
-        assert!(value.is_sensitive());
-
-        let parsed = value.to_str().unwrap().parse::<EncryptionSpec>().unwrap();
-        assert!(matches!(parsed, EncryptionSpec::Plain));
-    }
-
-    #[rstest]
-    #[case(EncryptionAlgorithm::Aegis256)]
-    #[case(EncryptionAlgorithm::Aes256Gcm)]
-    fn encrypted_header_value_roundtrips(#[case] algorithm: EncryptionAlgorithm) {
-        let value = match algorithm {
-            EncryptionAlgorithm::Aegis256 => EncryptionSpec::aegis256(KEY_BYTES),
-            EncryptionAlgorithm::Aes256Gcm => EncryptionSpec::aes256_gcm(KEY_BYTES),
-        }
-        .to_header_value();
-        assert_eq!(value.to_str().unwrap(), format!("{algorithm}; {KEY_B64}"));
-        assert!(value.is_sensitive());
-
-        let parsed = value.to_str().unwrap().parse::<EncryptionSpec>().unwrap();
-        assert_encrypted_spec(parsed, algorithm, &KEY_BYTES);
+    fn resolve_encrypted_requires_key() {
+        let err = Encryption::resolve(Some(EncryptionAlgorithm::Aegis256), None).unwrap_err();
+        assert_eq!(
+            err,
+            EncryptionResolutionError::MissingKey {
+                algorithm: EncryptionAlgorithm::Aegis256,
+            }
+        );
     }
 }

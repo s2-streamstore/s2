@@ -4,8 +4,8 @@ use clap::{Args, Parser, ValueEnum};
 use s2_sdk::{
     self as sdk,
     types::{
-        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, EncryptionMode, StreamName,
-        StreamNamePrefix, TimeseriesInterval,
+        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, EncryptionAlgorithm,
+        StreamName, StreamNamePrefix, TimeseriesInterval,
     },
 };
 use serde::Serialize;
@@ -130,6 +130,9 @@ impl FromStr for S2BasinAndStreamUri {
 pub struct BasinConfig {
     #[clap(flatten)]
     pub default_stream_config: StreamConfig,
+    /// Encryption algorithm materialized into streams created in this basin.
+    #[arg(long)]
+    pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
     /// Create stream on append with basin defaults if it doesn't exist.
     #[arg(long, default_value_t = false)]
     pub create_stream_on_append: bool,
@@ -152,9 +155,6 @@ pub struct StreamConfig {
     #[clap(flatten)]
     /// Delete-on-empty configuration.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
-    #[clap(flatten)]
-    /// Encryption configuration.
-    pub encryption: Option<EncryptionConfig>,
 }
 
 impl StreamConfig {
@@ -164,13 +164,11 @@ impl StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = self;
         storage_class.is_none()
             && retention_policy.is_none()
             && timestamping.is_none()
             && delete_on_empty.is_none()
-            && encryption.is_none()
     }
 }
 
@@ -257,39 +255,14 @@ impl From<sdk::types::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     }
 }
 
-#[derive(Parser, Debug, Clone, Serialize)]
-pub struct EncryptionConfig {
-    #[arg(long, value_delimiter = ',')]
-    /// Allowed encryption modes (comma-separated). If no default is configured, only plaintext is
-    /// allowed.
-    pub encryption_allowed_modes: Vec<EncryptionMode>,
-}
-
-impl From<EncryptionConfig> for sdk::types::EncryptionConfig {
-    fn from(value: EncryptionConfig) -> Self {
-        sdk::types::EncryptionConfig::new().with_allowed_modes(value.encryption_allowed_modes)
-    }
-}
-
-impl From<sdk::types::EncryptionConfig> for EncryptionConfig {
-    fn from(value: sdk::types::EncryptionConfig) -> Self {
-        Self {
-            encryption_allowed_modes: value.allowed_modes,
-        }
-    }
-}
-
-impl From<EncryptionConfig> for sdk::types::EncryptionReconfiguration {
-    fn from(value: EncryptionConfig) -> Self {
-        sdk::types::EncryptionReconfiguration::new()
-            .with_allowed_modes(value.encryption_allowed_modes)
-    }
-}
-
 impl From<BasinConfig> for sdk::types::BasinConfig {
     fn from(config: BasinConfig) -> Self {
-        sdk::types::BasinConfig::new()
-            .with_default_stream_config(config.default_stream_config.into())
+        let mut basin_config = sdk::types::BasinConfig::new()
+            .with_default_stream_config(config.default_stream_config.into());
+        if let Some(algorithm) = config.stream_encryption_algorithm {
+            basin_config = basin_config.with_stream_encryption_algorithm(algorithm);
+        }
+        basin_config
             .with_create_stream_on_append(config.create_stream_on_append)
             .with_create_stream_on_read(config.create_stream_on_read)
     }
@@ -309,9 +282,6 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
         }
         if let Some(delete_on_empty) = config.delete_on_empty {
             stream_config = stream_config.with_delete_on_empty(delete_on_empty.into());
-        }
-        if let Some(encryption) = config.encryption {
-            stream_config = stream_config.with_encryption(encryption.into());
         }
         stream_config
     }
@@ -404,6 +374,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
                 .default_stream_config
                 .map(Into::into)
                 .unwrap_or_default(),
+            stream_encryption_algorithm: config.stream_encryption_algorithm.map(Into::into),
             create_stream_on_append: config.create_stream_on_append,
             create_stream_on_read: config.create_stream_on_read,
         }
@@ -417,7 +388,6 @@ impl From<sdk::types::StreamConfig> for StreamConfig {
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),
-            encryption: config.encryption.map(Into::into),
         }
     }
 }
@@ -437,9 +407,6 @@ impl From<StreamConfig> for sdk::types::StreamReconfiguration {
         }
         if let Some(delete_on_empty) = config.delete_on_empty {
             reconfig = reconfig.with_delete_on_empty(delete_on_empty.into());
-        }
-        if let Some(encryption) = config.encryption {
-            reconfig = reconfig.with_encryption(encryption.into());
         }
         reconfig
     }

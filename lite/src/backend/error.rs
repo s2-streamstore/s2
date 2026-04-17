@@ -1,6 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
+    encryption::EncryptionMode,
     record::{FencingToken, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
@@ -77,15 +78,18 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("encryption mode '{0}' is not allowed on this stream")]
-pub struct EncryptionModeNotAllowedError(pub s2_common::encryption::EncryptionMode);
+#[error("record encryption mode mismatch")]
+pub struct EncryptionModeMismatchError {
+    pub expected: EncryptionMode,
+    pub actual: EncryptionMode,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("transaction conflict occurred – this is usually retriable")]
 pub struct TransactionConflictError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub(super) enum StreamerError {
+pub(crate) enum StreamerError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -107,7 +111,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
+    EncryptionModeMismatch(#[from] EncryptionModeMismatchError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -161,7 +165,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
+    EncryptionModeMismatch(#[from] EncryptionModeMismatchError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -174,8 +178,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptionModeNotAllowed(e) => {
-                AppendError::EncryptionModeNotAllowed(e)
+            AppendErrorInternal::EncryptionModeMismatch(e) => {
+                AppendError::EncryptionModeMismatch(e)
             }
         }
     }

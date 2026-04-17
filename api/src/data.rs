@@ -101,10 +101,10 @@ pub struct S2FormatHeader {
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
 pub struct S2EncryptionHeader {
-    /// Optional per-request encryption spec for append/read operations.
-    /// Use `plain` for plaintext, or `<alg>; <base64-key>` where `<alg>` is `aegis-256` or `aes-256-gcm`.
-    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-encryption", value_type = String))]
-    pub s2_encryption: String,
+    /// Optional per-request encryption key for append/read operations.
+    /// When stream encryption is enabled, provide a 32-byte symmetric key encoded as Base64.
+    #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-encryption-key", value_type = String))]
+    pub s2_encryption_key: String,
 }
 
 #[cfg(feature = "axum")]

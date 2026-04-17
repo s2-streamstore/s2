@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
-    encryption::{EncryptionMode, EncryptionSpec},
+    encryption::{Encryption, EncryptionMode},
     read_extent::{ReadLimit, ReadUntil},
     record::{MeteredSize, RecordDecryptionError, StreamPosition},
     types::{
@@ -203,7 +203,7 @@ async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
 
     let batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
     assert!(matches!(
-        batch.decrypt(&EncryptionSpec::Plain, &[]),
+        batch.decrypt(&Encryption::Plain, &[]),
         Err(RecordDecryptionError::ModeMismatch {
             expected: EncryptionMode::Plain,
             actual,
