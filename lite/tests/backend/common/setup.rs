@@ -46,32 +46,47 @@ pub fn test_stream_name(suffix: &str) -> StreamName {
     format!("test-stream-{}", suffix).parse().unwrap()
 }
 
-pub fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
-    OptionalStreamConfig::default()
-}
-
-pub fn all_encryption_modes_basin_config() -> BasinConfig {
+pub fn basin_config_with_stream_cipher(stream_cipher: EncryptionAlgorithm) -> BasinConfig {
     BasinConfig {
-        default_stream_config: all_encryption_modes_stream_config(),
-        stream_cipher: Some(EncryptionAlgorithm::Aegis256),
-        ..Default::default()
-    }
-}
-
-pub fn aegis_only_encryption_stream_config() -> OptionalStreamConfig {
-    OptionalStreamConfig::default()
-}
-
-pub fn aegis_only_encryption_basin_config() -> BasinConfig {
-    BasinConfig {
-        default_stream_config: aegis_only_encryption_stream_config(),
-        stream_cipher: Some(EncryptionAlgorithm::Aegis256),
+        default_stream_config: OptionalStreamConfig::default(),
+        stream_cipher: Some(stream_cipher),
         ..Default::default()
     }
 }
 
 pub fn aegis256_encryption_spec() -> EncryptionSpec {
     EncryptionSpec::aegis256([0x42; 32])
+}
+
+pub async fn setup_backend_for_encryption_spec(
+    basin_suffix: &str,
+    stream_suffix: &str,
+    encryption: &EncryptionSpec,
+) -> (Backend, BasinName, StreamName) {
+    match encryption {
+        EncryptionSpec::Plain => {
+            setup_backend_with_stream(basin_suffix, stream_suffix, OptionalStreamConfig::default())
+                .await
+        }
+        EncryptionSpec::Aegis256(_) => {
+            setup_backend_with_basin_and_stream(
+                basin_suffix,
+                stream_suffix,
+                basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+                OptionalStreamConfig::default(),
+            )
+            .await
+        }
+        EncryptionSpec::Aes256Gcm(_) => {
+            setup_backend_with_basin_and_stream(
+                basin_suffix,
+                stream_suffix,
+                basin_config_with_stream_cipher(EncryptionAlgorithm::Aes256Gcm),
+                OptionalStreamConfig::default(),
+            )
+            .await
+        }
+    }
 }
 
 pub fn create_test_record(body: Bytes) -> AppendRecord {

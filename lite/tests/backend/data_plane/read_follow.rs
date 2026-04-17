@@ -19,20 +19,8 @@ use super::common::*;
 const VIRTUAL_TIME_STEP: Duration = Duration::from_millis(50);
 
 async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionSpec) {
-    let (backend, basin_name, stream_name) = match encryption {
-        EncryptionSpec::Plain => {
-            setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
-        }
-        EncryptionSpec::Aegis256(_) | EncryptionSpec::Aes256Gcm(_) => {
-            setup_backend_with_basin_and_stream(
-                test_suffix,
-                "stream",
-                all_encryption_modes_basin_config(),
-                all_encryption_modes_stream_config(),
-            )
-            .await
-        }
-    };
+    let (backend, basin_name, stream_name) =
+        setup_backend_for_encryption_spec(test_suffix, "stream", encryption).await;
 
     append_payloads_with_encryption(
         &backend,
