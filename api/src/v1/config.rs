@@ -257,13 +257,15 @@ impl From<types::config::DeleteOnEmptyReconfiguration> for DeleteOnEmptyReconfig
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "kebab-case")]
 pub enum EncryptionMode {
     /// Plaintext (no encryption).
+    #[serde(rename = "plain")]
     Plain,
     /// AEGIS-256 authenticated encryption.
+    #[serde(rename = "aegis-256")]
     Aegis256,
     /// AES-256-GCM authenticated encryption.
+    #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
 }
 
