@@ -496,7 +496,7 @@ mod tests {
         let plaintext = make_envelope(headers, body);
         let encrypted = match encryption {
             EncryptionSpec::Plain => {
-                panic!("plain mode should not produce an encrypted record")
+                panic!("plain encryption should not produce an encrypted record")
             }
             EncryptionSpec::Aegis256(key) => encrypt_payload(
                 &plaintext,

@@ -101,11 +101,11 @@ async fn test_create_stream_defaults_to_no_encryption_algorithm() {
 }
 
 #[tokio::test]
-async fn test_create_stream_materializes_basin_encryption_algorithm() {
+async fn test_create_stream_uses_basin_cipher() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
-        "stream-encryption-materialize",
+        "stream-cipher",
         BasinConfig {
             stream_cipher: Some(EncryptionAlgorithm::Aegis256),
             ..Default::default()
@@ -115,7 +115,7 @@ async fn test_create_stream_materializes_basin_encryption_algorithm() {
     let stream_name = create_test_stream(
         &backend,
         &basin_name,
-        "stream-encryption-materialize",
+        "stream-cipher",
         OptionalStreamConfig::default(),
     )
     .await;
@@ -133,11 +133,11 @@ async fn test_create_stream_materializes_basin_encryption_algorithm() {
 }
 
 #[tokio::test]
-async fn test_existing_stream_keeps_materialized_algorithm_after_basin_reconfigure() {
+async fn test_existing_stream_keeps_cipher_after_basin_reconfigure() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
-        "stream-basin-encryption-reconfigure",
+        "stream-basin-cipher-reconfigure",
         BasinConfig {
             stream_cipher: Some(EncryptionAlgorithm::Aegis256),
             ..Default::default()
@@ -147,7 +147,7 @@ async fn test_existing_stream_keeps_materialized_algorithm_after_basin_reconfigu
     let stream_name = create_test_stream(
         &backend,
         &basin_name,
-        "stream-basin-encryption-reconfigure",
+        "stream-basin-cipher-reconfigure",
         OptionalStreamConfig::default(),
     )
     .await;
@@ -166,7 +166,7 @@ async fn test_existing_stream_keeps_materialized_algorithm_after_basin_reconfigu
     let next_stream = create_test_stream(
         &backend,
         &basin_name,
-        "stream-basin-encryption-reconfigure-next",
+        "stream-basin-cipher-reconfigure-next",
         OptionalStreamConfig::default(),
     )
     .await;

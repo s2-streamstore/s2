@@ -541,14 +541,10 @@ mod tests {
 
     use crate::{backend::Backend, handlers, stream_id::StreamId};
 
-    fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
-        OptionalStreamConfig::default()
-    }
-
-    fn all_encryption_modes_basin_config() -> BasinConfig {
+    fn basin_config_with_stream_cipher(stream_cipher: EncryptionAlgorithm) -> BasinConfig {
         BasinConfig {
-            default_stream_config: all_encryption_modes_stream_config(),
-            stream_cipher: Some(EncryptionAlgorithm::Aegis256),
+            default_stream_config: OptionalStreamConfig::default(),
+            stream_cipher: Some(stream_cipher),
             ..Default::default()
         }
     }
@@ -718,8 +714,8 @@ mod tests {
         let encryption_key = aegis_key(0x42);
         let (app, backend, basin, stream) = setup_app_with_config(
             "append-unary-encrypted",
-            all_encryption_modes_basin_config(),
-            all_encryption_modes_stream_config(),
+            basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+            OptionalStreamConfig::default(),
         )
         .await;
 
@@ -780,8 +776,8 @@ mod tests {
         let wrong_key = aegis_key(0x24);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-unary-bad-key",
-            all_encryption_modes_basin_config(),
-            all_encryption_modes_stream_config(),
+            basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+            OptionalStreamConfig::default(),
         )
         .await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
@@ -814,8 +810,8 @@ mod tests {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-sse-plain",
-            all_encryption_modes_basin_config(),
-            all_encryption_modes_stream_config(),
+            basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+            OptionalStreamConfig::default(),
         )
         .await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
@@ -843,8 +839,8 @@ mod tests {
         let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-s2s-plain",
-            all_encryption_modes_basin_config(),
-            all_encryption_modes_stream_config(),
+            basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+            OptionalStreamConfig::default(),
         )
         .await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
@@ -869,8 +865,8 @@ mod tests {
         let encryption_key = aegis_key(0x42);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-s2s-ok",
-            all_encryption_modes_basin_config(),
-            all_encryption_modes_stream_config(),
+            basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+            OptionalStreamConfig::default(),
         )
         .await;
         append_encrypted_payload(&backend, &basin, &stream, b"secret", &encryption).await;
