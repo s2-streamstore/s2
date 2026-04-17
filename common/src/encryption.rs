@@ -63,12 +63,6 @@ impl EncryptionKey {
         self.0.as_ref().expose_secret()
     }
 
-    pub(crate) fn bytes_32(&self) -> &[u8; 32] {
-        self.bytes()
-            .try_into()
-            .expect("encryption key should be 32 bytes after validation")
-    }
-
     pub fn to_header_value(&self) -> HeaderValue {
         let mut value = header_value_for_key_material(self.bytes());
         value.set_sensitive(true);
@@ -98,13 +92,9 @@ pub enum EncryptionResolutionError {
     },
 }
 
-/// Resolved stream encryption after combining stream metadata with customer-supplied encryption
-/// key, if any.
+/// Resolved stream encryption after combining stream metadata with the request key.
 #[derive(Debug, Clone, Default)]
-pub struct EncryptionSpec(EncryptionSpecInner);
-
-#[derive(Debug, Clone, Default)]
-pub(crate) enum EncryptionSpecInner {
+pub enum EncryptionSpec {
     #[default]
     Plaintext,
     Aegis256(EncryptionKey),
@@ -124,38 +114,42 @@ impl EncryptionSpec {
             (None, _) => Ok(Self::plain()),
             (Some(EncryptionAlgorithm::Aegis256), Some(key)) => {
                 validate_key_length(EncryptionAlgorithm::Aegis256, &key)?;
-                Ok(Self(EncryptionSpecInner::Aegis256(key)))
+                Ok(Self::Aegis256(key))
             }
             (Some(EncryptionAlgorithm::Aes256Gcm), Some(key)) => {
                 validate_key_length(EncryptionAlgorithm::Aes256Gcm, &key)?;
-                Ok(Self(EncryptionSpecInner::Aes256Gcm(key)))
+                Ok(Self::Aes256Gcm(key))
             }
             (Some(algorithm), None) => Err(EncryptionResolutionError::MissingKey { algorithm }),
         }
     }
 
     pub fn aegis256(key: [u8; 32]) -> Self {
-        Self(EncryptionSpecInner::Aegis256(EncryptionKey::new(key)))
+        Self::Aegis256(EncryptionKey::new(key))
     }
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
-        Self(EncryptionSpecInner::Aes256Gcm(EncryptionKey::new(key)))
+        Self::Aes256Gcm(EncryptionKey::new(key))
     }
 
     pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
-        match self.inner() {
-            EncryptionSpecInner::Plaintext => None,
-            EncryptionSpecInner::Aegis256(_) => Some(EncryptionAlgorithm::Aegis256),
-            EncryptionSpecInner::Aes256Gcm(_) => Some(EncryptionAlgorithm::Aes256Gcm),
+        match self {
+            Self::Plaintext => None,
+            Self::Aegis256(_) => Some(EncryptionAlgorithm::Aegis256),
+            Self::Aes256Gcm(_) => Some(EncryptionAlgorithm::Aes256Gcm),
         }
     }
 
     pub fn is_plain(&self) -> bool {
-        matches!(self.inner(), EncryptionSpecInner::Plaintext)
+        matches!(self, Self::Plaintext)
     }
 
-    pub(crate) fn inner(&self) -> &EncryptionSpecInner {
-        &self.0
+    pub(crate) fn key_for_algorithm(&self, algorithm: EncryptionAlgorithm) -> Option<&[u8; 32]> {
+        match (self, algorithm) {
+            (Self::Aegis256(key), EncryptionAlgorithm::Aegis256)
+            | (Self::Aes256Gcm(key), EncryptionAlgorithm::Aes256Gcm) => Some(key_bytes_32(key)),
+            _ => None,
+        }
     }
 }
 
@@ -196,11 +190,12 @@ fn validate_key_length(
     algorithm: EncryptionAlgorithm,
     key: &EncryptionKey,
 ) -> Result<(), EncryptionResolutionError> {
-    if key.0.expose_secret().len() != 32 {
+    let bytes = key.bytes();
+    if bytes.len() != 32 {
         return Err(EncryptionResolutionError::InvalidKeyLength {
             algorithm,
             expected: 32,
-            actual: key.0.expose_secret().len(),
+            actual: bytes.len(),
         });
     }
 
@@ -211,6 +206,12 @@ fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
     let mut value = vec![0u8; base64ct::Base64::encoded_len(key)];
     base64ct::Base64::encode(key, &mut value).expect("base64 output length should match buffer");
     HeaderValue::from_bytes(&value).expect("encryption key header value should be ASCII")
+}
+
+fn key_bytes_32(key: &EncryptionKey) -> &[u8; 32] {
+    key.bytes()
+        .try_into()
+        .expect("encryption key should be 32 bytes after validation")
 }
 
 #[cfg(test)]
