@@ -780,7 +780,7 @@ pub struct BasinConfig {
     ///
     /// See [`StreamConfig`] for defaults.
     pub default_stream_config: Option<StreamConfig>,
-    /// Encryption algorithm materialized into streams created in the basin.
+    /// Encryption algorithm to apply to newly created streams in the basin.
     pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
     /// Whether to create stream on append if it doesn't exist using default stream configuration.
     ///
@@ -806,7 +806,7 @@ impl BasinConfig {
         }
     }
 
-    /// Set the encryption algorithm materialized into streams created in the basin.
+    /// Set the encryption algorithm to apply to newly created streams in the basin.
     pub fn with_stream_encryption_algorithm(
         self,
         stream_encryption_algorithm: EncryptionAlgorithm,
@@ -2634,7 +2634,7 @@ pub struct StreamInfo {
     pub created_at: S2DateTime,
     /// Deletion time if the stream is being deleted.
     pub deleted_at: Option<S2DateTime>,
-    /// Encryption algorithm materialized at stream creation time, if encryption is enabled.
+    /// Encryption algorithm for this stream, if encryption is enabled.
     pub encryption_algorithm: Option<EncryptionAlgorithm>,
 }
 

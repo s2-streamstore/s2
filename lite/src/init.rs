@@ -50,7 +50,7 @@ pub struct StreamSpec {
 pub struct BasinConfigSpec {
     #[serde(default)]
     pub default_stream_config: Option<StreamConfigSpec>,
-    /// Encryption algorithm materialized into streams created in the basin.
+    /// Encryption algorithm to apply to newly created streams in the basin.
     #[serde(default)]
     pub stream_encryption_algorithm: Option<EncryptionAlgorithmSpec>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
@@ -125,7 +125,7 @@ impl schemars::JsonSchema for EncryptionAlgorithmSpec {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Encryption algorithm materialized into streams created in the basin.",
+            "description": "Encryption algorithm to apply to newly created streams in the basin.",
             "enum": ["aegis-256", "aes-256-gcm"]
         })
     }
