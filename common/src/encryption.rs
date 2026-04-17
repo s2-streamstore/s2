@@ -175,12 +175,15 @@ fn validate_key_length(
     algorithm: EncryptionAlgorithm,
     key: &EncryptionKey,
 ) -> Result<(), EncryptionResolutionError> {
-    let num_bytes = key.0.expose_secret().len();
-    if num_bytes != 32 {
+    let expected = match algorithm {
+        EncryptionAlgorithm::Aegis256 | EncryptionAlgorithm::Aes256Gcm => 32,
+    };
+    let actual = key.0.expose_secret().len();
+    if expected != actual {
         return Err(EncryptionResolutionError::InvalidKeyLength {
             algorithm,
-            expected: 32,
-            actual: num_bytes,
+            expected,
+            actual,
         });
     }
     Ok(())
