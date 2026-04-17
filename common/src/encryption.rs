@@ -14,6 +14,13 @@ pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-en
 
 type SecretKeyMaterial = Arc<SecretBox<[u8]>>;
 
+const CURRENT_ENCRYPTION_KEY_LEN: usize = 32;
+const MAX_ENCRYPTION_KEY_HEADER_LEN: usize = base64_encoded_len(CURRENT_ENCRYPTION_KEY_LEN);
+
+const fn base64_encoded_len(bytes_len: usize) -> usize {
+    ((bytes_len + 2) / 3) * 4
+}
+
 /// Encryption algorithm.
 #[derive(
     Debug,
@@ -48,15 +55,16 @@ pub struct EncryptionKey(SecretKeyMaterial);
 
 impl EncryptionKey {
     pub fn new(key: [u8; 32]) -> Self {
-        Self::from_bytes(Box::new(key))
+        Self::from_bytes(Box::new(key)).expect("32-byte encryption key should fit header length")
     }
 
     pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionKeyError> {
         parse_encryption_key_material(key_b64).map(Self)
     }
 
-    pub fn from_bytes(bytes: Box<[u8]>) -> Self {
-        Self(Arc::new(SecretBox::new(bytes)))
+    pub fn from_bytes(bytes: Box<[u8]>) -> Result<Self, EncryptionKeyError> {
+        validate_key_material_len(base64_encoded_len(bytes.len()))?;
+        Ok(Self(Arc::new(SecretBox::new(bytes))))
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -76,6 +84,10 @@ pub enum EncryptionKeyError {
     InvalidBase64,
     #[error("invalid encryption key: key material must not be empty")]
     Empty,
+    #[error(
+        "invalid encryption key: encoded key material exceeds maximum length of {max} characters (got {actual})"
+    )]
+    TooLong { max: usize, actual: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -93,6 +105,7 @@ pub enum EncryptionResolutionError {
 }
 
 /// Resolved encryption spec after combining stream metadata with the customer-supplied encryption key, if any.
+#[rustfmt::skip]
 #[derive(Debug, Clone, Default)]
 pub enum EncryptionSpec {
     #[default]
@@ -147,6 +160,8 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
     use base64ct::{Base64, Encoding};
     use secrecy::zeroize::Zeroize;
 
+    validate_key_material_len(key_b64.len())?;
+
     let mut key = match Base64::decode_vec(key_b64) {
         Ok(decoded) => decoded,
         Err(_) => {
@@ -160,6 +175,17 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
     }
 
     Ok(Arc::new(SecretBox::new(key.into_boxed_slice())))
+}
+
+fn validate_key_material_len(len: usize) -> Result<(), EncryptionKeyError> {
+    if len > MAX_ENCRYPTION_KEY_HEADER_LEN {
+        return Err(EncryptionKeyError::TooLong {
+            max: MAX_ENCRYPTION_KEY_HEADER_LEN,
+            actual: len,
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_key_length(
@@ -263,7 +289,7 @@ mod tests {
     fn resolve_encrypted_validates_key_length_per_algorithm() {
         let err = EncryptionSpec::resolve(
             Some(EncryptionAlgorithm::Aegis256),
-            Some(EncryptionKey::from_bytes(vec![0x42; 4].into_boxed_slice())),
+            Some(EncryptionKey::from_bytes(vec![0x42; 4].into_boxed_slice()).unwrap()),
         )
         .unwrap_err();
         assert_eq!(
@@ -272,6 +298,31 @@ mod tests {
                 algorithm: EncryptionAlgorithm::Aegis256,
                 expected: 32,
                 actual: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_key_header_rejects_overlong_encoded_material() {
+        let header = "A".repeat(MAX_ENCRYPTION_KEY_HEADER_LEN + 1);
+        let result = header.parse::<EncryptionKey>();
+        assert_eq!(
+            result.unwrap_err(),
+            EncryptionKeyError::TooLong {
+                max: MAX_ENCRYPTION_KEY_HEADER_LEN,
+                actual: MAX_ENCRYPTION_KEY_HEADER_LEN + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn from_bytes_rejects_key_material_that_would_overflow_header_limit() {
+        let result = EncryptionKey::from_bytes(vec![0x42; 34].into_boxed_slice());
+        assert_eq!(
+            result.unwrap_err(),
+            EncryptionKeyError::TooLong {
+                max: MAX_ENCRYPTION_KEY_HEADER_LEN,
+                actual: base64_encoded_len(34),
             }
         );
     }
