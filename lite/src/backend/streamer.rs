@@ -97,7 +97,7 @@ pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: OptionalStreamConfig,
-    pub encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub cipher: Option<EncryptionAlgorithm>,
     pub tail_pos: StreamPosition,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
@@ -112,7 +112,7 @@ impl Spawner {
             db,
             stream_id,
             config,
-            encryption_algorithm,
+            cipher,
             tail_pos,
             fencing_token,
             trim_point,
@@ -127,7 +127,7 @@ impl Spawner {
             stream_id,
             msg_tx: msg_tx.clone(),
             config,
-            encryption_algorithm,
+            cipher,
             fencing_token: CommandState {
                 state: fencing_token,
                 applied_point: ..tail_pos.seq_num,
@@ -158,7 +158,7 @@ impl Spawner {
         StreamerClient {
             id,
             stream_id,
-            encryption_algorithm,
+            cipher,
             msg_tx,
             append_inflight_bytes: append_inflight_bytes_sema,
         }
@@ -188,7 +188,7 @@ struct Streamer {
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: OptionalStreamConfig,
-    encryption_algorithm: Option<EncryptionAlgorithm>,
+    cipher: Option<EncryptionAlgorithm>,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -242,7 +242,7 @@ impl Streamer {
             first_seq_num,
             next_assignable_pos.timestamp,
             &self.config.timestamping,
-            self.encryption_algorithm,
+            self.cipher,
         )
     }
 
@@ -537,7 +537,7 @@ impl Drop for FollowGuard {
 pub(super) struct StreamerClient {
     id: StreamerId,
     stream_id: StreamId,
-    encryption_algorithm: Option<EncryptionAlgorithm>,
+    cipher: Option<EncryptionAlgorithm>,
     msg_tx: mpsc::UnboundedSender<Message>,
     append_inflight_bytes: Arc<Semaphore>,
 }
@@ -555,8 +555,8 @@ impl StreamerClient {
         self.stream_id
     }
 
-    pub fn encryption_algorithm(&self) -> Option<EncryptionAlgorithm> {
-        self.encryption_algorithm
+    pub fn cipher(&self) -> Option<EncryptionAlgorithm> {
+        self.cipher
     }
 
     pub async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
@@ -1161,7 +1161,7 @@ mod tests {
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
             config: OptionalStreamConfig::default(),
-            encryption_algorithm: None,
+            cipher: None,
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,

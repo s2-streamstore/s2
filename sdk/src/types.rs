@@ -2625,7 +2625,7 @@ pub struct StreamInfo {
     /// Deletion time if the stream is being deleted.
     pub deleted_at: Option<S2DateTime>,
     /// Encryption algorithm for this stream, if encryption is enabled.
-    pub encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub cipher: Option<EncryptionAlgorithm>,
 }
 
 impl TryFrom<api::stream::StreamInfo> for StreamInfo {
@@ -2636,7 +2636,7 @@ impl TryFrom<api::stream::StreamInfo> for StreamInfo {
             name: value.name,
             created_at: value.created_at.try_into()?,
             deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
-            encryption_algorithm: value.encryption_algorithm.map(Into::into),
+            cipher: value.cipher.map(Into::into),
         })
     }
 }

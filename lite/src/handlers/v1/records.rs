@@ -215,14 +215,14 @@ pub async fn read(
             format,
             response_mime,
         } => {
-            let encryption_algorithm = backend
-                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::ReadError>(
+            let cipher = backend
+                .stream_cipher_with_auto_create::<crate::backend::error::ReadError>(
                     &basin,
                     &stream,
                     |config| config.create_stream_on_read,
                 )
                 .await?;
-            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(cipher, encryption_key)?;
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend.read(basin, stream, start, end).await?;
             let session = decrypt_session(session, encryption, stream_id);
@@ -243,14 +243,14 @@ pub async fn read(
             format,
             last_event_id,
         } => {
-            let encryption_algorithm = backend
-                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::ReadError>(
+            let cipher = backend
+                .stream_cipher_with_auto_create::<crate::backend::error::ReadError>(
                     &basin,
                     &stream,
                     |config| config.create_stream_on_read,
                 )
                 .await?;
-            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(cipher, encryption_key)?;
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
@@ -295,14 +295,14 @@ pub async fn read(
             encryption_key,
             response_compression,
         } => {
-            let encryption_algorithm = backend
-                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::ReadError>(
+            let cipher = backend
+                .stream_cipher_with_auto_create::<crate::backend::error::ReadError>(
                     &basin,
                     &stream,
                     |config| config.create_stream_on_read,
                 )
                 .await?;
-            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(cipher, encryption_key)?;
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
             let s2s_stream =
@@ -420,14 +420,14 @@ pub async fn append(
             input,
             response_mime,
         } => {
-            let encryption_algorithm = backend
-                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::AppendError>(
+            let cipher = backend
+                .stream_cipher_with_auto_create::<crate::backend::error::AppendError>(
                     &basin,
                     &stream,
                     |config| config.create_stream_on_append,
                 )
                 .await?;
-            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(cipher, encryption_key)?;
             let input = input.encrypt(&encryption, stream_id.as_bytes());
             let ack = backend.append(basin, stream, input).await?;
             match response_mime {
@@ -446,14 +446,14 @@ pub async fn append(
             inputs,
             response_compression,
         } => {
-            let encryption_algorithm = backend
-                .stream_encryption_algorithm_with_auto_create::<crate::backend::error::AppendError>(
+            let cipher = backend
+                .stream_cipher_with_auto_create::<crate::backend::error::AppendError>(
                     &basin,
                     &stream,
                     |config| config.create_stream_on_append,
                 )
                 .await?;
-            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(cipher, encryption_key)?;
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
             let inputs = async_stream::stream! {

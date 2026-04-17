@@ -169,7 +169,7 @@ pub struct StreamInfo {
     pub name: StreamName,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
-    pub encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub cipher: Option<EncryptionAlgorithm>,
 }
 
 #[derive(Debug, Clone)]

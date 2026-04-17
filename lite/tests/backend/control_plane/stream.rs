@@ -97,7 +97,7 @@ async fn test_create_stream_defaults_to_no_encryption_algorithm() {
         .iter()
         .find(|info| info.name == stream_name)
         .expect("stream info should be present");
-    assert_eq!(info.encryption_algorithm, None);
+    assert_eq!(info.cipher, None);
 }
 
 #[tokio::test]
@@ -129,10 +129,7 @@ async fn test_create_stream_materializes_basin_encryption_algorithm() {
         .iter()
         .find(|info| info.name == stream_name)
         .expect("stream info should be present");
-    assert_eq!(
-        info.encryption_algorithm,
-        Some(EncryptionAlgorithm::Aegis256)
-    );
+    assert_eq!(info.cipher, Some(EncryptionAlgorithm::Aegis256));
 }
 
 #[tokio::test]
@@ -188,14 +185,8 @@ async fn test_existing_stream_keeps_materialized_algorithm_after_basin_reconfigu
         .iter()
         .find(|info| info.name == next_stream)
         .expect("new stream info should be present");
-    assert_eq!(
-        original.encryption_algorithm,
-        Some(EncryptionAlgorithm::Aegis256)
-    );
-    assert_eq!(
-        next.encryption_algorithm,
-        Some(EncryptionAlgorithm::Aes256Gcm)
-    );
+    assert_eq!(original.cipher, Some(EncryptionAlgorithm::Aegis256));
+    assert_eq!(next.cipher, Some(EncryptionAlgorithm::Aes256Gcm));
 }
 
 #[tokio::test]

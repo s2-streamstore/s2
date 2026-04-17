@@ -76,7 +76,7 @@ impl Backend {
                 name: stream,
                 created_at: meta.created_at,
                 deleted_at: meta.deleted_at,
-                encryption_algorithm: meta.encryption_algorithm,
+                cipher: meta.cipher,
             });
         }
         Ok(Page::new(streams, has_more))
@@ -141,7 +141,7 @@ impl Backend {
                             name: stream,
                             created_at: existing_meta.created_at,
                             deleted_at: None,
-                            encryption_algorithm: existing_meta.encryption_algorithm,
+                            cipher: existing_meta.cipher,
                         }))
                     } else {
                         Err(StreamAlreadyExistsError { basin, stream }.into())
@@ -154,11 +154,11 @@ impl Backend {
         }
 
         let is_reconfigure = existing_meta_opt.is_some();
-        let (resolved, created_at, encryption_algorithm) = match existing_meta_opt {
+        let (resolved, created_at, cipher) = match existing_meta_opt {
             Some(existing) => (
                 existing.config.reconfigure(config),
                 existing.created_at,
-                existing.encryption_algorithm,
+                existing.cipher,
             ),
             None => (
                 OptionalStreamConfig::default().reconfigure(config),
@@ -171,7 +171,7 @@ impl Backend {
 
         let meta = kv::stream_meta::StreamMeta {
             config: resolved.clone(),
-            encryption_algorithm,
+            cipher,
             created_at,
             deleted_at: None,
             creation_idempotency_key,
@@ -232,7 +232,7 @@ impl Backend {
             name: stream,
             created_at,
             deleted_at: None,
-            encryption_algorithm,
+            cipher,
         };
 
         Ok(if is_reconfigure {

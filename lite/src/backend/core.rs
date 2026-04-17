@@ -142,7 +142,7 @@ impl Backend {
             db: self.db.clone(),
             stream_id,
             config: meta.config,
-            encryption_algorithm: meta.encryption_algorithm,
+            cipher: meta.cipher,
             tail_pos,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
@@ -331,7 +331,7 @@ impl Backend {
         }
     }
 
-    pub(crate) async fn stream_encryption_algorithm_with_auto_create<E>(
+    pub(crate) async fn stream_cipher_with_auto_create<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
@@ -349,7 +349,7 @@ impl Backend {
         let client = self
             .streamer_client_with_auto_create::<E>(basin, stream, should_auto_create)
             .await?;
-        Ok(client.encryption_algorithm())
+        Ok(client.cipher())
     }
 }
 
@@ -388,7 +388,7 @@ mod tests {
 
         let meta = kv::stream_meta::StreamMeta {
             config: OptionalStreamConfig::default(),
-            encryption_algorithm: None,
+            cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
             creation_idempotency_key: None,

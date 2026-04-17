@@ -37,7 +37,7 @@ pub struct StreamInfo {
     #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
     /// Encryption algorithm for this stream, if encryption is enabled.
-    pub encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub cipher: Option<EncryptionAlgorithm>,
 }
 
 impl From<types::stream::StreamInfo> for StreamInfo {
@@ -46,7 +46,7 @@ impl From<types::stream::StreamInfo> for StreamInfo {
             name: value.name,
             created_at: value.created_at,
             deleted_at: value.deleted_at,
-            encryption_algorithm: value.encryption_algorithm.map(Into::into),
+            cipher: value.cipher.map(Into::into),
         }
     }
 }

@@ -25,7 +25,7 @@ const FIELD_SEPARATOR: u8 = b'\0';
 #[derive(Debug, Clone)]
 pub struct StreamMeta {
     pub config: OptionalStreamConfig,
-    pub encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub cipher: Option<EncryptionAlgorithm>,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
     pub creation_idempotency_key: Option<Bash>,
@@ -34,7 +34,7 @@ pub struct StreamMeta {
 #[derive(Debug, Serialize, Deserialize)]
 struct StreamMetaSerde {
     config: Option<s2_api::v1::config::StreamConfig>,
-    encryption_algorithm: Option<EncryptionAlgorithm>,
+    cipher: Option<EncryptionAlgorithm>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -46,7 +46,7 @@ impl From<StreamMeta> for StreamMetaSerde {
     fn from(meta: StreamMeta) -> Self {
         Self {
             config: s2_api::v1::config::StreamConfig::to_opt(meta.config),
-            encryption_algorithm: meta.encryption_algorithm,
+            cipher: meta.cipher,
             created_at: meta.created_at,
             deleted_at: meta.deleted_at,
             creation_idempotency_key: meta.creation_idempotency_key,
@@ -65,7 +65,7 @@ impl TryFrom<StreamMetaSerde> for StreamMeta {
 
         Ok(Self {
             config,
-            encryption_algorithm: serde.encryption_algorithm,
+            cipher: serde.cipher,
             created_at: serde.created_at,
             deleted_at: serde.deleted_at,
             creation_idempotency_key: serde.creation_idempotency_key,
@@ -187,7 +187,7 @@ mod tests {
         );
         let stream_meta = super::StreamMeta {
             config: config.clone(),
-            encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
+            cipher: Some(EncryptionAlgorithm::Aegis256),
             created_at,
             deleted_at,
             creation_idempotency_key: Some(Bash::length_prefixed(&[
@@ -212,7 +212,7 @@ mod tests {
     fn stream_meta_deser_defaults_config_missing() {
         let serde_value = super::StreamMetaSerde {
             config: None,
-            encryption_algorithm: Some(EncryptionAlgorithm::Aes256Gcm),
+            cipher: Some(EncryptionAlgorithm::Aes256Gcm),
             created_at: OffsetDateTime::from_unix_timestamp(2_345_678).unwrap(),
             deleted_at: None,
             creation_idempotency_key: Some(Bash::length_prefixed(&[
@@ -244,10 +244,7 @@ mod tests {
         );
         assert_eq!(decoded.created_at, serde_value.created_at);
         assert_eq!(decoded.deleted_at, serde_value.deleted_at);
-        assert_eq!(
-            decoded.encryption_algorithm,
-            serde_value.encryption_algorithm
-        );
+        assert_eq!(decoded.cipher, serde_value.cipher);
     }
 
     fn stream_name_prefix_strategy() -> impl Strategy<Value = StreamNamePrefix> {
