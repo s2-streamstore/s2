@@ -130,7 +130,7 @@ impl FromStr for S2BasinAndStreamUri {
 pub struct BasinConfig {
     #[clap(flatten)]
     pub default_stream_config: StreamConfig,
-    /// Encryption algorithm to apply to newly created streams in this basin.
+    /// Cipher to apply to newly created streams in this basin.
     #[arg(long)]
     pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Create stream on append with basin defaults if it doesn't exist.

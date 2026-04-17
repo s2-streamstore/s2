@@ -433,7 +433,7 @@ impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
 pub struct BasinConfig {
     /// Default stream configuration.
     pub default_stream_config: Option<StreamConfig>,
-    /// Encryption algorithm to apply to newly created streams in the basin.
+    /// Cipher to apply to newly created streams in the basin.
     pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
@@ -494,7 +494,7 @@ pub struct BasinReconfiguration {
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<StreamReconfiguration>))]
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
-    /// Encryption algorithm to apply to newly created streams in the basin.
+    /// Cipher to apply to newly created streams in the basin.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<EncryptionAlgorithm>))]
     pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
