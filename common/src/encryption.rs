@@ -92,7 +92,7 @@ pub enum EncryptionResolutionError {
     },
 }
 
-/// Resolved stream encryption after combining stream metadata with the request key.
+/// Resolved encryption spec after combining stream metadata with the customer-supplied encryption key, if any.
 #[derive(Debug, Clone, Default)]
 pub enum EncryptionSpec {
     #[default]
