@@ -51,23 +51,19 @@ pub struct EncryptionKey(SecretKeyMaterial);
 
 impl EncryptionKey {
     pub fn new<const N: usize>(key: [u8; N]) -> Self {
-        Self::from_bytes(Box::new(key))
+        Self(Arc::new(SecretBox::new(Box::new(key))))
     }
 
     pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionKeyError> {
         parse_encryption_key_material(key_b64).map(Self)
     }
 
-    pub fn from_bytes(bytes: Box<[u8]>) -> Self {
-        Self(Arc::new(SecretBox::new(bytes)))
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        self.0.as_ref().expose_secret()
+    pub fn expose_secret(&self) -> &[u8] {
+        self.0.expose_secret()
     }
 
     pub fn to_header_value(&self) -> HeaderValue {
-        let mut value = header_value_for_key_material(self.bytes());
+        let mut value = header_value_for_key_material(self.expose_secret());
         value.set_sensitive(true);
         value
     }
@@ -181,15 +177,14 @@ fn validate_key_length(
     algorithm: EncryptionAlgorithm,
     key: &EncryptionKey,
 ) -> Result<(), EncryptionResolutionError> {
-    let bytes = key.bytes();
-    if bytes.len() != 32 {
+    let num_bytes = key.0.expose_secret().len();
+    if num_bytes != 32 {
         return Err(EncryptionResolutionError::InvalidKeyLength {
             algorithm,
             expected: 32,
-            actual: bytes.len(),
+            actual: num_bytes,
         });
     }
-
     Ok(())
 }
 
@@ -215,7 +210,7 @@ mod tests {
     #[test]
     fn parse_key_header_roundtrips() {
         let key = KEY_B64.parse::<EncryptionKey>().unwrap();
-        assert_eq!(key.bytes(), KEY_BYTES);
+        assert_eq!(key.expose_secret(), KEY_BYTES);
     }
 
     #[test]
@@ -232,7 +227,7 @@ mod tests {
         assert!(value.is_sensitive());
 
         let parsed = value.to_str().unwrap().parse::<EncryptionKey>().unwrap();
-        assert_eq!(parsed.bytes(), KEY_BYTES);
+        assert_eq!(parsed.expose_secret(), KEY_BYTES);
     }
 
     #[rstest]
@@ -278,7 +273,7 @@ mod tests {
     fn resolve_encrypted_validates_key_length_per_algorithm() {
         let err = EncryptionSpec::resolve(
             Some(EncryptionAlgorithm::Aegis256),
-            Some(EncryptionKey::from_bytes(vec![0x42; 4].into_boxed_slice())),
+            Some(EncryptionKey::new([0x42; 4])),
         )
         .unwrap_err();
         assert_eq!(

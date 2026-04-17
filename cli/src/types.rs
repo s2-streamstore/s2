@@ -374,7 +374,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
                 .default_stream_config
                 .map(Into::into)
                 .unwrap_or_default(),
-            stream_cipher: config.stream_cipher.map(Into::into),
+            stream_cipher: config.stream_cipher,
             create_stream_on_append: config.create_stream_on_append,
             create_stream_on_read: config.create_stream_on_read,
         }

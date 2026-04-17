@@ -209,7 +209,7 @@ pub fn encrypt_record(
             let encrypted = encrypt_payload(
                 &envelope,
                 EncryptionAlgorithm::Aegis256,
-                key_bytes_32(key),
+                key.expose_secret(),
                 aad,
             );
             StoredRecord::encrypted(encrypted, metered_size)
@@ -218,7 +218,7 @@ pub fn encrypt_record(
             let encrypted = encrypt_payload(
                 &envelope,
                 EncryptionAlgorithm::Aes256Gcm,
-                key_bytes_32(key),
+                key.expose_secret(),
                 aad,
             );
             StoredRecord::encrypted(encrypted, metered_size)
@@ -230,7 +230,7 @@ pub fn encrypt_record(
 fn encrypt_payload(
     plaintext: &(impl Encodable + ?Sized),
     alg: EncryptionAlgorithm,
-    key: &[u8; 32],
+    key: &[u8],
     aad: &[u8],
 ) -> EncryptedRecord {
     let format = EncryptedRecordFormat::current_for_algorithm(alg);
@@ -246,9 +246,8 @@ fn encrypt_payload(
 
     match format {
         EncryptedRecordFormat::Aegis256V1 => {
-            let nonce: &[u8; 32] = nonce
-                .try_into()
-                .expect("AEGIS-256 nonce should match the encoded record framing");
+            let key: &[u8; 32] = key.try_into().expect("AEGIS-256 key must be 32 bytes");
+            let nonce: &[u8; 32] = nonce.try_into().expect("AEGIS-256 nonce must be 32 bytes");
             let tag = Aegis256::<16>::new(key, nonce).encrypt_in_place(payload, aad);
             encoded.put_slice(tag.as_ref());
         }
@@ -330,23 +329,24 @@ fn decrypt_payload(
 
     match (format, encryption) {
         (EncryptedRecordFormat::Aegis256V1, EncryptionSpec::Aegis256(key)) => {
-            {
-                let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
-                let nonce: &[u8; 32] = prefix
-                    .get(FORMAT_ID_LEN..)
-                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
-                    .try_into()
-                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-                let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
-                let tag: &[u8; 16] = tag
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-
-                Aegis256::<16>::new(key_bytes_32(key), nonce)
-                    .decrypt_in_place(ciphertext, tag, aad)
-                    .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
-            }
+            let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
+            let key: &[u8; 32] = key
+                .expose_secret()
+                .try_into()
+                .expect("AEGIS-256 key must be 32 bytes");
+            let nonce: &[u8; 32] = prefix
+                .get(FORMAT_ID_LEN..)
+                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
+                .try_into()
+                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
+            let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
+            let tag: &[u8; 16] = tag
+                .as_ref()
+                .try_into()
+                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
+            Aegis256::<16>::new(key, nonce)
+                .decrypt_in_place(ciphertext, tag, aad)
+                .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
         (EncryptedRecordFormat::Aegis256V1, EncryptionSpec::Plain) => {
@@ -362,25 +362,23 @@ fn decrypt_payload(
             })
         }
         (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Aes256Gcm(key)) => {
-            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key_bytes_32(key)));
-            {
-                let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
-                let nonce: &[u8; 12] = prefix
-                    .get(FORMAT_ID_LEN..)
-                    .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
-                    .try_into()
-                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-                let nonce = aes_gcm::Nonce::from_slice(nonce);
-                let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
-                let tag: &[u8; 16] = tag
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-                let tag = aes_gcm::Tag::from_slice(tag);
-                cipher
-                    .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
-                    .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
-            }
+            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()));
+            let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
+            let nonce: &[u8; 12] = prefix
+                .get(FORMAT_ID_LEN..)
+                .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
+                .try_into()
+                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
+            let nonce = aes_gcm::Nonce::from_slice(nonce);
+            let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
+            let tag: &[u8; 16] = tag
+                .as_ref()
+                .try_into()
+                .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
+            let tag = aes_gcm::Tag::from_slice(tag);
+            cipher
+                .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
+                .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
         (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Plain) => {
@@ -396,12 +394,6 @@ fn decrypt_payload(
             })
         }
     }
-}
-
-fn key_bytes_32(key: &crate::encryption::EncryptionKey) -> &[u8; 32] {
-    key.bytes()
-        .try_into()
-        .expect("encryption key should be 32 bytes after validation")
 }
 
 fn decryption_layout(
@@ -509,13 +501,13 @@ mod tests {
             EncryptionSpec::Aegis256(key) => encrypt_payload(
                 &plaintext,
                 EncryptionAlgorithm::Aegis256,
-                key_bytes_32(key),
+                key.expose_secret(),
                 aad,
             ),
             EncryptionSpec::Aes256Gcm(key) => encrypt_payload(
                 &plaintext,
                 EncryptionAlgorithm::Aes256Gcm,
-                key_bytes_32(key),
+                key.expose_secret(),
                 aad,
             ),
         };
