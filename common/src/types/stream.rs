@@ -616,7 +616,7 @@ mod test {
         let decryption = if encrypt {
             &encryption
         } else {
-            &EncryptionSpec::plain()
+            &EncryptionSpec::Plaintext
         };
         let decrypted = decrypt_stored_record(stored_record, decryption, TEST_AAD).unwrap();
         let Record::Envelope(record) = decrypted.into_inner() else {
@@ -655,7 +655,7 @@ mod test {
         };
 
         let mapped = batch
-            .decrypt(&crate::encryption::EncryptionSpec::plain(), &[])
+            .decrypt(&crate::encryption::EncryptionSpec::Plaintext, &[])
             .unwrap();
         let records = mapped.records.into_inner();
 

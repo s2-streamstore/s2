@@ -102,16 +102,12 @@ pub enum EncryptionSpec {
 }
 
 impl EncryptionSpec {
-    pub fn plain() -> Self {
-        Self::default()
-    }
-
     pub fn resolve(
         algorithm: Option<EncryptionAlgorithm>,
         key: Option<EncryptionKey>,
     ) -> Result<Self, EncryptionResolutionError> {
         match (algorithm, key) {
-            (None, _) => Ok(Self::plain()),
+            (None, _) => Ok(Self::Plaintext),
             (Some(EncryptionAlgorithm::Aegis256), Some(key)) => {
                 validate_key_length(EncryptionAlgorithm::Aegis256, &key)?;
                 Ok(Self::Aegis256(key))
@@ -130,26 +126,6 @@ impl EncryptionSpec {
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
         Self::Aes256Gcm(EncryptionKey::new(key))
-    }
-
-    pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
-        match self {
-            Self::Plaintext => None,
-            Self::Aegis256(_) => Some(EncryptionAlgorithm::Aegis256),
-            Self::Aes256Gcm(_) => Some(EncryptionAlgorithm::Aes256Gcm),
-        }
-    }
-
-    pub fn is_plain(&self) -> bool {
-        matches!(self, Self::Plaintext)
-    }
-
-    pub(crate) fn key_for_algorithm(&self, algorithm: EncryptionAlgorithm) -> Option<&[u8; 32]> {
-        match (self, algorithm) {
-            (Self::Aegis256(key), EncryptionAlgorithm::Aegis256)
-            | (Self::Aes256Gcm(key), EncryptionAlgorithm::Aes256Gcm) => Some(key_bytes_32(key)),
-            _ => None,
-        }
     }
 }
 
@@ -206,12 +182,6 @@ fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
     let mut value = vec![0u8; base64ct::Base64::encoded_len(key)];
     base64ct::Base64::encode(key, &mut value).expect("base64 output length should match buffer");
     HeaderValue::from_bytes(&value).expect("encryption key header value should be ASCII")
-}
-
-fn key_bytes_32(key: &EncryptionKey) -> &[u8; 32] {
-    key.bytes()
-        .try_into()
-        .expect("encryption key should be 32 bytes after validation")
 }
 
 #[cfg(test)]
@@ -275,7 +245,7 @@ mod tests {
     fn resolve_plain_ignores_key() {
         let encryption =
             EncryptionSpec::resolve(None, Some(EncryptionKey::new(KEY_BYTES))).unwrap();
-        assert!(encryption.is_plain());
+        assert!(matches!(encryption, EncryptionSpec::Plaintext));
     }
 
     #[test]

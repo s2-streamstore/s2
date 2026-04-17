@@ -19,16 +19,19 @@ use super::common::*;
 const VIRTUAL_TIME_STEP: Duration = Duration::from_millis(50);
 
 async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionSpec) {
-    let (backend, basin_name, stream_name) = if encryption.is_plain() {
-        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
-    } else {
-        setup_backend_with_basin_and_stream(
-            test_suffix,
-            "stream",
-            all_encryption_modes_basin_config(),
-            all_encryption_modes_stream_config(),
-        )
-        .await
+    let (backend, basin_name, stream_name) = match encryption {
+        EncryptionSpec::Plaintext => {
+            setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
+        }
+        EncryptionSpec::Aegis256(_) | EncryptionSpec::Aes256Gcm(_) => {
+            setup_backend_with_basin_and_stream(
+                test_suffix,
+                "stream",
+                all_encryption_modes_basin_config(),
+                all_encryption_modes_stream_config(),
+            )
+            .await
+        }
     };
 
     append_payloads_with_encryption(
@@ -464,7 +467,7 @@ async fn test_follow_mode_broadcast_lag_resumes_live_follow_after_catchup() {
 }
 
 #[rstest]
-#[case::plaintext("follow-new-data", EncryptionSpec::plain())]
+#[case::plaintext("follow-new-data", EncryptionSpec::Plaintext)]
 #[case::encrypted("follow-enc", aegis256_encryption_spec())]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_receives_new_data(

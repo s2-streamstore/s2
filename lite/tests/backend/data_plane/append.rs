@@ -18,16 +18,19 @@ use s2_lite::backend::{
 use super::common::*;
 
 async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionSpec) {
-    let (backend, basin_name, stream_name) = if encryption.is_plain() {
-        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
-    } else {
-        setup_backend_with_basin_and_stream(
-            test_suffix,
-            "stream",
-            all_encryption_modes_basin_config(),
-            all_encryption_modes_stream_config(),
-        )
-        .await
+    let (backend, basin_name, stream_name) = match encryption {
+        EncryptionSpec::Plaintext => {
+            setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
+        }
+        EncryptionSpec::Aegis256(_) | EncryptionSpec::Aes256Gcm(_) => {
+            setup_backend_with_basin_and_stream(
+                test_suffix,
+                "stream",
+                all_encryption_modes_basin_config(),
+                all_encryption_modes_stream_config(),
+            )
+            .await
+        }
     };
 
     let expected_bodies = vec![
@@ -394,7 +397,7 @@ async fn test_append_with_seq_num_mismatch() {
 }
 
 #[rstest]
-#[case::plaintext("append-session-basic", EncryptionSpec::plain())]
+#[case::plaintext("append-session-basic", EncryptionSpec::Plaintext)]
 #[case::encrypted("appsess-enc", aegis256_encryption_spec())]
 #[tokio::test]
 async fn test_append_session_roundtrip(

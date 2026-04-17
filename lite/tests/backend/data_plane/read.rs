@@ -203,7 +203,7 @@ async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
 
     let batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
     assert!(matches!(
-        batch.decrypt(&EncryptionSpec::plain(), &[]),
+        batch.decrypt(&EncryptionSpec::Plaintext, &[]),
         Err(RecordDecryptionError::AlgorithmMismatch {
             expected: None,
             actual,

@@ -176,7 +176,7 @@ pub async fn append_payloads(
     stream: &StreamName,
     payloads: &[&[u8]],
 ) -> s2_common::types::stream::AppendAck {
-    let encryption = EncryptionSpec::plain();
+    let encryption = EncryptionSpec::Plaintext;
     append_payloads_with_encryption(backend, basin, stream, payloads, &encryption).await
 }
 
