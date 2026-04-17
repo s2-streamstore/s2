@@ -42,46 +42,6 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
-/// Encryption mode, including plaintext.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    Display,
-    EnumString,
-    enumset::EnumSetType,
-)]
-#[strum(ascii_case_insensitive)]
-#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[enumset(no_super_impls)]
-pub enum EncryptionMode {
-    #[strum(serialize = "plain")]
-    #[serde(rename = "plain")]
-    Plain,
-    #[strum(serialize = "aegis-256")]
-    #[serde(rename = "aegis-256")]
-    #[cfg_attr(feature = "clap", value(name = "aegis-256"))]
-    Aegis256,
-    #[strum(serialize = "aes-256-gcm")]
-    #[serde(rename = "aes-256-gcm")]
-    #[cfg_attr(feature = "clap", value(name = "aes-256-gcm"))]
-    Aes256Gcm,
-}
-
-impl From<EncryptionAlgorithm> for EncryptionMode {
-    fn from(value: EncryptionAlgorithm) -> Self {
-        match value {
-            EncryptionAlgorithm::Aegis256 => Self::Aegis256,
-            EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
-        }
-    }
-}
-
 /// Customer-supplied encryption key shared by all supported algorithms.
 #[derive(Debug, Clone)]
 pub struct EncryptionKey(SecretKey);
@@ -150,11 +110,11 @@ impl Encryption {
         Self::Aes256Gcm(EncryptionKey::new(key))
     }
 
-    pub fn mode(&self) -> EncryptionMode {
+    pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
         match self {
-            Self::Plain => EncryptionMode::Plain,
-            Self::Aegis256(_) => EncryptionMode::Aegis256,
-            Self::Aes256Gcm(_) => EncryptionMode::Aes256Gcm,
+            Self::Plain => None,
+            Self::Aegis256(_) => Some(EncryptionAlgorithm::Aegis256),
+            Self::Aes256Gcm(_) => Some(EncryptionAlgorithm::Aes256Gcm),
         }
     }
 }
@@ -256,17 +216,6 @@ mod tests {
             Err(actual) => assert_eq!(actual, expected),
             Ok(_) => panic!("expected invalid key for {header:?}"),
         }
-    }
-
-    #[rstest]
-    #[case(EncryptionMode::Plain, "\"plain\"")]
-    #[case(EncryptionMode::Aegis256, "\"aegis-256\"")]
-    #[case(EncryptionMode::Aes256Gcm, "\"aes-256-gcm\"")]
-    fn mode_serde_roundtrip(#[case] mode: EncryptionMode, #[case] expected: &str) {
-        let serialized = serde_json::to_string(&mode).unwrap();
-        assert_eq!(serialized, expected);
-        let deserialized: EncryptionMode = serde_json::from_str(expected).unwrap();
-        assert_eq!(deserialized, mode);
     }
 
     #[rstest]

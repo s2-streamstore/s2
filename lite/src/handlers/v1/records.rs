@@ -519,10 +519,7 @@ mod tests {
         s2s::{FrameDecoder, SessionMessage},
     };
     use s2_common::{
-        encryption::{
-            Encryption, EncryptionAlgorithm, EncryptionKey, EncryptionMode,
-            S2_ENCRYPTION_KEY_HEADER,
-        },
+        encryption::{Encryption, EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record, RecordDecryptionError},
         types::{
@@ -757,9 +754,9 @@ mod tests {
 
         assert!(matches!(
             stored_batch.clone().decrypt(&Encryption::Plain, &[]),
-            Err(RecordDecryptionError::ModeMismatch {
-                expected: EncryptionMode::Plain,
-                actual: EncryptionMode::Aegis256,
+            Err(RecordDecryptionError::AlgorithmMismatch {
+                expected: None,
+                actual: Some(EncryptionAlgorithm::Aegis256),
             })
         ));
 

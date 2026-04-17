@@ -1,7 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    encryption::EncryptionMode,
+    encryption::EncryptionAlgorithm,
     record::{FencingToken, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
@@ -78,10 +78,10 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("record encryption mode mismatch")]
-pub struct EncryptionModeMismatchError {
-    pub expected: EncryptionMode,
-    pub actual: EncryptionMode,
+#[error("record encryption algorithm mismatch")]
+pub struct EncryptionAlgorithmMismatchError {
+    pub expected: Option<EncryptionAlgorithm>,
+    pub actual: Option<EncryptionAlgorithm>,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -111,7 +111,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeMismatch(#[from] EncryptionModeMismatchError),
+    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -165,7 +165,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeMismatch(#[from] EncryptionModeMismatchError),
+    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -178,8 +178,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptionModeMismatch(e) => {
-                AppendError::EncryptionModeMismatch(e)
+            AppendErrorInternal::EncryptionAlgorithmMismatch(e) => {
+                AppendError::EncryptionAlgorithmMismatch(e)
             }
         }
     }

@@ -23,8 +23,6 @@ pub use s2_common::caps::RECORD_BATCH_MAX;
 pub use s2_common::encryption::EncryptionAlgorithm;
 /// Encryption key for stream operations.
 pub use s2_common::encryption::EncryptionKey;
-/// Encryption mode, including plaintext.
-pub use s2_common::encryption::EncryptionMode;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.

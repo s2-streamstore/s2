@@ -101,7 +101,7 @@ impl ServiceError {
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
             ServiceError::EncryptionResolution(e) => standard(ErrorCode::Invalid, e.to_string()),
             ServiceError::RecordDecryption(e) => match e {
-                RecordDecryptionError::ModeMismatch { .. } => {
+                RecordDecryptionError::AlgorithmMismatch { .. } => {
                     standard(ErrorCode::Invalid, e.to_string())
                 }
                 RecordDecryptionError::AuthenticationFailed => {
@@ -265,7 +265,7 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
-                AppendError::EncryptionModeMismatch(e) => {
+                AppendError::EncryptionAlgorithmMismatch(e) => {
                     standard(ErrorCode::Invalid, e.to_string())
                 }
             },

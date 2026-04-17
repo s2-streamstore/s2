@@ -241,10 +241,10 @@ impl StoredRecord {
         }
     }
 
-    pub fn encryption_mode(&self) -> crate::encryption::EncryptionMode {
+    pub fn encryption_algorithm(&self) -> Option<crate::encryption::EncryptionAlgorithm> {
         match self {
-            Self::Plaintext(_) => crate::encryption::EncryptionMode::Plain,
-            Self::Encrypted { record, .. } => record.algorithm().into(),
+            Self::Plaintext(_) => None,
+            Self::Encrypted { record, .. } => Some(record.algorithm()),
         }
     }
 }

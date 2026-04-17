@@ -36,7 +36,7 @@ use rand::random;
 use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, StoredRecord};
 use crate::{
     deep_size::DeepSize,
-    encryption::{Encryption, EncryptionAlgorithm, EncryptionMode},
+    encryption::{Encryption, EncryptionAlgorithm},
     record::MeteredExt as _,
 };
 
@@ -109,10 +109,10 @@ impl EncryptedRecordFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordDecryptionError {
-    #[error("record encryption mode mismatch")]
-    ModeMismatch {
-        expected: EncryptionMode,
-        actual: EncryptionMode,
+    #[error("record encryption algorithm mismatch")]
+    AlgorithmMismatch {
+        expected: Option<EncryptionAlgorithm>,
+        actual: Option<EncryptionAlgorithm>,
     },
     #[error("record decryption failed")]
     AuthenticationFailed,
@@ -284,9 +284,9 @@ pub fn decrypt_stored_record(
         StoredRecord::Plaintext(record @ Record::Command(_)) => Ok(record.metered()),
         StoredRecord::Plaintext(record @ Record::Envelope(_)) => match encryption {
             Encryption::Plain => Ok(record.metered()),
-            _ => Err(RecordDecryptionError::ModeMismatch {
-                expected: encryption.mode(),
-                actual: EncryptionMode::Plain,
+            _ => Err(RecordDecryptionError::AlgorithmMismatch {
+                expected: encryption.algorithm(),
+                actual: None,
             }),
         },
         StoredRecord::Encrypted {
@@ -313,7 +313,7 @@ fn decrypt_payload(
     aad: &[u8],
 ) -> Result<Bytes, RecordDecryptionError> {
     let format = record.format;
-    let expected = encryption.mode();
+    let expected = encryption.algorithm();
     let (mut encoded, payload_start, payload_end) = decryption_layout(record, format)?;
     let plaintext_len = payload_end - payload_start;
 
@@ -322,9 +322,9 @@ fn decrypt_payload(
             let key = match encryption {
                 Encryption::Aegis256(key) => key,
                 _ => {
-                    return Err(RecordDecryptionError::ModeMismatch {
+                    return Err(RecordDecryptionError::AlgorithmMismatch {
                         expected,
-                        actual: EncryptionMode::Aegis256,
+                        actual: Some(EncryptionAlgorithm::Aegis256),
                     });
                 }
             };
@@ -351,9 +351,9 @@ fn decrypt_payload(
             let key = match encryption {
                 Encryption::Aes256Gcm(key) => key,
                 _ => {
-                    return Err(RecordDecryptionError::ModeMismatch {
+                    return Err(RecordDecryptionError::AlgorithmMismatch {
                         expected,
-                        actual: EncryptionMode::Aes256Gcm,
+                        actual: Some(EncryptionAlgorithm::Aes256Gcm),
                     });
                 }
             };
@@ -580,9 +580,9 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::ModeMismatch {
-                expected: EncryptionMode::Aegis256,
-                actual: EncryptionMode::Aes256Gcm,
+            Err(RecordDecryptionError::AlgorithmMismatch {
+                expected: Some(EncryptionAlgorithm::Aegis256),
+                actual: Some(EncryptionAlgorithm::Aes256Gcm),
             })
         ));
     }
@@ -752,9 +752,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RecordDecryptionError::ModeMismatch {
-                expected: EncryptionMode::Plain,
-                actual: EncryptionMode::Aegis256,
+            Err(RecordDecryptionError::AlgorithmMismatch {
+                expected: None,
+                actual: Some(EncryptionAlgorithm::Aegis256),
             })
         ));
     }
