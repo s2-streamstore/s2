@@ -1,4 +1,4 @@
-//! Encryption algorithm, key parsing, and key-only header handling.
+//! Encryption algorithm, key material parsing, and request header handling.
 
 use core::str::FromStr;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use crate::http::ParseableHeader;
 pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-encryption-key");
 
 type SecretKey = Arc<SecretBox<[u8; 32]>>;
+type SecretKeyMaterial = Arc<SecretBox<[u8]>>;
 
 /// Encryption algorithm.
 #[derive(
@@ -42,25 +43,33 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
-/// Customer-supplied encryption key shared by all supported algorithms.
+/// Customer-supplied encryption key material for append/read operations.
 #[derive(Debug, Clone)]
-pub struct EncryptionKey(SecretKey);
+pub struct EncryptionKey {
+    bytes: SecretKeyMaterial,
+}
 
 impl EncryptionKey {
     pub fn new(key: [u8; 32]) -> Self {
-        Self(Arc::new(SecretBox::new(Box::new(key))))
+        Self::from_bytes(Box::new(key))
     }
 
     pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionKeyError> {
-        parse_encryption_key(key_b64).map(Self)
+        parse_encryption_key_material(key_b64).map(|bytes| Self { bytes })
     }
 
-    pub(crate) fn secret(&self) -> &[u8; 32] {
-        self.0.as_ref().expose_secret()
+    pub fn from_bytes(bytes: Box<[u8]>) -> Self {
+        Self {
+            bytes: Arc::new(SecretBox::new(bytes)),
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref().expose_secret()
     }
 
     pub fn to_header_value(&self) -> HeaderValue {
-        let mut value = header_value_for_key(self.secret());
+        let mut value = header_value_for_key_material(self.bytes());
         value.set_sensitive(true);
         value
     }
@@ -70,52 +79,96 @@ impl EncryptionKey {
 pub enum EncryptionKeyError {
     #[error("invalid encryption key: key is not valid base64")]
     InvalidBase64,
-    #[error("invalid encryption key: key must be exactly {expected} bytes, got {actual} bytes")]
-    InvalidLength { expected: usize, actual: usize },
+    #[error("invalid encryption key: key material must not be empty")]
+    Empty,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EncryptionResolutionError {
     #[error("missing encryption key for stream encryption algorithm '{algorithm}'")]
     MissingKey { algorithm: EncryptionAlgorithm },
+    #[error(
+        "invalid encryption key length for stream encryption algorithm '{algorithm}': expected {expected} bytes, got {actual} bytes"
+    )]
+    InvalidKeyLength {
+        algorithm: EncryptionAlgorithm,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 /// Resolved stream encryption after combining stream metadata with the request key.
-#[derive(Debug, Clone, Default)]
-pub enum Encryption {
-    #[default]
-    Plain,
-    Aegis256(EncryptionKey),
-    Aes256Gcm(EncryptionKey),
+#[derive(Clone, Default)]
+pub struct EncryptionSpec {
+    algorithm: Option<EncryptionAlgorithm>,
+    key: Option<SecretKey>,
 }
 
-impl Encryption {
+impl std::fmt::Debug for EncryptionSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptionSpec")
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
+}
+
+impl EncryptionSpec {
+    pub fn plain() -> Self {
+        Self::default()
+    }
+
     pub fn resolve(
         algorithm: Option<EncryptionAlgorithm>,
         key: Option<EncryptionKey>,
     ) -> Result<Self, EncryptionResolutionError> {
         match (algorithm, key) {
-            (None, _) => Ok(Self::Plain),
-            (Some(EncryptionAlgorithm::Aegis256), Some(key)) => Ok(Self::Aegis256(key)),
-            (Some(EncryptionAlgorithm::Aes256Gcm), Some(key)) => Ok(Self::Aes256Gcm(key)),
+            (None, _) => Ok(Self::plain()),
+            (Some(EncryptionAlgorithm::Aegis256), Some(key)) => Ok(Self::with_secret_key(
+                EncryptionAlgorithm::Aegis256,
+                resolve_secret_key(EncryptionAlgorithm::Aegis256, key)?,
+            )),
+            (Some(EncryptionAlgorithm::Aes256Gcm), Some(key)) => Ok(Self::with_secret_key(
+                EncryptionAlgorithm::Aes256Gcm,
+                resolve_secret_key(EncryptionAlgorithm::Aes256Gcm, key)?,
+            )),
             (Some(algorithm), None) => Err(EncryptionResolutionError::MissingKey { algorithm }),
         }
     }
 
     pub fn aegis256(key: [u8; 32]) -> Self {
-        Self::Aegis256(EncryptionKey::new(key))
+        Self::with_secret_key(EncryptionAlgorithm::Aegis256, secret_key(key))
     }
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
-        Self::Aes256Gcm(EncryptionKey::new(key))
+        Self::with_secret_key(EncryptionAlgorithm::Aes256Gcm, secret_key(key))
     }
 
     pub fn algorithm(&self) -> Option<EncryptionAlgorithm> {
-        match self {
-            Self::Plain => None,
-            Self::Aegis256(_) => Some(EncryptionAlgorithm::Aegis256),
-            Self::Aes256Gcm(_) => Some(EncryptionAlgorithm::Aes256Gcm),
+        self.algorithm
+    }
+
+    pub fn is_plain(&self) -> bool {
+        self.algorithm.is_none()
+    }
+
+    fn with_secret_key(algorithm: EncryptionAlgorithm, key: SecretKey) -> Self {
+        Self {
+            algorithm: Some(algorithm),
+            key: Some(key),
         }
+    }
+
+    pub(crate) fn secret_key(&self) -> Option<&[u8; 32]> {
+        self.key.as_ref().map(|key| key.as_ref().expose_secret())
+    }
+
+    pub(crate) fn secret_key_for_algorithm(
+        &self,
+        algorithm: EncryptionAlgorithm,
+    ) -> Option<&[u8; 32]> {
+        (self.algorithm == Some(algorithm))
+            .then(|| self.secret_key())
+            .flatten()
     }
 }
 
@@ -133,35 +186,53 @@ impl ParseableHeader for EncryptionKey {
     }
 }
 
-fn parse_encryption_key(key_b64: &str) -> Result<SecretKey, EncryptionKeyError> {
+fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, EncryptionKeyError> {
     use base64ct::{Base64, Encoding};
     use secrecy::zeroize::Zeroize;
 
-    let mut key = Box::new([0u8; 32]);
-    let decoded = match Base64::decode(key_b64, key.as_mut()) {
+    let mut key = match Base64::decode_vec(key_b64) {
         Ok(decoded) => decoded,
         Err(_) => {
-            key.as_mut().zeroize();
             return Err(EncryptionKeyError::InvalidBase64);
         }
     };
 
-    if decoded.len() != 32 {
-        let len = decoded.len();
-        key.as_mut().zeroize();
-        return Err(EncryptionKeyError::InvalidLength {
+    if key.is_empty() {
+        key.zeroize();
+        return Err(EncryptionKeyError::Empty);
+    }
+
+    Ok(Arc::new(SecretBox::new(key.into_boxed_slice())))
+}
+
+fn resolve_secret_key(
+    algorithm: EncryptionAlgorithm,
+    key: EncryptionKey,
+) -> Result<SecretKey, EncryptionResolutionError> {
+    // Parse the request header as opaque bytes and validate the current
+    // algorithm-specific raw key requirement only at resolution time.
+    let bytes = key.bytes();
+    if bytes.len() != 32 {
+        return Err(EncryptionResolutionError::InvalidKeyLength {
+            algorithm,
             expected: 32,
-            actual: len,
+            actual: bytes.len(),
         });
     }
 
-    Ok(Arc::new(SecretBox::new(key)))
+    let mut secret = Box::new([0u8; 32]);
+    secret.copy_from_slice(bytes);
+    Ok(Arc::new(SecretBox::new(secret)))
 }
 
-fn header_value_for_key(key: &[u8; 32]) -> HeaderValue {
+fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
     let mut value = vec![0u8; base64ct::Base64::encoded_len(key)];
     base64ct::Base64::encode(key, &mut value).expect("base64 output length should match buffer");
     HeaderValue::from_bytes(&value).expect("encryption key header value should be ASCII")
+}
+
+fn secret_key(key: [u8; 32]) -> SecretKey {
+    Arc::new(SecretBox::new(Box::new(key)))
 }
 
 #[cfg(test)]
@@ -180,7 +251,7 @@ mod tests {
     #[test]
     fn parse_key_header_roundtrips() {
         let key = KEY_B64.parse::<EncryptionKey>().unwrap();
-        assert_eq!(key.secret(), &KEY_BYTES);
+        assert_eq!(key.bytes(), KEY_BYTES);
     }
 
     #[test]
@@ -197,18 +268,11 @@ mod tests {
         assert!(value.is_sensitive());
 
         let parsed = value.to_str().unwrap().parse::<EncryptionKey>().unwrap();
-        assert_eq!(parsed.secret(), &KEY_BYTES);
+        assert_eq!(parsed.bytes(), KEY_BYTES);
     }
 
     #[rstest]
-    #[case("", EncryptionKeyError::InvalidLength {
-        expected: 32,
-        actual: 0
-    })]
-    #[case("3q2+7w==", EncryptionKeyError::InvalidLength {
-        expected: 32,
-        actual: 4
-    })]
+    #[case("", EncryptionKeyError::Empty)]
     #[case("not-valid-base64!!!", EncryptionKeyError::InvalidBase64)]
     fn parse_key_header_invalid_cases(#[case] header: &str, #[case] expected: EncryptionKeyError) {
         let result = header.parse::<EncryptionKey>();
@@ -230,17 +294,35 @@ mod tests {
 
     #[test]
     fn resolve_plain_ignores_key() {
-        let encryption = Encryption::resolve(None, Some(EncryptionKey::new(KEY_BYTES))).unwrap();
-        assert!(matches!(encryption, Encryption::Plain));
+        let encryption =
+            EncryptionSpec::resolve(None, Some(EncryptionKey::new(KEY_BYTES))).unwrap();
+        assert!(encryption.is_plain());
     }
 
     #[test]
     fn resolve_encrypted_requires_key() {
-        let err = Encryption::resolve(Some(EncryptionAlgorithm::Aegis256), None).unwrap_err();
+        let err = EncryptionSpec::resolve(Some(EncryptionAlgorithm::Aegis256), None).unwrap_err();
         assert_eq!(
             err,
             EncryptionResolutionError::MissingKey {
                 algorithm: EncryptionAlgorithm::Aegis256,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_encrypted_validates_key_length_per_algorithm() {
+        let err = EncryptionSpec::resolve(
+            Some(EncryptionAlgorithm::Aegis256),
+            Some(EncryptionKey::from_bytes(vec![0x42; 4].into_boxed_slice())),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            EncryptionResolutionError::InvalidKeyLength {
+                algorithm: EncryptionAlgorithm::Aegis256,
+                expected: 32,
+                actual: 4,
             }
         );
     }

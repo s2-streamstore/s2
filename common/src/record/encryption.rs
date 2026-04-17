@@ -36,7 +36,7 @@ use rand::random;
 use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, StoredRecord};
 use crate::{
     deep_size::DeepSize,
-    encryption::{Encryption, EncryptionAlgorithm},
+    encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::MeteredExt as _,
 };
 
@@ -198,21 +198,21 @@ impl Encodable for EncryptedRecord {
 
 pub fn encrypt_record(
     record: Metered<Record>,
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
     aad: &[u8],
 ) -> Metered<StoredRecord> {
     let metered_size = record.metered_size();
-    let record = match (record.into_inner(), encryption) {
-        (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
-        (record @ Record::Envelope(_), Encryption::Plain) => StoredRecord::Plaintext(record),
-        (Record::Envelope(envelope), Encryption::Aegis256(key)) => {
-            let encrypted =
-                encrypt_payload(&envelope, EncryptionAlgorithm::Aegis256, key.secret(), aad);
-            StoredRecord::encrypted(encrypted, metered_size)
-        }
-        (Record::Envelope(envelope), Encryption::Aes256Gcm(key)) => {
-            let encrypted =
-                encrypt_payload(&envelope, EncryptionAlgorithm::Aes256Gcm, key.secret(), aad);
+    let record = match record.into_inner() {
+        record @ Record::Command(_) => StoredRecord::Plaintext(record),
+        record @ Record::Envelope(_) if encryption.is_plain() => StoredRecord::Plaintext(record),
+        Record::Envelope(envelope) => {
+            let algorithm = encryption
+                .algorithm()
+                .expect("non-plain encryption should carry an algorithm");
+            let key = encryption
+                .secret_key()
+                .expect("non-plain encryption should carry a secret key");
+            let encrypted = encrypt_payload(&envelope, algorithm, key, aad);
             StoredRecord::encrypted(encrypted, metered_size)
         }
     };
@@ -277,18 +277,21 @@ impl TryFrom<Bytes> for EncryptedRecord {
 
 pub fn decrypt_stored_record(
     record: StoredRecord,
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
     aad: &[u8],
 ) -> Result<Metered<Record>, RecordDecryptionError> {
     match record {
         StoredRecord::Plaintext(record @ Record::Command(_)) => Ok(record.metered()),
-        StoredRecord::Plaintext(record @ Record::Envelope(_)) => match encryption {
-            Encryption::Plain => Ok(record.metered()),
-            _ => Err(RecordDecryptionError::AlgorithmMismatch {
-                expected: encryption.algorithm(),
-                actual: None,
-            }),
-        },
+        StoredRecord::Plaintext(record @ Record::Envelope(_)) => {
+            if encryption.is_plain() {
+                Ok(record.metered())
+            } else {
+                Err(RecordDecryptionError::AlgorithmMismatch {
+                    expected: encryption.algorithm(),
+                    actual: None,
+                })
+            }
+        }
         StoredRecord::Encrypted {
             metered_size,
             record: encrypted,
@@ -309,7 +312,7 @@ pub fn decrypt_stored_record(
 
 fn decrypt_payload(
     record: EncryptedRecord,
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
     aad: &[u8],
 ) -> Result<Bytes, RecordDecryptionError> {
     let format = record.format;
@@ -319,14 +322,12 @@ fn decrypt_payload(
 
     match format {
         EncryptedRecordFormat::Aegis256V1 => {
-            let key = match encryption {
-                Encryption::Aegis256(key) => key,
-                _ => {
-                    return Err(RecordDecryptionError::AlgorithmMismatch {
-                        expected,
-                        actual: Some(EncryptionAlgorithm::Aegis256),
-                    });
-                }
+            let Some(key) = encryption.secret_key_for_algorithm(EncryptionAlgorithm::Aegis256)
+            else {
+                return Err(RecordDecryptionError::AlgorithmMismatch {
+                    expected,
+                    actual: Some(EncryptionAlgorithm::Aegis256),
+                });
             };
             {
                 let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
@@ -341,23 +342,21 @@ fn decrypt_payload(
                     .try_into()
                     .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
 
-                Aegis256::<16>::new(key.secret(), nonce)
+                Aegis256::<16>::new(key, nonce)
                     .decrypt_in_place(ciphertext, tag, aad)
                     .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             }
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
         EncryptedRecordFormat::Aes256GcmV1 => {
-            let key = match encryption {
-                Encryption::Aes256Gcm(key) => key,
-                _ => {
-                    return Err(RecordDecryptionError::AlgorithmMismatch {
-                        expected,
-                        actual: Some(EncryptionAlgorithm::Aes256Gcm),
-                    });
-                }
+            let Some(key) = encryption.secret_key_for_algorithm(EncryptionAlgorithm::Aes256Gcm)
+            else {
+                return Err(RecordDecryptionError::AlgorithmMismatch {
+                    expected,
+                    actual: Some(EncryptionAlgorithm::Aes256Gcm),
+                });
             };
-            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.secret()));
+            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));
             {
                 let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
                 let nonce: &[u8; 12] = prefix
@@ -414,17 +413,17 @@ mod tests {
     const TEST_KEY: [u8; 32] = [0x42; 32];
     const OTHER_TEST_KEY: [u8; 32] = [0x99; 32];
 
-    fn test_encryption(alg: EncryptionAlgorithm) -> Encryption {
+    fn test_encryption(alg: EncryptionAlgorithm) -> EncryptionSpec {
         match alg {
-            EncryptionAlgorithm::Aegis256 => Encryption::aegis256(TEST_KEY),
-            EncryptionAlgorithm::Aes256Gcm => Encryption::aes256_gcm(TEST_KEY),
+            EncryptionAlgorithm::Aegis256 => EncryptionSpec::aegis256(TEST_KEY),
+            EncryptionAlgorithm::Aes256Gcm => EncryptionSpec::aes256_gcm(TEST_KEY),
         }
     }
 
-    fn other_test_encryption(alg: EncryptionAlgorithm) -> Encryption {
+    fn other_test_encryption(alg: EncryptionAlgorithm) -> EncryptionSpec {
         match alg {
-            EncryptionAlgorithm::Aegis256 => Encryption::aegis256(OTHER_TEST_KEY),
-            EncryptionAlgorithm::Aes256Gcm => Encryption::aes256_gcm(OTHER_TEST_KEY),
+            EncryptionAlgorithm::Aegis256 => EncryptionSpec::aegis256(OTHER_TEST_KEY),
+            EncryptionAlgorithm::Aes256Gcm => EncryptionSpec::aes256_gcm(OTHER_TEST_KEY),
         }
     }
 
@@ -472,27 +471,20 @@ mod tests {
     }
 
     fn make_encrypted_stored_record(
-        encryption: &Encryption,
+        encryption: &EncryptionSpec,
         headers: Vec<Header>,
         body: Bytes,
         aad: &[u8],
     ) -> StoredRecord {
         let metered_size = make_plaintext_envelope(headers.clone(), body.clone()).metered_size();
         let plaintext = make_envelope(headers, body);
-        let encrypted = match encryption {
-            Encryption::Plain => {
-                unreachable!("plain mode should not produce an encrypted record")
-            }
-            Encryption::Aegis256(key) => {
-                encrypt_payload(&plaintext, EncryptionAlgorithm::Aegis256, key.secret(), aad)
-            }
-            Encryption::Aes256Gcm(key) => encrypt_payload(
-                &plaintext,
-                EncryptionAlgorithm::Aes256Gcm,
-                key.secret(),
-                aad,
-            ),
-        };
+        let algorithm = encryption
+            .algorithm()
+            .expect("plain mode should not produce an encrypted record");
+        let key = encryption
+            .secret_key()
+            .expect("encrypted test record should carry a secret key");
+        let encrypted = encrypt_payload(&plaintext, algorithm, key, aad);
         StoredRecord::encrypted(encrypted, metered_size)
     }
 
@@ -748,7 +740,7 @@ mod tests {
             &aad,
         );
 
-        let result = decrypt_stored_record(record, &Encryption::Plain, &aad);
+        let result = decrypt_stored_record(record, &EncryptionSpec::plain(), &aad);
 
         assert!(matches!(
             result,

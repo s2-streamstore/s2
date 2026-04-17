@@ -14,7 +14,7 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
-    encryption::Encryption,
+    encryption::EncryptionSpec,
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
@@ -40,7 +40,7 @@ pub fn router() -> axum::Router<Backend> {
 
 fn decrypt_session<S>(
     session: S,
-    encryption: Encryption,
+    encryption: EncryptionSpec,
     stream_id: StreamId,
 ) -> impl Stream<Item = Result<ReadSessionOutput, ServiceError>>
 where
@@ -185,7 +185,7 @@ pub struct ReadArgs {
     params(
         v1t::StreamNamePathSegment,
         s2_api::data::S2FormatHeader,
-        s2_api::data::S2EncryptionHeader,
+        s2_api::data::S2EncryptionKeyHeader,
         v1t::stream::ReadStart,
         v1t::stream::ReadEnd,
     ),
@@ -222,7 +222,7 @@ pub async fn read(
                     |config| config.create_stream_on_read,
                 )
                 .await?;
-            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend.read(basin, stream, start, end).await?;
             let session = decrypt_session(session, encryption, stream_id);
@@ -250,7 +250,7 @@ pub async fn read(
                     |config| config.create_stream_on_read,
                 )
                 .await?;
-            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
@@ -302,7 +302,7 @@ pub async fn read(
                     |config| config.create_stream_on_read,
                 )
                 .await?;
-            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend.read(basin, stream, start, end).await?;
             let s2s_stream =
@@ -395,7 +395,7 @@ pub struct AppendArgs {
     params(
         v1t::StreamNamePathSegment,
         s2_api::data::S2FormatHeader,
-        s2_api::data::S2EncryptionHeader,
+        s2_api::data::S2EncryptionKeyHeader,
     ),
     servers(
         (url = super::paths::cloud_endpoints::BASIN, variables(
@@ -427,7 +427,7 @@ pub async fn append(
                     |config| config.create_stream_on_append,
                 )
                 .await?;
-            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
             let input = input.encrypt(&encryption, stream_id.as_bytes());
             let ack = backend.append(basin, stream, input).await?;
             match response_mime {
@@ -453,7 +453,7 @@ pub async fn append(
                     |config| config.create_stream_on_append,
                 )
                 .await?;
-            let encryption = Encryption::resolve(encryption_algorithm, encryption_key)?;
+            let encryption = EncryptionSpec::resolve(encryption_algorithm, encryption_key)?;
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
             let inputs = async_stream::stream! {
@@ -519,7 +519,9 @@ mod tests {
         s2s::{FrameDecoder, SessionMessage},
     };
     use s2_common::{
-        encryption::{Encryption, EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
+        encryption::{
+            EncryptionAlgorithm, EncryptionKey, EncryptionSpec, S2_ENCRYPTION_KEY_HEADER,
+        },
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record, RecordDecryptionError},
         types::{
@@ -616,7 +618,7 @@ mod tests {
         basin: &BasinName,
         stream: &StreamName,
         body: &'static [u8],
-        encryption: &Encryption,
+        encryption: &EncryptionSpec,
     ) {
         let stream_id = StreamId::new(basin, stream);
         let input = append_input(body).encrypt(encryption, stream_id.as_bytes());
@@ -712,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn unary_append_with_encryption_header_persists_encrypted_record() {
-        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let encryption_key = aegis_key(0x42);
         let (app, backend, basin, stream) = setup_app_with_config(
             "append-unary-encrypted",
@@ -753,7 +755,7 @@ mod tests {
         let stored_batch = first_stored_batch(&backend, &basin, &stream).await;
 
         assert!(matches!(
-            stored_batch.clone().decrypt(&Encryption::Plain, &[]),
+            stored_batch.clone().decrypt(&EncryptionSpec::plain(), &[]),
             Err(RecordDecryptionError::AlgorithmMismatch {
                 expected: None,
                 actual: Some(EncryptionAlgorithm::Aegis256),
@@ -774,7 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn unary_read_with_wrong_key_returns_decryption_failed_error() {
-        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let wrong_key = aegis_key(0x24);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-unary-bad-key",
@@ -809,7 +811,7 @@ mod tests {
 
     #[tokio::test]
     async fn sse_read_without_key_header_emits_error_event_and_terminates() {
-        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-sse-plain",
             all_encryption_modes_basin_config(),
@@ -838,7 +840,7 @@ mod tests {
 
     #[tokio::test]
     async fn s2s_read_without_key_header_returns_terminal_invalid_frame() {
-        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-s2s-plain",
             all_encryption_modes_basin_config(),
@@ -863,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn s2s_read_with_correct_encryption_returns_batch_frame() {
-        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let encryption_key = aegis_key(0x42);
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-s2s-ok",

@@ -2,7 +2,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
-    encryption::Encryption,
+    encryption::EncryptionSpec,
     record::FencingToken,
     types::{
         basin::BasinName,
@@ -17,8 +17,8 @@ use s2_lite::backend::{
 
 use super::common::*;
 
-async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &Encryption) {
-    let (backend, basin_name, stream_name) = if matches!(encryption, Encryption::Plain) {
+async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionSpec) {
+    let (backend, basin_name, stream_name) = if encryption.is_plain() {
         setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
     } else {
         setup_backend_with_basin_and_stream(
@@ -84,7 +84,7 @@ async fn append_with_optional_encryption(
     basin: &BasinName,
     stream: &StreamName,
     input: AppendInput,
-    encryption: Option<&Encryption>,
+    encryption: Option<&EncryptionSpec>,
 ) -> Result<s2_common::types::stream::AppendAck, AppendError> {
     match encryption {
         Some(encryption) => {
@@ -107,7 +107,7 @@ async fn issue_fencing_command(
     stream_name: &StreamName,
     matching_token: &FencingToken,
     new_token: &FencingToken,
-    encryption: Option<&Encryption>,
+    encryption: Option<&EncryptionSpec>,
     bootstrap: FencingBootstrap,
 ) -> s2_common::types::stream::AppendAck {
     let command_match_seq_num = match bootstrap {
@@ -162,7 +162,7 @@ async fn issue_fencing_command(
 
 async fn assert_fencing_command_controls_stream_state(
     test_suffix: &str,
-    encryption: Option<Encryption>,
+    encryption: Option<EncryptionSpec>,
     bootstrap: FencingBootstrap,
 ) {
     let (backend, basin_name, stream_name) = if encryption.is_some() {
@@ -274,7 +274,7 @@ async fn test_append_multiple_records() {
 #[tokio::test]
 async fn test_fencing_command_controls_stream_state(
     #[case] test_suffix: &str,
-    #[case] encryption: Option<Encryption>,
+    #[case] encryption: Option<EncryptionSpec>,
     #[case] bootstrap: FencingBootstrap,
 ) {
     assert_fencing_command_controls_stream_state(test_suffix, encryption, bootstrap).await;
@@ -394,10 +394,13 @@ async fn test_append_with_seq_num_mismatch() {
 }
 
 #[rstest]
-#[case::plaintext("append-session-basic", Encryption::Plain)]
+#[case::plaintext("append-session-basic", EncryptionSpec::plain())]
 #[case::encrypted("appsess-enc", aegis256_encryption_spec())]
 #[tokio::test]
-async fn test_append_session_roundtrip(#[case] test_suffix: &str, #[case] encryption: Encryption) {
+async fn test_append_session_roundtrip(
+    #[case] test_suffix: &str,
+    #[case] encryption: EncryptionSpec,
+) {
     assert_append_session_roundtrip(test_suffix, &encryption).await;
 }
 

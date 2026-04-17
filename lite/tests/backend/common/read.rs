@@ -2,7 +2,7 @@ use std::{pin::Pin, task::Poll, time::Duration};
 
 use futures::StreamExt;
 use s2_common::{
-    encryption::Encryption,
+    encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
     record::{Record, SequencedRecord},
     types::{
@@ -17,7 +17,7 @@ use s2_lite::backend::{Backend, error::ReadError};
 
 pub fn decrypt_plain_batch(batch: StoredReadBatch) -> ReadBatch {
     batch
-        .decrypt(&Encryption::Plain, &[])
+        .decrypt(&EncryptionSpec::plain(), &[])
         .expect("Failed to decode batch")
 }
 
@@ -77,7 +77,7 @@ pub fn decrypt_batch_for_stream(
     batch: StoredReadBatch,
     basin: &BasinName,
     stream: &StreamName,
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
 ) -> ReadBatch {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
     batch
@@ -244,7 +244,7 @@ pub async fn collect_records_with_encryption<S>(
     session: &mut Pin<Box<S>>,
     basin: &BasinName,
     stream: &StreamName,
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
 ) -> Vec<SequencedRecord>
 where
     S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
@@ -361,7 +361,7 @@ pub async fn read_records_with_encryption(
     stream: &StreamName,
     start: ReadStart,
     end: ReadEnd,
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
 ) -> Vec<SequencedRecord> {
     let read_session = backend
         .read(basin.clone(), stream.clone(), start, end)

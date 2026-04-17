@@ -476,7 +476,7 @@ pub struct AppendArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct EncryptionArgs {
-    /// Base64-encoded 32-byte encryption key.
+    /// Base64-encoded encryption key material.
     /// Alternatively, set `S2_ENCRYPTION_KEY`.
     #[arg(
         long,
@@ -487,7 +487,7 @@ pub struct EncryptionArgs {
     )]
     pub encryption_key: Option<EncryptionKey>,
 
-    /// Read a base64-encoded encryption key from file.
+    /// Read base64-encoded encryption key material from file.
     #[arg(
         long,
         conflicts_with = "encryption_key",

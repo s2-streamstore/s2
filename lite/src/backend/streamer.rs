@@ -835,7 +835,7 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
-        encryption::{Encryption, EncryptionAlgorithm},
+        encryption::{EncryptionAlgorithm, EncryptionSpec},
         record::{EnvelopeRecord, Metered, Record, StoredRecord},
         types::stream::{
             StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
@@ -866,7 +866,7 @@ mod tests {
         let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
         let record = s2_common::record::encrypt_record(
             Metered::from(Record::Envelope(envelope)),
-            &Encryption::aegis256([0x42; 32]),
+            &EncryptionSpec::aegis256([0x42; 32]),
             b"test-streamer",
         );
         let parts = StoredAppendRecordParts { timestamp, record };

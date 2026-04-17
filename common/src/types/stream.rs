@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     caps,
-    encryption::{Encryption, EncryptionAlgorithm},
+    encryption::{EncryptionAlgorithm, EncryptionSpec},
     read_extent::{ReadLimit, ReadUntil},
     record::{
         FencingToken, Metered, MeteredExt, MeteredSize, Record, RecordDecryptionError, SeqNum,
@@ -327,7 +327,7 @@ pub struct AppendInput<T = Record> {
 }
 
 impl AppendInput<Record> {
-    pub fn encrypt(self, encryption: &Encryption, aad: &[u8]) -> AppendInput<StoredRecord> {
+    pub fn encrypt(self, encryption: &EncryptionSpec, aad: &[u8]) -> AppendInput<StoredRecord> {
         let AppendInput {
             records,
             match_seq_num,
@@ -447,7 +447,7 @@ impl<T> std::fmt::Debug for ReadBatch<T> {
 impl ReadBatch<StoredRecord> {
     pub fn decrypt(
         self,
-        encryption: &Encryption,
+        encryption: &EncryptionSpec,
         aad: &[u8],
     ) -> Result<ReadBatch, RecordDecryptionError> {
         let records: Result<Metered<Vec<Sequenced<Record>>>, RecordDecryptionError> = self
@@ -479,7 +479,7 @@ pub enum ReadSessionOutput<T = Record> {
 impl ReadSessionOutput<StoredRecord> {
     pub fn decrypt(
         self,
-        encryption: &Encryption,
+        encryption: &EncryptionSpec,
         aad: &[u8],
     ) -> Result<ReadSessionOutput, RecordDecryptionError> {
         match self {
@@ -586,7 +586,7 @@ mod test {
     #[case::encrypt(true)]
     #[case::into(false)]
     fn append_input_to_stored_preserves_metadata(#[case] encrypt: bool) {
-        let encryption = Encryption::aegis256([0x42; 32]);
+        let encryption = EncryptionSpec::aegis256([0x42; 32]);
         let mapped = if encrypt {
             sample_append_input().encrypt(&encryption, TEST_AAD)
         } else {
@@ -616,7 +616,7 @@ mod test {
         let decryption = if encrypt {
             &encryption
         } else {
-            &Encryption::Plain
+            &EncryptionSpec::plain()
         };
         let decrypted = decrypt_stored_record(stored_record, decryption, TEST_AAD).unwrap();
         let Record::Envelope(record) = decrypted.into_inner() else {
@@ -655,7 +655,7 @@ mod test {
         };
 
         let mapped = batch
-            .decrypt(&crate::encryption::Encryption::Plain, &[])
+            .decrypt(&crate::encryption::EncryptionSpec::plain(), &[])
             .unwrap();
         let records = mapped.records.into_inner();
 

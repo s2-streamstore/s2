@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use s2_common::{
-    encryption::{Encryption, EncryptionAlgorithm},
+    encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     types::{
         basin::BasinName,
@@ -70,8 +70,8 @@ pub fn aegis_only_encryption_basin_config() -> BasinConfig {
     }
 }
 
-pub fn aegis256_encryption_spec() -> Encryption {
-    Encryption::aegis256([0x42; 32])
+pub fn aegis256_encryption_spec() -> EncryptionSpec {
+    EncryptionSpec::aegis256([0x42; 32])
 }
 
 pub fn create_test_record(body: Bytes) -> AppendRecord {
@@ -176,7 +176,7 @@ pub async fn append_payloads(
     stream: &StreamName,
     payloads: &[&[u8]],
 ) -> s2_common::types::stream::AppendAck {
-    let encryption = Encryption::Plain;
+    let encryption = EncryptionSpec::plain();
     append_payloads_with_encryption(backend, basin, stream, payloads, &encryption).await
 }
 
@@ -185,7 +185,7 @@ pub async fn append_payloads_with_encryption(
     basin: &BasinName,
     stream: &StreamName,
     payloads: &[&[u8]],
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
 ) -> s2_common::types::stream::AppendAck {
     let bodies = payloads
         .iter()
@@ -225,7 +225,7 @@ pub fn encrypt_input_for_stream(
     input: AppendInput,
     basin: &BasinName,
     stream: &StreamName,
-    encryption: &Encryption,
+    encryption: &EncryptionSpec,
 ) -> StoredAppendInput {
     let stream_id = s2_lite::backend::StreamId::new(basin, stream);
     input.encrypt(encryption, stream_id.as_bytes())

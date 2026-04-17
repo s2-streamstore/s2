@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
-    encryption::Encryption,
+    encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
     record::MeteredSize,
     types::{
@@ -18,8 +18,8 @@ use super::common::*;
 
 const VIRTUAL_TIME_STEP: Duration = Duration::from_millis(50);
 
-async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &Encryption) {
-    let (backend, basin_name, stream_name) = if matches!(encryption, Encryption::Plain) {
+async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionSpec) {
+    let (backend, basin_name, stream_name) = if encryption.is_plain() {
         setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
     } else {
         setup_backend_with_basin_and_stream(
@@ -464,12 +464,12 @@ async fn test_follow_mode_broadcast_lag_resumes_live_follow_after_catchup() {
 }
 
 #[rstest]
-#[case::plaintext("follow-new-data", Encryption::Plain)]
+#[case::plaintext("follow-new-data", EncryptionSpec::plain())]
 #[case::encrypted("follow-enc", aegis256_encryption_spec())]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_receives_new_data(
     #[case] test_suffix: &str,
-    #[case] encryption: Encryption,
+    #[case] encryption: EncryptionSpec,
 ) {
     run_follow_mode_receives_new_data_case(test_suffix, &encryption).await;
 }
