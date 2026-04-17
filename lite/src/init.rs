@@ -110,10 +110,12 @@ impl From<StorageClassSpec> for StorageClass {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum EncryptionModeSpec {
+    #[serde(rename = "plain")]
     Plain,
+    #[serde(rename = "aegis-256")]
     Aegis256,
+    #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
 }
 

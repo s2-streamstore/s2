@@ -43,13 +43,17 @@ pub enum EncryptionAlgorithm {
 #[strum(ascii_case_insensitive)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[enumset(no_super_impls)]
-#[serde(rename_all = "kebab-case")]
 pub enum EncryptionMode {
     #[strum(serialize = "plain")]
+    #[serde(rename = "plain")]
     Plain,
     #[strum(serialize = "aegis-256")]
+    #[serde(rename = "aegis-256")]
+    #[cfg_attr(feature = "clap", value(name = "aegis-256"))]
     Aegis256,
     #[strum(serialize = "aes-256-gcm")]
+    #[serde(rename = "aes-256-gcm")]
+    #[cfg_attr(feature = "clap", value(name = "aes-256-gcm"))]
     Aes256Gcm,
 }
 
@@ -328,6 +332,25 @@ mod tests {
             EncryptionSpec::aes256_gcm(KEY_BYTES).mode(),
             EncryptionMode::Aes256Gcm
         );
+    }
+
+    #[rstest]
+    #[case(EncryptionMode::Plain, "\"plain\"")]
+    #[case(EncryptionMode::Aegis256, "\"aegis-256\"")]
+    #[case(EncryptionMode::Aes256Gcm, "\"aes-256-gcm\"")]
+    fn mode_serde_roundtrip(#[case] mode: EncryptionMode, #[case] expected: &str) {
+        let serialized = serde_json::to_string(&mode).unwrap();
+        assert_eq!(serialized, expected);
+        let deserialized: EncryptionMode = serde_json::from_str(expected).unwrap();
+        assert_eq!(deserialized, mode);
+    }
+
+    #[rstest]
+    #[case(EncryptionMode::Plain, "plain")]
+    #[case(EncryptionMode::Aegis256, "aegis-256")]
+    #[case(EncryptionMode::Aes256Gcm, "aes-256-gcm")]
+    fn mode_display_matches_spec(#[case] mode: EncryptionMode, #[case] expected: &str) {
+        assert_eq!(mode.to_string(), expected);
     }
 
     #[rstest]
