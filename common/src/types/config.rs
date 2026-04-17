@@ -341,7 +341,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
 #[derive(Debug, Clone, Default)]
 pub struct BasinConfig {
     pub default_stream_config: OptionalStreamConfig,
-    pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub stream_cipher: Option<EncryptionAlgorithm>,
     pub create_stream_on_append: bool,
     pub create_stream_on_read: bool,
 }
@@ -350,7 +350,7 @@ impl BasinConfig {
     pub fn reconfigure(mut self, reconfiguration: BasinReconfiguration) -> Self {
         let BasinReconfiguration {
             default_stream_config,
-            stream_encryption_algorithm,
+            stream_cipher,
             create_stream_on_append,
             create_stream_on_read,
         } = reconfiguration;
@@ -361,8 +361,8 @@ impl BasinConfig {
                 .unwrap_or_default();
         }
 
-        if let Maybe::Specified(stream_encryption_algorithm) = stream_encryption_algorithm {
-            self.stream_encryption_algorithm = stream_encryption_algorithm;
+        if let Maybe::Specified(stream_cipher) = stream_cipher {
+            self.stream_cipher = stream_cipher;
         }
 
         if let Maybe::Specified(create_stream_on_append) = create_stream_on_append {
@@ -381,14 +381,14 @@ impl From<BasinConfig> for BasinReconfiguration {
     fn from(value: BasinConfig) -> Self {
         let BasinConfig {
             default_stream_config,
-            stream_encryption_algorithm,
+            stream_cipher,
             create_stream_on_append,
             create_stream_on_read,
         } = value;
 
         Self {
             default_stream_config: Some(default_stream_config.into()).into(),
-            stream_encryption_algorithm: stream_encryption_algorithm.into(),
+            stream_cipher: stream_cipher.into(),
             create_stream_on_append: create_stream_on_append.into(),
             create_stream_on_read: create_stream_on_read.into(),
         }
@@ -398,7 +398,7 @@ impl From<BasinConfig> for BasinReconfiguration {
 #[derive(Debug, Clone, Default)]
 pub struct BasinReconfiguration {
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
-    pub stream_encryption_algorithm: Maybe<Option<EncryptionAlgorithm>>,
+    pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     pub create_stream_on_append: Maybe<bool>,
     pub create_stream_on_read: Maybe<bool>,
 }

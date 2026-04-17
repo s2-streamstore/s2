@@ -548,7 +548,7 @@ mod tests {
     fn all_encryption_modes_basin_config() -> BasinConfig {
         BasinConfig {
             default_stream_config: all_encryption_modes_stream_config(),
-            stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
+            stream_cipher: Some(EncryptionAlgorithm::Aegis256),
             ..Default::default()
         }
     }

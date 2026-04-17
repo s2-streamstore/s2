@@ -52,7 +52,7 @@
             }
           ]
         },
-        "stream_encryption_algorithm": {
+        "stream_cipher": {
           "description": "Encryption algorithm to apply to newly created streams in the basin.",
           "anyOf": [
             {

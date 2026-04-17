@@ -123,8 +123,8 @@ pub async fn reconfigure_basin(
     if !args.default_stream_config.is_empty() {
         reconfig = reconfig.with_default_stream_config(args.default_stream_config.into());
     }
-    if let Some(algorithm) = args.stream_encryption_algorithm {
-        reconfig = reconfig.with_stream_encryption_algorithm(algorithm);
+    if let Some(algorithm) = args.stream_cipher {
+        reconfig = reconfig.with_stream_cipher(algorithm);
     }
     if let Some(val) = args.create_stream_on_append {
         reconfig = reconfig.with_create_stream_on_append(val);

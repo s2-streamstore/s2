@@ -52,7 +52,7 @@ pub struct BasinConfigSpec {
     pub default_stream_config: Option<StreamConfigSpec>,
     /// Encryption algorithm to apply to newly created streams in the basin.
     #[serde(default)]
-    pub stream_encryption_algorithm: Option<EncryptionAlgorithmSpec>,
+    pub stream_cipher: Option<EncryptionAlgorithmSpec>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
     pub create_stream_on_append: Option<bool>,
@@ -280,8 +280,8 @@ impl From<BasinConfigSpec> for BasinReconfiguration {
                 .default_stream_config
                 .map(|dsc| Some(StreamReconfiguration::from(dsc)))
                 .map_or(Maybe::Unspecified, Maybe::Specified),
-            stream_encryption_algorithm: s
-                .stream_encryption_algorithm
+            stream_cipher: s
+                .stream_cipher
                 .map(|algorithm| Some(algorithm.into()))
                 .map_or(Maybe::Unspecified, Maybe::Specified),
             create_stream_on_append: s
@@ -574,7 +574,7 @@ mod tests {
     fn basin_config_conversion() {
         let spec = BasinConfigSpec {
             default_stream_config: None,
-            stream_encryption_algorithm: None,
+            stream_cipher: None,
             create_stream_on_append: Some(true),
             create_stream_on_read: None,
         };
@@ -687,17 +687,17 @@ mod tests {
     }
 
     #[test]
-    fn basin_config_conversion_includes_stream_encryption_algorithm() {
+    fn basin_config_conversion_includes_stream_cipher() {
         let spec = BasinConfigSpec {
             default_stream_config: None,
-            stream_encryption_algorithm: Some(EncryptionAlgorithmSpec::Aegis256),
+            stream_cipher: Some(EncryptionAlgorithmSpec::Aegis256),
             create_stream_on_append: None,
             create_stream_on_read: None,
         };
 
         let reconfig = BasinReconfiguration::from(spec);
         assert!(matches!(
-            reconfig.stream_encryption_algorithm,
+            reconfig.stream_cipher,
             Maybe::Specified(Some(s2_common::encryption::EncryptionAlgorithm::Aegis256))
         ));
     }

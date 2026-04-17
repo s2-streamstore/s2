@@ -53,7 +53,7 @@ pub fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
 pub fn all_encryption_modes_basin_config() -> BasinConfig {
     BasinConfig {
         default_stream_config: all_encryption_modes_stream_config(),
-        stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
+        stream_cipher: Some(EncryptionAlgorithm::Aegis256),
         ..Default::default()
     }
 }
@@ -65,7 +65,7 @@ pub fn aegis_only_encryption_stream_config() -> OptionalStreamConfig {
 pub fn aegis_only_encryption_basin_config() -> BasinConfig {
     BasinConfig {
         default_stream_config: aegis_only_encryption_stream_config(),
-        stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
+        stream_cipher: Some(EncryptionAlgorithm::Aegis256),
         ..Default::default()
     }
 }

@@ -216,7 +216,7 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
 
     let reconfig = BasinReconfiguration {
         default_stream_config: Maybe::from(Some(stream_reconfig)),
-        stream_encryption_algorithm: Maybe::default(),
+        stream_cipher: Maybe::default(),
         create_stream_on_append: Maybe::from(true),
         create_stream_on_read: Maybe::from(true),
     };

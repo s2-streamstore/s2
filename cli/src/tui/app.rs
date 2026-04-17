@@ -982,7 +982,7 @@ impl ReadFormat {
 /// Config for basin reconfiguration
 #[derive(Debug, Clone)]
 pub struct BasinReconfigureConfig {
-    pub stream_encryption_algorithm: Option<s2_sdk::types::EncryptionAlgorithm>,
+    pub stream_cipher: Option<s2_sdk::types::EncryptionAlgorithm>,
     pub create_stream_on_append: Option<bool>,
     pub create_stream_on_read: Option<bool>,
     pub storage_class: Option<StorageClass>,
@@ -1066,7 +1066,7 @@ fn build_basin_config(
             timestamping,
             delete_on_empty,
         },
-        stream_encryption_algorithm: None,
+        stream_cipher: None,
         create_stream_on_append,
         create_stream_on_read,
     }
@@ -2731,7 +2731,7 @@ impl App {
                     KeyCode::Char('s') => {
                         let b = basin.clone();
                         let config = BasinReconfigureConfig {
-                            stream_encryption_algorithm: None,
+                            stream_cipher: None,
                             create_stream_on_append: *create_stream_on_append,
                             create_stream_on_read: *create_stream_on_read,
                             storage_class: storage_class.clone(),
@@ -4960,7 +4960,7 @@ impl App {
 
             let args = ReconfigureBasinArgs {
                 basin: S2BasinUri(basin),
-                stream_encryption_algorithm: config.stream_encryption_algorithm,
+                stream_cipher: config.stream_cipher,
                 create_stream_on_append: config.create_stream_on_append,
                 create_stream_on_read: config.create_stream_on_read,
                 default_stream_config,

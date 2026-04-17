@@ -132,7 +132,7 @@ pub struct BasinConfig {
     pub default_stream_config: StreamConfig,
     /// Encryption algorithm to apply to newly created streams in this basin.
     #[arg(long)]
-    pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Create stream on append with basin defaults if it doesn't exist.
     #[arg(long, default_value_t = false)]
     pub create_stream_on_append: bool,
@@ -259,8 +259,8 @@ impl From<BasinConfig> for sdk::types::BasinConfig {
     fn from(config: BasinConfig) -> Self {
         let mut basin_config = sdk::types::BasinConfig::new()
             .with_default_stream_config(config.default_stream_config.into());
-        if let Some(algorithm) = config.stream_encryption_algorithm {
-            basin_config = basin_config.with_stream_encryption_algorithm(algorithm);
+        if let Some(algorithm) = config.stream_cipher {
+            basin_config = basin_config.with_stream_cipher(algorithm);
         }
         basin_config
             .with_create_stream_on_append(config.create_stream_on_append)
@@ -374,7 +374,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
                 .default_stream_config
                 .map(Into::into)
                 .unwrap_or_default(),
-            stream_encryption_algorithm: config.stream_encryption_algorithm.map(Into::into),
+            stream_cipher: config.stream_cipher.map(Into::into),
             create_stream_on_append: config.create_stream_on_append,
             create_stream_on_read: config.create_stream_on_read,
         }

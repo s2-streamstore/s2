@@ -99,8 +99,8 @@ fn basin_reconfiguration_from_spec(s: BasinConfigSpec) -> BasinReconfiguration {
     if let Some(dsc) = s.default_stream_config {
         r = r.with_default_stream_config(stream_reconfiguration_from_spec(dsc));
     }
-    if let Some(algorithm) = s.stream_encryption_algorithm {
-        r = r.with_stream_encryption_algorithm(encryption_algorithm_from_spec(algorithm));
+    if let Some(algorithm) = s.stream_cipher {
+        r = r.with_stream_cipher(encryption_algorithm_from_spec(algorithm));
     }
     if let Some(v) = s.create_stream_on_append {
         r = r.with_create_stream_on_append(v);
@@ -273,15 +273,15 @@ fn diff_basin_config(existing: &BasinConfig, spec: &BasinConfigSpec) -> Vec<Fiel
     let mut diffs = Vec::new();
 
     if let Some(algorithm) = spec
-        .stream_encryption_algorithm
+        .stream_cipher
         .clone()
         .map(encryption_algorithm_from_spec)
-        && existing.stream_encryption_algorithm != Some(algorithm)
+        && existing.stream_cipher != Some(algorithm)
     {
         diffs.push(FieldDiff {
-            field: "stream_encryption_algorithm",
+            field: "stream_cipher",
             old: existing
-                .stream_encryption_algorithm
+                .stream_cipher
                 .map(format_encryption_algorithm)
                 .unwrap_or("none")
                 .to_string(),
@@ -397,12 +397,12 @@ fn spec_basin_fields(spec: &BasinConfigSpec) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
 
     if let Some(algorithm) = spec
-        .stream_encryption_algorithm
+        .stream_cipher
         .clone()
         .map(encryption_algorithm_from_spec)
     {
         fields.push(FieldDiff {
-            field: "stream_encryption_algorithm",
+            field: "stream_cipher",
             old: String::new(),
             new: format_encryption_algorithm(algorithm).to_string(),
         });

@@ -163,7 +163,7 @@ impl Backend {
             None => (
                 OptionalStreamConfig::default().reconfigure(config),
                 OffsetDateTime::now_utc(),
-                basin_meta.config.stream_encryption_algorithm,
+                basin_meta.config.stream_cipher,
             ),
         };
         let basin_defaults = &basin_meta.config.default_stream_config;

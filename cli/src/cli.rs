@@ -276,7 +276,7 @@ pub struct ReconfigureBasinArgs {
 
     /// Encryption algorithm to apply to newly created streams in this basin.
     #[arg(long)]
-    pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub stream_cipher: Option<EncryptionAlgorithm>,
 
     /// Create stream on append with basin defaults if it doesn't exist.
     #[arg(long)]

@@ -107,7 +107,7 @@ async fn test_create_stream_materializes_basin_encryption_algorithm() {
         &backend,
         "stream-encryption-materialize",
         BasinConfig {
-            stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
+            stream_cipher: Some(EncryptionAlgorithm::Aegis256),
             ..Default::default()
         },
     )
@@ -142,7 +142,7 @@ async fn test_existing_stream_keeps_materialized_algorithm_after_basin_reconfigu
         &backend,
         "stream-basin-encryption-reconfigure",
         BasinConfig {
-            stream_encryption_algorithm: Some(EncryptionAlgorithm::Aegis256),
+            stream_cipher: Some(EncryptionAlgorithm::Aegis256),
             ..Default::default()
         },
     )
@@ -159,7 +159,7 @@ async fn test_existing_stream_keeps_materialized_algorithm_after_basin_reconfigu
         .reconfigure_basin(
             basin_name.clone(),
             BasinReconfiguration {
-                stream_encryption_algorithm: Maybe::Specified(Some(EncryptionAlgorithm::Aes256Gcm)),
+                stream_cipher: Maybe::Specified(Some(EncryptionAlgorithm::Aes256Gcm)),
                 ..Default::default()
             },
         )

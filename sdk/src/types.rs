@@ -781,7 +781,7 @@ pub struct BasinConfig {
     /// See [`StreamConfig`] for defaults.
     pub default_stream_config: Option<StreamConfig>,
     /// Encryption algorithm to apply to newly created streams in the basin.
-    pub stream_encryption_algorithm: Option<EncryptionAlgorithm>,
+    pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Whether to create stream on append if it doesn't exist using default stream configuration.
     ///
     /// Defaults to `false`.
@@ -807,12 +807,9 @@ impl BasinConfig {
     }
 
     /// Set the encryption algorithm to apply to newly created streams in the basin.
-    pub fn with_stream_encryption_algorithm(
-        self,
-        stream_encryption_algorithm: EncryptionAlgorithm,
-    ) -> Self {
+    pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
         Self {
-            stream_encryption_algorithm: Some(stream_encryption_algorithm),
+            stream_cipher: Some(stream_cipher),
             ..self
         }
     }
@@ -839,7 +836,7 @@ impl From<api::config::BasinConfig> for BasinConfig {
     fn from(value: api::config::BasinConfig) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
-            stream_encryption_algorithm: value.stream_encryption_algorithm.map(Into::into),
+            stream_cipher: value.stream_cipher.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -850,7 +847,7 @@ impl From<BasinConfig> for api::config::BasinConfig {
     fn from(value: BasinConfig) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
-            stream_encryption_algorithm: value.stream_encryption_algorithm.map(Into::into),
+            stream_cipher: value.stream_cipher.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -1337,9 +1334,8 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
 pub struct BasinReconfiguration {
     /// Override for the existing [`default_stream_config`](BasinConfig::default_stream_config).
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
-    /// Override for the existing
-    /// [`stream_encryption_algorithm`](BasinConfig::stream_encryption_algorithm).
-    pub stream_encryption_algorithm: Maybe<Option<EncryptionAlgorithm>>,
+    /// Override for the existing [`stream_cipher`](BasinConfig::stream_cipher).
+    pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     /// Override for the existing
     /// [`create_stream_on_append`](BasinConfig::create_stream_on_append).
     pub create_stream_on_append: Maybe<bool>,
@@ -1362,14 +1358,10 @@ impl BasinReconfiguration {
         }
     }
 
-    /// Set the override for the existing
-    /// [`stream_encryption_algorithm`](BasinConfig::stream_encryption_algorithm).
-    pub fn with_stream_encryption_algorithm(
-        self,
-        stream_encryption_algorithm: EncryptionAlgorithm,
-    ) -> Self {
+    /// Set the override for the existing [`stream_cipher`](BasinConfig::stream_cipher).
+    pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
         Self {
-            stream_encryption_algorithm: Maybe::Specified(Some(stream_encryption_algorithm)),
+            stream_cipher: Maybe::Specified(Some(stream_cipher)),
             ..self
         }
     }
@@ -1397,9 +1389,7 @@ impl From<BasinReconfiguration> for api::config::BasinReconfiguration {
     fn from(value: BasinReconfiguration) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(|m| m.map(Into::into)),
-            stream_encryption_algorithm: value
-                .stream_encryption_algorithm
-                .map(|m| m.map(Into::into)),
+            stream_cipher: value.stream_cipher.map(|m| m.map(Into::into)),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
