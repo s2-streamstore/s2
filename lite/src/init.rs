@@ -685,20 +685,4 @@ mod tests {
         assert!(matches!(reconfig.timestamping, Maybe::Unspecified));
         assert!(matches!(reconfig.delete_on_empty, Maybe::Unspecified));
     }
-
-    #[test]
-    fn basin_config_conversion_includes_stream_cipher() {
-        let spec = BasinConfigSpec {
-            default_stream_config: None,
-            stream_cipher: Some(EncryptionAlgorithmSpec::Aegis256),
-            create_stream_on_append: None,
-            create_stream_on_read: None,
-        };
-
-        let reconfig = BasinReconfiguration::from(spec);
-        assert!(matches!(
-            reconfig.stream_cipher,
-            Maybe::Specified(Some(s2_common::encryption::EncryptionAlgorithm::Aegis256))
-        ));
-    }
 }

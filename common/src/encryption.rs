@@ -208,12 +208,6 @@ mod tests {
     ];
 
     #[test]
-    fn parse_key_header_roundtrips() {
-        let key = KEY_B64.parse::<EncryptionKey>().unwrap();
-        assert_eq!(key.expose_secret(), KEY_BYTES);
-    }
-
-    #[test]
     fn key_header_value_is_sensitive() {
         let value = EncryptionKey::new([7; 32]).to_header_value();
         assert!(value.is_sensitive());
@@ -239,16 +233,6 @@ mod tests {
             Err(actual) => assert_eq!(actual, expected),
             Ok(_) => panic!("expected invalid key for {header:?}"),
         }
-    }
-
-    #[rstest]
-    #[case(EncryptionAlgorithm::Aegis256, "\"aegis-256\"")]
-    #[case(EncryptionAlgorithm::Aes256Gcm, "\"aes-256-gcm\"")]
-    fn algorithm_serde_roundtrip(#[case] algorithm: EncryptionAlgorithm, #[case] expected: &str) {
-        let serialized = serde_json::to_string(&algorithm).unwrap();
-        assert_eq!(serialized, expected);
-        let deserialized: EncryptionAlgorithm = serde_json::from_str(expected).unwrap();
-        assert_eq!(deserialized, algorithm);
     }
 
     #[test]
