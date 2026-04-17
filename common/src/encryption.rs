@@ -14,7 +14,7 @@ pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-en
 
 type SecretKeyMaterial = Arc<SecretBox<[u8]>>;
 
-// 32 bytes in base64 with padding
+// 32 bytes incl padding
 const MAX_ENCRYPTION_KEY_HEADER_LEN: usize = 44;
 
 /// Encryption algorithm.
