@@ -44,9 +44,7 @@ pub enum EncryptionAlgorithm {
 
 /// Customer-supplied encryption key material for append/read operations.
 #[derive(Debug, Clone)]
-pub struct EncryptionKey {
-    bytes: SecretKeyMaterial,
-}
+pub struct EncryptionKey(SecretKeyMaterial);
 
 impl EncryptionKey {
     pub fn new(key: [u8; 32]) -> Self {
@@ -54,17 +52,15 @@ impl EncryptionKey {
     }
 
     pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionKeyError> {
-        parse_encryption_key_material(key_b64).map(|bytes| Self { bytes })
+        parse_encryption_key_material(key_b64).map(Self)
     }
 
     pub fn from_bytes(bytes: Box<[u8]>) -> Self {
-        Self {
-            bytes: Arc::new(SecretBox::new(bytes)),
-        }
+        Self(Arc::new(SecretBox::new(bytes)))
     }
 
     pub fn bytes(&self) -> &[u8] {
-        self.bytes.as_ref().expose_secret()
+        self.0.as_ref().expose_secret()
     }
 
     pub fn to_header_value(&self) -> HeaderValue {
@@ -97,27 +93,12 @@ pub enum EncryptionResolutionError {
 }
 
 /// Resolved stream encryption after combining stream metadata with the request key.
-#[derive(Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum EncryptionSpec {
+    #[default]
     Plaintext,
     Aegis256(EncryptionKey),
     Aes256Gcm(EncryptionKey),
-}
-
-impl Default for EncryptionSpec {
-    fn default() -> Self {
-        Self::Plaintext
-    }
-}
-
-impl std::fmt::Debug for EncryptionSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Plaintext => f.write_str("EncryptionSpec::Plaintext"),
-            Self::Aegis256(_) => f.write_str("EncryptionSpec::Aegis256(..)"),
-            Self::Aes256Gcm(_) => f.write_str("EncryptionSpec::Aes256Gcm(..)"),
-        }
-    }
 }
 
 impl EncryptionSpec {
