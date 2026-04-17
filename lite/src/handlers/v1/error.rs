@@ -38,8 +38,6 @@ pub enum ServiceError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
     #[error(transparent)]
-    EncryptionResolution(#[from] EncryptionResolutionError),
-    #[error(transparent)]
     RecordDecryption(#[from] RecordDecryptionError),
     #[error(transparent)]
     ListBasins(#[from] ListBasinsError),
@@ -82,6 +80,12 @@ impl From<AppendRequestRejection> for ServiceError {
     }
 }
 
+impl From<EncryptionResolutionError> for ServiceError {
+    fn from(e: EncryptionResolutionError) -> Self {
+        ServiceError::Validation(ValidationError(e.to_string()))
+    }
+}
+
 impl ServiceError {
     pub fn to_response(&self) -> ErrorResponse {
         match self {
@@ -99,7 +103,6 @@ impl ServiceError {
                 }
             },
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
-            ServiceError::EncryptionResolution(e) => standard(ErrorCode::Invalid, e.to_string()),
             ServiceError::RecordDecryption(e) => match e {
                 RecordDecryptionError::AlgorithmMismatch { .. } => {
                     standard(ErrorCode::Invalid, e.to_string())
