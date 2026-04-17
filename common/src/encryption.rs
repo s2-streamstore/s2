@@ -14,7 +14,7 @@ pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-en
 
 type SecretKeyMaterial = Arc<SecretBox<[u8]>>;
 
-// 32 bytes incl padding
+// 32 bytes in base64 with padding
 const MAX_ENCRYPTION_KEY_HEADER_LEN: usize = 44;
 
 /// Encryption algorithm.
@@ -149,7 +149,6 @@ impl ParseableHeader for EncryptionKey {
 
 fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, EncryptionKeyError> {
     use base64ct::{Base64, Encoding};
-    use secrecy::zeroize::Zeroize;
 
     if key_b64.len() > MAX_ENCRYPTION_KEY_HEADER_LEN {
         return Err(EncryptionKeyError::TooLong {
@@ -158,7 +157,7 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
         });
     }
 
-    let mut key = match Base64::decode_vec(key_b64) {
+    let key = match Base64::decode_vec(key_b64) {
         Ok(decoded) => decoded,
         Err(_) => {
             return Err(EncryptionKeyError::InvalidBase64);
@@ -166,7 +165,6 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
     };
 
     if key.is_empty() {
-        key.zeroize();
         return Err(EncryptionKeyError::Empty);
     }
 
