@@ -780,7 +780,7 @@ pub struct BasinConfig {
     ///
     /// See [`StreamConfig`] for defaults.
     pub default_stream_config: Option<StreamConfig>,
-    /// Cipher to apply to newly created streams in the basin.
+    /// Encryption algorithm to apply to newly created streams in the basin.
     pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Whether to create stream on append if it doesn't exist using default stream configuration.
     ///
@@ -806,7 +806,7 @@ impl BasinConfig {
         }
     }
 
-    /// Set the cipher to apply to newly created streams in the basin.
+    /// Set the encryption algorithm to apply to newly created streams in the basin.
     pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
         Self {
             stream_cipher: Some(stream_cipher),
@@ -2624,7 +2624,7 @@ pub struct StreamInfo {
     pub created_at: S2DateTime,
     /// Deletion time if the stream is being deleted.
     pub deleted_at: Option<S2DateTime>,
-    /// Cipher for this stream, if encryption is enabled.
+    /// Encryption algorithm for this stream, if encryption is enabled.
     pub cipher: Option<EncryptionAlgorithm>,
 }
 

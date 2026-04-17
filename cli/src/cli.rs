@@ -274,7 +274,7 @@ pub struct ReconfigureBasinArgs {
     /// Name of the basin to reconfigure.
     pub basin: S2BasinUri,
 
-    /// Cipher to apply to newly created streams in this basin.
+    /// Encryption algorithm to apply to newly created streams in this basin.
     #[arg(long)]
     pub stream_cipher: Option<EncryptionAlgorithm>,
 

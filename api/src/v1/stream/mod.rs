@@ -36,7 +36,7 @@ pub struct StreamInfo {
     /// Deletion time in RFC 3339 format, if the stream is being deleted.
     #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
-    /// Cipher for this stream, if encryption is enabled.
+    /// Encryption algorithm for this stream, if encryption is enabled.
     pub cipher: Option<EncryptionAlgorithm>,
 }
 
