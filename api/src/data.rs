@@ -101,7 +101,7 @@ pub struct S2FormatHeader {
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
 pub struct S2EncryptionKeyHeader {
-    /// Optional per-request encryption key material for append/read operations.
+    /// Optional customer-supplied encryption key material for append/read operations.
     /// When stream encryption is enabled, provide Base64-encoded key material.
     #[cfg_attr(feature = "utoipa", param(required = false, rename = "s2-encryption-key", value_type = String))]
     pub s2_encryption_key: String,
