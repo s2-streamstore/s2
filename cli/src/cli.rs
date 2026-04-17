@@ -471,30 +471,30 @@ pub struct AppendArgs {
     pub linger: humantime::Duration,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct EncryptionArgs {
+pub struct EncryptionKeyArgs {
     /// Base64-encoded encryption key material.
     /// Alternatively, set `S2_ENCRYPTION_KEY`.
     #[arg(
-        long,
+        long = "encryption-key",
         env = "S2_ENCRYPTION_KEY",
         hide_env_values = true,
         value_name = "KEY",
-        group = "encryption_source"
+        group = "encryption_key_source"
     )]
-    pub encryption_key: Option<EncryptionKey>,
+    pub key: Option<EncryptionKey>,
 
     /// Read base64-encoded encryption key material from file.
     #[arg(
-        long,
-        conflicts_with = "encryption_key",
+        long = "encryption-key-file",
+        conflicts_with = "key",
         value_name = "FILE",
-        group = "encryption_source"
+        group = "encryption_key_source"
     )]
-    pub encryption_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -548,7 +548,7 @@ pub struct ReadArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug)]
@@ -575,7 +575,7 @@ pub struct TailArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug)]

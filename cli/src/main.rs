@@ -363,7 +363,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Append(args) => {
-            let encryption_key = resolve_encryption_key(&args.encryption)?;
+            let encryption_key = resolve_encryption_key(&args.encryption_key)?;
             let records_in = args
                 .input
                 .reader()
@@ -425,7 +425,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Read(args) => {
-            let encryption_key = resolve_encryption_key(&args.encryption)?;
+            let encryption_key = resolve_encryption_key(&args.encryption_key)?;
             let mut batches = ops::read(&s2, &args, encryption_key.as_ref()).await?;
             let mut writer = args
                 .output
@@ -488,7 +488,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Tail(args) => {
-            let encryption_key = resolve_encryption_key(&args.encryption)?;
+            let encryption_key = resolve_encryption_key(&args.encryption_key)?;
             let mut records = ops::tail(&s2, &args, encryption_key.as_ref()).await?;
             let mut writer = args
                 .output
@@ -801,8 +801,10 @@ fn print_metrics(metrics: &[Metric]) {
     }
 }
 
-fn resolve_encryption_key(args: &cli::EncryptionArgs) -> Result<Option<EncryptionKey>, CliError> {
-    match (&args.encryption_key, &args.encryption_file) {
+fn resolve_encryption_key(
+    args: &cli::EncryptionKeyArgs,
+) -> Result<Option<EncryptionKey>, CliError> {
+    match (&args.key, &args.key_file) {
         (Some(key), _) => Ok(Some(key.clone())),
         (_, Some(path)) => {
             let contents = std::fs::read_to_string(path).map_err(|e| {

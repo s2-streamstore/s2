@@ -4503,7 +4503,7 @@ impl App {
                 until: None,
                 format: RecordFormat::default(),
                 output: RecordsOut::Stdout,
-                encryption: Default::default(),
+                encryption_key: Default::default(),
             };
 
             match ops::read(&s2, &args, None).await {
@@ -4576,7 +4576,7 @@ impl App {
                 until: None,
                 format: RecordFormat::default(),
                 output: RecordsOut::Stdout,
-                encryption: Default::default(),
+                encryption_key: Default::default(),
             };
 
             match ops::read(&s2, &args, None).await {
@@ -4740,7 +4740,7 @@ impl App {
                 until,
                 format: record_format,
                 output: output.clone(),
-                encryption: Default::default(),
+                encryption_key: Default::default(),
             };
 
             // Open file writer if output file is specified
