@@ -58,7 +58,7 @@ impl EncryptionKey {
         parse_encryption_key_material(key_b64).map(Self)
     }
 
-    pub fn expose_secret(&self) -> &[u8] {
+    pub(crate) fn expose_secret(&self) -> &[u8] {
         self.0.expose_secret()
     }
 
