@@ -203,7 +203,7 @@ pub struct TimestampingConfig {
 #[derive(Clone, Debug, Serialize)]
 pub enum RetentionPolicy {
     #[allow(dead_code)]
-    Age(Duration),
+    Age(#[serde(serialize_with = "serialize_duration_as_secs")] Duration),
     Infinite,
 }
 
@@ -231,6 +231,7 @@ impl FromStr for RetentionPolicy {
 #[derive(Args, Clone, Debug, Serialize)]
 pub struct DeleteOnEmptyConfig {
     #[arg(long, value_parser = humantime::parse_duration, required = false)]
+    #[serde(serialize_with = "serialize_duration_as_secs")]
     /// Minimum age before an empty stream can be deleted.
     /// Example: 1d, 1w, 1y
     pub delete_on_empty_min_age: Duration,
@@ -490,6 +491,13 @@ where
     S: serde::Serializer,
 {
     serializer.serialize_str(&value.to_string())
+}
+
+fn serialize_duration_as_secs<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_u64(value.as_secs())
 }
 
 impl FromStr for BasinMatcher {
