@@ -14,7 +14,7 @@ use s2_common::{
 };
 use tokio::sync::oneshot;
 
-use super::Backend;
+use super::{Backend, StreamHandle};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
@@ -27,13 +27,12 @@ impl Backend {
     where
         I: Into<StoredAppendInput>,
     {
-        let client = self
-            .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
+        let handle = self
+            .stream_handle_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
-        let ack = client.append_permit(input.into()).await?.submit().await?;
-        Ok(ack)
+        handle.append(input).await
     }
 
     pub async fn append_session<I, S>(
@@ -46,13 +45,40 @@ impl Backend {
         I: Into<StoredAppendInput>,
         S: Stream<Item = I>,
     {
-        let client = self
-            .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
+        let handle = self
+            .stream_handle_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
+        Ok(handle.append_session(inputs))
+    }
+}
+
+impl StreamHandle {
+    pub(crate) async fn append<I>(self, input: I) -> Result<AppendAck, AppendError>
+    where
+        I: Into<StoredAppendInput>,
+    {
+        let ack = self
+            .client
+            .append_permit(input.into())
+            .await?
+            .submit()
+            .await?;
+        Ok(ack)
+    }
+
+    pub(crate) fn append_session<I, S>(
+        self,
+        inputs: S,
+    ) -> impl Stream<Item = Result<AppendAck, AppendError>>
+    where
+        I: Into<StoredAppendInput>,
+        S: Stream<Item = I>,
+    {
+        let client = self.client;
         let session = SessionHandle::new();
-        Ok(async_stream::stream! {
+        async_stream::stream! {
             tokio::pin!(inputs);
             let mut permit_opt = None;
             let mut append_futs = FuturesOrdered::new();
@@ -87,7 +113,7 @@ impl Backend {
                     }
                 }
             }
-        })
+        }
     }
 }
 

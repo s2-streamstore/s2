@@ -1,3 +1,5 @@
+use s2_common::encryption::EncryptionAlgorithm;
+
 pub mod error;
 
 mod basins;
@@ -15,6 +17,22 @@ mod kv;
 pub use core::Backend;
 
 pub use crate::stream_id::StreamId;
+
+#[derive(Clone)]
+pub(crate) struct StreamHandle {
+    backend: Backend,
+    client: streamer::StreamerClient,
+}
+
+impl StreamHandle {
+    pub(crate) fn cipher(&self) -> Option<EncryptionAlgorithm> {
+        self.client.cipher()
+    }
+
+    pub(crate) fn stream_id(&self) -> StreamId {
+        self.client.stream_id()
+    }
+}
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
 

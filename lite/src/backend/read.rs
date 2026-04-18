@@ -18,7 +18,7 @@ use slatedb::{
 };
 use tokio::{sync::broadcast, time::Instant};
 
-use super::Backend;
+use super::{Backend, StreamHandle};
 use crate::{
     backend::{
         error::{
@@ -78,13 +78,12 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<StreamPosition, CheckTailError> {
-        let client = self
-            .streamer_client_with_auto_create::<CheckTailError>(&basin, &stream, |config| {
+        let handle = self
+            .stream_handle_with_auto_create::<CheckTailError>(&basin, &stream, |config| {
                 config.create_stream_on_read
             })
             .await?;
-        let tail = client.check_tail().await?;
-        Ok(tail)
+        handle.check_tail().await
     }
 
     pub async fn read(
@@ -95,22 +94,42 @@ impl Backend {
         end: ReadEnd,
     ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
     {
-        let client = self
-            .streamer_client_with_auto_create::<ReadError>(&basin, &stream, |config| {
+        let handle = self
+            .stream_handle_with_auto_create::<ReadError>(&basin, &stream, |config| {
                 config.create_stream_on_read
             })
             .await?;
+        handle.read(start, end).await
+    }
+}
+
+impl StreamHandle {
+    pub(crate) async fn check_tail(self) -> Result<StreamPosition, CheckTailError> {
+        let tail = self.client.check_tail().await?;
+        Ok(tail)
+    }
+
+    pub(crate) async fn read(
+        self,
+        start: ReadStart,
+        end: ReadEnd,
+    ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
+    {
+        let backend = self.backend;
+        let client = self.client;
         let stream_id = client.stream_id();
         let tail = client.check_tail().await?;
         let mut state = ReadSessionState {
-            start_seq_num: self.read_start_seq_num(stream_id, start, end, tail).await?,
+            start_seq_num: backend
+                .read_start_seq_num(stream_id, start, end, tail)
+                .await?,
             limit: EvaluatedReadLimit::Remaining(end.limit),
             until: end.until,
             wait: end.wait,
             wait_deadline: None,
             tail,
         };
-        let db = self.db.clone();
+        let db = backend.db.clone();
         let session = async_stream::try_stream! {
             'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                 if state.start_seq_num < state.tail.seq_num {
@@ -251,7 +270,9 @@ impl Backend {
         };
         Ok(session)
     }
+}
 
+impl Backend {
     pub(super) async fn resolve_timestamp(
         &self,
         stream_id: StreamId,

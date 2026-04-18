@@ -11,7 +11,6 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use s2_common::{
-    encryption::EncryptionAlgorithm,
     record::{NonZeroSeqNum, SeqNum, StreamPosition},
     types::{
         basin::BasinName,
@@ -27,6 +26,7 @@ use slatedb::{
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
+    StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
@@ -331,12 +331,12 @@ impl Backend {
         }
     }
 
-    pub(crate) async fn stream_cipher_with_auto_create<E>(
+    pub(crate) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         should_auto_create: impl FnOnce(&BasinConfig) -> bool,
-    ) -> Result<Option<EncryptionAlgorithm>, E>
+    ) -> Result<StreamHandle, E>
     where
         E: From<StreamerError>
             + From<StorageError>
@@ -346,10 +346,12 @@ impl Backend {
             + From<StreamDeletionPendingError>
             + From<StreamNotFoundError>,
     {
-        let client = self
-            .streamer_client_with_auto_create::<E>(basin, stream, should_auto_create)
-            .await?;
-        Ok(client.cipher())
+        self.streamer_client_with_auto_create::<E>(basin, stream, should_auto_create)
+            .await
+            .map(|client| StreamHandle {
+                backend: self.clone(),
+                client,
+            })
     }
 }
 
