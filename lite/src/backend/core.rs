@@ -284,39 +284,6 @@ impl Backend {
         }
     }
 
-    pub(super) async fn create_stream_if_missing<E>(
-        &self,
-        basin: &BasinName,
-        stream: &StreamName,
-    ) -> Result<(), E>
-    where
-        E: From<StorageError>
-            + From<TransactionConflictError>
-            + From<BasinDeletionPendingError>
-            + From<StreamDeletionPendingError>
-            + From<BasinNotFoundError>,
-    {
-        match self
-            .create_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
-            )
-            .await
-        {
-            Ok(_) | Err(CreateStreamError::StreamAlreadyExists(_)) => Ok(()),
-            Err(CreateStreamError::Storage(err)) => Err(err.into()),
-            Err(CreateStreamError::TransactionConflict(err)) => Err(err.into()),
-            Err(CreateStreamError::BasinDeletionPending(err)) => Err(err.into()),
-            Err(CreateStreamError::StreamDeletionPending(err)) => Err(err.into()),
-            Err(CreateStreamError::BasinNotFound(err)) => Err(err.into()),
-            Err(CreateStreamError::Validation(_)) => {
-                unreachable!("auto-create uses default config")
-            }
-        }
-    }
-
     pub(super) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
@@ -343,7 +310,31 @@ impl Backend {
                 if !should_auto_create(&basin_config) {
                     return Err(not_found.into());
                 }
-                self.create_stream_if_missing::<E>(basin, stream).await?;
+                match self
+                    .create_stream(
+                        basin.clone(),
+                        stream.clone(),
+                        OptionalStreamConfig::default(),
+                        CreateMode::CreateOnly(None),
+                    )
+                    .await
+                {
+                    Ok(_) | Err(CreateStreamError::StreamAlreadyExists(_)) => {}
+                    Err(CreateStreamError::Storage(err)) => return Err(err.into()),
+                    Err(CreateStreamError::TransactionConflict(err)) => {
+                        return Err(err.into());
+                    }
+                    Err(CreateStreamError::BasinDeletionPending(err)) => {
+                        return Err(err.into());
+                    }
+                    Err(CreateStreamError::StreamDeletionPending(err)) => {
+                        return Err(err.into());
+                    }
+                    Err(CreateStreamError::BasinNotFound(err)) => return Err(err.into()),
+                    Err(CreateStreamError::Validation(_)) => {
+                        unreachable!("auto-create uses default config")
+                    }
+                }
                 Ok(self.new_stream_handle(self.streamer_client(basin, stream).await?))
             }
             Err(e) => Err(e.into()),
