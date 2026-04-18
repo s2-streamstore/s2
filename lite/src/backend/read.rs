@@ -3,6 +3,7 @@ use std::time::Duration;
 use futures::Stream;
 use s2_common::{
     caps,
+    encryption::{EncryptionKey, EncryptionSpec},
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp},
     types::{
@@ -18,11 +19,13 @@ use slatedb::{
 };
 use tokio::{sync::broadcast, time::Instant};
 
-use super::{Backend, StreamHandle};
+use super::{Backend, StreamHandle, core::StreamLookup};
 use crate::{
     backend::{
         error::{
-            CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
+            BasinDeletionPendingError, BasinNotFoundError, CheckTailError, ReadError,
+            ResolveReadError, StorageError, StreamDeletionPendingError, StreamNotFoundError,
+            StreamerError, StreamerMissingInActionError, TransactionConflictError, UnwrittenError,
         },
         kv,
     },
@@ -30,6 +33,50 @@ use crate::{
 };
 
 impl Backend {
+    async fn resolve_read_handle<E>(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+    ) -> Result<StreamHandle, E>
+    where
+        E: From<StreamerError>
+            + From<StorageError>
+            + From<BasinNotFoundError>
+            + From<TransactionConflictError>
+            + From<BasinDeletionPendingError>
+            + From<StreamDeletionPendingError>
+            + From<StreamNotFoundError>,
+    {
+        match self.lookup_stream::<E>(basin, stream).await? {
+            StreamLookup::Found(handle) => Ok(handle),
+            StreamLookup::Missing {
+                basin_config,
+                not_found,
+            } => {
+                if !basin_config.create_stream_on_read {
+                    return Err(not_found.into());
+                }
+                self.create_stream_if_missing::<E>(basin, stream).await?;
+                let client = self.streamer_client(basin, stream).await?;
+                Ok(StreamHandle {
+                    backend: self.clone(),
+                    client,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn resolve_read_target(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<(StreamHandle, EncryptionSpec), ResolveReadError> {
+        let handle = self.resolve_read_handle::<ReadError>(basin, stream).await?;
+        let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
+        Ok((handle, encryption))
+    }
+
     async fn read_start_seq_num(
         &self,
         stream_id: StreamId,
@@ -79,9 +126,7 @@ impl Backend {
         stream: StreamName,
     ) -> Result<StreamPosition, CheckTailError> {
         let handle = self
-            .stream_handle_with_auto_create::<CheckTailError>(&basin, &stream, |config| {
-                config.create_stream_on_read
-            })
+            .resolve_read_handle::<CheckTailError>(&basin, &stream)
             .await?;
         handle.check_tail().await
     }
@@ -95,9 +140,7 @@ impl Backend {
     ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
     {
         let handle = self
-            .stream_handle_with_auto_create::<ReadError>(&basin, &stream, |config| {
-                config.create_stream_on_read
-            })
+            .resolve_read_handle::<ReadError>(&basin, &stream)
             .await?;
         handle.read(start, end).await
     }

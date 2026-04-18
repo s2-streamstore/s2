@@ -6,6 +6,7 @@ use std::{
 
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
+    encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
@@ -14,10 +15,46 @@ use s2_common::{
 };
 use tokio::sync::oneshot;
 
-use super::{Backend, StreamHandle};
-use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
+use super::{Backend, StreamHandle, core::StreamLookup};
+use crate::backend::error::{AppendError, AppendErrorInternal, ResolveAppendError, StorageError};
 
 impl Backend {
+    async fn resolve_append_handle(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+    ) -> Result<StreamHandle, AppendError> {
+        match self.lookup_stream::<AppendError>(basin, stream).await? {
+            StreamLookup::Found(handle) => Ok(handle),
+            StreamLookup::Missing {
+                basin_config,
+                not_found,
+            } => {
+                if !basin_config.create_stream_on_append {
+                    return Err(not_found.into());
+                }
+                self.create_stream_if_missing::<AppendError>(basin, stream)
+                    .await?;
+                let client = self.streamer_client(basin, stream).await?;
+                Ok(StreamHandle {
+                    backend: self.clone(),
+                    client,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn resolve_append_target(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<(StreamHandle, EncryptionSpec), ResolveAppendError> {
+        let handle = self.resolve_append_handle(basin, stream).await?;
+        let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
+        Ok((handle, encryption))
+    }
+
     pub async fn append<I>(
         &self,
         basin: BasinName,
@@ -27,11 +64,7 @@ impl Backend {
     where
         I: Into<StoredAppendInput>,
     {
-        let handle = self
-            .stream_handle_with_auto_create::<AppendError>(&basin, &stream, |config| {
-                config.create_stream_on_append
-            })
-            .await?;
+        let handle = self.resolve_append_handle(&basin, &stream).await?;
         handle.append(input).await
     }
 
@@ -45,11 +78,7 @@ impl Backend {
         I: Into<StoredAppendInput>,
         S: Stream<Item = I>,
     {
-        let handle = self
-            .stream_handle_with_auto_create::<AppendError>(&basin, &stream, |config| {
-                config.create_stream_on_append
-            })
-            .await?;
+        let handle = self.resolve_append_handle(&basin, &stream).await?;
         Ok(handle.append_session(inputs))
     }
 }

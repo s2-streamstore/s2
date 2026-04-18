@@ -19,6 +19,7 @@ use crate::backend::error::{
     AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError, CreateStreamError,
     DeleteBasinError, DeleteStreamError, GetBasinConfigError, GetStreamConfigError,
     ListBasinsError, ListStreamsError, ReadError, ReconfigureBasinError, ReconfigureStreamError,
+    ResolveAppendError, ResolveReadError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +84,24 @@ impl From<AppendRequestRejection> for ServiceError {
 impl From<EncryptionSpecResolutionError> for ServiceError {
     fn from(e: EncryptionSpecResolutionError) -> Self {
         ServiceError::Validation(ValidationError(e.to_string()))
+    }
+}
+
+impl From<ResolveAppendError> for ServiceError {
+    fn from(value: ResolveAppendError) -> Self {
+        match value {
+            ResolveAppendError::Append(e) => ServiceError::Append(e),
+            ResolveAppendError::EncryptionSpecResolution(e) => ServiceError::from(e),
+        }
+    }
+}
+
+impl From<ResolveReadError> for ServiceError {
+    fn from(value: ResolveReadError) -> Self {
+        match value {
+            ResolveReadError::Read(e) => ServiceError::Read(e),
+            ResolveReadError::EncryptionSpecResolution(e) => ServiceError::from(e),
+        }
     }
 }
 

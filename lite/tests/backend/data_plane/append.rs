@@ -393,7 +393,7 @@ async fn test_append_session_roundtrip(
 }
 
 #[tokio::test]
-async fn test_append_session_auto_create_stream() {
+async fn test_append_session_auto_creates_missing_stream_when_enabled() {
     let backend = create_backend().await;
     let basin_config = BasinConfig {
         create_stream_on_append: true,
@@ -418,28 +418,28 @@ async fn test_append_session_auto_create_stream() {
         .clone()
         .append_session(basin_name.clone(), stream_name.clone(), inputs)
         .await
-        .expect("Failed to create append session");
+        .expect("Failed to create append session for missing stream");
     tokio::pin!(session);
 
     let ack = session
         .next()
         .await
-        .expect("Should have ack")
-        .expect("Append should succeed");
-    assert_eq!(ack.start.seq_num, 0);
+        .expect("Missing append ack")
+        .expect("Append session should succeed");
     assert_eq!(ack.end.seq_num, 1);
     assert!(session.next().await.is_none());
 
     let stream_list = backend
-        .list_streams(basin_name, ListStreamsRequest::default())
+        .list_streams(basin_name.clone(), ListStreamsRequest::default())
         .await
         .expect("Failed to list streams");
-    let stream_names: Vec<_> = stream_list
-        .values
-        .iter()
-        .map(|info| info.name.as_ref())
-        .collect();
-    assert_eq!(stream_names, vec![stream_name.as_ref()]);
+    assert_eq!(stream_list.values.len(), 1);
+
+    let tail = backend
+        .check_tail(basin_name, stream_name)
+        .await
+        .expect("Failed to check tail");
+    assert_eq!(tail.seq_num, 1);
 }
 
 #[tokio::test]

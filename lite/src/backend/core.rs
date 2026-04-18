@@ -70,6 +70,14 @@ pub struct Backend {
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
+pub(super) enum StreamLookup {
+    Found(StreamHandle),
+    Missing {
+        basin_config: BasinConfig,
+        not_found: StreamNotFoundError,
+    },
+}
+
 impl Backend {
     pub fn new(db: slatedb::Db, append_inflight_bytes: ByteSize) -> Self {
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
@@ -86,6 +94,13 @@ impl Backend {
             append_inflight_bytes_sema: append_inflight_bytes,
             durability_notifier,
             bgtask_trigger_tx,
+        }
+    }
+
+    fn new_stream_handle(&self, client: StreamerClient) -> StreamHandle {
+        StreamHandle {
+            backend: self.clone(),
+            client,
         }
     }
 
@@ -277,81 +292,61 @@ impl Backend {
         }
     }
 
-    pub(super) async fn streamer_client_with_auto_create<E>(
+    pub(super) async fn lookup_stream<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
-        should_auto_create: impl FnOnce(&BasinConfig) -> bool,
-    ) -> Result<StreamerClient, E>
+    ) -> Result<StreamLookup, E>
     where
-        E: From<StreamerError>
-            + From<StorageError>
-            + From<BasinNotFoundError>
-            + From<TransactionConflictError>
-            + From<BasinDeletionPendingError>
-            + From<StreamDeletionPendingError>
-            + From<StreamNotFoundError>,
+        E: From<StreamerError> + From<StorageError> + From<BasinNotFoundError>,
     {
         match self.streamer_client(basin, stream).await {
-            Ok(client) => Ok(client),
-            Err(StreamerError::StreamNotFound(e)) => {
-                let config = match self.get_basin_config(basin.clone()).await {
-                    Ok(config) => config,
-                    Err(GetBasinConfigError::Storage(e)) => Err(e)?,
-                    Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
-                };
-                if should_auto_create(&config) {
-                    if let Err(e) = self
-                        .create_stream(
-                            basin.clone(),
-                            stream.clone(),
-                            OptionalStreamConfig::default(),
-                            CreateMode::CreateOnly(None),
-                        )
-                        .await
-                    {
-                        match e {
-                            CreateStreamError::Storage(e) => Err(e)?,
-                            CreateStreamError::TransactionConflict(e) => Err(e)?,
-                            CreateStreamError::BasinDeletionPending(e) => Err(e)?,
-                            CreateStreamError::StreamDeletionPending(e) => Err(e)?,
-                            CreateStreamError::BasinNotFound(e) => Err(e)?,
-                            CreateStreamError::StreamAlreadyExists(_) => {}
-                            CreateStreamError::Validation(_) => {
-                                unreachable!("auto-create uses default config")
-                            }
-                        }
-                    }
-                    Ok(self.streamer_client(basin, stream).await?)
-                } else {
-                    Err(e.into())
+            Ok(client) => Ok(StreamLookup::Found(self.new_stream_handle(client))),
+            Err(StreamerError::StreamNotFound(not_found)) => {
+                match self.get_basin_config(basin.clone()).await {
+                    Ok(basin_config) => Ok(StreamLookup::Missing {
+                        basin_config,
+                        not_found,
+                    }),
+                    Err(GetBasinConfigError::Storage(e)) => Err(e.into()),
+                    Err(GetBasinConfigError::BasinNotFound(e)) => Err(e.into()),
                 }
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    pub(crate) async fn stream_handle_with_auto_create<E>(
+    pub(super) async fn create_stream_if_missing<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
-        should_auto_create: impl FnOnce(&BasinConfig) -> bool,
-    ) -> Result<StreamHandle, E>
+    ) -> Result<(), E>
     where
-        E: From<StreamerError>
-            + From<StorageError>
-            + From<BasinNotFoundError>
+        E: From<StorageError>
             + From<TransactionConflictError>
             + From<BasinDeletionPendingError>
             + From<StreamDeletionPendingError>
-            + From<StreamNotFoundError>,
+            + From<BasinNotFoundError>,
     {
-        self.streamer_client_with_auto_create::<E>(basin, stream, should_auto_create)
+        match self
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
             .await
-            .map(|client| StreamHandle {
-                backend: self.clone(),
-                client,
-            })
+        {
+            Ok(_) | Err(CreateStreamError::StreamAlreadyExists(_)) => Ok(()),
+            Err(CreateStreamError::Storage(err)) => Err(err.into()),
+            Err(CreateStreamError::TransactionConflict(err)) => Err(err.into()),
+            Err(CreateStreamError::BasinDeletionPending(err)) => Err(err.into()),
+            Err(CreateStreamError::StreamDeletionPending(err)) => Err(err.into()),
+            Err(CreateStreamError::BasinNotFound(err)) => Err(err.into()),
+            Err(CreateStreamError::Validation(_)) => {
+                unreachable!("auto-create uses default config")
+            }
+        }
     }
 }
 
@@ -362,7 +357,10 @@ mod tests {
     use bytes::Bytes;
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
-        types::{config::BasinConfig, resources::CreateMode},
+        types::{
+            config::{BasinConfig, OptionalStreamConfig},
+            resources::CreateMode,
+        },
     };
     use slatedb::{WriteBatch, config::WriteOptions, object_store};
     use time::OffsetDateTime;
