@@ -70,14 +70,6 @@ pub struct Backend {
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
 
-pub(super) enum StreamLookup {
-    Found(StreamHandle),
-    Missing {
-        basin_config: BasinConfig,
-        not_found: StreamNotFoundError,
-    },
-}
-
 impl Backend {
     pub fn new(db: slatedb::Db, append_inflight_bytes: ByteSize) -> Self {
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
@@ -292,30 +284,6 @@ impl Backend {
         }
     }
 
-    pub(super) async fn lookup_stream<E>(
-        &self,
-        basin: &BasinName,
-        stream: &StreamName,
-    ) -> Result<StreamLookup, E>
-    where
-        E: From<StreamerError> + From<StorageError> + From<BasinNotFoundError>,
-    {
-        match self.streamer_client(basin, stream).await {
-            Ok(client) => Ok(StreamLookup::Found(self.new_stream_handle(client))),
-            Err(StreamerError::StreamNotFound(not_found)) => {
-                match self.get_basin_config(basin.clone()).await {
-                    Ok(basin_config) => Ok(StreamLookup::Missing {
-                        basin_config,
-                        not_found,
-                    }),
-                    Err(GetBasinConfigError::Storage(e)) => Err(e.into()),
-                    Err(GetBasinConfigError::BasinNotFound(e)) => Err(e.into()),
-                }
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     pub(super) async fn create_stream_if_missing<E>(
         &self,
         basin: &BasinName,
@@ -364,18 +332,21 @@ impl Backend {
             + From<StreamDeletionPendingError>
             + From<StreamNotFoundError>,
     {
-        match self.lookup_stream::<E>(basin, stream).await? {
-            StreamLookup::Found(handle) => Ok(handle),
-            StreamLookup::Missing {
-                basin_config,
-                not_found,
-            } => {
+        match self.streamer_client(basin, stream).await {
+            Ok(client) => Ok(self.new_stream_handle(client)),
+            Err(StreamerError::StreamNotFound(not_found)) => {
+                let basin_config = match self.get_basin_config(basin.clone()).await {
+                    Ok(basin_config) => basin_config,
+                    Err(GetBasinConfigError::Storage(e)) => return Err(e.into()),
+                    Err(GetBasinConfigError::BasinNotFound(e)) => return Err(e.into()),
+                };
                 if !should_auto_create(&basin_config) {
                     return Err(not_found.into());
                 }
                 self.create_stream_if_missing::<E>(basin, stream).await?;
                 Ok(self.new_stream_handle(self.streamer_client(basin, stream).await?))
             }
+            Err(e) => Err(e.into()),
         }
     }
 }
