@@ -1,10 +1,19 @@
+use std::time::Duration;
+
 use bytes::Bytes;
-use s2_common::types::{
-    config::BasinConfig,
-    stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart},
+use s2_common::{
+    read_extent::{ReadLimit, ReadUntil},
+    record::StreamPosition,
+    types::{
+        config::BasinConfig,
+        stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart},
+    },
 };
+use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
 
 use super::common::*;
+
+const MAX_AUTO_CREATE_ATTEMPTS: usize = 50;
 
 async fn assert_stream_count(
     backend: &s2_lite::backend::Backend,
@@ -49,6 +58,29 @@ async fn test_backend_append_auto_creates_stream() {
 }
 
 #[tokio::test]
+async fn test_backend_append_without_auto_create_returns_not_found() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-no-auto-create-append",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+
+    let input = AppendInput {
+        records: create_test_record_batch(vec![Bytes::from_static(b"should fail")]),
+        match_seq_num: None,
+        fencing_token: None,
+    };
+
+    let result = backend.append(basin_name.clone(), stream_name, input).await;
+
+    assert!(matches!(result, Err(AppendError::StreamNotFound(_))));
+    assert_stream_count(&backend, &basin_name, 0).await;
+}
+
+#[tokio::test]
 async fn test_backend_read_auto_creates_stream() {
     let backend = create_backend().await;
     let basin_config = BasinConfig {
@@ -80,6 +112,29 @@ async fn test_backend_read_auto_creates_stream() {
 }
 
 #[tokio::test]
+async fn test_backend_read_without_auto_create_returns_not_found() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-no-auto-create-read",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+
+    let start = ReadStart {
+        from: ReadFrom::SeqNum(0),
+        clamp: false,
+    };
+    let result = backend
+        .read(basin_name.clone(), stream_name, start, ReadEnd::default())
+        .await;
+
+    assert!(matches!(result, Err(ReadError::StreamNotFound(_))));
+    assert_stream_count(&backend, &basin_name, 0).await;
+}
+
+#[tokio::test]
 async fn test_backend_check_tail_auto_creates_stream() {
     let backend = create_backend().await;
     let basin_config = BasinConfig {
@@ -96,4 +151,161 @@ async fn test_backend_check_tail_auto_creates_stream() {
 
     assert_eq!(tail.seq_num, 0);
     assert_stream_count(&backend, &basin_name, 1).await;
+}
+
+#[tokio::test]
+async fn test_backend_check_tail_without_auto_create_returns_not_found() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-no-auto-create-tail",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+
+    let result = backend.check_tail(basin_name.clone(), stream_name).await;
+
+    assert!(matches!(result, Err(CheckTailError::StreamNotFound(_))));
+    assert_stream_count(&backend, &basin_name, 0).await;
+}
+
+#[tokio::test]
+async fn test_backend_append_auto_create_is_race_safe() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-append-race",
+        BasinConfig {
+            create_stream_on_append: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+    let expected_bodies: Vec<_> = (0..10).map(|i| format!("racer-{i}").into_bytes()).collect();
+    let mut handles = Vec::new();
+
+    for body in &expected_bodies {
+        let backend = backend.clone();
+        let basin_name = basin_name.clone();
+        let stream_name = stream_name.clone();
+        let body = body.clone();
+        handles.push(tokio::spawn(async move {
+            let input = AppendInput {
+                records: create_test_record_batch(vec![Bytes::from(body)]),
+                match_seq_num: None,
+                fencing_token: None,
+            };
+            for _ in 0..MAX_AUTO_CREATE_ATTEMPTS {
+                match backend
+                    .append(basin_name.clone(), stream_name.clone(), input.clone())
+                    .await
+                {
+                    Ok(ack) => return Ok(ack),
+                    Err(AppendError::TransactionConflict(_))
+                    | Err(AppendError::StreamNotFound(_)) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            backend.append(basin_name, stream_name, input).await
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .await
+            .unwrap()
+            .expect("auto-create append racer should succeed");
+    }
+
+    let tail = backend
+        .check_tail(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to check tail");
+    assert_eq!(tail.seq_num, 10);
+    assert_stream_count(&backend, &basin_name, 1).await;
+
+    let (start, end) = read_all_bounds();
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
+    let mut actual_bodies = envelope_bodies(&records);
+    let mut expected_bodies = expected_bodies;
+    actual_bodies.sort();
+    expected_bodies.sort();
+    assert_eq!(actual_bodies, expected_bodies);
+}
+
+#[tokio::test]
+async fn test_backend_read_auto_create_is_race_safe() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-read-race",
+        BasinConfig {
+            create_stream_on_read: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+    let mut handles = Vec::new();
+
+    for _ in 0..10 {
+        let backend = backend.clone();
+        let basin_name = basin_name.clone();
+        let stream_name = stream_name.clone();
+        handles.push(tokio::spawn(async move {
+            let start = ReadStart {
+                from: ReadFrom::SeqNum(0),
+                clamp: false,
+            };
+            let end = ReadEnd {
+                limit: ReadLimit::Unbounded,
+                until: ReadUntil::Unbounded,
+                wait: Some(Duration::ZERO),
+            };
+            for _ in 0..MAX_AUTO_CREATE_ATTEMPTS {
+                match backend
+                    .read(basin_name.clone(), stream_name.clone(), start, end)
+                    .await
+                {
+                    Ok(session) => {
+                        drop(session);
+                        return Ok::<(), ReadError>(());
+                    }
+                    Err(ReadError::TransactionConflict(_)) | Err(ReadError::StreamNotFound(_)) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            match backend.read(basin_name, stream_name, start, end).await {
+                Ok(session) => {
+                    drop(session);
+                    Ok::<(), ReadError>(())
+                }
+                Err(err) => Err(err),
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .await
+            .unwrap()
+            .expect("auto-create read racer should succeed");
+    }
+
+    let tail = backend
+        .check_tail(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to check tail after auto-create reads");
+    assert_eq!(tail, StreamPosition::MIN);
+    assert_stream_count(&backend, &basin_name, 1).await;
+
+    let (start, end) = read_all_bounds();
+    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
+    assert!(records.is_empty());
 }
