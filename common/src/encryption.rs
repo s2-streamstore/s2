@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use base64ct::Encoding;
 use http::{HeaderName, HeaderValue};
-use secrecy::{ExposeSecret, SecretBox};
+use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroizing};
 use strum::{Display, EnumString};
 
 use crate::http::ParseableHeader;
@@ -206,7 +206,7 @@ fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, Enc
 }
 
 fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
-    let mut value = vec![0u8; base64ct::Base64::encoded_len(key)];
+    let mut value = Zeroizing::new(vec![0u8; base64ct::Base64::encoded_len(key)]);
     base64ct::Base64::encode(key, &mut value).expect("base64 output length should match buffer");
     HeaderValue::from_bytes(&value).expect("encryption key header value should be ASCII")
 }
