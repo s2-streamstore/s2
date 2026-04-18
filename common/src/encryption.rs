@@ -185,7 +185,7 @@ fn resolve_key<const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use http::header::HeaderValue;
+    use rstest::rstest;
 
     use super::*;
 
@@ -195,15 +195,15 @@ mod tests {
         26, 27, 28, 29, 30, 31, 32,
     ];
 
-    #[test]
-    fn key_header_value_is_sensitive() {
-        let value = EncryptionKey::new([7; 32]).to_header_value();
-        assert!(value.is_sensitive());
-        assert_ne!(value, HeaderValue::from_static("plain"));
+    fn resolve_encrypted(
+        cipher: EncryptionAlgorithm,
+        key: EncryptionKey,
+    ) -> Result<EncryptionSpec, EncryptionSpecResolutionError> {
+        EncryptionSpec::resolve(Some(cipher), Some(key))
     }
 
     #[test]
-    fn key_header_value_roundtrips() {
+    fn key_header_value_roundtrips_and_is_sensitive() {
         let value = EncryptionKey::new(KEY_BYTES).to_header_value();
         assert_eq!(value.to_str().unwrap(), KEY_B64);
         assert!(value.is_sensitive());
@@ -213,36 +213,75 @@ mod tests {
     }
 
     #[test]
-    fn resolve_plain_ignores_key() {
-        let encryption =
-            EncryptionSpec::resolve(None, Some(EncryptionKey::new(KEY_BYTES))).unwrap();
-        assert!(matches!(encryption, EncryptionSpec::Plain));
-    }
+    fn encryption_key_parsing_trims_and_enforces_bounds() {
+        let parsed = format!("  {KEY_B64}\n").parse::<EncryptionKey>().unwrap();
+        assert_eq!(parsed.to_header_value().to_str().unwrap(), KEY_B64);
 
-    #[test]
-    fn resolve_encrypted_requires_key() {
-        let err = EncryptionSpec::resolve(Some(EncryptionAlgorithm::Aegis256), None).unwrap_err();
         assert_eq!(
-            err,
-            EncryptionSpecResolutionError::MissingKey {
-                cipher: EncryptionAlgorithm::Aegis256,
-            }
+            "   ".parse::<EncryptionKey>().unwrap_err(),
+            EncryptionKeyLengthError(0)
+        );
+
+        let too_long = "A".repeat(MAX_ENCRYPTION_KEY_HEADER_VALUE_LEN + 1);
+        assert_eq!(
+            too_long.parse::<EncryptionKey>().unwrap_err(),
+            EncryptionKeyLengthError(MAX_ENCRYPTION_KEY_HEADER_VALUE_LEN + 1)
         );
     }
 
     #[test]
-    fn resolve_encrypted_validates_key_length_per_algorithm() {
-        let err = EncryptionSpec::resolve(
-            Some(EncryptionAlgorithm::Aegis256),
-            Some(EncryptionKey::new([0x42; 4])),
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            EncryptionSpecResolutionError::InvalidKeyLength {
-                cipher: EncryptionAlgorithm::Aegis256,
-                length: 4,
+    fn resolve_plain_ignores_supplied_key() {
+        let encryption = EncryptionSpec::resolve(None, Some("!!!!".parse().unwrap())).unwrap();
+        assert!(matches!(encryption, EncryptionSpec::Plain));
+    }
+
+    #[rstest]
+    #[case(EncryptionAlgorithm::Aegis256)]
+    #[case(EncryptionAlgorithm::Aes256Gcm)]
+    fn resolve_encrypted_requires_key(#[case] cipher: EncryptionAlgorithm) {
+        let err = EncryptionSpec::resolve(Some(cipher), None).unwrap_err();
+        assert_eq!(err, EncryptionSpecResolutionError::MissingKey { cipher });
+    }
+
+    #[rstest]
+    #[case(EncryptionAlgorithm::Aegis256)]
+    #[case(EncryptionAlgorithm::Aes256Gcm)]
+    fn resolve_encrypted_decodes_key_for_each_algorithm(#[case] cipher: EncryptionAlgorithm) {
+        let encryption = resolve_encrypted(cipher, EncryptionKey::new(KEY_BYTES)).unwrap();
+
+        match (cipher, encryption) {
+            (EncryptionAlgorithm::Aegis256, EncryptionSpec::Aegis256(key)) => {
+                assert_eq!(key.expose_secret(), &KEY_BYTES);
             }
+            (EncryptionAlgorithm::Aes256Gcm, EncryptionSpec::Aes256Gcm(key)) => {
+                assert_eq!(key.expose_secret(), &KEY_BYTES);
+            }
+            _ => panic!("resolved encryption spec did not match requested algorithm"),
+        }
+    }
+
+    #[rstest]
+    #[case(EncryptionAlgorithm::Aegis256)]
+    #[case(EncryptionAlgorithm::Aes256Gcm)]
+    fn resolve_encrypted_rejects_invalid_base64(#[case] cipher: EncryptionAlgorithm) {
+        let err = resolve_encrypted(cipher, "!!!!".parse().unwrap()).unwrap_err();
+        assert_eq!(err, EncryptionSpecResolutionError::InvalidBase64 { cipher });
+    }
+
+    #[test]
+    fn resolve_encrypted_rejects_non_32_byte_keys() {
+        let cipher = EncryptionAlgorithm::Aegis256;
+
+        let short_err = resolve_encrypted(cipher, EncryptionKey::new([0x42; 4])).unwrap_err();
+        assert_eq!(
+            short_err,
+            EncryptionSpecResolutionError::InvalidKeyLength { cipher, length: 4 }
+        );
+
+        let long_err = resolve_encrypted(cipher, EncryptionKey::new([0x42; 33])).unwrap_err();
+        assert_eq!(
+            long_err,
+            EncryptionSpecResolutionError::InvalidKeyLength { cipher, length: 33 }
         );
     }
 }
