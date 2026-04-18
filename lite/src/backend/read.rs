@@ -3,7 +3,6 @@ use std::time::Duration;
 use futures::Stream;
 use s2_common::{
     caps,
-    encryption::{EncryptionKey, EncryptionSpec},
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp},
     types::{
@@ -23,9 +22,9 @@ use super::{Backend, StreamHandle, core::StreamLookup};
 use crate::{
     backend::{
         error::{
-            BasinDeletionPendingError, BasinNotFoundError, CheckTailError, ReadError,
-            ResolveReadError, StorageError, StreamDeletionPendingError, StreamNotFoundError,
-            StreamerError, StreamerMissingInActionError, TransactionConflictError, UnwrittenError,
+            BasinDeletionPendingError, BasinNotFoundError, CheckTailError, ReadError, StorageError,
+            StreamDeletionPendingError, StreamNotFoundError, StreamerError,
+            StreamerMissingInActionError, TransactionConflictError, UnwrittenError,
         },
         kv,
     },
@@ -33,7 +32,7 @@ use crate::{
 };
 
 impl Backend {
-    async fn resolve_read_handle<E>(
+    pub(crate) async fn resolve_read_handle<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
@@ -64,17 +63,6 @@ impl Backend {
                 })
             }
         }
-    }
-
-    pub(crate) async fn resolve_read_target(
-        &self,
-        basin: &BasinName,
-        stream: &StreamName,
-        encryption_key: Option<EncryptionKey>,
-    ) -> Result<(StreamHandle, EncryptionSpec), ResolveReadError> {
-        let handle = self.resolve_read_handle::<ReadError>(basin, stream).await?;
-        let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
-        Ok((handle, encryption))
     }
 
     async fn read_start_seq_num(

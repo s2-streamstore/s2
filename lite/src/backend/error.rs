@@ -1,7 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    encryption::{EncryptionAlgorithm, EncryptionSpecResolutionError},
+    encryption::EncryptionAlgorithm,
     record::{FencingToken, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
@@ -186,14 +186,6 @@ impl From<AppendErrorInternal> for AppendError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum ResolveAppendError {
-    #[error(transparent)]
-    Append(#[from] AppendError),
-    #[error(transparent)]
-    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
 pub enum AppendConditionFailedError {
     #[error("fencing token mismatch: expected `{expected}`, actual `{actual}`")]
     FencingTokenMismatch {
@@ -270,14 +262,6 @@ impl From<slatedb::Error> for ReadError {
     fn from(e: slatedb::Error) -> Self {
         Self::Storage(e.into())
     }
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum ResolveReadError {
-    #[error(transparent)]
-    Read(#[from] ReadError),
-    #[error(transparent)]
-    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]

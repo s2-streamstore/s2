@@ -6,7 +6,6 @@ use std::{
 
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
-    encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
@@ -16,10 +15,10 @@ use s2_common::{
 use tokio::sync::oneshot;
 
 use super::{Backend, StreamHandle, core::StreamLookup};
-use crate::backend::error::{AppendError, AppendErrorInternal, ResolveAppendError, StorageError};
+use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
-    async fn resolve_append_handle(
+    pub(crate) async fn resolve_append_handle(
         &self,
         basin: &BasinName,
         stream: &StreamName,
@@ -42,17 +41,6 @@ impl Backend {
                 })
             }
         }
-    }
-
-    pub(crate) async fn resolve_append_target(
-        &self,
-        basin: &BasinName,
-        stream: &StreamName,
-        encryption_key: Option<EncryptionKey>,
-    ) -> Result<(StreamHandle, EncryptionSpec), ResolveAppendError> {
-        let handle = self.resolve_append_handle(basin, stream).await?;
-        let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
-        Ok((handle, encryption))
     }
 
     pub async fn append<I>(
