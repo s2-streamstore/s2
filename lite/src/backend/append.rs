@@ -14,33 +14,19 @@ use s2_common::{
 };
 use tokio::sync::oneshot;
 
-use super::{Backend, StreamHandle, core::StreamLookup};
+use super::{Backend, StreamHandle};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
-    pub(crate) async fn resolve_append_handle(
+    pub async fn resolve_append_handle(
         &self,
         basin: &BasinName,
         stream: &StreamName,
     ) -> Result<StreamHandle, AppendError> {
-        match self.lookup_stream::<AppendError>(basin, stream).await? {
-            StreamLookup::Found(handle) => Ok(handle),
-            StreamLookup::Missing {
-                basin_config,
-                not_found,
-            } => {
-                if !basin_config.create_stream_on_append {
-                    return Err(not_found.into());
-                }
-                self.create_stream_if_missing::<AppendError>(basin, stream)
-                    .await?;
-                let client = self.streamer_client(basin, stream).await?;
-                Ok(StreamHandle {
-                    backend: self.clone(),
-                    client,
-                })
-            }
-        }
+        self.stream_handle_with_auto_create::<AppendError>(basin, stream, |config| {
+            config.create_stream_on_append
+        })
+        .await
     }
 
     pub async fn append<I>(
@@ -72,7 +58,7 @@ impl Backend {
 }
 
 impl StreamHandle {
-    pub(crate) async fn append<I>(self, input: I) -> Result<AppendAck, AppendError>
+    pub async fn append<I>(self, input: I) -> Result<AppendAck, AppendError>
     where
         I: Into<StoredAppendInput>,
     {
@@ -85,7 +71,7 @@ impl StreamHandle {
         Ok(ack)
     }
 
-    pub(crate) fn append_session<I, S>(
+    pub fn append_session<I, S>(
         self,
         inputs: S,
     ) -> impl Stream<Item = Result<AppendAck, AppendError>>

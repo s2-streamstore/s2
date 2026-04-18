@@ -89,7 +89,7 @@ pub struct EncryptionAlgorithmMismatchError {
 pub struct TransactionConflictError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub(crate) enum StreamerError {
+pub enum StreamerError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]

@@ -348,6 +348,36 @@ impl Backend {
             }
         }
     }
+
+    pub(super) async fn stream_handle_with_auto_create<E>(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        should_auto_create: impl FnOnce(&BasinConfig) -> bool,
+    ) -> Result<StreamHandle, E>
+    where
+        E: From<StreamerError>
+            + From<StorageError>
+            + From<BasinNotFoundError>
+            + From<TransactionConflictError>
+            + From<BasinDeletionPendingError>
+            + From<StreamDeletionPendingError>
+            + From<StreamNotFoundError>,
+    {
+        match self.lookup_stream::<E>(basin, stream).await? {
+            StreamLookup::Found(handle) => Ok(handle),
+            StreamLookup::Missing {
+                basin_config,
+                not_found,
+            } => {
+                if !should_auto_create(&basin_config) {
+                    return Err(not_found.into());
+                }
+                self.create_stream_if_missing::<E>(basin, stream).await?;
+                Ok(self.new_stream_handle(self.streamer_client(basin, stream).await?))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

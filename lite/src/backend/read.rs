@@ -18,7 +18,7 @@ use slatedb::{
 };
 use tokio::{sync::broadcast, time::Instant};
 
-use super::{Backend, StreamHandle, core::StreamLookup};
+use super::{Backend, StreamHandle};
 use crate::{
     backend::{
         error::{
@@ -32,7 +32,7 @@ use crate::{
 };
 
 impl Backend {
-    pub(crate) async fn resolve_read_handle<E>(
+    pub async fn resolve_read_handle<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
@@ -46,23 +46,10 @@ impl Backend {
             + From<StreamDeletionPendingError>
             + From<StreamNotFoundError>,
     {
-        match self.lookup_stream::<E>(basin, stream).await? {
-            StreamLookup::Found(handle) => Ok(handle),
-            StreamLookup::Missing {
-                basin_config,
-                not_found,
-            } => {
-                if !basin_config.create_stream_on_read {
-                    return Err(not_found.into());
-                }
-                self.create_stream_if_missing::<E>(basin, stream).await?;
-                let client = self.streamer_client(basin, stream).await?;
-                Ok(StreamHandle {
-                    backend: self.clone(),
-                    client,
-                })
-            }
-        }
+        self.stream_handle_with_auto_create::<E>(basin, stream, |config| {
+            config.create_stream_on_read
+        })
+        .await
     }
 
     async fn read_start_seq_num(
@@ -135,12 +122,12 @@ impl Backend {
 }
 
 impl StreamHandle {
-    pub(crate) async fn check_tail(self) -> Result<StreamPosition, CheckTailError> {
+    pub async fn check_tail(self) -> Result<StreamPosition, CheckTailError> {
         let tail = self.client.check_tail().await?;
         Ok(tail)
     }
 
-    pub(crate) async fn read(
+    pub async fn read(
         self,
         start: ReadStart,
         end: ReadEnd,

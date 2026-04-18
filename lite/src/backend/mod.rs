@@ -19,17 +19,17 @@ pub use core::Backend;
 pub use crate::stream_id::StreamId;
 
 #[derive(Clone)]
-pub(crate) struct StreamHandle {
+pub struct StreamHandle {
     backend: Backend,
     client: streamer::StreamerClient,
 }
 
 impl StreamHandle {
-    pub(crate) fn cipher(&self) -> Option<EncryptionAlgorithm> {
+    pub fn cipher(&self) -> Option<EncryptionAlgorithm> {
         self.client.cipher()
     }
 
-    pub(crate) fn stream_id(&self) -> StreamId {
+    pub fn stream_id(&self) -> StreamId {
         self.client.stream_id()
     }
 }

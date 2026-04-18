@@ -5,4 +5,4 @@ pub mod handlers;
 pub mod init;
 pub mod metrics;
 pub mod server;
-pub(crate) mod stream_id;
+pub mod stream_id;
