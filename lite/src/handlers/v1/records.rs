@@ -14,7 +14,7 @@ use s2_api::{
 };
 use s2_common::{
     caps::RECORD_BATCH_MAX,
-    encryption::EncryptionSpec,
+    encryption::{EncryptionKey, EncryptionSpec},
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
@@ -114,6 +114,21 @@ fn prepare_read(
     }
     validate_read_until(start, end)?;
     Ok((start, end))
+}
+
+async fn open_read_session(
+    backend: &Backend,
+    basin: &BasinName,
+    stream: &StreamName,
+    start: ReadStart,
+    end: ReadEnd,
+    encryption_key: Option<EncryptionKey>,
+) -> Result<impl Stream<Item = Result<ReadSessionOutput, ServiceError>> + use<>, ServiceError> {
+    let handle = backend.open_for_read::<ReadError>(basin, stream).await?;
+    let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
+    let stream_id = handle.stream_id();
+    let session = handle.read(start, end).await?;
+    Ok(decrypt_session(session, encryption, stream_id))
 }
 
 #[derive(FromRequest)]
@@ -219,11 +234,8 @@ pub async fn read(
             response_mime,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
-            let handle = backend.open_for_read::<ReadError>(&basin, &stream).await?;
-            let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
-            let stream_id = handle.stream_id();
-            let session = handle.read(start, end).await?;
-            let session = decrypt_session(session, encryption, stream_id);
+            let session =
+                open_read_session(&backend, &basin, &stream, start, end, encryption_key).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
                 JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
@@ -243,11 +255,8 @@ pub async fn read(
         } => {
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
-            let handle = backend.open_for_read::<ReadError>(&basin, &stream).await?;
-            let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
-            let stream_id = handle.stream_id();
-            let session = handle.read(start, end).await?;
-            let session = decrypt_session(session, encryption, stream_id);
+            let session =
+                open_read_session(&backend, &basin, &stream, start, end, encryption_key).await?;
             let events = async_stream::stream! {
                 let mut processed = CountOrBytes::ZERO;
                 tokio::pin!(session);
@@ -289,18 +298,15 @@ pub async fn read(
             response_compression,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
-            let handle = backend.open_for_read::<ReadError>(&basin, &stream).await?;
-            let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
-            let stream_id = handle.stream_id();
-            let session = handle.read(start, end).await?;
-            let s2s_stream =
-                decrypt_session(session, encryption, stream_id).map_ok(|msg| match msg {
-                    ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
-                        records: vec![],
-                        tail: Some(tail.into()),
-                    },
-                    ReadSessionOutput::Batch(batch) => v1t::stream::proto::ReadBatch::from(batch),
-                });
+            let session =
+                open_read_session(&backend, &basin, &stream, start, end, encryption_key).await?;
+            let s2s_stream = session.map_ok(|msg| match msg {
+                ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
+                    records: vec![],
+                    tail: Some(tail.into()),
+                },
+                ReadSessionOutput::Batch(batch) => v1t::stream::proto::ReadBatch::from(batch),
+            });
             let response_stream = s2s::FramedMessageStream::<_>::new(
                 response_compression,
                 Box::pin(s2s_stream.map_err(ServiceError::from)),
@@ -401,15 +407,16 @@ pub async fn append(
         request,
     }: AppendArgs,
 ) -> Result<Response, ServiceError> {
+    let handle = backend.open_for_append(&basin, &stream).await?;
+    let stream_id = handle.stream_id();
     match request {
         v1t::stream::AppendRequest::Unary {
             encryption_key,
             input,
             response_mime,
         } => {
-            let handle = backend.open_for_append(&basin, &stream).await?;
             let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
-            let stream_id = handle.stream_id();
+
             let input = input.encrypt(&encryption, stream_id.as_bytes());
             let ack = handle.append(input).await?;
             match response_mime {
@@ -428,9 +435,8 @@ pub async fn append(
             inputs,
             response_compression,
         } => {
-            let handle = backend.open_for_append(&basin, &stream).await?;
             let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
-            let stream_id = handle.stream_id();
+
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
             let inputs = async_stream::stream! {
