@@ -60,7 +60,8 @@ impl EncryptionKey {
     }
 
     pub fn to_header_value(&self) -> HeaderValue {
-        let mut value = header_value_for_encoded_key_material(self.expose_secret());
+        let mut value = HeaderValue::from_bytes(self.expose_secret().as_bytes())
+            .expect("encryption key header value should be ASCII");
         value.set_sensitive(true);
         value
     }
@@ -115,10 +116,10 @@ impl EncryptionSpec {
         match (cipher, key) {
             (None, _) => Ok(Self::Plain),
             (Some(cipher @ EncryptionAlgorithm::Aegis256), Some(key)) => {
-                Ok(Self::Aegis256(resolve_fixed_size_key(cipher, key)?))
+                Ok(Self::Aegis256(resolve_key(cipher, key)?))
             }
             (Some(cipher @ EncryptionAlgorithm::Aes256Gcm), Some(key)) => {
-                Ok(Self::Aes256Gcm(resolve_fixed_size_key(cipher, key)?))
+                Ok(Self::Aes256Gcm(resolve_key(cipher, key)?))
             }
             (Some(cipher), None) => Err(EncryptionSpecResolutionError::MissingKey { cipher }),
         }
@@ -152,7 +153,7 @@ impl ParseableHeader for EncryptionKey {
     }
 }
 
-fn resolve_fixed_size_key<const N: usize>(
+fn resolve_key<const N: usize>(
     cipher: EncryptionAlgorithm,
     key: EncryptionKey,
 ) -> Result<DecodedEncryptionKey<N>, EncryptionSpecResolutionError> {
@@ -180,11 +181,6 @@ fn resolve_fixed_size_key<const N: usize>(
             Err(EncryptionSpecResolutionError::InvalidKeyLength { cipher, length })
         }
     }
-}
-
-fn header_value_for_encoded_key_material(key_b64: &str) -> HeaderValue {
-    HeaderValue::from_bytes(key_b64.as_bytes())
-        .expect("encryption key header value should be ASCII")
 }
 
 #[cfg(test)]
