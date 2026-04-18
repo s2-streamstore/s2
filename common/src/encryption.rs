@@ -47,9 +47,6 @@ pub enum EncryptionAlgorithm {
 }
 
 /// Customer-supplied encryption key material for append/read operations.
-///
-/// The request header value remains opaque until it is resolved into a
-/// fixed-size key for a specific stream cipher.
 #[derive(Debug, Clone)]
 pub struct EncryptionKey(EncodedKeyMaterial);
 
