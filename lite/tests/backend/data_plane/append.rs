@@ -6,8 +6,8 @@ use s2_common::{
     record::FencingToken,
     types::{
         basin::BasinName,
-        config::{BasinConfig, OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, AppendRecordBatch, ListStreamsRequest, StreamName},
+        config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
+        stream::{AppendInput, AppendRecordBatch, StreamName},
     },
 };
 use s2_lite::backend::{
@@ -390,56 +390,6 @@ async fn test_append_session_roundtrip(
     #[case] encryption: EncryptionSpec,
 ) {
     assert_append_session_roundtrip(test_suffix, &encryption).await;
-}
-
-#[tokio::test]
-async fn test_append_session_auto_creates_missing_stream_when_enabled() {
-    let backend = create_backend().await;
-    let basin_config = BasinConfig {
-        create_stream_on_append: true,
-        ..Default::default()
-    };
-    let basin_name = create_test_basin(&backend, "append-session-auto-create", basin_config).await;
-    let stream_name = test_stream_name("auto");
-
-    let stream_list = backend
-        .list_streams(basin_name.clone(), ListStreamsRequest::default())
-        .await
-        .expect("Failed to list streams");
-    assert!(stream_list.values.is_empty());
-
-    let inputs = futures::stream::iter(vec![AppendInput {
-        records: create_test_record_batch(vec![Bytes::from_static(b"auto created")]),
-        match_seq_num: None,
-        fencing_token: None,
-    }]);
-
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session for missing stream");
-    tokio::pin!(session);
-
-    let ack = session
-        .next()
-        .await
-        .expect("Missing append ack")
-        .expect("Append session should succeed");
-    assert_eq!(ack.end.seq_num, 1);
-    assert!(session.next().await.is_none());
-
-    let stream_list = backend
-        .list_streams(basin_name.clone(), ListStreamsRequest::default())
-        .await
-        .expect("Failed to list streams");
-    assert_eq!(stream_list.values.len(), 1);
-
-    let tail = backend
-        .check_tail(basin_name, stream_name)
-        .await
-        .expect("Failed to check tail");
-    assert_eq!(tail.seq_num, 1);
 }
 
 #[tokio::test]

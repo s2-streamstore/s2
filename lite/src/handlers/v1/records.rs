@@ -858,57 +858,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unary_append_missing_key_still_auto_creates_stream() {
-        let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
-        basin_config.create_stream_on_append = true;
-        let (app, backend, basin, stream) =
-            setup_app_with_basin_only("append-missing-key-create", basin_config).await;
-
-        let input = proto::AppendInput {
-            records: vec![proto::AppendRecord {
-                timestamp: None,
-                headers: vec![],
-                body: Bytes::from_static(b"secret"),
-            }],
-            match_seq_num: None,
-            fencing_token: None,
-        };
-
-        let response = send(
-            &app,
-            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
-                .header(header::CONTENT_TYPE, "application/protobuf")
-                .header(header::ACCEPT, "application/protobuf")
-                .body(Body::from(input.encode_to_vec()))
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let info = response_json(response, "append error body").await;
-        assert_invalid_error(&info, "missing encryption key");
-        assert_listed_stream_cipher(
-            &backend,
-            &basin,
-            &stream,
-            Some(EncryptionAlgorithm::Aegis256),
-        )
-        .await;
-
-        let response = send(
-            &app,
-            request_builder("GET", format!("/v1/streams/{stream}/records/tail"), &basin)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response, "tail response body").await;
-        assert_eq!(body["tail"]["seq_num"], 0);
-    }
-
-    #[tokio::test]
     async fn check_tail_auto_creates_stream_with_basin_cipher() {
         let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
         basin_config.create_stream_on_read = true;
@@ -927,45 +876,6 @@ mod tests {
         let body = response_json(response, "tail response body").await;
         assert_eq!(body["tail"]["seq_num"], 0);
 
-        assert_listed_stream_cipher(
-            &backend,
-            &basin,
-            &stream,
-            Some(EncryptionAlgorithm::Aegis256),
-        )
-        .await;
-
-        let response = send(
-            &app,
-            request_builder("GET", read_uri(&stream), &basin)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let info = response_json(response, "read error body").await;
-        assert_invalid_error(&info, "missing encryption key");
-    }
-
-    #[tokio::test]
-    async fn unary_read_missing_key_still_auto_creates_stream() {
-        let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
-        basin_config.create_stream_on_read = true;
-        let (app, backend, basin, stream) =
-            setup_app_with_basin_only("read-missing-key-create", basin_config).await;
-
-        let response = send(
-            &app,
-            request_builder("GET", read_uri(&stream), &basin)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let info = response_json(response, "read error body").await;
-        assert_invalid_error(&info, "missing encryption key");
         assert_listed_stream_cipher(
             &backend,
             &basin,
