@@ -89,13 +89,6 @@ impl Backend {
         }
     }
 
-    fn new_stream_handle(&self, client: StreamerClient) -> StreamHandle {
-        StreamHandle {
-            backend: self.clone(),
-            client,
-        }
-    }
-
     pub(super) fn bgtask_trigger(&self, trigger: BgtaskTrigger) {
         let _ = self.bgtask_trigger_tx.send(trigger);
     }
@@ -300,7 +293,10 @@ impl Backend {
             + From<StreamNotFoundError>,
     {
         match self.streamer_client(basin, stream).await {
-            Ok(client) => Ok(self.new_stream_handle(client)),
+            Ok(client) => Ok(StreamHandle {
+                backend: self.clone(),
+                client,
+            }),
             Err(StreamerError::StreamNotFound(not_found)) => {
                 let basin_config = match self.get_basin_config(basin.clone()).await {
                     Ok(basin_config) => basin_config,
@@ -335,7 +331,10 @@ impl Backend {
                         unreachable!("auto-create uses default config")
                     }
                 }
-                Ok(self.new_stream_handle(self.streamer_client(basin, stream).await?))
+                Ok(StreamHandle {
+                    backend: self.clone(),
+                    client: self.streamer_client(basin, stream).await?,
+                })
             }
             Err(e) => Err(e.into()),
         }
