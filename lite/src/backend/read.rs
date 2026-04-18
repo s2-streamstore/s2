@@ -131,12 +131,11 @@ impl StreamHandle {
         end: ReadEnd,
     ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
     {
-        let backend = self.backend;
-        let client = self.client;
-        let stream_id = client.stream_id();
-        let tail = client.check_tail().await?;
+        let stream_id = self.client.stream_id();
+        let tail = self.client.check_tail().await?;
         let mut state = ReadSessionState {
-            start_seq_num: backend
+            start_seq_num: self
+                .backend
                 .read_start_seq_num(stream_id, start, end, tail)
                 .await?,
             limit: EvaluatedReadLimit::Remaining(end.limit),
@@ -145,7 +144,7 @@ impl StreamHandle {
             wait_deadline: None,
             tail,
         };
-        let db = backend.db.clone();
+        let db = self.backend.db.clone();
         let session = async_stream::try_stream! {
             'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                 if state.start_seq_num < state.tail.seq_num {
@@ -229,7 +228,7 @@ impl StreamHandle {
                     if !end.may_follow() {
                         break;
                     }
-                    match client.follow(state.start_seq_num).await? {
+                    match self.client.follow(state.start_seq_num).await? {
                         Ok(mut follow_rx) => {
                             // Only a delivered batch should reset the absolute wait budget.
                             state.arm_wait_deadline_if_unset();
