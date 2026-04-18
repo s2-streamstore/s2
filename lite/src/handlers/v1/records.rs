@@ -573,7 +573,7 @@ mod tests {
         (app, backend, basin, stream)
     }
 
-    async fn setup_app_with_basin_only(
+    async fn setup_app_with_missing_stream(
         test_suffix: &str,
         basin_config: BasinConfig,
     ) -> (axum::Router, Backend, BasinName, StreamName) {
@@ -799,7 +799,7 @@ mod tests {
         let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
         basin_config.create_stream_on_append = true;
         let (app, backend, basin, stream) =
-            setup_app_with_basin_only("append-auto-create-encrypted", basin_config).await;
+            setup_app_with_missing_stream("append-auto-create-encrypted", basin_config).await;
 
         let input = proto::AppendInput {
             records: vec![proto::AppendRecord {
@@ -867,7 +867,7 @@ mod tests {
         let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
         basin_config.create_stream_on_read = true;
         let (app, backend, basin, stream) =
-            setup_app_with_basin_only("read-auto-create-encrypted", basin_config).await;
+            setup_app_with_missing_stream("read-auto-create-encrypted", basin_config).await;
 
         let response = send(
             &app,
@@ -897,7 +897,7 @@ mod tests {
             ..Default::default()
         };
         let (app, backend, basin, stream) =
-            setup_app_with_basin_only("read-invalid-bounds-no-create", basin_config).await;
+            setup_app_with_missing_stream("read-invalid-bounds-no-create", basin_config).await;
 
         let response = send(
             &app,
