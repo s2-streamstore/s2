@@ -32,7 +32,7 @@ use crate::{
 };
 
 impl Backend {
-    pub async fn resolve_read_handle<E>(
+    pub async fn open_for_read<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
@@ -101,7 +101,7 @@ impl Backend {
         stream: StreamName,
     ) -> Result<StreamPosition, CheckTailError> {
         let handle = self
-            .resolve_read_handle::<CheckTailError>(&basin, &stream)
+            .open_for_read::<CheckTailError>(&basin, &stream)
             .await?;
         handle.check_tail().await
     }
@@ -114,9 +114,7 @@ impl Backend {
         end: ReadEnd,
     ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
     {
-        let handle = self
-            .resolve_read_handle::<ReadError>(&basin, &stream)
-            .await?;
+        let handle = self.open_for_read::<ReadError>(&basin, &stream).await?;
         handle.read(start, end).await
     }
 }

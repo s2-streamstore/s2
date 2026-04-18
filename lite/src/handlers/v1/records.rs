@@ -28,7 +28,11 @@ use s2_common::{
     },
 };
 
-use crate::{backend::Backend, handlers::v1::error::ServiceError, stream_id::StreamId};
+use crate::{
+    backend::{Backend, error::ReadError},
+    handlers::v1::error::ServiceError,
+    stream_id::StreamId,
+};
 
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{get, post};
@@ -44,7 +48,7 @@ fn decrypt_session<S>(
     stream_id: StreamId,
 ) -> impl Stream<Item = Result<ReadSessionOutput, ServiceError>>
 where
-    S: Stream<Item = Result<StoredReadSessionOutput, crate::backend::error::ReadError>>,
+    S: Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
 {
     async_stream::stream! {
         tokio::pin!(session);
@@ -215,9 +219,7 @@ pub async fn read(
             response_mime,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
-            let handle = backend
-                .resolve_read_handle::<crate::backend::error::ReadError>(&basin, &stream)
-                .await?;
+            let handle = backend.open_for_read::<ReadError>(&basin, &stream).await?;
             let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
             let stream_id = handle.stream_id();
             let session = handle.read(start, end).await?;
@@ -241,9 +243,7 @@ pub async fn read(
         } => {
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
-            let handle = backend
-                .resolve_read_handle::<crate::backend::error::ReadError>(&basin, &stream)
-                .await?;
+            let handle = backend.open_for_read::<ReadError>(&basin, &stream).await?;
             let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
             let stream_id = handle.stream_id();
             let session = handle.read(start, end).await?;
@@ -289,9 +289,7 @@ pub async fn read(
             response_compression,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
-            let handle = backend
-                .resolve_read_handle::<crate::backend::error::ReadError>(&basin, &stream)
-                .await?;
+            let handle = backend.open_for_read::<ReadError>(&basin, &stream).await?;
             let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
             let stream_id = handle.stream_id();
             let session = handle.read(start, end).await?;
@@ -409,7 +407,7 @@ pub async fn append(
             input,
             response_mime,
         } => {
-            let handle = backend.resolve_append_handle(&basin, &stream).await?;
+            let handle = backend.open_for_append(&basin, &stream).await?;
             let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
             let stream_id = handle.stream_id();
             let input = input.encrypt(&encryption, stream_id.as_bytes());
@@ -430,7 +428,7 @@ pub async fn append(
             inputs,
             response_compression,
         } => {
-            let handle = backend.resolve_append_handle(&basin, &stream).await?;
+            let handle = backend.open_for_append(&basin, &stream).await?;
             let encryption = EncryptionSpec::resolve(handle.cipher(), encryption_key)?;
             let stream_id = handle.stream_id();
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();

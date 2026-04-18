@@ -18,7 +18,7 @@ use super::{Backend, StreamHandle};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
-    pub async fn resolve_append_handle(
+    pub async fn open_for_append(
         &self,
         basin: &BasinName,
         stream: &StreamName,
@@ -38,7 +38,7 @@ impl Backend {
     where
         I: Into<StoredAppendInput>,
     {
-        let handle = self.resolve_append_handle(&basin, &stream).await?;
+        let handle = self.open_for_append(&basin, &stream).await?;
         handle.append(input).await
     }
 
@@ -52,7 +52,7 @@ impl Backend {
         I: Into<StoredAppendInput>,
         S: Stream<Item = I>,
     {
-        let handle = self.resolve_append_handle(&basin, &stream).await?;
+        let handle = self.open_for_append(&basin, &stream).await?;
         Ok(handle.append_session(inputs))
     }
 }
