@@ -921,9 +921,10 @@ impl BaseClient {
 
 fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionKey>) {
     if let Some(encryption) = encryption {
-        request
-            .headers_mut()
-            .insert(S2_ENCRYPTION_KEY_HEADER.clone(), encryption.to_header_value());
+        request.headers_mut().insert(
+            S2_ENCRYPTION_KEY_HEADER.clone(),
+            encryption.to_header_value(),
+        );
     }
 }
 

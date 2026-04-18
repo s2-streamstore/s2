@@ -3,19 +3,20 @@
 use core::str::FromStr;
 use std::sync::Arc;
 
-use base64ct::Encoding;
+use base64ct::{Base64, Decoder, Encoding};
 use http::{HeaderName, HeaderValue};
-use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroizing};
+use secrecy::{ExposeSecret, SecretBox, SecretString, zeroize::Zeroize};
 use strum::{Display, EnumString};
 
 use crate::http::ParseableHeader;
 
 pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-encryption-key");
 
-type SecretKeyMaterial = Arc<SecretBox<[u8]>>;
+// 32 bytes in Base 64
+const MAX_ENCRYPTION_KEY_HEADER_VALUE_LEN: usize = 44;
 
-// 32 bytes incl padding
-const MAX_ENCRYPTION_KEY_HEADER_LEN: usize = 44;
+type EncodedKeyMaterial = Arc<SecretString>;
+type DecodedKeyMaterial<const N: usize> = Arc<SecretBox<[u8; N]>>;
 
 /// Encryption algorithm.
 #[derive(
@@ -46,74 +47,52 @@ pub enum EncryptionAlgorithm {
 }
 
 /// Customer-supplied encryption key material for append/read operations.
+///
+/// The request header value remains opaque until it is resolved into a
+/// fixed-size key for a specific stream cipher.
 #[derive(Debug, Clone)]
-pub struct EncryptionKey(SecretKeyMaterial);
+pub struct EncryptionKey(EncodedKeyMaterial);
 
 impl EncryptionKey {
     pub fn new<const N: usize>(key: [u8; N]) -> Self {
-        Self(Arc::new(SecretBox::new(Box::new(key))))
+        Self(Arc::new(Base64::encode_string(&key).into()))
     }
 
-    pub fn from_base64(key_b64: &str) -> Result<Self, EncryptionKeyError> {
-        parse_encryption_key_material(key_b64).map(Self)
-    }
-
-    pub(crate) fn expose_secret(&self) -> &[u8] {
+    pub(crate) fn expose_secret(&self) -> &str {
         self.0.expose_secret()
     }
 
     pub fn to_header_value(&self) -> HeaderValue {
-        let mut value = header_value_for_key_material(self.expose_secret());
+        let mut value = header_value_for_encoded_key_material(self.expose_secret());
         value.set_sensitive(true);
         value
     }
 }
 
-/// Fixed-size customer-supplied encryption key material.
+/// Decoded fixed-size customer-supplied encryption key material.
 #[derive(Debug, Clone)]
-pub struct FixedSizeEncryptionKey<const N: usize>(EncryptionKey);
+pub struct DecodedEncryptionKey<const N: usize>(DecodedKeyMaterial<N>);
 
-impl<const N: usize> FixedSizeEncryptionKey<N> {
+impl<const N: usize> DecodedEncryptionKey<N> {
     pub fn new(key: [u8; N]) -> Self {
-        Self(EncryptionKey::new(key))
+        Self(Arc::new(SecretBox::new(Box::new(key))))
     }
 
     pub(crate) fn expose_secret(&self) -> &[u8; N] {
-        self.0
-            .expose_secret()
-            .try_into()
-            .expect("fixed-size encryption key length validated at construction")
+        self.0.expose_secret()
     }
 }
 
-impl<const N: usize> TryFrom<EncryptionKey> for FixedSizeEncryptionKey<N> {
-    type Error = usize;
-
-    fn try_from(key: EncryptionKey) -> Result<Self, Self::Error> {
-        let actual = key.expose_secret().len();
-        if actual != N {
-            return Err(actual);
-        }
-        Ok(Self(key))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EncryptionKeyError {
-    #[error("invalid encryption key: key is not valid base64")]
-    InvalidBase64,
-    #[error("invalid encryption key: key material must not be empty")]
-    Empty,
-    #[error(
-        "invalid encryption key: encoded key material exceeds maximum length of {max} characters (got {actual})"
-    )]
-    TooLong { max: usize, actual: usize },
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid encryption key: key material length {0} is out of range")]
+pub struct EncryptionKeyLengthError(usize);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EncryptionSpecResolutionError {
     #[error("missing encryption key for stream cipher '{cipher}'")]
     MissingKey { cipher: EncryptionAlgorithm },
+    #[error("invalid encryption key for stream cipher '{cipher}': invalid base64")]
+    InvalidBase64 { cipher: EncryptionAlgorithm },
     #[error("invalid encryption key length for stream cipher '{cipher}': {length}")]
     InvalidKeyLength {
         cipher: EncryptionAlgorithm,
@@ -127,8 +106,8 @@ pub enum EncryptionSpecResolutionError {
 pub enum EncryptionSpec {
     #[default]
     Plain,
-    Aegis256(FixedSizeEncryptionKey<32>),
-    Aes256Gcm(FixedSizeEncryptionKey<32>),
+    Aegis256(DecodedEncryptionKey<32>),
+    Aes256Gcm(DecodedEncryptionKey<32>),
 }
 
 impl EncryptionSpec {
@@ -139,39 +118,34 @@ impl EncryptionSpec {
         match (cipher, key) {
             (None, _) => Ok(Self::Plain),
             (Some(cipher @ EncryptionAlgorithm::Aegis256), Some(key)) => {
-                Ok(Self::Aegis256(key.try_into().map_err(|actual| {
-                    EncryptionSpecResolutionError::InvalidKeyLength {
-                        cipher,
-                        length: actual,
-                    }
-                })?))
+                Ok(Self::Aegis256(resolve_fixed_size_key(cipher, key)?))
             }
             (Some(cipher @ EncryptionAlgorithm::Aes256Gcm), Some(key)) => {
-                Ok(Self::Aes256Gcm(key.try_into().map_err(|actual| {
-                    EncryptionSpecResolutionError::InvalidKeyLength {
-                        cipher,
-                        length: actual,
-                    }
-                })?))
+                Ok(Self::Aes256Gcm(resolve_fixed_size_key(cipher, key)?))
             }
             (Some(cipher), None) => Err(EncryptionSpecResolutionError::MissingKey { cipher }),
         }
     }
 
     pub fn aegis256(key: [u8; 32]) -> Self {
-        Self::Aegis256(FixedSizeEncryptionKey::new(key))
+        Self::Aegis256(DecodedEncryptionKey::new(key))
     }
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
-        Self::Aes256Gcm(FixedSizeEncryptionKey::new(key))
+        Self::Aes256Gcm(DecodedEncryptionKey::new(key))
     }
 }
 
 impl FromStr for EncryptionKey {
-    type Err = EncryptionKeyError;
+    type Err = EncryptionKeyLengthError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_base64(s.trim())
+        let trimmed = s.trim();
+        if (1..=MAX_ENCRYPTION_KEY_HEADER_VALUE_LEN).contains(&trimmed.len()) {
+            Ok(Self(Arc::new(trimmed.to_owned().into())))
+        } else {
+            Err(EncryptionKeyLengthError(trimmed.len()))
+        }
     }
 }
 
@@ -181,40 +155,44 @@ impl ParseableHeader for EncryptionKey {
     }
 }
 
-fn parse_encryption_key_material(key_b64: &str) -> Result<SecretKeyMaterial, EncryptionKeyError> {
-    use base64ct::{Base64, Encoding};
-
-    if key_b64.len() > MAX_ENCRYPTION_KEY_HEADER_LEN {
-        return Err(EncryptionKeyError::TooLong {
-            max: MAX_ENCRYPTION_KEY_HEADER_LEN,
-            actual: key_b64.len(),
-        });
-    }
-
-    let key = match Base64::decode_vec(key_b64) {
-        Ok(decoded) => decoded,
-        Err(_) => {
-            return Err(EncryptionKeyError::InvalidBase64);
+fn resolve_fixed_size_key<const N: usize>(
+    cipher: EncryptionAlgorithm,
+    key: EncryptionKey,
+) -> Result<DecodedEncryptionKey<N>, EncryptionSpecResolutionError> {
+    let mut decoder = Decoder::<Base64>::new(key.expose_secret().as_bytes())
+        .map_err(|_| EncryptionSpecResolutionError::InvalidBase64 { cipher })?;
+    let mut key_material = Box::new([0u8; N]);
+    match decoder.decode(key_material.as_mut()) {
+        Ok(_) if decoder.is_finished() => {
+            Ok(DecodedEncryptionKey(Arc::new(SecretBox::new(key_material))))
         }
-    };
-
-    if key.is_empty() {
-        return Err(EncryptionKeyError::Empty);
+        Ok(_) => {
+            let length = N
+                .checked_add(decoder.remaining_len())
+                .expect("decoded key length should fit usize");
+            key_material.as_mut().zeroize();
+            Err(EncryptionSpecResolutionError::InvalidKeyLength { cipher, length })
+        }
+        Err(base64ct::Error::InvalidEncoding) => {
+            key_material.as_mut().zeroize();
+            Err(EncryptionSpecResolutionError::InvalidBase64 { cipher })
+        }
+        Err(base64ct::Error::InvalidLength) => {
+            let length = decoder.remaining_len();
+            key_material.as_mut().zeroize();
+            Err(EncryptionSpecResolutionError::InvalidKeyLength { cipher, length })
+        }
     }
-
-    Ok(Arc::new(SecretBox::new(key.into_boxed_slice())))
 }
 
-fn header_value_for_key_material(key: &[u8]) -> HeaderValue {
-    let mut value = Zeroizing::new(vec![0u8; base64ct::Base64::encoded_len(key)]);
-    base64ct::Base64::encode(key, &mut value).expect("base64 output length should match buffer");
-    HeaderValue::from_bytes(&value).expect("encryption key header value should be ASCII")
+fn header_value_for_encoded_key_material(key_b64: &str) -> HeaderValue {
+    HeaderValue::from_bytes(key_b64.as_bytes())
+        .expect("encryption key header value should be ASCII")
 }
 
 #[cfg(test)]
 mod tests {
     use http::header::HeaderValue;
-    use rstest::rstest;
 
     use super::*;
 
@@ -238,18 +216,7 @@ mod tests {
         assert!(value.is_sensitive());
 
         let parsed = value.to_str().unwrap().parse::<EncryptionKey>().unwrap();
-        assert_eq!(parsed.expose_secret(), KEY_BYTES);
-    }
-
-    #[rstest]
-    #[case("", EncryptionKeyError::Empty)]
-    #[case("not-valid-base64!!!", EncryptionKeyError::InvalidBase64)]
-    fn parse_key_header_invalid_cases(#[case] header: &str, #[case] expected: EncryptionKeyError) {
-        let result = header.parse::<EncryptionKey>();
-        match result {
-            Err(actual) => assert_eq!(actual, expected),
-            Ok(_) => panic!("expected invalid key for {header:?}"),
-        }
+        assert_eq!(parsed.to_header_value().to_str().unwrap(), KEY_B64);
     }
 
     #[test]
@@ -282,33 +249,6 @@ mod tests {
             EncryptionSpecResolutionError::InvalidKeyLength {
                 cipher: EncryptionAlgorithm::Aegis256,
                 length: 4,
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_encrypted_reuses_decoded_key_material() {
-        let key = EncryptionKey::new(KEY_BYTES);
-        let secret_ptr = key.0.expose_secret().as_ptr();
-
-        let encryption = EncryptionSpec::resolve(Some(EncryptionAlgorithm::Aegis256), Some(key))
-            .expect("resolve typed encryption key");
-
-        let EncryptionSpec::Aegis256(key) = encryption else {
-            panic!("expected AEGIS-256 encryption");
-        };
-        assert_eq!(key.expose_secret().as_ptr(), secret_ptr);
-    }
-
-    #[test]
-    fn parse_key_header_rejects_overlong_encoded_material() {
-        let header = "A".repeat(MAX_ENCRYPTION_KEY_HEADER_LEN + 1);
-        let result = header.parse::<EncryptionKey>();
-        assert_eq!(
-            result.unwrap_err(),
-            EncryptionKeyError::TooLong {
-                max: MAX_ENCRYPTION_KEY_HEADER_LEN,
-                actual: MAX_ENCRYPTION_KEY_HEADER_LEN + 1,
             }
         );
     }
