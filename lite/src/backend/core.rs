@@ -307,7 +307,6 @@ impl Backend {
                     Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
                 };
                 if should_auto_create(&config) {
-                    let encryption = resolve_encryption(config.stream_cipher)?;
                     if let Err(e) = self
                         .create_stream(
                             basin.clone(),
@@ -330,6 +329,7 @@ impl Backend {
                         }
                     }
                     let client = self.streamer_client(basin, stream).await?;
+                    let encryption = resolve_encryption(client.cipher())?;
                     Ok(StreamHandle {
                         db: self.db.clone(),
                         encryption,
