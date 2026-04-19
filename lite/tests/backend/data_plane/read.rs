@@ -132,6 +132,31 @@ async fn test_check_tail_scenarios() {
     ));
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_check_tail_handle_survives_streamer_dormancy_before_call() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "check-tail-dormancy",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let ack = append_payloads(&backend, &basin_name, &stream_name, &[b"seed"]).await;
+    let handle = backend
+        .open_for_check_tail(&basin_name, &stream_name)
+        .await
+        .expect("Failed to open check-tail handle");
+
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+
+    let tail = handle
+        .check_tail()
+        .await
+        .expect("check-tail handle should survive dormancy before use");
+    assert_eq!(tail, ack.end);
+}
+
 #[tokio::test]
 async fn test_read_from_beginning() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(

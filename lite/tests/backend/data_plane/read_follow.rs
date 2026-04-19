@@ -513,6 +513,70 @@ async fn test_transition_from_catchup_to_follow() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_survives_streamer_dormancy_after_catchup_batch() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-dormancy-after-catchup",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"initial"]).await;
+
+    let session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: None,
+        },
+    )
+    .await;
+    let mut session = Box::pin(session);
+
+    let initial = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should yield the catchup batch")
+        .expect("session should not error");
+    let ReadSessionOutput::Batch(batch) = initial else {
+        panic!("expected initial catchup batch");
+    };
+    assert_eq!(envelope_bodies(&batch.records), vec![b"initial".to_vec()]);
+
+    tokio::task::yield_now().await;
+    advance_time(Duration::from_secs(61)).await;
+
+    let heartbeat = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should re-enter follow mode after dormancy")
+        .expect("session should not error after dormancy");
+    assert!(matches!(heartbeat, ReadSessionOutput::Heartbeat(_)));
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"follow-1"]).await;
+
+    let next = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should deliver live data after dormancy")
+        .expect("session should not error after dormancy");
+    let ReadSessionOutput::Batch(batch) = next else {
+        panic!("expected live batch after dormancy");
+    };
+    assert_eq!(envelope_bodies(&batch.records), vec![b"follow-1".to_vec()]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_with_count_limit() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "follow-count-limit",

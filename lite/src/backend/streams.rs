@@ -343,7 +343,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
-        match self.streamer_client(&basin, &stream).await {
+        match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => {
                 client.terminal_trim().await?;
             }
