@@ -738,11 +738,10 @@ fn sequenced_records(
         match record.as_ref().into_inner() {
             StoredRecord::Plaintext(Record::Command(_)) => {}
             sr @ StoredRecord::Plaintext(_) | sr @ StoredRecord::Encrypted { .. } => {
-                let actual_algorithm = sr.encryption_algorithm();
-                if actual_algorithm != expected_encryption_algorithm {
+                if expected_encryption_algorithm != sr.encryption_algorithm() {
                     Err(EncryptionAlgorithmMismatchError {
                         expected: expected_encryption_algorithm,
-                        actual: actual_algorithm,
+                        actual: sr.encryption_algorithm(),
                     })?;
                 }
             }
