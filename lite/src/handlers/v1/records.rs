@@ -637,25 +637,6 @@ mod tests {
         );
     }
 
-    async fn assert_listed_stream_cipher(
-        backend: &Backend,
-        basin: &BasinName,
-        stream: &StreamName,
-        expected_cipher: Option<EncryptionAlgorithm>,
-    ) {
-        let stream_list = backend
-            .list_streams(basin.clone(), ListStreamsRequest::default())
-            .await
-            .expect("list streams");
-        let stream_names: Vec<_> = stream_list
-            .values
-            .iter()
-            .map(|info| info.name.as_ref())
-            .collect();
-        assert_eq!(stream_names, vec![stream.as_ref()]);
-        assert_eq!(stream_list.values[0].cipher, expected_cipher);
-    }
-
     async fn assert_no_streams(backend: &Backend, basin: &BasinName) {
         let stream_list = backend
             .list_streams(basin.clone(), ListStreamsRequest::default())
@@ -736,103 +717,6 @@ mod tests {
             panic!("expected envelope record");
         };
         assert_eq!(record.body().as_ref(), b"secret");
-    }
-
-    #[tokio::test]
-    async fn unary_append_auto_creates_encrypted_stream() {
-        let encryption_key = aegis_key(0x42);
-        let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
-        basin_config.create_stream_on_append = true;
-        let (app, backend, basin, stream) =
-            setup_app_without_stream("append-auto-create-encrypted", basin_config).await;
-
-        let input = proto::AppendInput {
-            records: vec![proto::AppendRecord {
-                timestamp: None,
-                headers: vec![],
-                body: Bytes::from_static(b"secret"),
-            }],
-            match_seq_num: None,
-            fencing_token: None,
-        };
-
-        let response = send(
-            &app,
-            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
-                .header(header::CONTENT_TYPE, "application/protobuf")
-                .header(header::ACCEPT, "application/protobuf")
-                .header(
-                    S2_ENCRYPTION_KEY_HEADER.as_str(),
-                    encryption_key.to_header_value(),
-                )
-                .body(Body::from(input.encode_to_vec()))
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_bytes(response, "append ack body").await;
-        let ack = proto::AppendAck::decode(body).expect("append ack");
-        assert_eq!(ack.end.as_ref().map(|pos| pos.seq_num), Some(1));
-
-        assert_listed_stream_cipher(
-            &backend,
-            &basin,
-            &stream,
-            Some(EncryptionAlgorithm::Aegis256),
-        )
-        .await;
-
-        let response = send(
-            &app,
-            request_builder(
-                "GET",
-                format!("/v1/streams/{stream}/records?seq_num=0&wait=1"),
-                &basin,
-            )
-            .header(header::ACCEPT, "application/protobuf")
-            .header(
-                S2_ENCRYPTION_KEY_HEADER.as_str(),
-                encryption_key.to_header_value(),
-            )
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_bytes(response, "read batch body").await;
-        let batch = proto::ReadBatch::decode(body).expect("read batch");
-        assert_eq!(batch.records.len(), 1);
-        assert_eq!(batch.records[0].body.as_ref(), b"secret");
-    }
-
-    #[tokio::test]
-    async fn check_tail_auto_creates_stream_with_basin_cipher() {
-        let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
-        basin_config.create_stream_on_read = true;
-        let (app, backend, basin, stream) =
-            setup_app_without_stream("read-auto-create-encrypted", basin_config).await;
-
-        let response = send(
-            &app,
-            request_builder("GET", format!("/v1/streams/{stream}/records/tail"), &basin)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response, "tail response body").await;
-        assert_eq!(body["tail"]["seq_num"], 0);
-
-        assert_listed_stream_cipher(
-            &backend,
-            &basin,
-            &stream,
-            Some(EncryptionAlgorithm::Aegis256),
-        )
-        .await;
     }
 
     #[tokio::test]

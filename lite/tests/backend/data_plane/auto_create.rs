@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
+    encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
     record::StreamPosition,
     types::{
@@ -25,6 +26,21 @@ async fn assert_stream_count(
         .await
         .expect("Failed to list streams");
     assert_eq!(stream_list.values.len(), expected);
+}
+
+async fn assert_stream_cipher(
+    backend: &s2_lite::backend::Backend,
+    basin_name: &s2_common::types::basin::BasinName,
+    stream_name: &s2_common::types::stream::StreamName,
+    expected: Option<EncryptionAlgorithm>,
+) {
+    let stream_list = backend
+        .list_streams(basin_name.clone(), ListStreamsRequest::default())
+        .await
+        .expect("Failed to list streams");
+    assert_eq!(stream_list.values.len(), 1);
+    assert_eq!(stream_list.values[0].name.as_ref(), stream_name.as_ref());
+    assert_eq!(stream_list.values[0].cipher, expected);
 }
 
 #[tokio::test]
@@ -59,6 +75,53 @@ async fn test_backend_append_auto_creates_stream() {
         .await
         .expect("Failed to check tail on auto-created stream");
     assert_eq!(tail.seq_num, 1);
+}
+
+#[tokio::test]
+async fn test_backend_append_auto_creates_stream_with_basin_cipher() {
+    let backend = create_backend().await;
+    let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
+    basin_config.create_stream_on_append = true;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-append-encrypted",
+        basin_config,
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+    let encryption = aegis256_encryption_spec();
+
+    let input = AppendInput {
+        records: create_test_record_batch(vec![Bytes::from_static(b"secret")]),
+        match_seq_num: None,
+        fencing_token: None,
+    };
+
+    let ack = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input,
+        Some(&encryption),
+    )
+    .await
+    .expect("Failed to append to auto-created encrypted stream");
+
+    assert_eq!(ack.end.seq_num, 1);
+    assert_stream_count(&backend, &basin_name, 1).await;
+    assert_stream_cipher(
+        &backend,
+        &basin_name,
+        &stream_name,
+        Some(EncryptionAlgorithm::Aegis256),
+    )
+    .await;
+
+    let (start, end) = read_all_bounds();
+    let records =
+        read_records_with_encryption(&backend, &basin_name, &stream_name, start, end, &encryption)
+            .await;
+    assert_eq!(envelope_bodies(&records), vec![b"secret".to_vec()]);
 }
 
 #[tokio::test]
@@ -157,6 +220,30 @@ async fn test_backend_check_tail_auto_creates_stream() {
 
     assert_eq!(tail.seq_num, 0);
     assert_stream_count(&backend, &basin_name, 1).await;
+}
+
+#[tokio::test]
+async fn test_backend_check_tail_auto_creates_stream_with_basin_cipher() {
+    let backend = create_backend().await;
+    let mut basin_config = basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256);
+    basin_config.create_stream_on_read = true;
+    let basin_name =
+        create_test_basin(&backend, "backend-auto-create-tail-encrypted", basin_config).await;
+    let stream_name = test_stream_name("missing");
+
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to check tail on auto-created encrypted stream");
+
+    assert_eq!(tail, StreamPosition::MIN);
+    assert_stream_count(&backend, &basin_name, 1).await;
+    assert_stream_cipher(
+        &backend,
+        &basin_name,
+        &stream_name,
+        Some(EncryptionAlgorithm::Aegis256),
+    )
+    .await;
 }
 
 #[tokio::test]
