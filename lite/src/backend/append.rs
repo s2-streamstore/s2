@@ -37,8 +37,7 @@ impl Backend {
 
 impl StreamHandle {
     pub async fn append(self, input: AppendInput) -> Result<AppendAck, AppendError> {
-        let stream_id = self.stream_id();
-        let input = input.encrypt(&self.encryption, stream_id.as_bytes());
+        let input = input.encrypt(&self.encryption, self.client.stream_id().as_bytes());
         let ack = self.client.append_permit(input).await?.submit().await?;
         Ok(ack)
     }
@@ -47,7 +46,7 @@ impl StreamHandle {
     where
         S: Stream<Item = AppendInput>,
     {
-        let stream_id = self.stream_id();
+        let stream_id = self.client.stream_id();
         let StreamHandle {
             client, encryption, ..
         } = self;
