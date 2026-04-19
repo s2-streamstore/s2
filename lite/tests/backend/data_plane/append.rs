@@ -35,14 +35,17 @@ async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &Encrypt
                 fencing_token: None,
             })
             .collect::<Vec<_>>(),
-    )
-    .map(|input| encrypt_input_for_stream(input, &basin_name, &stream_name, encryption));
+    );
 
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
+    let session = append_session(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        Some(encryption),
+        inputs,
+    )
+    .await
+    .expect("Failed to create append session");
     tokio::pin!(session);
 
     let mut acks = Vec::new();
@@ -57,8 +60,7 @@ async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &Encrypt
         assert_eq!(ack.end.seq_num, index + 1);
     }
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, expected_bodies.len() as u64);
@@ -77,13 +79,7 @@ async fn append_with_optional_encryption(
     input: AppendInput,
     encryption: Option<&EncryptionSpec>,
 ) -> Result<s2_common::types::stream::AppendAck, AppendError> {
-    match encryption {
-        Some(encryption) => {
-            let input = encrypt_input_for_stream(input, basin, stream, encryption);
-            backend.append(basin.clone(), stream.clone(), input).await
-        }
-        None => backend.append(basin.clone(), stream.clone(), input).await,
-    }
+    append(backend, basin.clone(), stream.clone(), input, encryption).await
 }
 
 #[derive(Clone, Copy)]
@@ -287,9 +283,14 @@ async fn test_append_requires_timestamp() {
         fencing_token: None,
     };
 
-    let result = backend
-        .append(basin_name.clone(), stream_name.clone(), missing_timestamp)
-        .await;
+    let result = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        missing_timestamp,
+        None,
+    )
+    .await;
 
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 
@@ -302,8 +303,7 @@ async fn test_append_requires_timestamp() {
         fencing_token: None,
     };
 
-    let ack = backend
-        .append(basin_name, stream_name, with_timestamp)
+    let ack = append(&backend, basin_name, stream_name, with_timestamp, None)
         .await
         .expect("Expected append to succeed when timestamp is provided");
 
@@ -322,10 +322,15 @@ async fn test_append_with_seq_num_match() {
         fencing_token: None,
     };
 
-    let ack = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append with matching seq_num");
+    let ack = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input,
+        None,
+    )
+    .await
+    .expect("Failed to append with matching seq_num");
 
     assert_eq!(ack.start.seq_num, 0);
 
@@ -335,10 +340,15 @@ async fn test_append_with_seq_num_match() {
         fencing_token: None,
     };
 
-    let ack2 = backend
-        .append(basin_name.clone(), stream_name.clone(), input2)
-        .await
-        .expect("Failed to append with matching seq_num");
+    let ack2 = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input2,
+        None,
+    )
+    .await
+    .expect("Failed to append with matching seq_num");
 
     assert_eq!(ack2.start.seq_num, 1);
 }
@@ -358,10 +368,15 @@ async fn test_append_with_seq_num_mismatch() {
         fencing_token: None,
     };
 
-    backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append first record");
+    append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input,
+        None,
+    )
+    .await
+    .expect("Failed to append first record");
 
     let input2 = AppendInput {
         records: create_test_record_batch(vec![Bytes::from_static(b"second record")]),
@@ -369,9 +384,14 @@ async fn test_append_with_seq_num_mismatch() {
         fencing_token: None,
     };
 
-    let result = backend
-        .append(basin_name.clone(), stream_name.clone(), input2)
-        .await;
+    let result = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input2,
+        None,
+    )
+    .await;
 
     assert!(matches!(
         result,
@@ -403,18 +423,21 @@ async fn test_append_session_empty() {
 
     let inputs = futures::stream::iter(Vec::<AppendInput>::new());
 
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
+    let session = append_session(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        None,
+        inputs,
+    )
+    .await
+    .expect("Failed to create append session");
     tokio::pin!(session);
 
     let ack = session.next().await;
     assert!(ack.is_none());
 
-    let tail = backend
-        .check_tail(basin_name, stream_name)
+    let tail = check_tail(&backend, basin_name, stream_name)
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 0);
@@ -449,11 +472,15 @@ async fn test_append_session_multiple_records_per_batch() {
         },
     ]);
 
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
+    let session = append_session(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        None,
+        inputs,
+    )
+    .await
+    .expect("Failed to create append session");
     tokio::pin!(session);
 
     let ack1 = session
@@ -472,8 +499,7 @@ async fn test_append_session_multiple_records_per_batch() {
     assert_eq!(ack2.start.seq_num, 2);
     assert_eq!(ack2.end.seq_num, 5);
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 5);
@@ -515,10 +541,15 @@ async fn test_append_session_with_seq_num_conditions() {
         },
     ]);
 
-    let session = backend
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
+    let session = append_session(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        None,
+        inputs,
+    )
+    .await
+    .expect("Failed to create append session");
     tokio::pin!(session);
 
     let ack1 = session
@@ -553,8 +584,7 @@ async fn test_append_session_seq_num_mismatch() {
         fencing_token: None,
     }]);
 
-    let session = backend
-        .append_session(basin_name, stream_name, inputs)
+    let session = append_session(&backend, basin_name, stream_name, None, inputs)
         .await
         .expect("Failed to create append session");
     tokio::pin!(session);
@@ -590,11 +620,15 @@ async fn test_append_session_stops_after_condition_failure() {
         },
     ]);
 
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
+    let session = append_session(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        None,
+        inputs,
+    )
+    .await
+    .expect("Failed to create append session");
     tokio::pin!(session);
 
     let ack = session
@@ -617,8 +651,7 @@ async fn test_append_session_stops_after_condition_failure() {
     ));
     assert!(session.next().await.is_none());
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 1);
@@ -652,8 +685,7 @@ async fn test_append_session_with_fencing_token() {
         },
     ]);
 
-    let session = backend
-        .append_session(basin_name, stream_name, inputs)
+    let session = append_session(&backend, basin_name, stream_name, None, inputs)
         .await
         .expect("Failed to create append session");
     tokio::pin!(session);
@@ -685,17 +717,24 @@ async fn test_append_session_large_batches() {
     let large_record = vec![0u8; 100_000];
     let batch_count = 50;
 
-    let inputs = futures::stream::iter((0..batch_count).map(|_| AppendInput {
-        records: create_test_record_batch(vec![Bytes::from(large_record.clone())]),
-        match_seq_num: None,
-        fencing_token: None,
+    let inputs = futures::stream::iter((0..batch_count).map({
+        let large_record = large_record.clone();
+        move |_| AppendInput {
+            records: create_test_record_batch(vec![Bytes::from(large_record.clone())]),
+            match_seq_num: None,
+            fencing_token: None,
+        }
     }));
 
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
+    let session = append_session(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        None,
+        inputs,
+    )
+    .await
+    .expect("Failed to create append session");
     tokio::pin!(session);
 
     let mut ack_count = 0;
@@ -706,8 +745,7 @@ async fn test_append_session_large_batches() {
 
     assert_eq!(ack_count, batch_count);
 
-    let tail = backend
-        .check_tail(basin_name, stream_name)
+    let tail = check_tail(&backend, basin_name, stream_name)
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, batch_count);
@@ -735,11 +773,15 @@ async fn test_append_session_pipeline_preserves_ack_tail_and_read_order() {
         .collect();
     let inputs = futures::stream::iter(inputs);
 
-    let session = backend
-        .clone()
-        .append_session(basin_name.clone(), stream_name.clone(), inputs)
-        .await
-        .expect("Failed to create append session");
+    let session = append_session(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        None,
+        inputs,
+    )
+    .await
+    .expect("Failed to create append session");
     tokio::pin!(session);
 
     let mut acks = Vec::new();
@@ -763,8 +805,7 @@ async fn test_append_session_pipeline_preserves_ack_tail_and_read_order() {
         }
     }
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, expected_bodies.len() as u64);

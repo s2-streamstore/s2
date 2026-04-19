@@ -6,10 +6,11 @@ use std::{
 
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
+    encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
-        stream::{AppendAck, StoredAppendInput, StreamName},
+        stream::{AppendAck, AppendInput, StreamName},
     },
 };
 use tokio::sync::oneshot;
@@ -22,64 +23,34 @@ impl Backend {
         &self,
         basin: &BasinName,
         stream: &StreamName,
+        encryption_key: Option<EncryptionKey>,
     ) -> Result<StreamHandle, AppendError> {
-        self.stream_handle_with_auto_create::<AppendError>(basin, stream, |config| {
-            config.create_stream_on_append
-        })
+        self.stream_handle_with_auto_create::<AppendError>(
+            basin,
+            stream,
+            |config| config.create_stream_on_append,
+            |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
+        )
         .await
-    }
-
-    pub async fn append<I>(
-        &self,
-        basin: BasinName,
-        stream: StreamName,
-        input: I,
-    ) -> Result<AppendAck, AppendError>
-    where
-        I: Into<StoredAppendInput>,
-    {
-        let handle = self.open_for_append(&basin, &stream).await?;
-        handle.append(input).await
-    }
-
-    pub async fn append_session<I, S>(
-        self,
-        basin: BasinName,
-        stream: StreamName,
-        inputs: S,
-    ) -> Result<impl Stream<Item = Result<AppendAck, AppendError>>, AppendError>
-    where
-        I: Into<StoredAppendInput>,
-        S: Stream<Item = I>,
-    {
-        let handle = self.open_for_append(&basin, &stream).await?;
-        Ok(handle.append_session(inputs))
     }
 }
 
 impl StreamHandle {
-    pub async fn append<I>(self, input: I) -> Result<AppendAck, AppendError>
-    where
-        I: Into<StoredAppendInput>,
-    {
-        let ack = self
-            .client
-            .append_permit(input.into())
-            .await?
-            .submit()
-            .await?;
+    pub async fn append(self, input: AppendInput) -> Result<AppendAck, AppendError> {
+        let stream_id = self.stream_id();
+        let input = input.encrypt(&self.encryption, stream_id.as_bytes());
+        let ack = self.client.append_permit(input).await?.submit().await?;
         Ok(ack)
     }
 
-    pub fn append_session<I, S>(
-        self,
-        inputs: S,
-    ) -> impl Stream<Item = Result<AppendAck, AppendError>>
+    pub fn append_session<S>(self, inputs: S) -> impl Stream<Item = Result<AppendAck, AppendError>>
     where
-        I: Into<StoredAppendInput>,
-        S: Stream<Item = I>,
+        S: Stream<Item = AppendInput>,
     {
-        let client = self.client;
+        let stream_id = self.stream_id();
+        let StreamHandle {
+            client, encryption, ..
+        } = self;
         let session = SessionHandle::new();
         async_stream::stream! {
             tokio::pin!(inputs);
@@ -88,7 +59,9 @@ impl StreamHandle {
             loop {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
-                        permit_opt = Some(Box::pin(client.append_permit(input.into())));
+                        permit_opt = Some(Box::pin(client.append_permit(
+                            input.encrypt(&encryption, stream_id.as_bytes()),
+                        )));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
                         permit_opt = None;

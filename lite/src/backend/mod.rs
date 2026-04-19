@@ -1,4 +1,4 @@
-use s2_common::encryption::EncryptionAlgorithm;
+use s2_common::encryption::EncryptionSpec;
 
 pub mod error;
 
@@ -20,15 +20,12 @@ pub use crate::stream_id::StreamId;
 
 #[derive(Clone)]
 pub struct StreamHandle {
-    backend: Backend,
+    db: slatedb::Db,
     client: streamer::StreamerClient,
+    encryption: EncryptionSpec,
 }
 
 impl StreamHandle {
-    pub fn cipher(&self) -> Option<EncryptionAlgorithm> {
-        self.client.cipher()
-    }
-
     pub fn stream_id(&self) -> StreamId {
         self.client.stream_id()
     }

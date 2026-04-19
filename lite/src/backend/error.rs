@@ -1,8 +1,8 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    encryption::EncryptionAlgorithm,
-    record::{FencingToken, SeqNum, StreamPosition},
+    encryption::{EncryptionAlgorithm, EncryptionSpecResolutionError},
+    record::{FencingToken, RecordDecryptionError, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
 
@@ -147,6 +147,8 @@ pub enum AppendError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
+    #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
@@ -226,6 +228,10 @@ impl From<StreamerError> for AppendError {
 pub enum ReadError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
+    #[error(transparent)]
+    RecordDecryption(#[from] RecordDecryptionError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]

@@ -43,15 +43,19 @@ async fn test_backend_append_auto_creates_stream() {
         fencing_token: None,
     };
 
-    let ack = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await
-        .expect("Failed to append to auto-created stream");
+    let ack = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input,
+        None,
+    )
+    .await
+    .expect("Failed to append to auto-created stream");
 
     assert_eq!(ack.end.seq_num, 1);
     assert_stream_count(&backend, &basin_name, 1).await;
-    let tail = backend
-        .check_tail(basin_name, stream_name)
+    let tail = check_tail(&backend, basin_name, stream_name)
         .await
         .expect("Failed to check tail on auto-created stream");
     assert_eq!(tail.seq_num, 1);
@@ -74,7 +78,7 @@ async fn test_backend_append_without_auto_create_returns_not_found() {
         fencing_token: None,
     };
 
-    let result = backend.append(basin_name.clone(), stream_name, input).await;
+    let result = append(&backend, basin_name.clone(), stream_name, input, None).await;
 
     assert!(matches!(result, Err(AppendError::StreamNotFound(_))));
     assert_stream_count(&backend, &basin_name, 0).await;
@@ -94,18 +98,16 @@ async fn test_backend_read_auto_creates_stream() {
         from: ReadFrom::SeqNum(0),
         clamp: false,
     };
-    let _session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            start,
-            ReadEnd::default(),
-        )
-        .await
-        .expect("Failed to open read session on auto-created stream");
+    let _session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        start,
+        ReadEnd::default(),
+    )
+    .await;
     assert_stream_count(&backend, &basin_name, 1).await;
-    let tail = backend
-        .check_tail(basin_name, stream_name)
+    let tail = check_tail(&backend, basin_name, stream_name)
         .await
         .expect("Failed to check tail on auto-created read stream");
     assert_eq!(tail.seq_num, 0);
@@ -126,9 +128,14 @@ async fn test_backend_read_without_auto_create_returns_not_found() {
         from: ReadFrom::SeqNum(0),
         clamp: false,
     };
-    let result = backend
-        .read(basin_name.clone(), stream_name, start, ReadEnd::default())
-        .await;
+    let result = try_open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        start,
+        ReadEnd::default(),
+    )
+    .await;
 
     assert!(matches!(result, Err(ReadError::StreamNotFound(_))));
     assert_stream_count(&backend, &basin_name, 0).await;
@@ -144,8 +151,7 @@ async fn test_backend_check_tail_auto_creates_stream() {
     let basin_name = create_test_basin(&backend, "backend-auto-create-tail", basin_config).await;
     let stream_name = test_stream_name("missing");
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name)
+    let tail = check_tail(&backend, basin_name.clone(), stream_name)
         .await
         .expect("Failed to check tail on auto-created stream");
 
@@ -164,7 +170,7 @@ async fn test_backend_check_tail_without_auto_create_returns_not_found() {
     .await;
     let stream_name = test_stream_name("missing");
 
-    let result = backend.check_tail(basin_name.clone(), stream_name).await;
+    let result = check_tail(&backend, basin_name.clone(), stream_name).await;
 
     assert!(matches!(result, Err(CheckTailError::StreamNotFound(_))));
     assert_stream_count(&backend, &basin_name, 0).await;
@@ -198,9 +204,14 @@ async fn test_backend_append_auto_create_is_race_safe() {
                 fencing_token: None,
             };
             for _ in 0..MAX_AUTO_CREATE_ATTEMPTS {
-                match backend
-                    .append(basin_name.clone(), stream_name.clone(), input.clone())
-                    .await
+                match append(
+                    &backend,
+                    basin_name.clone(),
+                    stream_name.clone(),
+                    input.clone(),
+                    None,
+                )
+                .await
                 {
                     Ok(ack) => return Ok(ack),
                     Err(AppendError::TransactionConflict(_))
@@ -210,7 +221,7 @@ async fn test_backend_append_auto_create_is_race_safe() {
                     Err(err) => return Err(err),
                 }
             }
-            backend.append(basin_name, stream_name, input).await
+            append(&backend, basin_name, stream_name, input, None).await
         }));
     }
 
@@ -221,8 +232,7 @@ async fn test_backend_append_auto_create_is_race_safe() {
             .expect("auto-create append racer should succeed");
     }
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 10);
@@ -267,10 +277,7 @@ async fn test_backend_read_auto_create_is_race_safe() {
                 wait: Some(Duration::ZERO),
             };
             for _ in 0..MAX_AUTO_CREATE_ATTEMPTS {
-                match backend
-                    .read(basin_name.clone(), stream_name.clone(), start, end)
-                    .await
-                {
+                match try_open_read_session(&backend, &basin_name, &stream_name, start, end).await {
                     Ok(session) => {
                         drop(session);
                         return Ok::<(), ReadError>(());
@@ -281,7 +288,7 @@ async fn test_backend_read_auto_create_is_race_safe() {
                     Err(err) => return Err(err),
                 }
             }
-            match backend.read(basin_name, stream_name, start, end).await {
+            match try_open_read_session(&backend, &basin_name, &stream_name, start, end).await {
                 Ok(session) => {
                     drop(session);
                     Ok::<(), ReadError>(())
@@ -298,8 +305,7 @@ async fn test_backend_read_auto_create_is_race_safe() {
             .expect("auto-create read racer should succeed");
     }
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail after auto-create reads");
     assert_eq!(tail, StreamPosition::MIN);

@@ -366,8 +366,7 @@ async fn test_reconfigure_stream_updates_active_streamer() {
         .await
         .expect("Failed to reconfigure stream");
 
-    backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
 
@@ -376,7 +375,7 @@ async fn test_reconfigure_stream_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend.append(basin_name, stream_name, input).await;
+    let result = append(&backend, basin_name, stream_name, input, None).await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -409,8 +408,7 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         .await
         .expect("CreateOrReconfigure should succeed for an existing stream");
 
-    backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
 
@@ -419,7 +417,7 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend.append(basin_name, stream_name, input).await;
+    let result = append(&backend, basin_name, stream_name, input, None).await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -575,9 +573,7 @@ async fn test_delete_stream_blocks_data_operations() {
         .await
         .expect("Failed to delete stream");
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
-        .await;
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone()).await;
     assert!(matches!(
         tail,
         Err(CheckTailError::StreamDeletionPending(_))
@@ -588,9 +584,14 @@ async fn test_delete_stream_blocks_data_operations() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let append_result = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await;
+    let append_result = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input,
+        None,
+    )
+    .await;
     assert!(matches!(
         append_result,
         Err(AppendError::StreamDeletionPending(_))
@@ -601,7 +602,7 @@ async fn test_delete_stream_blocks_data_operations() {
         clamp: false,
     };
     let end = ReadEnd::default();
-    let read_result = backend.read(basin_name, stream_name, start, end).await;
+    let read_result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     assert!(matches!(
         read_result,
         Err(ReadError::StreamDeletionPending(_))

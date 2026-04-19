@@ -11,8 +11,7 @@ use s2_api::{
     },
 };
 use s2_common::{
-    encryption::EncryptionSpecResolutionError, http::extract::HeaderRejection,
-    record::RecordDecryptionError, types::ValidationError,
+    http::extract::HeaderRejection, record::RecordDecryptionError, types::ValidationError,
 };
 
 use crate::backend::error::{
@@ -37,8 +36,6 @@ pub enum ServiceError {
     AppendInputStream(#[from] AppendInputStreamError),
     #[error(transparent)]
     Validation(#[from] ValidationError),
-    #[error(transparent)]
-    RecordDecryption(#[from] RecordDecryptionError),
     #[error(transparent)]
     ListBasins(#[from] ListBasinsError),
     #[error(transparent)]
@@ -80,12 +77,6 @@ impl From<AppendRequestRejection> for ServiceError {
     }
 }
 
-impl From<EncryptionSpecResolutionError> for ServiceError {
-    fn from(e: EncryptionSpecResolutionError) -> Self {
-        ServiceError::Validation(ValidationError(e.to_string()))
-    }
-}
-
 impl ServiceError {
     pub fn to_response(&self) -> ErrorResponse {
         match self {
@@ -103,19 +94,6 @@ impl ServiceError {
                 }
             },
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
-            ServiceError::RecordDecryption(e) => match e {
-                RecordDecryptionError::AlgorithmMismatch { .. } => {
-                    standard(ErrorCode::Invalid, e.to_string())
-                }
-                RecordDecryptionError::AuthenticationFailed => {
-                    standard(ErrorCode::DecryptionFailed, e.to_string())
-                }
-                RecordDecryptionError::MalformedEncryptedRecord
-                | RecordDecryptionError::MeteredSizeMismatch { .. }
-                | RecordDecryptionError::MalformedDecryptedRecord(_) => {
-                    standard(ErrorCode::Storage, e.to_string())
-                }
-            },
             ServiceError::ListBasins(e) => match e {
                 ListBasinsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
             },
@@ -238,6 +216,9 @@ impl ServiceError {
             },
             ServiceError::Append(e) => match e {
                 AppendError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                AppendError::EncryptionSpecResolution(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
@@ -274,6 +255,22 @@ impl ServiceError {
             },
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                ReadError::EncryptionSpecResolution(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
+                ReadError::RecordDecryption(e) => match e {
+                    RecordDecryptionError::AlgorithmMismatch { .. } => {
+                        standard(ErrorCode::Invalid, e.to_string())
+                    }
+                    RecordDecryptionError::AuthenticationFailed => {
+                        standard(ErrorCode::DecryptionFailed, e.to_string())
+                    }
+                    RecordDecryptionError::MalformedEncryptedRecord
+                    | RecordDecryptionError::MeteredSizeMismatch { .. }
+                    | RecordDecryptionError::MalformedDecryptedRecord(_) => {
+                        standard(ErrorCode::Storage, e.to_string())
+                    }
+                },
                 ReadError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }

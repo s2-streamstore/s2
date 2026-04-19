@@ -11,6 +11,7 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use s2_common::{
+    encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::{NonZeroSeqNum, SeqNum, StreamPosition},
     types::{
         basin::BasinName,
@@ -282,6 +283,7 @@ impl Backend {
         basin: &BasinName,
         stream: &StreamName,
         should_auto_create: impl FnOnce(&BasinConfig) -> bool,
+        resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
     ) -> Result<StreamHandle, E>
     where
         E: From<StreamerError>
@@ -294,7 +296,8 @@ impl Backend {
     {
         match self.streamer_client(basin, stream).await {
             Ok(client) => Ok(StreamHandle {
-                backend: self.clone(),
+                db: self.db.clone(),
+                encryption: resolve_encryption(client.cipher())?,
                 client,
             }),
             Err(StreamerError::StreamNotFound(e)) => {
@@ -304,6 +307,7 @@ impl Backend {
                     Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
                 };
                 if should_auto_create(&config) {
+                    let encryption = resolve_encryption(config.stream_cipher)?;
                     if let Err(e) = self
                         .create_stream(
                             basin.clone(),
@@ -325,9 +329,11 @@ impl Backend {
                             }
                         }
                     }
+                    let client = self.streamer_client(basin, stream).await?;
                     Ok(StreamHandle {
-                        backend: self.clone(),
-                        client: self.streamer_client(basin, stream).await?,
+                        db: self.db.clone(),
+                        encryption,
+                        client,
                     })
                 } else {
                     Err(e.into())

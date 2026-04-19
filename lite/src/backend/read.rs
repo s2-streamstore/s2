@@ -1,14 +1,16 @@
 use std::time::Duration;
 
-use futures::Stream;
+use futures::{Stream, StreamExt as _};
 use s2_common::{
     caps,
+    encryption::{EncryptionKey, EncryptionSpec},
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp},
     types::{
         basin::BasinName,
         stream::{
-            ReadEnd, ReadPosition, ReadStart, StoredReadBatch, StoredReadSessionOutput, StreamName,
+            ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StoredReadBatch,
+            StoredReadSessionOutput, StreamName,
         },
     },
 };
@@ -22,9 +24,7 @@ use super::{Backend, StreamHandle};
 use crate::{
     backend::{
         error::{
-            BasinDeletionPendingError, BasinNotFoundError, CheckTailError, ReadError, StorageError,
-            StreamDeletionPendingError, StreamNotFoundError, StreamerError,
-            StreamerMissingInActionError, TransactionConflictError, UnwrittenError,
+            CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
         },
         kv,
     },
@@ -32,90 +32,33 @@ use crate::{
 };
 
 impl Backend {
-    pub async fn open_for_read<E>(
+    pub async fn open_for_check_tail(
         &self,
         basin: &BasinName,
         stream: &StreamName,
-    ) -> Result<StreamHandle, E>
-    where
-        E: From<StreamerError>
-            + From<StorageError>
-            + From<BasinNotFoundError>
-            + From<TransactionConflictError>
-            + From<BasinDeletionPendingError>
-            + From<StreamDeletionPendingError>
-            + From<StreamNotFoundError>,
-    {
-        self.stream_handle_with_auto_create::<E>(basin, stream, |config| {
-            config.create_stream_on_read
-        })
+    ) -> Result<StreamHandle, CheckTailError> {
+        self.stream_handle_with_auto_create::<CheckTailError>(
+            basin,
+            stream,
+            |config| config.create_stream_on_read,
+            |_| Ok(EncryptionSpec::Plain),
+        )
         .await
     }
 
-    async fn read_start_seq_num(
+    pub async fn open_for_read(
         &self,
-        stream_id: StreamId,
-        start: ReadStart,
-        end: ReadEnd,
-        tail: StreamPosition,
-    ) -> Result<SeqNum, ReadError> {
-        let mut read_pos = match start.from {
-            s2_common::types::stream::ReadFrom::SeqNum(seq_num) => ReadPosition::SeqNum(seq_num),
-            s2_common::types::stream::ReadFrom::Timestamp(timestamp) => {
-                ReadPosition::Timestamp(timestamp)
-            }
-            s2_common::types::stream::ReadFrom::TailOffset(tail_offset) => {
-                ReadPosition::SeqNum(tail.seq_num.saturating_sub(tail_offset))
-            }
-        };
-        if match read_pos {
-            ReadPosition::SeqNum(start_seq_num) => start_seq_num > tail.seq_num,
-            ReadPosition::Timestamp(start_timestamp) => start_timestamp > tail.timestamp,
-        } {
-            if start.clamp {
-                read_pos = ReadPosition::SeqNum(tail.seq_num);
-            } else {
-                return Err(UnwrittenError(tail).into());
-            }
-        }
-        if let ReadPosition::SeqNum(start_seq_num) = read_pos
-            && start_seq_num == tail.seq_num
-            && !end.may_follow()
-        {
-            return Err(UnwrittenError(tail).into());
-        }
-        Ok(match read_pos {
-            ReadPosition::SeqNum(start_seq_num) => start_seq_num,
-            ReadPosition::Timestamp(start_timestamp) => {
-                self.resolve_timestamp(stream_id, start_timestamp)
-                    .await?
-                    .unwrap_or(tail)
-                    .seq_num
-            }
-        })
-    }
-
-    pub async fn check_tail(
-        &self,
-        basin: BasinName,
-        stream: StreamName,
-    ) -> Result<StreamPosition, CheckTailError> {
-        let handle = self
-            .open_for_read::<CheckTailError>(&basin, &stream)
-            .await?;
-        handle.check_tail().await
-    }
-
-    pub async fn read(
-        &self,
-        basin: BasinName,
-        stream: StreamName,
-        start: ReadStart,
-        end: ReadEnd,
-    ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
-    {
-        let handle = self.open_for_read::<ReadError>(&basin, &stream).await?;
-        handle.read(start, end).await
+        basin: &BasinName,
+        stream: &StreamName,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<StreamHandle, ReadError> {
+        self.stream_handle_with_auto_create::<ReadError>(
+            basin,
+            stream,
+            |config| config.create_stream_on_read,
+            |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
+        )
+        .await
     }
 }
 
@@ -129,210 +72,268 @@ impl StreamHandle {
         self,
         start: ReadStart,
         end: ReadEnd,
-    ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
-    {
+    ) -> Result<impl Stream<Item = Result<ReadSessionOutput, ReadError>> + 'static, ReadError> {
         let stream_id = self.client.stream_id();
-        let tail = self.client.check_tail().await?;
-        let mut state = ReadSessionState {
-            start_seq_num: self
-                .backend
-                .read_start_seq_num(stream_id, start, end, tail)
-                .await?,
-            limit: EvaluatedReadLimit::Remaining(end.limit),
-            until: end.until,
-            wait: end.wait,
-            wait_deadline: None,
-            tail,
-        };
-        let db = self.backend.db.clone();
-        let session = async_stream::try_stream! {
-            'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
-                if state.start_seq_num < state.tail.seq_num {
-                    let start_key = kv::stream_record_data::ser_key(
-                        stream_id,
-                        StreamPosition {
-                            seq_num: state.start_seq_num,
-                            timestamp: 0,
-                        },
-                    );
-                    let end_key = kv::stream_record_data::ser_key(
-                        stream_id,
-                        StreamPosition {
-                            seq_num: state.tail.seq_num,
-                            timestamp: 0,
-                        },
-                    );
-                    static SCAN_OPTS: ScanOptions = ScanOptions {
-                        durability_filter: DurabilityLevel::Remote,
-                        dirty: false,
-                        read_ahead_bytes: 1024 * 1024,
-                        cache_blocks: true,
-                        max_fetch_tasks: 8,
-                        order: IterationOrder::Ascending,
-                    };
-                    let mut it = db
-                        .scan_with_options(start_key..end_key, &SCAN_OPTS)
-                        .await?;
-
-                    let mut records = Metered::with_capacity(
-                        limit.count()
-                            .unwrap_or(usize::MAX)
-                            .min(caps::RECORD_BATCH_MAX.count),
-                    );
-
-                    while let EvaluatedReadLimit::Remaining(limit) = state.limit {
-                        let Some(kv) = it.next().await? else {
-                            break;
-                        };
-                        let (deser_stream_id, pos) = kv::stream_record_data::deser_key(kv.key)?;
-                        assert_eq!(deser_stream_id, stream_id);
-
-                        let record = kv::stream_record_data::deser_value(kv.value)?.sequenced(pos);
-
-                        if end.until.deny(pos.timestamp)
-                            || limit.deny(records.len() + 1, records.metered_size() + record.metered_size()) {
-                            if records.is_empty() {
-                                break 'session;
-                            } else {
-                                break;
-                            }
-                        }
-
-                        if records.len() == caps::RECORD_BATCH_MAX.count
-                            || records.metered_size() + record.metered_size() > caps::RECORD_BATCH_MAX.bytes
-                        {
-                            let new_records_buf = Metered::with_capacity(
-                                limit.count()
-                                    .map_or(usize::MAX, |n| n.saturating_sub(records.len()))
-                                    .min(caps::RECORD_BATCH_MAX.count),
-                            );
-                            yield state.on_batch(StoredReadBatch {
-                                records: std::mem::replace(&mut records, new_records_buf),
-                                tail: None,
-                            });
-                        }
-
-                        records.push(record);
-                    }
-
-                    if !records.is_empty() {
-                        yield state.on_batch(StoredReadBatch {
-                            records,
-                            tail: None,
-                        });
-                    } else {
-                        state.start_seq_num = state.tail.seq_num;
-                    }
-                } else {
-                    assert_eq!(state.start_seq_num, state.tail.seq_num);
-                    if !end.may_follow() {
-                        break;
-                    }
-                    match self.client.follow(state.start_seq_num).await? {
-                        Ok(mut follow_rx) => {
-                            // Only a delivered batch should reset the absolute wait budget.
-                            state.arm_wait_deadline_if_unset();
-                            if state.wait_deadline_expired() {
-                                break;
-                            }
-                            yield StoredReadSessionOutput::Heartbeat(state.tail);
-                            while let EvaluatedReadLimit::Remaining(limit) = state.limit {
-                                tokio::select! {
-                                    biased;
-                                    msg = follow_rx.recv() => {
-                                        match msg {
-                                            Ok(mut records) => {
-                                                let count = records.len();
-                                                let tail = super::streamer::next_pos(&records);
-                                                let allowed_count = count_allowed_records(limit, end.until, &records);
-                                                if allowed_count > 0 {
-                                                    yield state.on_batch(StoredReadBatch {
-                                                        records: records.drain(..allowed_count).collect(),
-                                                        tail: Some(tail),
-                                                    });
-                                                }
-                                                if allowed_count < count {
-                                                    break 'session;
-                                                }
-                                                Ok(())
-                                            }
-                                            Err(broadcast::error::RecvError::Lagged(_)) => {
-                                                // Catch up using DB
-                                                continue 'session;
-                                            }
-                                            Err(broadcast::error::RecvError::Closed) => {
-                                                Err(StreamerMissingInActionError)
-                                            }
-                                        }
-                                    }
-                                    _ = new_heartbeat_sleep() => {
-                                        yield StoredReadSessionOutput::Heartbeat(state.tail);
-                                        Ok(())
-                                    }
-                                    _ = wait_sleep_until(state.wait_deadline) => {
-                                        break 'session;
-                                    }
-                                }?;
-                            }
-                        }
-                        Err(tail) => {
-                            assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
-                            state.tail = tail;
-                        }
-                    }
+        let session = read_session(self.db, self.client, start, end).await?;
+        Ok(async_stream::stream! {
+            tokio::pin!(session);
+            while let Some(output) = session.next().await {
+                let output = match output {
+                    Ok(output) => output
+                        .decrypt(&self.encryption, stream_id.as_bytes())
+                        .map_err(ReadError::from),
+                    Err(err) => Err(err),
+                };
+                let should_stop = output.is_err();
+                yield output;
+                if should_stop {
+                    break;
                 }
             }
-        };
-        Ok(session)
+        })
     }
 }
 
-impl Backend {
-    pub(super) async fn resolve_timestamp(
-        &self,
-        stream_id: StreamId,
-        timestamp: Timestamp,
-    ) -> Result<Option<StreamPosition>, StorageError> {
-        let start_key = kv::stream_record_timestamp::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: SeqNum::MIN,
-                timestamp,
-            },
-        );
-        let end_key = kv::stream_record_timestamp::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: SeqNum::MAX,
-                timestamp: Timestamp::MAX,
-            },
-        );
-        static SCAN_OPTS: ScanOptions = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-            order: IterationOrder::Ascending,
-        };
-        let mut it = self
-            .db
-            .scan_with_options(start_key..end_key, &SCAN_OPTS)
-            .await?;
-        Ok(match it.next().await? {
-            Some(kv) => {
-                let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
-                assert_eq!(deser_stream_id, stream_id);
-                assert!(pos.timestamp >= timestamp);
-                kv::stream_record_timestamp::deser_value(kv.value)?;
-                Some(StreamPosition {
-                    seq_num: pos.seq_num,
-                    timestamp: pos.timestamp,
-                })
+async fn read_session(
+    db: slatedb::Db,
+    client: super::streamer::StreamerClient,
+    start: ReadStart,
+    end: ReadEnd,
+) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError> {
+    let stream_id = client.stream_id();
+    let tail = client.check_tail().await?;
+    let mut state = ReadSessionState {
+        start_seq_num: read_start_seq_num(&db, stream_id, start, end, tail).await?,
+        limit: EvaluatedReadLimit::Remaining(end.limit),
+        until: end.until,
+        wait: end.wait,
+        wait_deadline: None,
+        tail,
+    };
+    let session = async_stream::try_stream! {
+        'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
+            if state.start_seq_num < state.tail.seq_num {
+                let start_key = kv::stream_record_data::ser_key(
+                    stream_id,
+                    StreamPosition {
+                        seq_num: state.start_seq_num,
+                        timestamp: 0,
+                    },
+                );
+                let end_key = kv::stream_record_data::ser_key(
+                    stream_id,
+                    StreamPosition {
+                        seq_num: state.tail.seq_num,
+                        timestamp: 0,
+                    },
+                );
+                static SCAN_OPTS: ScanOptions = ScanOptions {
+                    durability_filter: DurabilityLevel::Remote,
+                    dirty: false,
+                    read_ahead_bytes: 1024 * 1024,
+                    cache_blocks: true,
+                    max_fetch_tasks: 8,
+                    order: IterationOrder::Ascending,
+                };
+                let mut it = db.scan_with_options(start_key..end_key, &SCAN_OPTS).await?;
+
+                let mut records = Metered::with_capacity(
+                    limit.count()
+                        .unwrap_or(usize::MAX)
+                        .min(caps::RECORD_BATCH_MAX.count),
+                );
+
+                while let EvaluatedReadLimit::Remaining(limit) = state.limit {
+                    let Some(kv) = it.next().await? else {
+                        break;
+                    };
+                    let (deser_stream_id, pos) = kv::stream_record_data::deser_key(kv.key)?;
+                    assert_eq!(deser_stream_id, stream_id);
+
+                    let record = kv::stream_record_data::deser_value(kv.value)?.sequenced(pos);
+
+                    if end.until.deny(pos.timestamp)
+                        || limit.deny(records.len() + 1, records.metered_size() + record.metered_size())
+                    {
+                        if records.is_empty() {
+                            break 'session;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if records.len() == caps::RECORD_BATCH_MAX.count
+                        || records.metered_size() + record.metered_size() > caps::RECORD_BATCH_MAX.bytes
+                    {
+                        let new_records_buf = Metered::with_capacity(
+                            limit.count()
+                                .map_or(usize::MAX, |n| n.saturating_sub(records.len()))
+                                .min(caps::RECORD_BATCH_MAX.count),
+                        );
+                        yield state.on_batch(StoredReadBatch {
+                            records: std::mem::replace(&mut records, new_records_buf),
+                            tail: None,
+                        });
+                    }
+
+                    records.push(record);
+                }
+
+                if !records.is_empty() {
+                    yield state.on_batch(StoredReadBatch {
+                        records,
+                        tail: None,
+                    });
+                } else {
+                    state.start_seq_num = state.tail.seq_num;
+                }
+            } else {
+                assert_eq!(state.start_seq_num, state.tail.seq_num);
+                if !end.may_follow() {
+                    break;
+                }
+                match client.follow(state.start_seq_num).await? {
+                    Ok(mut follow_rx) => {
+                        // Only a delivered batch should reset the absolute wait budget.
+                        state.arm_wait_deadline_if_unset();
+                        if state.wait_deadline_expired() {
+                            break;
+                        }
+                        yield StoredReadSessionOutput::Heartbeat(state.tail);
+                        while let EvaluatedReadLimit::Remaining(limit) = state.limit {
+                            tokio::select! {
+                                biased;
+                                msg = follow_rx.recv() => {
+                                    match msg {
+                                        Ok(mut records) => {
+                                            let count = records.len();
+                                            let tail = super::streamer::next_pos(&records);
+                                            let allowed_count = count_allowed_records(limit, end.until, &records);
+                                            if allowed_count > 0 {
+                                                yield state.on_batch(StoredReadBatch {
+                                                    records: records.drain(..allowed_count).collect(),
+                                                    tail: Some(tail),
+                                                });
+                                            }
+                                            if allowed_count < count {
+                                                break 'session;
+                                            }
+                                            Ok(())
+                                        }
+                                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                                            // Catch up using DB
+                                            continue 'session;
+                                        }
+                                        Err(broadcast::error::RecvError::Closed) => {
+                                            Err(StreamerMissingInActionError)
+                                        }
+                                    }
+                                }
+                                _ = new_heartbeat_sleep() => {
+                                    yield StoredReadSessionOutput::Heartbeat(state.tail);
+                                    Ok(())
+                                }
+                                _ = wait_sleep_until(state.wait_deadline) => {
+                                    break 'session;
+                                }
+                            }?;
+                        }
+                    }
+                    Err(tail) => {
+                        assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
+                        state.tail = tail;
+                    }
+                }
             }
-            None => None,
-        })
+        }
+    };
+    Ok(session)
+}
+
+async fn read_start_seq_num(
+    db: &slatedb::Db,
+    stream_id: StreamId,
+    start: ReadStart,
+    end: ReadEnd,
+    tail: StreamPosition,
+) -> Result<SeqNum, ReadError> {
+    let mut read_pos = match start.from {
+        s2_common::types::stream::ReadFrom::SeqNum(seq_num) => ReadPosition::SeqNum(seq_num),
+        s2_common::types::stream::ReadFrom::Timestamp(timestamp) => {
+            ReadPosition::Timestamp(timestamp)
+        }
+        s2_common::types::stream::ReadFrom::TailOffset(tail_offset) => {
+            ReadPosition::SeqNum(tail.seq_num.saturating_sub(tail_offset))
+        }
+    };
+    if match read_pos {
+        ReadPosition::SeqNum(start_seq_num) => start_seq_num > tail.seq_num,
+        ReadPosition::Timestamp(start_timestamp) => start_timestamp > tail.timestamp,
+    } {
+        if start.clamp {
+            read_pos = ReadPosition::SeqNum(tail.seq_num);
+        } else {
+            return Err(UnwrittenError(tail).into());
+        }
     }
+    if let ReadPosition::SeqNum(start_seq_num) = read_pos
+        && start_seq_num == tail.seq_num
+        && !end.may_follow()
+    {
+        return Err(UnwrittenError(tail).into());
+    }
+    Ok(match read_pos {
+        ReadPosition::SeqNum(start_seq_num) => start_seq_num,
+        ReadPosition::Timestamp(start_timestamp) => {
+            resolve_timestamp(db, stream_id, start_timestamp)
+                .await?
+                .unwrap_or(tail)
+                .seq_num
+        }
+    })
+}
+
+async fn resolve_timestamp(
+    db: &slatedb::Db,
+    stream_id: StreamId,
+    timestamp: Timestamp,
+) -> Result<Option<StreamPosition>, StorageError> {
+    let start_key = kv::stream_record_timestamp::ser_key(
+        stream_id,
+        StreamPosition {
+            seq_num: SeqNum::MIN,
+            timestamp,
+        },
+    );
+    let end_key = kv::stream_record_timestamp::ser_key(
+        stream_id,
+        StreamPosition {
+            seq_num: SeqNum::MAX,
+            timestamp: Timestamp::MAX,
+        },
+    );
+    static SCAN_OPTS: ScanOptions = ScanOptions {
+        durability_filter: DurabilityLevel::Remote,
+        dirty: false,
+        read_ahead_bytes: 1,
+        cache_blocks: false,
+        max_fetch_tasks: 1,
+        order: IterationOrder::Ascending,
+    };
+    let mut it = db.scan_with_options(start_key..end_key, &SCAN_OPTS).await?;
+    Ok(match it.next().await? {
+        Some(kv) => {
+            let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
+            assert_eq!(deser_stream_id, stream_id);
+            assert!(pos.timestamp >= timestamp);
+            kv::stream_record_timestamp::deser_value(kv.value)?;
+            Some(StreamPosition {
+                seq_num: pos.seq_num,
+                timestamp: pos.timestamp,
+            })
+        }
+        None => None,
+    })
 }
 
 struct ReadSessionState {
@@ -426,14 +427,14 @@ mod tests {
     use futures::StreamExt;
     use s2_common::{
         read_extent::{ReadLimit, ReadUntil},
-        record::{Metered, Record, StoredRecord},
+        record::{Metered, Record},
         types::{
             basin::BasinName,
             config::{BasinConfig, OptionalStreamConfig},
             resources::CreateMode,
             stream::{
-                ReadEnd, ReadFrom, ReadStart, StoredAppendInput, StoredAppendRecord,
-                StoredAppendRecordBatch, StoredAppendRecordParts, StoredReadSessionOutput,
+                AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
+                ReadSessionOutput, ReadStart,
             },
         },
     };
@@ -446,15 +447,15 @@ mod tests {
         stream_id::StreamId,
     };
 
-    fn stored_append_input(record: Record) -> StoredAppendInput {
-        let record: StoredAppendRecord = StoredAppendRecordParts {
+    fn append_input(record: Record) -> AppendInput {
+        let record: AppendRecord = AppendRecordParts {
             timestamp: None,
-            record: Metered::from(StoredRecord::from(record)),
+            record: Metered::from(record),
         }
         .try_into()
         .unwrap();
-        let records: StoredAppendRecordBatch = vec![record].try_into().unwrap();
-        StoredAppendInput {
+        let records: AppendRecordBatch = vec![record].try_into().unwrap();
+        AppendInput {
             records,
             match_seq_num: None,
             fencing_token: None,
@@ -462,8 +463,8 @@ mod tests {
     }
 
     fn map_test_output(
-        output: Option<Result<StoredReadSessionOutput, ReadError>>,
-    ) -> Option<StoredReadSessionOutput> {
+        output: Option<Result<ReadSessionOutput, ReadError>>,
+    ) -> Option<ReadSessionOutput> {
         match output {
             Some(Ok(output)) => Some(output),
             Some(Err(e)) => panic!("Read error: {e:?}"),
@@ -474,9 +475,9 @@ mod tests {
     async fn poll_next_after_advance<S>(
         session: &mut std::pin::Pin<Box<S>>,
         advance_by: Duration,
-    ) -> Poll<Option<StoredReadSessionOutput>>
+    ) -> Poll<Option<ReadSessionOutput>>
     where
-        S: futures::Stream<Item = Result<StoredReadSessionOutput, ReadError>>,
+        S: futures::Stream<Item = Result<ReadSessionOutput, ReadError>>,
     {
         let mut pinned_session = session.as_mut();
         let next = pinned_session.next();
@@ -535,7 +536,7 @@ mod tests {
             .unwrap();
 
         // Should find record in stream_a
-        let result = backend.resolve_timestamp(stream_a, 500).await.unwrap();
+        let result = resolve_timestamp(&backend.db, stream_a, 500).await.unwrap();
         assert_eq!(
             result,
             Some(StreamPosition {
@@ -545,7 +546,9 @@ mod tests {
         );
 
         // Should return None, not find stream_b's record
-        let result = backend.resolve_timestamp(stream_a, 1500).await.unwrap();
+        let result = resolve_timestamp(&backend.db, stream_a, 1500)
+            .await
+            .unwrap();
         assert_eq!(result, None);
     }
 
@@ -575,10 +578,12 @@ mod tests {
             .await
             .unwrap();
 
-        let input =
-            stored_append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
+        let input = append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
         let ack = backend
-            .append(basin.clone(), stream.clone(), input)
+            .open_for_append(&basin, &stream, None)
+            .await
+            .unwrap()
+            .append(input)
             .await
             .unwrap();
         assert!(ack.end.seq_num > 0);
@@ -604,7 +609,13 @@ mod tests {
             until: ReadUntil::Unbounded,
             wait: None,
         };
-        let session = backend.read(basin, stream, start, end).await.unwrap();
+        let session = backend
+            .open_for_read(&basin, &stream, None)
+            .await
+            .unwrap()
+            .read(start, end)
+            .await
+            .unwrap();
         let records: Vec<_> = tokio::time::timeout(
             Duration::from_secs(2),
             futures::StreamExt::collect::<Vec<_>>(session),
@@ -651,7 +662,13 @@ mod tests {
             wait: Some(wait),
         };
 
-        let session = backend.read(basin, stream, start, end).await.unwrap();
+        let session = backend
+            .open_for_read(&basin, &stream, None)
+            .await
+            .unwrap()
+            .read(start, end)
+            .await
+            .unwrap();
         let mut session = Box::pin(session);
         let probe_step = Duration::from_millis(1);
         let first = session
@@ -660,7 +677,7 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(first, StoredReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(first, ReadSessionOutput::Heartbeat(_)));
 
         let started = Instant::now();
         let second = match poll_next_after_advance(&mut session, wait).await {
@@ -668,12 +685,12 @@ mod tests {
             Poll::Ready(None) => panic!("session closed before emitting a follow heartbeat"),
             Poll::Pending => panic!("expected a follow heartbeat before the wait budget expired"),
         };
-        assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
 
         tokio::task::yield_now().await;
         let closed_at = loop {
             match futures::poll!(session.as_mut().next()) {
-                Poll::Ready(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {}
+                Poll::Ready(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
                 Poll::Ready(Some(Ok(output))) => {
                     panic!("unexpected output after wait deadline: {output:?}");
                 }
@@ -713,11 +730,13 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_input = stored_append_input(
-            Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap(),
-        );
+        let initial_input =
+            append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .append(basin.clone(), stream.clone(), initial_input)
+            .open_for_append(&basin, &stream, None)
+            .await
+            .unwrap()
+            .append(initial_input)
             .await
             .unwrap();
 
@@ -734,7 +753,10 @@ mod tests {
         };
 
         let session = backend
-            .read(basin.clone(), stream.clone(), start, end)
+            .open_for_read(&basin, &stream, None)
+            .await
+            .unwrap()
+            .read(start, end)
             .await
             .unwrap();
         let mut session = Box::pin(session);
@@ -745,15 +767,14 @@ mod tests {
             .await
             .expect("session should yield the initial batch")
             .expect("session should not error");
-        let StoredReadSessionOutput::Batch(batch) = first else {
+        let ReadSessionOutput::Batch(batch) = first else {
             panic!("expected initial batch");
         };
         let initial_record = batch
             .records
             .first()
             .expect("batch should contain one record");
-        let StoredRecord::Plaintext(Record::Envelope(initial_envelope)) = initial_record.inner()
-        else {
+        let Record::Envelope(initial_envelope) = initial_record.inner() else {
             panic!("expected plaintext envelope record");
         };
         assert_eq!(initial_envelope.body().as_ref(), b"initial");
@@ -764,15 +785,20 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
 
         tokio::time::advance(Duration::from_millis(20)).await;
         tokio::task::yield_now().await;
 
-        let follow_input = stored_append_input(
-            Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap(),
-        );
-        backend.append(basin, stream, follow_input).await.unwrap();
+        let follow_input =
+            append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
+        backend
+            .open_for_append(&basin, &stream, None)
+            .await
+            .unwrap()
+            .append(follow_input)
+            .await
+            .unwrap();
 
         let follow = session
             .as_mut()
@@ -781,15 +807,14 @@ mod tests {
             .expect("session should deliver the live batch")
             .expect("session should not error");
         let reset_at = Instant::now();
-        let StoredReadSessionOutput::Batch(batch) = follow else {
+        let ReadSessionOutput::Batch(batch) = follow else {
             panic!("expected live batch after append");
         };
         let follow_record = batch
             .records
             .first()
             .expect("batch should contain one record");
-        let StoredRecord::Plaintext(Record::Envelope(follow_envelope)) = follow_record.inner()
-        else {
+        let Record::Envelope(follow_envelope) = follow_record.inner() else {
             panic!("expected plaintext envelope record");
         };
         assert_eq!(follow_envelope.body().as_ref(), b"follow-1");
@@ -799,7 +824,7 @@ mod tests {
 
         loop {
             match futures::poll!(session.as_mut().next()) {
-                Poll::Ready(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {}
+                Poll::Ready(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
                 Poll::Ready(Some(Ok(output))) => {
                     panic!("unexpected output before the reset wait deadline: {output:?}");
                 }
@@ -816,7 +841,7 @@ mod tests {
 
         let closed_at = loop {
             match futures::poll!(session.as_mut().next()) {
-                Poll::Ready(Some(Ok(StoredReadSessionOutput::Heartbeat(_)))) => {}
+                Poll::Ready(Some(Ok(ReadSessionOutput::Heartbeat(_)))) => {}
                 Poll::Ready(Some(Ok(output))) => {
                     panic!("unexpected output after the reset wait deadline: {output:?}");
                 }
@@ -869,7 +894,10 @@ mod tests {
             wait: Some(wait),
         };
         let session = backend
-            .read(basin.clone(), stream.clone(), start, end)
+            .open_for_read(&basin, &stream, None)
+            .await
+            .unwrap()
+            .read(start, end)
             .await
             .unwrap();
         let mut session = Box::pin(session);
@@ -880,18 +908,21 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(first, StoredReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(first, ReadSessionOutput::Heartbeat(_)));
 
         let stream_id = StreamId::new(&basin, &stream);
         let mut delete_batch = WriteBatch::new();
         let lagged_appends = FOLLOWER_MAX_LAG + 25;
 
         for i in 0..lagged_appends {
-            let input = stored_append_input(
+            let input = append_input(
                 Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap(),
             );
             let ack = backend
-                .append(basin.clone(), stream.clone(), input)
+                .open_for_append(&basin, &stream, None)
+                .await
+                .unwrap()
+                .append(input)
                 .await
                 .unwrap();
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
@@ -942,11 +973,13 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_input = stored_append_input(
-            Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap(),
-        );
+        let initial_input =
+            append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .append(basin.clone(), stream.clone(), initial_input)
+            .open_for_append(&basin, &stream, None)
+            .await
+            .unwrap()
+            .append(initial_input)
             .await
             .unwrap();
 
@@ -960,7 +993,10 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .read(basin.clone(), stream.clone(), start, end)
+            .open_for_read(&basin, &stream, None)
+            .await
+            .unwrap()
+            .read(start, end)
             .await
             .unwrap();
         let mut session = Box::pin(session);
@@ -971,7 +1007,7 @@ mod tests {
             .await
             .expect("session should yield initial batch")
             .expect("session should not error");
-        assert!(matches!(first, StoredReadSessionOutput::Batch(_)));
+        assert!(matches!(first, ReadSessionOutput::Batch(_)));
 
         let second = session
             .as_mut()
@@ -979,15 +1015,20 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
 
         tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
 
-        let follow_input = stored_append_input(
-            Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap(),
-        );
-        backend.append(basin, stream, follow_input).await.unwrap();
+        let follow_input =
+            append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
+        backend
+            .open_for_append(&basin, &stream, None)
+            .await
+            .unwrap()
+            .append(follow_input)
+            .await
+            .unwrap();
 
         let next = session
             .as_mut()
@@ -995,12 +1036,12 @@ mod tests {
             .await
             .expect("session should stay open after dormancy")
             .expect("session should not error after dormancy");
-        let StoredReadSessionOutput::Batch(batch) = next else {
+        let ReadSessionOutput::Batch(batch) = next else {
             panic!("expected new batch after append");
         };
         assert_eq!(batch.records.len(), 1);
         let record = batch.records.first().expect("batch should have one record");
-        let StoredRecord::Plaintext(Record::Envelope(envelope)) = record.inner() else {
+        let Record::Envelope(envelope) = record.inner() else {
             panic!("expected envelope record");
         };
         assert_eq!(envelope.body().as_ref(), b"follow-1");

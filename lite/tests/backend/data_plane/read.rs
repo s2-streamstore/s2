@@ -4,13 +4,13 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
-    encryption::{EncryptionAlgorithm, EncryptionSpec},
+    encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
-    record::{MeteredSize, RecordDecryptionError, StreamPosition},
+    record::{MeteredSize, StreamPosition},
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{ReadEnd, ReadFrom, ReadStart, StoredReadSessionOutput, StreamName},
+        stream::{ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
     },
 };
 use s2_lite::backend::{
@@ -106,27 +106,25 @@ async fn test_check_tail_scenarios() {
     let (backend, basin_name, stream_name) =
         setup_backend_with_stream("check-tail", "stream", OptionalStreamConfig::default()).await;
 
-    let empty_tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let empty_tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail on empty stream");
     assert_eq!(empty_tail, StreamPosition::MIN);
 
     let ack = append_payloads(&backend, &basin_name, &stream_name, &[b"test data"]).await;
 
-    let tail_after_append = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail_after_append = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail after append");
     assert_eq!(tail_after_append, ack.end);
 
     let missing_backend = create_backend().await;
-    let missing_result = missing_backend
-        .check_tail(
-            test_basin_name("check-tail-missing"),
-            test_stream_name("missing"),
-        )
-        .await;
+    let missing_result = check_tail(
+        &missing_backend,
+        test_basin_name("check-tail-missing"),
+        test_stream_name("missing"),
+    )
+    .await;
 
     assert!(matches!(
         missing_result,
@@ -182,36 +180,6 @@ async fn test_read_encrypted_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
-    let encryption = aegis256_encryption_spec();
-    let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
-        "read-enc-plain-mismatch",
-        "stream",
-        basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
-        OptionalStreamConfig::default(),
-    )
-    .await;
-
-    append_payloads_with_encryption(
-        &backend,
-        &basin_name,
-        &stream_name,
-        &[b"secret-1", b"secret-2"],
-        &encryption,
-    )
-    .await;
-
-    let batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    assert!(matches!(
-        batch.decrypt(&EncryptionSpec::Plain, &[]),
-        Err(RecordDecryptionError::AlgorithmMismatch {
-            expected: None,
-            actual,
-        }) if actual == Some(EncryptionAlgorithm::Aegis256)
-    ));
-}
-
-#[tokio::test]
 async fn test_read_with_limit() {
     let (backend, basin_name, stream_name) =
         setup_backend_with_stream("read-with-limit", "limit", OptionalStreamConfig::default())
@@ -258,14 +226,14 @@ async fn test_read_unwritten_clamp_behavior() {
         from: ReadFrom::SeqNum(100),
         clamp: false,
     };
-    let result = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            start,
-            ReadEnd::default(),
-        )
-        .await;
+    let result = try_open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        start,
+        ReadEnd::default(),
+    )
+    .await;
     assert!(matches!(result, Err(ReadError::Unwritten(_))));
 
     // With clamp: succeeds with empty result
@@ -320,9 +288,7 @@ async fn test_read_at_tail_without_follow_returns_unwritten(
         clamp,
     };
     let end = tail_read_end(end_case);
-    let result = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await;
+    let result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
 
     match result {
         Err(ReadError::Unwritten(UnwrittenError(tail))) => {
@@ -429,7 +395,7 @@ async fn test_read_from_tail_times_out_without_new_data() {
         outputs
             .outputs
             .iter()
-            .all(|output| matches!(output, StoredReadSessionOutput::Heartbeat(_)))
+            .all(|output| matches!(output, ReadSessionOutput::Heartbeat(_)))
     );
     let wait = Duration::from_millis(100);
     assert!(outputs.closed_at >= started + wait);
@@ -465,7 +431,7 @@ async fn test_read_from_tail_wait_is_reset_by_new_data() {
         .await
         .expect("session should enter follow mode")
         .expect("session should not error");
-    assert!(matches!(first, StoredReadSessionOutput::Heartbeat(_)));
+    assert!(matches!(first, ReadSessionOutput::Heartbeat(_)));
 
     advance_time(follow_delay).await;
 
@@ -478,10 +444,9 @@ async fn test_read_from_tail_wait_is_reset_by_new_data() {
         .expect("session should yield the live tail batch")
         .expect("session should not error");
     let reset_at = tokio::time::Instant::now();
-    let StoredReadSessionOutput::Batch(batch) = follow else {
+    let ReadSessionOutput::Batch(batch) = follow else {
         panic!("expected a batch after appending past tail");
     };
-    let batch = decrypt_plain_batch(batch);
     assert_eq!(
         envelope_bodies(&batch.records),
         vec![b"follow data".to_vec()]
@@ -515,9 +480,11 @@ async fn test_read_with_bytes_limit_exact_fit() {
     )
     .await;
 
-    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    let exact_limit =
-        stored_batch.records[0].metered_size() + stored_batch.records[1].metered_size();
+    let expected_batch = create_test_record_batch(vec![
+        Bytes::from_static(b"record-1"),
+        Bytes::from_static(b"record-2"),
+    ]);
+    let exact_limit = expected_batch[0].metered_size() + expected_batch[1].metered_size();
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -547,8 +514,8 @@ async fn test_read_with_bytes_limit_smaller_than_first_record_returns_empty() {
 
     append_payloads(&backend, &basin_name, &stream_name, &[b"oversized"]).await;
 
-    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    let first_size = stored_batch.records[0].metered_size();
+    let first_size =
+        create_test_record_batch(vec![Bytes::from_static(b"oversized")])[0].metered_size();
     assert!(first_size > 0);
 
     let start = ReadStart {
@@ -614,8 +581,8 @@ async fn test_read_with_count_or_bytes_limit_bytes_wins() {
     )
     .await;
 
-    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    let per_record_bytes = stored_batch.records[0].metered_size();
+    let per_record_bytes =
+        create_test_record_batch(vec![Bytes::from_static(b"slot-0")])[0].metered_size();
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -714,8 +681,8 @@ async fn test_read_until_with_additional_limits() {
     )
     .await;
 
-    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    let per_record_bytes = stored_batch.records[0].metered_size();
+    let per_record_bytes =
+        create_test_record_batch(vec![Bytes::from_static(b"ts-1000")])[0].metered_size();
     let cases = vec![
         (
             "count wins",
