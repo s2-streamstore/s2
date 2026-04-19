@@ -204,6 +204,7 @@ mod tests {
             stream_meta.config.storage_class,
             decoded.config.storage_class
         );
+        assert_eq!(stream_meta.cipher, decoded.cipher);
         assert_eq!(stream_meta.created_at, decoded.created_at);
         assert_eq!(stream_meta.deleted_at, decoded.deleted_at);
     }
