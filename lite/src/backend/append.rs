@@ -16,7 +16,9 @@ use s2_common::{
 use tokio::sync::oneshot;
 
 use super::{Backend, StreamHandle};
-use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
+use crate::backend::error::{
+    AppendError, AppendErrorInternal, StorageError, StreamerMissingInActionError,
+};
 
 impl Backend {
     pub async fn open_for_append(
@@ -37,8 +39,29 @@ impl Backend {
 
 impl StreamHandle {
     pub async fn append(self, input: AppendInput) -> Result<AppendAck, AppendError> {
-        let input = input.encrypt(&self.encryption, self.client.stream_id().as_bytes());
-        let ack = self.client.append_permit(input).await?.submit().await?;
+        let StreamHandle {
+            backend,
+            basin,
+            stream,
+            mut client,
+            encryption,
+            ..
+        } = self;
+        let input = input.encrypt(&encryption, client.stream_id().as_bytes());
+        let ack = match client.clone().append_permit_owned(input.clone()).await {
+            Ok(permit) => match permit.submit().await {
+                Ok(ack) => ack,
+                Err(AppendErrorInternal::StreamerMissingInActionError(_)) => {
+                    refresh_append_streamer_client(&backend, &basin, &stream, &mut client).await?;
+                    client.append_permit_owned(input).await?.submit().await?
+                }
+                Err(e) => Err(e)?,
+            },
+            Err(StreamerMissingInActionError) => {
+                refresh_append_streamer_client(&backend, &basin, &stream, &mut client).await?;
+                client.append_permit_owned(input).await?.submit().await?
+            }
+        };
         Ok(ack)
     }
 
@@ -46,37 +69,106 @@ impl StreamHandle {
     where
         S: Stream<Item = AppendInput>,
     {
-        let stream_id = self.client.stream_id();
         let StreamHandle {
-            client, encryption, ..
+            backend,
+            basin,
+            stream,
+            mut client,
+            encryption,
+            ..
         } = self;
+        let stream_id = client.stream_id();
         let session = SessionHandle::new();
         async_stream::stream! {
             tokio::pin!(inputs);
+            let mut pending_input = None;
             let mut permit_opt = None;
             let mut append_futs = FuturesOrdered::new();
-            loop {
+            let mut inflight_inputs: VecDeque<AppendInput> = VecDeque::new();
+            'session: loop {
                 tokio::select! {
-                    Some(input) = inputs.next(), if permit_opt.is_none() => {
-                        permit_opt = Some(Box::pin(client.append_permit(
-                            input.encrypt(&encryption, stream_id.as_bytes()),
-                        )));
+                    Some(input) = inputs.next(), if permit_opt.is_none() && pending_input.is_none() => {
+                        if client.is_dead() {
+                            if let Err(e) = refresh_append_streamer_client(&backend, &basin, &stream, &mut client).await {
+                                yield Err(e);
+                                break;
+                            }
+                        }
+                        let encrypted = input.clone().encrypt(&encryption, stream_id.as_bytes());
+                        pending_input = Some(input);
+                        permit_opt = Some(Box::pin(client.clone().append_permit_owned(encrypted)));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
                         permit_opt = None;
                         match res {
-                            Ok(permit) => append_futs.push_back(permit.submit_session(session.clone())),
-                            Err(e) => {
-                                yield Err(e.into());
-                                break;
+                            Ok(permit) => {
+                                let input = pending_input.take().expect("permit must correspond to a pending input");
+                                inflight_inputs.push_back(input);
+                                append_futs.push_back(permit.submit_session(session.clone()));
+                            }
+                            Err(StreamerMissingInActionError) => {
+                                if let Err(e) = refresh_append_streamer_client(&backend, &basin, &stream, &mut client).await {
+                                    yield Err(e);
+                                    break;
+                                }
+                                let input = pending_input.as_ref().expect("failed permit must preserve input").clone();
+                                let encrypted = input.encrypt(&encryption, stream_id.as_bytes());
+                                permit_opt = Some(Box::pin(client.clone().append_permit_owned(encrypted)));
                             }
                         }
                     }
                     Some(res) = append_futs.next(), if !append_futs.is_empty() => {
+                        let input = inflight_inputs.pop_front().expect("inflight input for yielded submit");
                         match res {
                             Ok(ack) => {
                                 yield Ok(ack);
-                            },
+                            }
+                            Err(AppendErrorInternal::StreamerMissingInActionError(_)) => {
+                                // Streamer died after permit acquisition but before the append
+                                // was durably enqueued. Drain any remaining in-flight work in
+                                // order, then resubmit the lost inputs against a fresh client.
+                                let mut retry_inputs: VecDeque<AppendInput> = VecDeque::new();
+                                retry_inputs.push_back(input);
+                                while let Some(res) = append_futs.next().await {
+                                    let input = inflight_inputs.pop_front().expect("inflight input for yielded submit");
+                                    match res {
+                                        Ok(ack) => yield Ok(ack),
+                                        Err(AppendErrorInternal::StreamerMissingInActionError(_)) => {
+                                            retry_inputs.push_back(input);
+                                        }
+                                        Err(e) => {
+                                            yield Err(e.into());
+                                            break 'session;
+                                        }
+                                    }
+                                }
+                                if let Some(permit_fut) = permit_opt.take() {
+                                    let _ = permit_fut.await;
+                                    let input = pending_input.take().expect("permit must correspond to pending input");
+                                    retry_inputs.push_back(input);
+                                }
+                                if let Err(e) = refresh_append_streamer_client(&backend, &basin, &stream, &mut client).await {
+                                    yield Err(e);
+                                    break 'session;
+                                }
+                                for retry_input in retry_inputs {
+                                    let encrypted = retry_input.clone().encrypt(&encryption, stream_id.as_bytes());
+                                    let permit = match client.clone().append_permit_owned(encrypted).await {
+                                        Ok(permit) => permit,
+                                        Err(e) => {
+                                            yield Err(e.into());
+                                            break 'session;
+                                        }
+                                    };
+                                    match permit.submit_session(session.clone()).await {
+                                        Ok(ack) => yield Ok(ack),
+                                        Err(e) => {
+                                            yield Err(e.into());
+                                            break 'session;
+                                        }
+                                    }
+                                }
+                            }
                             Err(e) => {
                                 yield Err(e.into());
                                 break;
@@ -90,6 +182,16 @@ impl StreamHandle {
             }
         }
     }
+}
+
+async fn refresh_append_streamer_client(
+    backend: &Backend,
+    basin: &BasinName,
+    stream: &StreamName,
+    client: &mut super::streamer::StreamerClient,
+) -> Result<(), AppendError> {
+    *client = backend.streamer_client(basin, stream).await?;
+    Ok(())
 }
 
 #[derive(Debug)]

@@ -64,7 +64,20 @@ impl Backend {
 
 impl StreamHandle {
     pub async fn check_tail(self) -> Result<StreamPosition, CheckTailError> {
-        let tail = self.client.check_tail().await?;
+        let StreamHandle {
+            backend,
+            basin,
+            stream,
+            mut client,
+            ..
+        } = self;
+        let tail = match client.check_tail().await {
+            Ok(tail) => tail,
+            Err(StreamerMissingInActionError) => {
+                refresh_check_tail_streamer_client(&backend, &basin, &stream, &mut client).await?;
+                client.check_tail().await?
+            }
+        };
         Ok(tail)
     }
 
@@ -73,14 +86,22 @@ impl StreamHandle {
         start: ReadStart,
         end: ReadEnd,
     ) -> Result<impl Stream<Item = Result<ReadSessionOutput, ReadError>> + 'static, ReadError> {
-        let stream_id = self.client.stream_id();
-        let session = read_session(self.db, self.client, start, end).await?;
+        let StreamHandle {
+            backend,
+            basin,
+            stream,
+            db,
+            client,
+            encryption,
+        } = self;
+        let stream_id = client.stream_id();
+        let session = read_session(backend, basin, stream, db, client, start, end).await?;
         Ok(async_stream::stream! {
             tokio::pin!(session);
             while let Some(output) = session.next().await {
                 let output = match output {
                     Ok(output) => output
-                        .decrypt(&self.encryption, stream_id.as_bytes())
+                        .decrypt(&encryption, stream_id.as_bytes())
                         .map_err(ReadError::from),
                     Err(err) => Err(err),
                 };
@@ -95,13 +116,23 @@ impl StreamHandle {
 }
 
 async fn read_session(
+    backend: Backend,
+    basin: BasinName,
+    stream: StreamName,
     db: slatedb::Db,
-    client: super::streamer::StreamerClient,
+    mut client: super::streamer::StreamerClient,
     start: ReadStart,
     end: ReadEnd,
 ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError> {
     let stream_id = client.stream_id();
-    let tail = client.check_tail().await?;
+    let tail = loop {
+        match client.check_tail().await {
+            Ok(tail) => break tail,
+            Err(StreamerMissingInActionError) => {
+                refresh_read_streamer_client(&backend, &basin, &stream, &mut client).await?;
+            }
+        }
+    };
     let mut state = ReadSessionState {
         start_seq_num: read_start_seq_num(&db, stream_id, start, end, tail).await?,
         limit: EvaluatedReadLimit::Remaining(end.limit),
@@ -192,16 +223,16 @@ async fn read_session(
                 if !end.may_follow() {
                     break;
                 }
-                match client.follow(state.start_seq_num).await? {
-                    Ok(mut follow_rx) => {
-                        // Only a delivered batch should reset the absolute wait budget.
+                match client.follow(state.start_seq_num).await {
+                    Ok(Ok(mut follow_rx)) => {
                         state.arm_wait_deadline_if_unset();
                         if state.wait_deadline_expired() {
                             break;
                         }
                         yield StoredReadSessionOutput::Heartbeat(state.tail);
+                        let mut reconnect = false;
                         while let EvaluatedReadLimit::Remaining(limit) = state.limit {
-                            tokio::select! {
+                            let res: Result<(), ReadError> = tokio::select! {
                                 biased;
                                 msg = follow_rx.recv() => {
                                     match msg {
@@ -221,11 +252,11 @@ async fn read_session(
                                             Ok(())
                                         }
                                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                                            // Catch up using DB
                                             continue 'session;
                                         }
                                         Err(broadcast::error::RecvError::Closed) => {
-                                            Err(StreamerMissingInActionError)
+                                            reconnect = true;
+                                            break;
                                         }
                                     }
                                 }
@@ -236,18 +267,49 @@ async fn read_session(
                                 _ = wait_sleep_until(state.wait_deadline) => {
                                     break 'session;
                                 }
-                            }?;
+                            };
+                            res?;
+                        }
+                        if reconnect {
+                            refresh_read_streamer_client(&backend, &basin, &stream, &mut client)
+                                .await?;
+                            continue 'session;
                         }
                     }
-                    Err(tail) => {
+                    Ok(Err(tail)) => {
                         assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
                         state.tail = tail;
+                    }
+                    Err(StreamerMissingInActionError) => {
+                        refresh_read_streamer_client(&backend, &basin, &stream, &mut client)
+                            .await?;
+                        continue 'session;
                     }
                 }
             }
         }
     };
     Ok(session)
+}
+
+async fn refresh_check_tail_streamer_client(
+    backend: &Backend,
+    basin: &BasinName,
+    stream: &StreamName,
+    client: &mut super::streamer::StreamerClient,
+) -> Result<(), CheckTailError> {
+    *client = backend.streamer_client(basin, stream).await?;
+    Ok(())
+}
+
+async fn refresh_read_streamer_client(
+    backend: &Backend,
+    basin: &BasinName,
+    stream: &StreamName,
+    client: &mut super::streamer::StreamerClient,
+) -> Result<(), ReadError> {
+    *client = backend.streamer_client(basin, stream).await?;
+    Ok(())
 }
 
 async fn read_start_seq_num(
@@ -1035,6 +1097,149 @@ mod tests {
             .next()
             .await
             .expect("session should stay open after dormancy")
+            .expect("session should not error after dormancy");
+        let ReadSessionOutput::Batch(batch) = next else {
+            panic!("expected new batch after append");
+        };
+        assert_eq!(batch.records.len(), 1);
+        let record = batch.records.first().expect("batch should have one record");
+        let Record::Envelope(envelope) = record.inner() else {
+            panic!("expected envelope record");
+        };
+        assert_eq!(envelope.body().as_ref(), b"follow-1");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn stale_client_check_tail_fails_after_dormancy() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let client = backend.streamer_client(&basin, &stream).await.unwrap();
+        let initial_tail = client
+            .check_tail()
+            .await
+            .expect("initial check_tail should succeed");
+        assert_eq!(initial_tail, StreamPosition::MIN);
+
+        tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(matches!(
+            client.check_tail().await,
+            Err(StreamerMissingInActionError)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn follow_survives_streamer_dormancy_after_catchup_batch() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .create_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        backend
+            .create_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly(None),
+            )
+            .await
+            .unwrap();
+
+        let initial_input =
+            append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
+        backend
+            .open_for_append(&basin, &stream, None)
+            .await
+            .unwrap()
+            .append(initial_input)
+            .await
+            .unwrap();
+
+        let start = ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        };
+        let end = ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: None,
+        };
+        let session = backend
+            .open_for_read(&basin, &stream, None)
+            .await
+            .unwrap()
+            .read(start, end)
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should yield initial batch")
+            .expect("session should not error");
+        assert!(matches!(first, ReadSessionOutput::Batch(_)));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        let second = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should enter follow mode after dormancy")
+            .expect("session should not error after dormancy");
+        assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
+
+        let follow_input =
+            append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
+        backend
+            .open_for_append(&basin, &stream, None)
+            .await
+            .unwrap()
+            .append(follow_input)
+            .await
+            .unwrap();
+
+        let next = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should deliver new data after dormancy")
             .expect("session should not error after dormancy");
         let ReadSessionOutput::Batch(batch) = next else {
             panic!("expected new batch after append");

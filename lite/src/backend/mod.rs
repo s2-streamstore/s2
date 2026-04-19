@@ -1,4 +1,7 @@
-use s2_common::encryption::EncryptionSpec;
+use s2_common::{
+    encryption::EncryptionSpec,
+    types::{basin::BasinName, stream::StreamName},
+};
 
 pub mod error;
 
@@ -20,6 +23,9 @@ pub use crate::stream_id::StreamId;
 
 #[derive(Clone)]
 pub struct StreamHandle {
+    backend: core::Backend,
+    basin: BasinName,
+    stream: StreamName,
     db: slatedb::Db,
     client: streamer::StreamerClient,
     encryption: EncryptionSpec,

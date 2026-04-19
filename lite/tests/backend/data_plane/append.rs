@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
@@ -410,6 +412,62 @@ async fn test_append_session_roundtrip(
     #[case] encryption: EncryptionSpec,
 ) {
     assert_append_session_roundtrip(test_suffix, &encryption).await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_append_session_survives_streamer_dormancy_between_inputs() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "append-session-dormancy",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        tx.send(AppendInput {
+            records: create_test_record_batch(vec![Bytes::from_static(b"first")]),
+            match_seq_num: None,
+            fencing_token: None,
+        })
+        .expect("first input should send");
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        tx.send(AppendInput {
+            records: create_test_record_batch(vec![Bytes::from_static(b"second")]),
+            match_seq_num: None,
+            fencing_token: None,
+        })
+        .expect("second input should send");
+    });
+    let inputs = async_stream::stream! {
+        while let Some(input) = rx.recv().await {
+            yield input;
+        }
+    };
+
+    let session = append_session(&backend, basin_name, stream_name, None, inputs)
+        .await
+        .expect("Failed to create append session");
+    tokio::pin!(session);
+
+    let first_ack = session
+        .next()
+        .await
+        .expect("session should yield first ack")
+        .expect("first append should succeed");
+    assert_eq!(first_ack.start.seq_num, 0);
+    assert_eq!(first_ack.end.seq_num, 1);
+
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+
+    let second_ack = session
+        .next()
+        .await
+        .expect("session should yield second ack")
+        .expect("append session should survive dormancy between inputs");
+    assert_eq!(second_ack.start.seq_num, 1);
+    assert_eq!(second_ack.end.seq_num, 2);
 }
 
 #[tokio::test]

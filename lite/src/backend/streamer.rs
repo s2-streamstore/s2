@@ -33,7 +33,7 @@ use slatedb::{
     config::{PutOptions, Ttl, WriteOptions},
 };
 use tokio::{
-    sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot},
     time::Instant,
 };
 
@@ -584,24 +584,36 @@ impl StreamerClient {
     pub async fn append_permit(
         &self,
         input: StoredAppendInput,
-    ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
+    ) -> Result<AppendPermit, StreamerMissingInActionError> {
+        self.clone().append_permit_owned(input).await
+    }
+
+    pub async fn append_permit_owned(
+        self,
+        input: StoredAppendInput,
+    ) -> Result<AppendPermit, StreamerMissingInActionError> {
         let metered_size = input.records.metered_size();
         metrics::observe_append_batch_size(input.records.len(), metered_size);
         let start = Instant::now();
         let num_permits =
             u32::try_from(metered_size.max(1)).expect("append batch size fits in u32");
+        let StreamerClient {
+            msg_tx,
+            append_inflight_bytes,
+            ..
+        } = self;
         let sema_permit = tokio::select! {
-            res = self.append_inflight_bytes.acquire_many(num_permits) => {
+            res = append_inflight_bytes.acquire_many_owned(num_permits) => {
                 res.map_err(|_| StreamerMissingInActionError)
             }
-            _ = self.msg_tx.closed() => {
+            _ = msg_tx.closed() => {
                 Err(StreamerMissingInActionError)
             }
         }?;
         metrics::observe_append_permit_latency(start.elapsed());
         Ok(AppendPermit {
             sema_permit,
-            msg_tx: &self.msg_tx,
+            msg_tx,
             input,
         })
     }
@@ -657,13 +669,13 @@ fn timestamp_now() -> Timestamp {
 }
 
 #[derive(Debug)]
-pub struct AppendPermit<'a> {
-    sema_permit: SemaphorePermit<'a>,
-    msg_tx: &'a mpsc::UnboundedSender<Message>,
+pub struct AppendPermit {
+    sema_permit: OwnedSemaphorePermit,
+    msg_tx: mpsc::UnboundedSender<Message>,
     input: StoredAppendInput,
 }
 
-impl AppendPermit<'_> {
+impl AppendPermit {
     pub async fn submit(self) -> Result<AppendAck, AppendErrorInternal> {
         self.submit_internal(None, AppendType::Regular).await
     }
