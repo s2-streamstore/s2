@@ -52,10 +52,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem
 rkyv = "0.8"
 rstest = "0.26"
 rustls = "0.23"
-s2-api = { path = "api", version = "0.27" }
-s2-common = { path = "common", version = "0.31" }
-s2-lite = { path = "lite", version = "0.29" }
-s2-sdk = { path = "sdk", version = "0.26" }
+s2-api = { path = "api", version = "0.28" }
+s2-common = { path = "common", version = "0.32" }
+s2-lite = { path = "lite", version = "0.30" }
+s2-sdk = { path = "sdk", version = "0.27" }
 schemars = "1.2"
 secrecy = "0.10.3"
 serde = "1.0"
