@@ -27,6 +27,7 @@ use crate::{
             CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
         },
         kv,
+        streamer::GuardedStreamerClient,
     },
     stream_id::StreamId,
 };
@@ -96,7 +97,7 @@ impl StreamHandle {
 
 async fn read_session(
     db: slatedb::Db,
-    client: super::streamer::StreamerClient,
+    client: GuardedStreamerClient,
     start: ReadStart,
     end: ReadEnd,
 ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError> {

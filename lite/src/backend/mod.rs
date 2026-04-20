@@ -18,10 +18,9 @@ pub use core::Backend;
 
 pub use crate::stream_id::StreamId;
 
-#[derive(Clone)]
 pub struct StreamHandle {
     db: slatedb::Db,
-    client: streamer::StreamerClient,
+    client: streamer::GuardedStreamerClient,
     encryption: EncryptionSpec,
 }
 

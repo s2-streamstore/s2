@@ -12,6 +12,7 @@ use futures::{
     FutureExt as _,
     future::{BoxFuture, OptionFuture},
 };
+use parking_lot::Mutex;
 use s2_common::{
     encryption::EncryptionAlgorithm,
     record::{
@@ -71,11 +72,11 @@ pub(super) fn retention_age_or_zero(config: &OptionalStreamConfig) -> Duration {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct StreamerId(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct StreamerGenerationId(u64);
 
-impl StreamerId {
-    fn next() -> Self {
+impl StreamerGenerationId {
+    pub(super) fn next() -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
@@ -93,7 +94,126 @@ struct InFlightAppend {
     records: Vec<Metered<StoredSequencedRecord>>,
 }
 
+#[derive(Debug, Default)]
+struct LeaseState {
+    active: usize,
+    closed: bool,
+}
+
+#[derive(Debug)]
+struct StreamerLeaseState {
+    state: Arc<Mutex<LeaseState>>,
+}
+
+impl StreamerLeaseState {
+    fn new() -> (Self, StreamerClientLeaseState) {
+        let state = Arc::new(Mutex::new(LeaseState::default()));
+        (
+            Self {
+                state: state.clone(),
+            },
+            StreamerClientLeaseState { state },
+        )
+    }
+
+    fn close_if_idle(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.closed {
+            return true;
+        }
+        if state.active == 0 {
+            state.closed = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for StreamerLeaseState {
+    fn drop(&mut self) {
+        self.state.lock().closed = true;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StreamerClientLeaseState {
+    state: Arc<Mutex<LeaseState>>,
+}
+
+pub(super) struct StreamerClientLeaseGuard {
+    state: Arc<Mutex<LeaseState>>,
+}
+
+impl Drop for StreamerClientLeaseGuard {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        assert!(state.active > 0, "lease count underflow");
+        state.active -= 1;
+    }
+}
+
+impl StreamerClientLeaseState {
+    fn try_acquire(&self) -> Result<StreamerClientLeaseGuard, StreamerMissingInActionError> {
+        {
+            let mut state = self.state.lock();
+            if state.closed {
+                return Err(StreamerMissingInActionError);
+            }
+            state.active += 1;
+        }
+        Ok(StreamerClientLeaseGuard {
+            state: self.state.clone(),
+        })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state.lock().closed
+    }
+}
+
+pub(super) struct GuardedStreamerClient {
+    client: StreamerClient,
+    _guard: StreamerClientLeaseGuard,
+}
+
+impl GuardedStreamerClient {
+    pub(super) fn stream_id(&self) -> StreamId {
+        self.client.stream_id
+    }
+
+    pub(super) fn cipher(&self) -> Option<EncryptionAlgorithm> {
+        self.client.cipher
+    }
+
+    pub(super) async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
+        self.client.check_tail().await
+    }
+
+    pub(super) async fn follow(
+        &self,
+        start_seq_num: SeqNum,
+    ) -> Result<
+        Result<broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>, StreamPosition>,
+        StreamerMissingInActionError,
+    > {
+        self.client.follow(start_seq_num).await
+    }
+
+    pub(super) async fn append_permit(
+        &self,
+        input: StoredAppendInput,
+    ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
+        self.client.append_permit(input).await
+    }
+
+    pub(super) async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
+        self.client.terminal_trim().await
+    }
+}
+
 pub(super) struct Spawner {
+    pub generation_id: StreamerGenerationId,
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: OptionalStreamConfig,
@@ -107,8 +227,12 @@ pub(super) struct Spawner {
 }
 
 impl Spawner {
-    pub fn spawn(self, on_exit: impl FnOnce(StreamerId) + Send + 'static) -> StreamerClient {
+    pub fn spawn(
+        self,
+        on_exit: impl FnOnce(StreamerGenerationId) + Send + 'static,
+    ) -> StreamerClient {
         let Self {
+            generation_id,
             db,
             stream_id,
             config,
@@ -122,6 +246,7 @@ impl Spawner {
         } = self;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (streamer_lease_state, client_lease_state) = StreamerLeaseState::new();
         let streamer = Streamer {
             db,
             stream_id,
@@ -143,24 +268,23 @@ impl Spawner {
             pending_appends: append::PendingAppends::new(),
             stable_pos: tail_pos,
             follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
-            active_followers: 0,
+            lease_state: streamer_lease_state,
             durability_notifier,
             bgtask_trigger_tx,
         };
 
-        let id = StreamerId::next();
-
         tokio::spawn(async move {
             streamer.run(msg_rx).await;
-            on_exit(id);
+            on_exit(generation_id);
         });
 
         StreamerClient {
-            id,
+            generation_id,
             stream_id,
             cipher,
             msg_tx,
             append_inflight_bytes: append_inflight_bytes_sema,
+            lease_state: client_lease_state,
         }
     }
 }
@@ -198,7 +322,7 @@ struct Streamer {
     pending_appends: append::PendingAppends,
     stable_pos: StreamPosition,
     follow_tx: broadcast::Sender<Vec<Metered<StoredSequencedRecord>>>,
-    active_followers: usize,
+    lease_state: StreamerLeaseState,
     durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
@@ -439,13 +563,7 @@ impl Streamer {
                             reply_tx,
                         } => {
                             let reply = if start_seq_num == self.stable_pos.seq_num {
-                                self.active_followers += 1;
-                                Ok(FollowReceiver {
-                                    _guard: FollowGuard {
-                                        msg_tx: self.msg_tx.clone(),
-                                    },
-                                    rx: self.follow_tx.subscribe(),
-                                })
+                                Ok(self.follow_tx.subscribe())
                             } else {
                                 Err(self.stable_pos)
                             };
@@ -456,10 +574,6 @@ impl Streamer {
                         }
                         Message::Reconfigure { config } => {
                             self.config = config;
-                        }
-                        Message::FollowerDropped => {
-                            assert!(self.active_followers > 0, "follow guard count underflow");
-                            self.active_followers -= 1;
                         }
                         Message::DurabilityStatus(status) => {
                             match status {
@@ -480,7 +594,7 @@ impl Streamer {
                     }
                 }
                 _ = dormancy.as_mut() => {
-                    if self.active_followers == 0 {
+                    if self.lease_state.close_if_idle() {
                         break;
                     }
                 }
@@ -498,7 +612,9 @@ enum Message {
     },
     Follow {
         start_seq_num: SeqNum,
-        reply_tx: oneshot::Sender<Result<FollowReceiver, StreamPosition>>,
+        reply_tx: oneshot::Sender<
+            Result<broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>, StreamPosition>,
+        >,
     },
     CheckTail {
         reply_tx: oneshot::Sender<StreamPosition>,
@@ -506,60 +622,37 @@ enum Message {
     Reconfigure {
         config: OptionalStreamConfig,
     },
-    FollowerDropped,
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
-}
-
-pub(super) struct FollowReceiver {
-    _guard: FollowGuard,
-    rx: broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>,
-}
-
-impl FollowReceiver {
-    pub async fn recv(
-        &mut self,
-    ) -> Result<Vec<Metered<StoredSequencedRecord>>, broadcast::error::RecvError> {
-        self.rx.recv().await
-    }
-}
-
-struct FollowGuard {
-    msg_tx: mpsc::UnboundedSender<Message>,
-}
-
-impl Drop for FollowGuard {
-    fn drop(&mut self) {
-        let _ = self.msg_tx.send(Message::FollowerDropped);
-    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct StreamerClient {
-    id: StreamerId,
+    generation_id: StreamerGenerationId,
     stream_id: StreamId,
     cipher: Option<EncryptionAlgorithm>,
     msg_tx: mpsc::UnboundedSender<Message>,
     append_inflight_bytes: Arc<Semaphore>,
+    lease_state: StreamerClientLeaseState,
 }
 
 impl StreamerClient {
-    pub fn id(&self) -> StreamerId {
-        self.id
+    pub(super) fn generation_id(&self) -> StreamerGenerationId {
+        self.generation_id
     }
 
-    pub fn is_dead(&self) -> bool {
-        self.msg_tx.is_closed()
+    pub(super) fn is_dead(&self) -> bool {
+        self.lease_state.is_closed()
     }
 
-    pub fn stream_id(&self) -> StreamId {
-        self.stream_id
+    pub(super) fn guard(self) -> Result<GuardedStreamerClient, StreamerMissingInActionError> {
+        let _guard = self.lease_state.try_acquire()?;
+        Ok(GuardedStreamerClient {
+            client: self,
+            _guard,
+        })
     }
 
-    pub fn cipher(&self) -> Option<EncryptionAlgorithm> {
-        self.cipher
-    }
-
-    pub async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
+    async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::CheckTail { reply_tx })
@@ -567,10 +660,13 @@ impl StreamerClient {
         reply_rx.await.map_err(|_| StreamerMissingInActionError)
     }
 
-    pub async fn follow(
+    async fn follow(
         &self,
         start_seq_num: SeqNum,
-    ) -> Result<Result<FollowReceiver, StreamPosition>, StreamerMissingInActionError> {
+    ) -> Result<
+        Result<broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>, StreamPosition>,
+        StreamerMissingInActionError,
+    > {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::Follow {
@@ -581,7 +677,7 @@ impl StreamerClient {
         reply_rx.await.map_err(|_| StreamerMissingInActionError)
     }
 
-    pub async fn append_permit(
+    async fn append_permit(
         &self,
         input: StoredAppendInput,
     ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
@@ -606,11 +702,11 @@ impl StreamerClient {
         })
     }
 
-    pub fn advise_reconfig(&self, config: OptionalStreamConfig) -> bool {
+    pub(super) fn advise_reconfig(&self, config: OptionalStreamConfig) -> bool {
         self.msg_tx.send(Message::Reconfigure { config }).is_ok()
     }
 
-    pub async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
+    async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
         let record: StoredAppendRecord = StoredAppendRecordParts {
             timestamp: Some(Timestamp::MAX),
             record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
@@ -1155,6 +1251,7 @@ mod tests {
             .expect("db");
         let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
+        let (lease_state, _) = StreamerLeaseState::new();
         Streamer {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
@@ -1176,10 +1273,53 @@ mod tests {
             pending_appends: append::PendingAppends::new(),
             stable_pos: StreamPosition::MIN,
             follow_tx: broadcast::Sender::new(super::super::FOLLOWER_MAX_LAG),
-            active_followers: 0,
+            lease_state,
             durability_notifier: DurabilityNotifier::spawn(&db),
             bgtask_trigger_tx,
         }
+    }
+
+    #[test]
+    fn lease_state_closes_when_idle_and_rejects_new_leases() {
+        let (streamer_lease_state, client_lease_state) = StreamerLeaseState::new();
+
+        let lease = client_lease_state
+            .try_acquire()
+            .expect("first lease should succeed");
+        assert!(
+            !streamer_lease_state.close_if_idle(),
+            "an outstanding lease should keep the state open"
+        );
+
+        drop(lease);
+
+        assert!(
+            streamer_lease_state.close_if_idle(),
+            "an idle state should close once dormancy wins"
+        );
+        assert!(client_lease_state.is_closed());
+        assert!(matches!(
+            client_lease_state.try_acquire(),
+            Err(StreamerMissingInActionError)
+        ));
+    }
+
+    #[test]
+    fn streamer_lease_state_drop_blocks_new_leases_while_existing_guard_drops_cleanly() {
+        let (streamer_lease_state, client_lease_state) = StreamerLeaseState::new();
+
+        let lease = client_lease_state
+            .try_acquire()
+            .expect("first lease should succeed");
+        drop(streamer_lease_state);
+
+        assert!(matches!(
+            client_lease_state.try_acquire(),
+            Err(StreamerMissingInActionError)
+        ));
+
+        drop(lease);
+        assert!(client_lease_state.is_closed());
     }
 
     #[tokio::test]

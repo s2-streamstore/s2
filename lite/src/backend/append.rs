@@ -76,7 +76,7 @@ impl StreamHandle {
                         match res {
                             Ok(ack) => {
                                 yield Ok(ack);
-                            },
+                            }
                             Err(e) => {
                                 yield Err(e.into());
                                 break;
