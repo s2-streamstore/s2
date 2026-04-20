@@ -1140,7 +1140,7 @@ impl App {
     /// Create an S2 client from the given access token
     fn create_s2_client(access_token: &str) -> Result<s2_sdk::S2, CliError> {
         let sdk_config = s2_sdk::types::S2Config::new(access_token)
-            .with_user_agent(format!("s2-tui/{}", env!("CARGO_PKG_VERSION")))
+            .with_user_agent(super::user_agent())
             .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?
             .with_request_timeout(Duration::from_secs(30));
         s2_sdk::S2::new(sdk_config).map_err(CliError::SdkInit)
