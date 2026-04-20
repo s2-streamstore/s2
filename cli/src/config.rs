@@ -163,7 +163,7 @@ pub fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigError> {
     save_cli_config(&config)
 }
 
-pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
+pub fn sdk_config(config: &CliConfig, user_agent: &str) -> Result<S2Config, CliError> {
     let access_token = config
         .access_token
         .as_ref()
@@ -175,7 +175,7 @@ pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
         .unwrap_or(sdk::types::Compression::None);
 
     let mut sdk_config = S2Config::new(access_token)
-        .with_user_agent(format!("s2-cli/{}", env!("CARGO_PKG_VERSION")))
+        .with_user_agent(user_agent)
         .expect("valid user agent")
         .with_request_timeout(Duration::from_secs(30))
         .with_compression(compression);

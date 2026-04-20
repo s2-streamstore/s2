@@ -151,7 +151,10 @@ async fn run() -> Result<(), CliError> {
     }
 
     let cli_config = load_cli_config()?;
-    let sdk_config = sdk_config(&cli_config)?;
+    let sdk_config = sdk_config(
+        &cli_config,
+        &format!("s2-cli/{}", env!("CARGO_PKG_VERSION")),
+    )?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
     let token_source = access_token_source(&cli_config);
     let result: Result<(), CliError> = (async {
