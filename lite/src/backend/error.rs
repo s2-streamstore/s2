@@ -1,7 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    encryption::{EncryptionAlgorithm, EncryptionSpecResolutionError},
+    encryption::EncryptionSpecResolutionError,
     record::{FencingToken, RecordDecryptionError, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
@@ -78,10 +78,12 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("record encryption algorithm mismatch")]
-pub struct EncryptionAlgorithmMismatchError {
-    pub expected: Option<EncryptionAlgorithm>,
-    pub actual: Option<EncryptionAlgorithm>,
+#[error(
+    "stream message limit exceeded: records must use sequence numbers below {limit} (max {limit} messages per stream); attempted {assigned_seq_num}"
+)]
+pub struct StreamMessageLimitExceededError {
+    pub assigned_seq_num: SeqNum,
+    pub limit: SeqNum,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -111,7 +113,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
+    StreamMessageLimitExceeded(#[from] StreamMessageLimitExceededError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -167,7 +169,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
+    StreamMessageLimitExceeded(#[from] StreamMessageLimitExceededError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -180,8 +182,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptionAlgorithmMismatch(e) => {
-                AppendError::EncryptionAlgorithmMismatch(e)
+            AppendErrorInternal::StreamMessageLimitExceeded(e) => {
+                AppendError::StreamMessageLimitExceeded(e)
             }
         }
     }

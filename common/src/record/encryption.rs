@@ -33,7 +33,7 @@ use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 
-use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, StoredRecord};
+use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, SeqNum, StoredRecord};
 use crate::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionSpec},
@@ -97,6 +97,13 @@ impl EncryptedRecordFormat {
             Self::Aes256GcmV1 => buf.put_slice(&random::<[u8; 12]>()),
         }
     }
+
+    const fn stream_message_limit(self) -> Option<SeqNum> {
+        match self {
+            Self::Aegis256V1 => None,
+            Self::Aes256GcmV1 => Some(1u64 << 32),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -132,6 +139,10 @@ impl EncryptedRecord {
 
     pub fn algorithm(&self) -> EncryptionAlgorithm {
         self.format.algorithm()
+    }
+
+    pub fn stream_message_limit(&self) -> Option<SeqNum> {
+        self.format.stream_message_limit()
     }
 
     pub(crate) fn nonce(&self) -> &[u8] {

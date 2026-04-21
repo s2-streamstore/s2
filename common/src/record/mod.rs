@@ -247,6 +247,13 @@ impl StoredRecord {
             Self::Encrypted { record, .. } => Some(record.algorithm()),
         }
     }
+
+    pub fn stream_message_limit(&self) -> Option<SeqNum> {
+        match self {
+            Self::Plaintext(_) => None,
+            Self::Encrypted { record, .. } => record.stream_message_limit(),
+        }
+    }
 }
 
 impl DeepSize for StoredRecord {
