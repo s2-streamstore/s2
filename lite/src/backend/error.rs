@@ -79,7 +79,7 @@ pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
-    "stream encrypted message limit exceeded: records must use sequence numbers below {limit}; attempted {assigned_seq_num}"
+    "stream encrypted message limit exceeded: records must be assigned sequence numbers below {limit}; attempted {assigned_seq_num}"
 )]
 pub struct EncryptedMessageLimitExceededError {
     pub assigned_seq_num: SeqNum,
