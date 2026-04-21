@@ -45,7 +45,7 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, RequestDroppedError, StreamMessageLimitExceededError,
+            DeleteStreamError, EncryptedMessageLimitExceededError, RequestDroppedError,
             StreamerMissingInActionError,
         },
         kv,
@@ -732,7 +732,7 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::StreamMessageLimitExceeded(_) => {
+                AppendErrorInternal::EncryptedMessageLimitExceeded(_) => {
                     unreachable!("terminal append is plaintext command record")
                 }
             }),
@@ -828,18 +828,13 @@ fn sequenced_records(
         .enumerate()
     {
         let assigned_seq_num = first_seq_num + i as u64;
-        match record.as_ref().into_inner() {
-            StoredRecord::Plaintext(Record::Command(_)) => {}
-            sr @ StoredRecord::Plaintext(_) | sr @ StoredRecord::Encrypted { .. } => {
-                if let Some(limit) = sr.stream_message_limit()
-                    && assigned_seq_num >= limit
-                {
-                    Err(StreamMessageLimitExceededError {
-                        assigned_seq_num,
-                        limit,
-                    })?;
-                }
-            }
+        if let Some(limit) = record.as_ref().into_inner().stream_message_limit()
+            && assigned_seq_num >= limit
+        {
+            Err(EncryptedMessageLimitExceededError {
+                assigned_seq_num,
+                limit,
+            })?;
         }
         let mut timestamp = match mode {
             TimestampingMode::ClientPrefer => timestamp.unwrap_or(now),
@@ -1212,13 +1207,13 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(AppendErrorInternal::StreamMessageLimitExceeded(
-                StreamMessageLimitExceededError {
+            Err(AppendErrorInternal::EncryptedMessageLimitExceeded(
+                EncryptedMessageLimitExceededError {
                     assigned_seq_num: seq_num,
                     limit: err_limit,
                 }
             ))
-            if seq_num == limit && err_limit == limit
+            if seq_num == limit && err_limit == limit,
         ));
     }
 
