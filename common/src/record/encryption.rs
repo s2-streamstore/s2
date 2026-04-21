@@ -98,7 +98,7 @@ impl EncryptedRecordFormat {
         }
     }
 
-    const fn stream_message_limit(self) -> Option<SeqNum> {
+    const fn stream_encrypted_record_limit(self) -> Option<SeqNum> {
         match self {
             Self::Aegis256V1 => None,
             Self::Aes256GcmV1 => Some(1u64 << 32),
@@ -141,8 +141,8 @@ impl EncryptedRecord {
         self.format.algorithm()
     }
 
-    pub fn stream_message_limit(&self) -> Option<SeqNum> {
-        self.format.stream_message_limit()
+    pub fn stream_encrypted_record_limit(&self) -> Option<SeqNum> {
+        self.format.stream_encrypted_record_limit()
     }
 
     pub(crate) fn nonce(&self) -> &[u8] {

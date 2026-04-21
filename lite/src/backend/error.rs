@@ -79,9 +79,9 @@ pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
-    "stream encrypted message limit exceeded: records must be assigned sequence numbers below {limit}; attempted {assigned_seq_num}"
+    "stream encrypted record limit exceeded: records must be assigned sequence numbers below {limit}; attempted {assigned_seq_num}"
 )]
-pub struct EncryptedMessageLimitExceededError {
+pub struct StreamEncryptedRecordLimitExceededError {
     pub assigned_seq_num: SeqNum,
     pub limit: SeqNum,
 }
@@ -113,7 +113,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptedMessageLimitExceeded(#[from] EncryptedMessageLimitExceededError),
+    StreamEncryptedRecordLimitExceeded(#[from] StreamEncryptedRecordLimitExceededError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -169,7 +169,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    StreamMessageLimitExceeded(#[from] EncryptedMessageLimitExceededError),
+    StreamEncryptedRecordLimitExceeded(#[from] StreamEncryptedRecordLimitExceededError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -182,8 +182,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptedMessageLimitExceeded(e) => {
-                AppendError::StreamMessageLimitExceeded(e)
+            AppendErrorInternal::StreamEncryptedRecordLimitExceeded(e) => {
+                AppendError::StreamEncryptedRecordLimitExceeded(e)
             }
         }
     }

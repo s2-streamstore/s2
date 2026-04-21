@@ -249,7 +249,7 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
-                AppendError::StreamMessageLimitExceeded(e) => {
+                AppendError::StreamEncryptedRecordLimitExceeded(e) => {
                     standard(ErrorCode::Invalid, e.to_string())
                 }
             },

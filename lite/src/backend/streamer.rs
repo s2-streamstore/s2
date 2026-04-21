@@ -45,7 +45,7 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, EncryptedMessageLimitExceededError, RequestDroppedError,
+            DeleteStreamError, RequestDroppedError, StreamEncryptedRecordLimitExceededError,
             StreamerMissingInActionError,
         },
         kv,
@@ -732,7 +732,7 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::EncryptedMessageLimitExceeded(_) => {
+                AppendErrorInternal::StreamEncryptedRecordLimitExceeded(_) => {
                     unreachable!("terminal append is plaintext command record")
                 }
             }),
@@ -828,10 +828,10 @@ fn sequenced_records(
         .enumerate()
     {
         let assigned_seq_num = first_seq_num + i as u64;
-        if let Some(limit) = record.as_ref().into_inner().stream_message_limit()
+        if let Some(limit) = record.as_ref().into_inner().stream_encrypted_record_limit()
             && assigned_seq_num >= limit
         {
-            Err(EncryptedMessageLimitExceededError {
+            Err(StreamEncryptedRecordLimitExceededError {
                 assigned_seq_num,
                 limit,
             })?;
@@ -1190,7 +1190,7 @@ mod tests {
         let limit = first_record
             .parts()
             .record
-            .stream_message_limit()
+            .stream_encrypted_record_limit()
             .expect("aes-256-gcm record has stream message limit");
         let records: StoredAppendRecordBatch = vec![
             first_record,
@@ -1207,8 +1207,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(AppendErrorInternal::EncryptedMessageLimitExceeded(
-                EncryptedMessageLimitExceededError {
+            Err(AppendErrorInternal::StreamEncryptedRecordLimitExceeded(
+                StreamEncryptedRecordLimitExceededError {
                     assigned_seq_num: seq_num,
                     limit: err_limit,
                 }
@@ -1227,7 +1227,7 @@ mod tests {
         )
         .parts()
         .record
-        .stream_message_limit()
+        .stream_encrypted_record_limit()
         .expect("aes-256-gcm record has stream message limit");
 
         let records: StoredAppendRecordBatch =

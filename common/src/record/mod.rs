@@ -248,10 +248,10 @@ impl StoredRecord {
         }
     }
 
-    pub fn stream_message_limit(&self) -> Option<SeqNum> {
+    pub fn stream_encrypted_record_limit(&self) -> Option<SeqNum> {
         match self {
             Self::Plaintext(_) => None,
-            Self::Encrypted { record, .. } => record.stream_message_limit(),
+            Self::Encrypted { record, .. } => record.stream_encrypted_record_limit(),
         }
     }
 }
