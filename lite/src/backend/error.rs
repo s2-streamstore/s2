@@ -79,10 +79,11 @@ pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
-    "stream encrypted record limit exceeded: records must be assigned sequence numbers below {limit}; attempted {assigned_seq_num}"
+    "stream encrypted record limit exceeded: records must be assigned sequence numbers below {limit}; attempted {attempted}",
+    attempted = self.assigned_seq_num()
 )]
 pub struct StreamEncryptedRecordLimitExceededError {
-    pub assigned_seq_num: SeqNum,
+    pub first_seq_num: SeqNum,
     pub limit: SeqNum,
 }
 
@@ -114,6 +115,16 @@ pub(super) enum AppendErrorInternal {
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
     StreamEncryptedRecordLimitExceeded(#[from] StreamEncryptedRecordLimitExceededError),
+}
+
+impl AppendErrorInternal {
+    pub(crate) fn durability_dependency(&self) -> RangeTo<SeqNum> {
+        match self {
+            Self::ConditionFailed(e) => e.durability_dependency(),
+            Self::StreamEncryptedRecordLimitExceeded(e) => e.durability_dependency(),
+            _ => ..0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -213,6 +224,16 @@ impl AppendConditionFailedError {
             } => ..*assigned_seq_num,
             FencingTokenMismatch { applied_point, .. } => *applied_point,
         }
+    }
+}
+
+impl StreamEncryptedRecordLimitExceededError {
+    pub fn assigned_seq_num(&self) -> SeqNum {
+        self.first_seq_num.max(self.limit)
+    }
+
+    pub(crate) fn durability_dependency(&self) -> RangeTo<SeqNum> {
+        ..self.first_seq_num
     }
 }
 

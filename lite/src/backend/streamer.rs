@@ -832,7 +832,7 @@ fn sequenced_records(
             && assigned_seq_num >= limit
         {
             Err(StreamEncryptedRecordLimitExceededError {
-                assigned_seq_num,
+                first_seq_num,
                 limit,
             })?;
         }
@@ -1207,13 +1207,10 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(AppendErrorInternal::StreamEncryptedRecordLimitExceeded(
-                StreamEncryptedRecordLimitExceededError {
-                    assigned_seq_num: seq_num,
-                    limit: err_limit,
-                }
-            ))
-            if seq_num == limit && err_limit == limit,
+            Err(AppendErrorInternal::StreamEncryptedRecordLimitExceeded(error))
+                if error.first_seq_num == limit - 1
+                    && error.limit == limit
+                    && error.assigned_seq_num() == limit,
         ));
     }
 

@@ -228,12 +228,7 @@ impl Ticket {
         append_err: AppendErrorInternal,
         stable_pos: StreamPosition,
     ) -> Option<BlockedReplySender> {
-        let mut durability_dependency =
-            if let AppendErrorInternal::ConditionFailed(cond_fail) = &append_err {
-                cond_fail.durability_dependency()
-            } else {
-                ..0
-            };
+        let mut durability_dependency = append_err.durability_dependency();
         if let Some(mut session) = self.session {
             let session = session.deref_mut();
             assert!(!session.poisoned, "thanks to typestate");
