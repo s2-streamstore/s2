@@ -79,12 +79,12 @@ pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
-    "stream encrypted record limit exceeded: records must be assigned sequence numbers below {limit}; attempted {attempted}",
-    attempted = self.assigned_seq_num()
+    "stream record limit exceeded: max assignable sequence number is {max_assignable_seq_num}; attempted {assigned_seq_num}"
 )]
-pub struct StreamEncryptedRecordLimitExceededError {
+pub struct StreamRecordLimitExceededError {
     pub first_seq_num: SeqNum,
-    pub limit: SeqNum,
+    pub assigned_seq_num: SeqNum,
+    pub max_assignable_seq_num: SeqNum,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -114,14 +114,14 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    StreamEncryptedRecordLimitExceeded(#[from] StreamEncryptedRecordLimitExceededError),
+    StreamRecordLimitExceeded(#[from] StreamRecordLimitExceededError),
 }
 
 impl AppendErrorInternal {
-    pub(crate) fn durability_dependency(&self) -> RangeTo<SeqNum> {
+    pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         match self {
             Self::ConditionFailed(e) => e.durability_dependency(),
-            Self::StreamEncryptedRecordLimitExceeded(e) => e.durability_dependency(),
+            Self::StreamRecordLimitExceeded(e) => e.durability_dependency(),
             _ => ..0,
         }
     }
@@ -180,7 +180,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    StreamEncryptedRecordLimitExceeded(#[from] StreamEncryptedRecordLimitExceededError),
+    StreamRecordLimitExceeded(#[from] StreamRecordLimitExceededError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -193,8 +193,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::StreamEncryptedRecordLimitExceeded(e) => {
-                AppendError::StreamEncryptedRecordLimitExceeded(e)
+            AppendErrorInternal::StreamRecordLimitExceeded(e) => {
+                AppendError::StreamRecordLimitExceeded(e)
             }
         }
     }
@@ -227,12 +227,8 @@ impl AppendConditionFailedError {
     }
 }
 
-impl StreamEncryptedRecordLimitExceededError {
-    pub fn assigned_seq_num(&self) -> SeqNum {
-        self.first_seq_num.max(self.limit)
-    }
-
-    pub(crate) fn durability_dependency(&self) -> RangeTo<SeqNum> {
+impl StreamRecordLimitExceededError {
+    pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         ..self.first_seq_num
     }
 }

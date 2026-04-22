@@ -45,7 +45,7 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, RequestDroppedError, StreamEncryptedRecordLimitExceededError,
+            DeleteStreamError, RequestDroppedError, StreamRecordLimitExceededError,
             StreamerMissingInActionError,
         },
         kv,
@@ -732,7 +732,7 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::StreamEncryptedRecordLimitExceeded(_) => {
+                AppendErrorInternal::StreamRecordLimitExceeded(_) => {
                     unreachable!("terminal append is plaintext command record")
                 }
             }),
@@ -828,12 +828,13 @@ fn sequenced_records(
         .enumerate()
     {
         let assigned_seq_num = first_seq_num + i as u64;
-        if let Some(limit) = record.as_ref().into_inner().stream_encrypted_record_limit()
-            && assigned_seq_num >= limit
-        {
-            Err(StreamEncryptedRecordLimitExceededError {
+
+        let max_assignable_seq_num = record.as_ref().into_inner().max_assignable_seq_num();
+        if assigned_seq_num > max_assignable_seq_num {
+            Err(StreamRecordLimitExceededError {
                 first_seq_num,
-                limit,
+                assigned_seq_num,
+                max_assignable_seq_num,
             })?;
         }
         let mut timestamp = match mode {
@@ -1187,11 +1188,8 @@ mod tests {
             None,
             &EncryptionSpec::aes256_gcm([0x24; 32]),
         );
-        let limit = first_record
-            .parts()
-            .record
-            .stream_encrypted_record_limit()
-            .expect("aes-256-gcm record has stream message limit");
+        let max_assignable_seq_num = first_record.parts().record.max_assignable_seq_num();
+        let first_rejected_seq_num = max_assignable_seq_num + 1;
         let records: StoredAppendRecordBatch = vec![
             first_record,
             test_encrypted_record(
@@ -1203,39 +1201,39 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, limit - 1, 0, &config);
+        let result = sequenced_records(records, max_assignable_seq_num, 0, &config);
 
         assert!(matches!(
             result,
-            Err(AppendErrorInternal::StreamEncryptedRecordLimitExceeded(error))
-                if error.first_seq_num == limit - 1
-                    && error.limit == limit
-                    && error.assigned_seq_num() == limit,
+            Err(AppendErrorInternal::StreamRecordLimitExceeded(error))
+                if error.first_seq_num == max_assignable_seq_num
+                    && error.assigned_seq_num == first_rejected_seq_num
+                    && error.max_assignable_seq_num == max_assignable_seq_num
         ));
     }
 
     #[test]
     fn sequenced_records_allow_aes256gcm_command_records_past_random_nonce_limit() {
         let config = OptionalTimestampingConfig::default();
-        let limit = test_encrypted_record(
+        let max_assignable_seq_num = test_encrypted_record(
             vec![1, 2, 3].into(),
             None,
             &EncryptionSpec::aes256_gcm([0x24; 32]),
         )
         .parts()
         .record
-        .stream_encrypted_record_limit()
-        .expect("aes-256-gcm record has stream message limit");
+        .max_assignable_seq_num();
 
         let records: StoredAppendRecordBatch =
             vec![test_command_record(CommandRecord::Trim(42), None)]
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, limit, 0, &config).unwrap();
+        let first_command_seq_num = max_assignable_seq_num + 1;
+        let result = sequenced_records(records, first_command_seq_num, 0, &config).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].position().seq_num, limit);
+        assert_eq!(result[0].position().seq_num, first_command_seq_num);
     }
 
     #[test]

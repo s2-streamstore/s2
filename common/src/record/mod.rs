@@ -248,10 +248,10 @@ impl StoredRecord {
         }
     }
 
-    pub fn stream_encrypted_record_limit(&self) -> Option<SeqNum> {
+    pub fn max_assignable_seq_num(&self) -> SeqNum {
         match self {
-            Self::Plaintext(_) => None,
-            Self::Encrypted { record, .. } => record.stream_encrypted_record_limit(),
+            Self::Plaintext(_) => SeqNum::MAX,
+            Self::Encrypted { record, .. } => record.max_assignable_seq_num(),
         }
     }
 }
