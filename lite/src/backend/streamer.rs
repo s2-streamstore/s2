@@ -731,7 +731,7 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::MaxSeqNumLimit(_) => {
+                AppendErrorInternal::MaxSeqNum(_) => {
                     unreachable!("terminal append is plaintext command record")
                 }
             }),
@@ -1204,7 +1204,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(AppendErrorInternal::MaxSeqNumLimit(error))
+            Err(AppendErrorInternal::MaxSeqNum(error))
                 if error.first_seq_num == max_assignable_seq_num
                     && error.assigned_seq_num == first_rejected_seq_num
                     && error.max_assignable_seq_num == max_assignable_seq_num

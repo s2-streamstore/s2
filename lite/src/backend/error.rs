@@ -112,14 +112,14 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    MaxSeqNumLimit(#[from] MaxSeqNumError),
+    MaxSeqNum(#[from] MaxSeqNumError),
 }
 
 impl AppendErrorInternal {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         match self {
             Self::ConditionFailed(e) => e.durability_dependency(),
-            Self::MaxSeqNumLimit(e) => e.durability_dependency(),
+            Self::MaxSeqNum(e) => e.durability_dependency(),
             _ => ..0,
         }
     }
@@ -191,7 +191,7 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::MaxSeqNumLimit(e) => AppendError::MaxSeqNum(e),
+            AppendErrorInternal::MaxSeqNum(e) => AppendError::MaxSeqNum(e),
         }
     }
 }
