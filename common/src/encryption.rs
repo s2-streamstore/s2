@@ -16,7 +16,7 @@ pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-en
 const MAX_ENCRYPTION_KEY_HEADER_VALUE_LEN: usize = 44;
 
 type EncodedKeyMaterial = Arc<SecretString>;
-type DecodedKeyMaterial<const N: usize> = Arc<SecretBox<[u8; N]>>;
+type DecodedKey<const N: usize> = Arc<SecretBox<[u8; N]>>;
 
 /// Encryption algorithm.
 #[derive(
@@ -46,7 +46,7 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
-/// Customer-supplied encryption key material for append/read operations.
+/// Encryption key material for append/read operations.
 #[derive(Debug, Clone)]
 pub struct EncryptionKey(EncodedKeyMaterial);
 
@@ -67,9 +67,9 @@ impl EncryptionKey {
     }
 }
 
-/// Decoded fixed-size customer-supplied encryption key material.
+/// Decoded fixed-size encryption key material.
 #[derive(Debug, Clone)]
-pub struct DecodedEncryptionKey<const N: usize>(DecodedKeyMaterial<N>);
+pub struct DecodedEncryptionKey<const N: usize>(DecodedKey<N>);
 
 impl<const N: usize> DecodedEncryptionKey<N> {
     pub fn new(key: [u8; N]) -> Self {
@@ -98,7 +98,7 @@ pub enum EncryptionSpecResolutionError {
     },
 }
 
-/// Resolved encryption spec after combining stream metadata with the customer-supplied encryption key, if any.
+/// Resolved encryption spec after combining stream metadata with the encryption key material, if any.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Default)]
 pub enum EncryptionSpec {

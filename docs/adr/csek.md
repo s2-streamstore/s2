@@ -1,4 +1,4 @@
-# Customer-supplied Encryption Key
+# Client-supplied Encryption Key
 
 Encryption algorithms supported: `aegis-256`, `aes-256-gcm`.
 
