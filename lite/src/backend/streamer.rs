@@ -1188,7 +1188,8 @@ mod tests {
             None,
             &EncryptionSpec::aes256_gcm([0x24; 32]),
         );
-        let limit = first_record.parts().record.max_assignable_seq_num();
+        let max_assignable_seq_num = first_record.parts().record.max_assignable_seq_num();
+        let first_rejected_seq_num = max_assignable_seq_num + 1;
         let records: StoredAppendRecordBatch = vec![
             first_record,
             test_encrypted_record(
@@ -1200,21 +1201,21 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(records, limit, 0, &config);
+        let result = sequenced_records(records, max_assignable_seq_num, 0, &config);
 
         assert!(matches!(
             result,
             Err(AppendErrorInternal::StreamRecordLimitExceeded(error))
-                if error.first_seq_num == limit
-                    && error.assigned_seq_num == limit + 1
-                    && error.max_assignable_seq_num == limit
+                if error.first_seq_num == max_assignable_seq_num
+                    && error.assigned_seq_num == first_rejected_seq_num
+                    && error.max_assignable_seq_num == max_assignable_seq_num
         ));
     }
 
     #[test]
     fn sequenced_records_allow_aes256gcm_command_records_past_random_nonce_limit() {
         let config = OptionalTimestampingConfig::default();
-        let limit = test_encrypted_record(
+        let max_assignable_seq_num = test_encrypted_record(
             vec![1, 2, 3].into(),
             None,
             &EncryptionSpec::aes256_gcm([0x24; 32]),
@@ -1228,10 +1229,11 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, limit + 1, 0, &config).unwrap();
+        let first_command_seq_num = max_assignable_seq_num + 1;
+        let result = sequenced_records(records, first_command_seq_num, 0, &config).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].position().seq_num, limit + 1);
+        assert_eq!(result[0].position().seq_num, first_command_seq_num);
     }
 
     #[test]
