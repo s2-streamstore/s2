@@ -257,13 +257,11 @@ impl ServiceError {
                     standard(ErrorCode::Invalid, e.to_string())
                 }
                 ReadError::RecordDecryption(e) => match e {
-                    RecordDecryptionError::AlgorithmMismatch { .. } => {
-                        standard(ErrorCode::Invalid, e.to_string())
-                    }
                     RecordDecryptionError::AuthenticationFailed => {
                         standard(ErrorCode::DecryptionFailed, e.to_string())
                     }
-                    RecordDecryptionError::MalformedEncryptedRecord
+                    RecordDecryptionError::AlgorithmMismatch { .. }
+                    | RecordDecryptionError::MalformedEncryptedRecord
                     | RecordDecryptionError::MeteredSizeMismatch { .. }
                     | RecordDecryptionError::MalformedDecryptedRecord(_) => {
                         standard(ErrorCode::Storage, e.to_string())
