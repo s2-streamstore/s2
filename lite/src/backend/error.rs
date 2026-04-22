@@ -78,10 +78,8 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error(
-    "stream record limit exceeded: max assignable sequence number is {max_assignable_seq_num}; attempted {assigned_seq_num}"
-)]
-pub struct StreamRecordLimitExceededError {
+#[error("max assignable sequence number is {max_assignable_seq_num}; attempted {assigned_seq_num}")]
+pub struct StreamSeqNumLimitError {
     pub first_seq_num: SeqNum,
     pub assigned_seq_num: SeqNum,
     pub max_assignable_seq_num: SeqNum,
@@ -114,14 +112,14 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    StreamRecordLimitExceeded(#[from] StreamRecordLimitExceededError),
+    StreamSeqNumLimit(#[from] StreamSeqNumLimitError),
 }
 
 impl AppendErrorInternal {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         match self {
             Self::ConditionFailed(e) => e.durability_dependency(),
-            Self::StreamRecordLimitExceeded(e) => e.durability_dependency(),
+            Self::StreamSeqNumLimit(e) => e.durability_dependency(),
             _ => ..0,
         }
     }
@@ -180,7 +178,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    StreamRecordLimitExceeded(#[from] StreamRecordLimitExceededError),
+    StreamRecordLimitExceeded(#[from] StreamSeqNumLimitError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -193,9 +191,7 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::StreamRecordLimitExceeded(e) => {
-                AppendError::StreamRecordLimitExceeded(e)
-            }
+            AppendErrorInternal::StreamSeqNumLimit(e) => AppendError::StreamRecordLimitExceeded(e),
         }
     }
 }
@@ -227,7 +223,7 @@ impl AppendConditionFailedError {
     }
 }
 
-impl StreamRecordLimitExceededError {
+impl StreamSeqNumLimitError {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         ..self.first_seq_num
     }
