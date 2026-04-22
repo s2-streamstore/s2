@@ -118,7 +118,7 @@ pub(super) enum AppendErrorInternal {
 }
 
 impl AppendErrorInternal {
-    pub(crate) fn durability_dependency(&self) -> RangeTo<SeqNum> {
+    pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         match self {
             Self::ConditionFailed(e) => e.durability_dependency(),
             Self::StreamRecordLimitExceeded(e) => e.durability_dependency(),
@@ -228,7 +228,7 @@ impl AppendConditionFailedError {
 }
 
 impl StreamRecordLimitExceededError {
-    pub(crate) fn durability_dependency(&self) -> RangeTo<SeqNum> {
+    pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         ..self.first_seq_num
     }
 }
