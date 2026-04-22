@@ -98,10 +98,10 @@ impl EncryptedRecordFormat {
         }
     }
 
-    const fn stream_encrypted_record_limit(self) -> Option<SeqNum> {
+    const fn max_assignable_seq_num(self) -> SeqNum {
         match self {
-            Self::Aegis256V1 => None,
-            Self::Aes256GcmV1 => Some(1u64 << 32),
+            Self::Aegis256V1 => SeqNum::MAX,
+            Self::Aes256GcmV1 => (1u64 << 32) - 1,
         }
     }
 }
@@ -141,8 +141,8 @@ impl EncryptedRecord {
         self.format.algorithm()
     }
 
-    pub fn stream_encrypted_record_limit(&self) -> Option<SeqNum> {
-        self.format.stream_encrypted_record_limit()
+    pub fn max_assignable_seq_num(&self) -> SeqNum {
+        self.format.max_assignable_seq_num()
     }
 
     pub(crate) fn nonce(&self) -> &[u8] {
