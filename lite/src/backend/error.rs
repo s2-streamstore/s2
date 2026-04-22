@@ -79,7 +79,7 @@ pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("max assignable sequence number is {max_assignable_seq_num}; attempted {assigned_seq_num}")]
-pub struct StreamSeqNumLimitError {
+pub struct MaxSeqNumError {
     pub first_seq_num: SeqNum,
     pub assigned_seq_num: SeqNum,
     pub max_assignable_seq_num: SeqNum,
@@ -112,14 +112,14 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    StreamSeqNumLimit(#[from] StreamSeqNumLimitError),
+    MaxSeqNumLimit(#[from] MaxSeqNumError),
 }
 
 impl AppendErrorInternal {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         match self {
             Self::ConditionFailed(e) => e.durability_dependency(),
-            Self::StreamSeqNumLimit(e) => e.durability_dependency(),
+            Self::MaxSeqNumLimit(e) => e.durability_dependency(),
             _ => ..0,
         }
     }
@@ -178,7 +178,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    StreamRecordLimitExceeded(#[from] StreamSeqNumLimitError),
+    MaxSeqNum(#[from] MaxSeqNumError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -191,7 +191,7 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::StreamSeqNumLimit(e) => AppendError::StreamRecordLimitExceeded(e),
+            AppendErrorInternal::MaxSeqNumLimit(e) => AppendError::MaxSeqNum(e),
         }
     }
 }
@@ -223,7 +223,7 @@ impl AppendConditionFailedError {
     }
 }
 
-impl StreamSeqNumLimitError {
+impl MaxSeqNumError {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         ..self.first_seq_num
     }

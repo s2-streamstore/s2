@@ -45,8 +45,7 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, RequestDroppedError, StreamSeqNumLimitError,
-            StreamerMissingInActionError,
+            DeleteStreamError, MaxSeqNumError, RequestDroppedError, StreamerMissingInActionError,
         },
         kv,
     },
@@ -732,7 +731,7 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::StreamSeqNumLimit(_) => {
+                AppendErrorInternal::MaxSeqNumLimit(_) => {
                     unreachable!("terminal append is plaintext command record")
                 }
             }),
@@ -831,7 +830,7 @@ fn sequenced_records(
 
         let max_assignable_seq_num = record.as_ref().into_inner().max_assignable_seq_num();
         if assigned_seq_num > max_assignable_seq_num {
-            Err(StreamSeqNumLimitError {
+            Err(MaxSeqNumError {
                 first_seq_num,
                 assigned_seq_num,
                 max_assignable_seq_num,
@@ -1205,7 +1204,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(AppendErrorInternal::StreamSeqNumLimit(error))
+            Err(AppendErrorInternal::MaxSeqNumLimit(error))
                 if error.first_seq_num == max_assignable_seq_num
                     && error.assigned_seq_num == first_rejected_seq_num
                     && error.max_assignable_seq_num == max_assignable_seq_num
