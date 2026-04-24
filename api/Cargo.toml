@@ -8,6 +8,13 @@ repository.workspace = true
 homepage.workspace = true
 keywords = ["s2", "durable", "streams", "log", "api"]
 categories = ["api-bindings"]
+include = [
+    "src/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "CHANGELOG.md",
+    "specs/s2/v1/s2.proto",
+]
 
 [features]
 axum = ["dep:axum", "s2-common/axum"]
