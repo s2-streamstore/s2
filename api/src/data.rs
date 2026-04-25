@@ -423,7 +423,6 @@ pub mod extract {
                 retention_policy: Maybe::Unspecified,
                 timestamping: Maybe::Unspecified,
                 delete_on_empty: Maybe::Unspecified,
-                encryption: Maybe::Unspecified,
             });
             // Mix of specified-null and specified-value
             assert_roundtrip(&StreamReconfiguration {
@@ -434,12 +433,12 @@ pub mod extract {
                     uncapped: Maybe::Specified(Some(true)),
                 })),
                 delete_on_empty: Maybe::Unspecified,
-                encryption: Maybe::Unspecified,
             });
 
             // BasinReconfiguration: nested Maybe<Option<StreamReconfiguration>>
             assert_roundtrip(&BasinReconfiguration {
                 default_stream_config: Maybe::Specified(None),
+                stream_cipher: Maybe::Unspecified,
                 create_stream_on_append: Maybe::Specified(true),
                 create_stream_on_read: Maybe::Unspecified,
             });
