@@ -4711,7 +4711,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.28.3"
+version = "0.28.4"
 dependencies = [
  "axum",
  "base64ct",
@@ -4741,7 +4741,7 @@ dependencies = [
 
 [[package]]
 name = "s2-cli"
-version = "0.30.4"
+version = "0.30.5"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -4794,7 +4794,7 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.33.0"
+version = "0.33.1"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -4821,7 +4821,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.30.4"
+version = "0.30.5"
 dependencies = [
  "async-stream",
  "async-trait",
