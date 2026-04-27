@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use enum_ordinalize::Ordinalize;
 use futures::{StreamExt, stream};
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -170,7 +169,7 @@ impl Backend {
         let Some(kv) = it.next().await? else {
             return Ok(false);
         };
-        if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp.ordinal()) {
+        if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp as u8) {
             return Ok(false);
         }
         let (candidate_stream_id, _pos) = kv::stream_record_timestamp::deser_key(kv.key)?;

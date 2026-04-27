@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use s2_common::{
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
     types::{basin::BasinName, stream::StreamName},
@@ -15,7 +14,7 @@ const FIELD_SEPARATOR: u8 = b'\0';
 
 pub fn ser_key(stream_id: StreamId) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
-    buf.put_u8(KeyType::StreamIdMapping.ordinal());
+    buf.put_u8(KeyType::StreamIdMapping as u8);
     buf.put_slice(stream_id.as_bytes());
     debug_assert_eq!(buf.len(), KEY_LEN, "serialized length mismatch");
     buf.freeze()
@@ -24,7 +23,7 @@ pub fn ser_key(stream_id: StreamId) -> Bytes {
 pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
     check_exact_size(&bytes, KEY_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::StreamIdMapping.ordinal() {
+    if ordinal != (KeyType::StreamIdMapping as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let mut stream_id_bytes = [0u8; StreamId::LEN];

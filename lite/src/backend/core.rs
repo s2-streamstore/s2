@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use bytesize::ByteSize;
 use dashmap::DashMap;
-use enum_ordinalize::Ordinalize;
 use futures::{
     FutureExt as _,
     future::{BoxFuture, Shared},
@@ -173,7 +172,7 @@ impl Backend {
         let Some(kv) = it.next().await? else {
             return Ok(());
         };
-        if kv.key.first().copied() != Some(kv::KeyType::StreamRecordData.ordinal()) {
+        if kv.key.first().copied() != Some(kv::KeyType::StreamRecordData as u8) {
             return Ok(());
         }
         let (deser_stream_id, pos) = kv::stream_record_data::deser_key(kv.key)?;

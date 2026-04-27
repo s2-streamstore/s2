@@ -1,7 +1,6 @@
 use std::{ops::Range, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 
 use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
 use crate::stream_id::StreamId;
@@ -11,7 +10,7 @@ const VALUE_LEN: usize = 8;
 
 pub fn ser_key(deadline: TimestampSecs, stream_id: StreamId) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
-    buf.put_u8(KeyType::StreamDeleteOnEmptyDeadline.ordinal());
+    buf.put_u8(KeyType::StreamDeleteOnEmptyDeadline as u8);
     buf.put_u32(deadline.as_u32());
     buf.put_slice(stream_id.as_bytes());
     debug_assert_eq!(buf.len(), KEY_LEN, "serialized length mismatch");
@@ -19,7 +18,7 @@ pub fn ser_key(deadline: TimestampSecs, stream_id: StreamId) -> Bytes {
 }
 
 pub fn expired_key_range(deadline: TimestampSecs) -> Range<Bytes> {
-    let start = Bytes::from(vec![KeyType::StreamDeleteOnEmptyDeadline.ordinal()]);
+    let start = Bytes::from(vec![KeyType::StreamDeleteOnEmptyDeadline as u8]);
     let end = ser_key_range_end(deadline);
     start..end
 }
@@ -33,7 +32,7 @@ fn ser_key_range_end(deadline: TimestampSecs) -> Bytes {
 pub fn deser_key(mut bytes: Bytes) -> Result<(TimestampSecs, StreamId), DeserializationError> {
     check_exact_size(&bytes, KEY_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::StreamDeleteOnEmptyDeadline.ordinal() {
+    if ordinal != (KeyType::StreamDeleteOnEmptyDeadline as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let deadline_secs = bytes.get_u32();

@@ -1,5 +1,4 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use s2_common::record::{Encodable, Metered, StoredRecord, StreamPosition};
 
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
@@ -9,7 +8,7 @@ const KEY_LEN: usize = 1 + StreamId::LEN + 8 + 8;
 
 pub fn ser_key(stream_id: StreamId, pos: StreamPosition) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
-    buf.put_u8(KeyType::StreamRecordData.ordinal());
+    buf.put_u8(KeyType::StreamRecordData as u8);
     buf.put_slice(stream_id.as_bytes());
     buf.put_u64(pos.seq_num);
     buf.put_u64(pos.timestamp);
@@ -20,7 +19,7 @@ pub fn ser_key(stream_id: StreamId, pos: StreamPosition) -> Bytes {
 pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, StreamPosition), DeserializationError> {
     check_exact_size(&bytes, KEY_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::StreamRecordData.ordinal() {
+    if ordinal != (KeyType::StreamRecordData as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let mut stream_id_bytes = [0u8; StreamId::LEN];

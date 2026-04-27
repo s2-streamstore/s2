@@ -13,12 +13,12 @@ use command::{CommandOp, CommandPayloadError};
 pub use encryption::{
     EncryptedRecord, RecordDecryptionError, decrypt_stored_record, encrypt_record,
 };
-use enum_ordinalize::Ordinalize;
 pub use envelope::EnvelopeRecord;
 use envelope::HeaderValidationError;
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
 pub use iterator::StoredRecordIterator;
 pub use metering::{Metered, MeteredExt, MeteredSize};
+use strum::FromRepr;
 
 use crate::deep_size::DeepSize;
 
@@ -81,7 +81,7 @@ impl DeepSize for Header {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Ordinalize)]
+#[derive(Clone, Copy, Debug, PartialEq, FromRepr)]
 #[repr(u8)]
 pub enum RecordType {
     Command = 1,
@@ -131,7 +131,7 @@ impl TryFrom<u8> for MagicByte {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         let record_type =
-            RecordType::from_ordinal(value & 0b111).ok_or("invalid record type ordinal")?;
+            RecordType::from_repr(value & 0b111).ok_or("invalid record type ordinal")?;
         Ok(Self {
             record_type,
             metered_size_varlen: match (value >> 3) & 0b11 {

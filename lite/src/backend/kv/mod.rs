@@ -13,11 +13,11 @@ pub mod timestamp;
 use std::ops::Range;
 
 use bytes::{Buf, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use s2_common::{
     record::StreamPosition,
     types::{basin::BasinName, stream::StreamName},
 };
+use strum::FromRepr;
 use thiserror::Error;
 
 use crate::stream_id::StreamId;
@@ -40,7 +40,7 @@ pub enum DeserializationError {
 
 // IDs persisted so must be kept stable.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ordinalize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromRepr)]
 pub enum KeyType {
     BasinMeta = 1,
     BasinDeletionPending = 8,
@@ -124,7 +124,7 @@ impl TryFrom<Bytes> for Key {
 
     fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
         check_min_size(&bytes, 1)?;
-        let ordinal = KeyType::from_ordinal(bytes[0])
+        let ordinal = KeyType::from_repr(bytes[0])
             .ok_or_else(|| DeserializationError::InvalidOrdinal(bytes[0]))?;
         match ordinal {
             KeyType::BasinMeta => basin_meta::deser_key(bytes).map(Key::BasinMeta),
@@ -177,7 +177,7 @@ fn check_min_size(bytes: &Bytes, min: usize) -> Result<(), DeserializationError>
 }
 
 pub fn key_type_range(key_type: KeyType) -> Range<Bytes> {
-    let ordinal = key_type.ordinal();
+    let ordinal = key_type as u8;
     let start = Bytes::from(vec![ordinal]);
     let end = Bytes::from(vec![
         ordinal.checked_add(1).expect("key type ordinal overflow"),
@@ -244,7 +244,6 @@ mod proptest_strategies {
 #[cfg(test)]
 mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
-    use enum_ordinalize::Ordinalize;
 
     use super::{DeserializationError, Key, KeyType};
 
@@ -260,7 +259,7 @@ mod tests {
 
     #[test]
     fn error_on_insufficient_data() {
-        let bytes = Bytes::from(vec![KeyType::StreamTailPosition.ordinal(), 1, 2, 3]);
+        let bytes = Bytes::from(vec![KeyType::StreamTailPosition as u8, 1, 2, 3]);
         let result = Key::try_from(bytes);
         assert!(matches!(
             result,
@@ -271,7 +270,7 @@ mod tests {
     #[test]
     fn error_on_missing_separator() {
         let mut buf = BytesMut::new();
-        buf.put_u8(KeyType::StreamMeta.ordinal());
+        buf.put_u8(KeyType::StreamMeta as u8);
         buf.put_slice(b"basin-without-separator");
         let bytes = buf.freeze();
 

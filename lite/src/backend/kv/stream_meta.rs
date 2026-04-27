@@ -1,7 +1,6 @@
 use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use s2_common::{
     bash::Bash,
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
@@ -112,7 +111,7 @@ pub fn ser_key(basin: &BasinName, stream: &StreamName) -> Bytes {
 fn ser_key_internal(basin_bytes: &[u8], stream_bytes: &[u8]) -> BytesMut {
     let capacity = 1 + basin_bytes.len() + 1 + stream_bytes.len();
     let mut buf = BytesMut::with_capacity(capacity);
-    buf.put_u8(KeyType::StreamMeta.ordinal());
+    buf.put_u8(KeyType::StreamMeta as u8);
     buf.put_slice(basin_bytes);
     buf.put_u8(FIELD_SEPARATOR);
     buf.put_slice(stream_bytes);
@@ -123,7 +122,7 @@ fn ser_key_internal(basin_bytes: &[u8], stream_bytes: &[u8]) -> BytesMut {
 pub fn deser_key(mut bytes: Bytes) -> Result<(BasinName, StreamName), DeserializationError> {
     check_min_size(&bytes, 1 + MIN_BASIN_NAME_LEN + 1 + MIN_STREAM_NAME_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::StreamMeta.ordinal() {
+    if ordinal != (KeyType::StreamMeta as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let sep_pos = bytes
