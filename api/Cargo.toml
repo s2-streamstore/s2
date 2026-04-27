@@ -17,7 +17,7 @@ include = [
 ]
 
 [features]
-axum = ["dep:axum", "s2-common/axum"]
+axum = ["dep:axum", "dep:sonic-rs", "s2-common/axum"]
 utoipa = ["dep:utoipa"]
 codegen = ["dep:prost-build"]
 
@@ -37,6 +37,7 @@ prost = { workspace = true }
 s2-common = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sonic-rs = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
