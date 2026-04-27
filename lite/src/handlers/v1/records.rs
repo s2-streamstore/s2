@@ -627,16 +627,6 @@ mod tests {
         frame
     }
 
-    fn assert_invalid_error(info: &serde_json::Value, expected_message: &str) {
-        assert_eq!(info["code"], "invalid");
-        assert!(
-            info["message"]
-                .as_str()
-                .expect("error message string")
-                .contains(expected_message)
-        );
-    }
-
     async fn assert_no_streams(backend: &Backend, basin: &BasinName) {
         let stream_list = backend
             .list_streams(basin.clone(), ListStreamsRequest::default())
@@ -742,7 +732,13 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let info = response_json(response, "read error body").await;
-        assert_invalid_error(&info, "start `timestamp` exceeds or equal to `until`");
+        assert_eq!(info["code"], "invalid");
+        assert!(
+            info["message"]
+                .as_str()
+                .expect("error message string")
+                .contains("start `timestamp` exceeds or equal to `until`")
+        );
         assert_no_streams(&backend, &basin).await;
     }
 
@@ -805,9 +801,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let info = response_json(response, "sse read error body").await;
-        assert_invalid_error(&info, "missing encryption key");
+        assert_eq!(info["code"], "bad_header");
+        assert!(
+            info["message"]
+                .as_str()
+                .expect("error message string")
+                .contains("missing encryption key")
+        );
     }
 
     #[tokio::test]
@@ -830,9 +832,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let info = response_json(response, "s2s read error body").await;
-        assert_invalid_error(&info, "missing encryption key");
+        assert_eq!(info["code"], "bad_header");
+        assert!(
+            info["message"]
+                .as_str()
+                .expect("error message string")
+                .contains("missing encryption key")
+        );
     }
 
     #[tokio::test]

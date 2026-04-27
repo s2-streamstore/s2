@@ -217,7 +217,7 @@ impl ServiceError {
             ServiceError::Append(e) => match e {
                 AppendError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 AppendError::EncryptionSpecResolution(e) => {
-                    standard(ErrorCode::Invalid, e.to_string())
+                    standard(ErrorCode::BadHeader, e.to_string())
                 }
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
@@ -254,7 +254,7 @@ impl ServiceError {
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
                 ReadError::EncryptionSpecResolution(e) => {
-                    standard(ErrorCode::Invalid, e.to_string())
+                    standard(ErrorCode::BadHeader, e.to_string())
                 }
                 ReadError::RecordDecryption(e) => match e {
                     RecordDecryptionError::AuthenticationFailed => {
