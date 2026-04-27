@@ -25,8 +25,6 @@
 
 use std::time::Duration;
 
-use enum_ordinalize::Ordinalize;
-
 use crate::{encryption::EncryptionAlgorithm, maybe::Maybe};
 
 #[derive(
@@ -41,7 +39,6 @@ use crate::{encryption::EncryptionAlgorithm, maybe::Maybe};
     strum::EnumString,
     PartialEq,
     Eq,
-    Ordinalize,
     Hash,
 )]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]

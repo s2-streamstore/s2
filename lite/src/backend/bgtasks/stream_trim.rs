@@ -1,6 +1,5 @@
 use std::ops::RangeTo;
 
-use enum_ordinalize::Ordinalize;
 use futures::{StreamExt, stream};
 use s2_common::{
     record::{NonZeroSeqNum, SeqNum, StreamPosition, Timestamp},
@@ -105,7 +104,7 @@ impl Backend {
         let mut batch_size = 0usize;
         let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
-            if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp.ordinal()) {
+            if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp as u8) {
                 break;
             }
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;

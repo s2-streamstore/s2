@@ -1783,26 +1783,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enum-ordinalize"
-version = "4.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a1091a7bb1f8f2c4b28f1fe2cef4980ca2d410a3d727d67ecc3178c9b0800f0"
-dependencies = [
- "enum-ordinalize-derive",
-]
-
-[[package]]
-name = "enum-ordinalize-derive"
-version = "4.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ca9601fb2d62598ee17836250842873a413586e5d7ed88b356e38ddbb0ec631"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "enumset"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4737,7 +4717,6 @@ dependencies = [
  "base64ct",
  "bytes",
  "compact_str",
- "enum-ordinalize",
  "enumset",
  "flate2",
  "futures",
@@ -4825,7 +4804,6 @@ dependencies = [
  "bytes",
  "clap",
  "compact_str",
- "enum-ordinalize",
  "enumset",
  "http 1.4.0",
  "proptest",
@@ -4857,7 +4835,6 @@ dependencies = [
  "clap",
  "compact_str",
  "dashmap",
- "enum-ordinalize",
  "enumset",
  "eyre",
  "futures",
@@ -4880,6 +4857,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slatedb",
+ "strum 0.28.0",
  "thiserror 2.0.18",
  "time",
  "tokio",

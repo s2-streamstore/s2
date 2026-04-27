@@ -5,9 +5,9 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures::Stream;
+use strum::FromRepr;
 
 /*
   REGULAR MESSAGE:
@@ -55,7 +55,7 @@ const FLAG_TERMINAL: u8 = 0b1000_0000;
 const FLAG_COMPRESSION_MASK: u8 = 0b0110_0000;
 const FLAG_COMPRESSION_SHIFT: u8 = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Ordinalize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromRepr)]
 #[repr(u8)]
 pub enum CompressionAlgorithm {
     None = 0,
@@ -235,7 +235,7 @@ impl SessionMessage {
         match self {
             Self::Regular(msg) => {
                 let flag =
-                    (msg.compression.ordinal() << FLAG_COMPRESSION_SHIFT) & FLAG_COMPRESSION_MASK;
+                    ((msg.compression as u8) << FLAG_COMPRESSION_SHIFT) & FLAG_COMPRESSION_MASK;
                 buf.put_u8(flag);
                 buf.extend_from_slice(&msg.payload);
             }
@@ -273,7 +273,7 @@ impl SessionMessage {
         }
 
         let compression_bits = (flag & FLAG_COMPRESSION_MASK) >> FLAG_COMPRESSION_SHIFT;
-        let Some(compression) = CompressionAlgorithm::from_ordinal(compression_bits) else {
+        let Some(compression) = CompressionAlgorithm::from_repr(compression_bits) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "unknown compression algorithm",

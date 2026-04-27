@@ -23,7 +23,6 @@ blake3 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
-enum-ordinalize = { workspace = true }
 enumset = { workspace = true }
 http = { workspace = true }
 rand = { workspace = true }

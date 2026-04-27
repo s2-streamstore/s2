@@ -1,7 +1,6 @@
 use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use s2_common::{
     bash::Bash,
     caps::MIN_BASIN_NAME_LEN,
@@ -100,7 +99,7 @@ pub fn ser_key(basin: &BasinName) -> Bytes {
 fn ser_key_internal(basin: &[u8]) -> BytesMut {
     let capacity = 1 + basin.len();
     let mut buf = BytesMut::with_capacity(capacity);
-    buf.put_u8(KeyType::BasinMeta.ordinal());
+    buf.put_u8(KeyType::BasinMeta as u8);
     buf.put_slice(basin);
     debug_assert_eq!(buf.len(), capacity, "serialized length mismatch");
     buf
@@ -109,7 +108,7 @@ fn ser_key_internal(basin: &[u8]) -> BytesMut {
 pub fn deser_key(mut bytes: Bytes) -> Result<BasinName, DeserializationError> {
     check_min_size(&bytes, 1 + MIN_BASIN_NAME_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::BasinMeta.ordinal() {
+    if ordinal != (KeyType::BasinMeta as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let basin_str = std::str::from_utf8(&bytes).map_err(|e| invalid_value_err("basin", e))?;
@@ -129,7 +128,6 @@ mod tests {
     use std::str::FromStr;
 
     use bytes::Bytes;
-    use enum_ordinalize::Ordinalize;
     use proptest::prelude::*;
     use s2_common::{
         bash::Bash,
@@ -161,7 +159,7 @@ mod tests {
         let prefix = basin_prefix("test-prefix");
         let key = super::ser_key_prefix(&prefix);
 
-        assert_eq!(key[0], KeyType::BasinMeta.ordinal());
+        assert_eq!(key[0], (KeyType::BasinMeta as u8));
         assert_eq!(&key[1..], b"test-prefix");
     }
 
@@ -171,7 +169,7 @@ mod tests {
         let key = super::ser_key_prefix(&prefix);
 
         assert_eq!(key.len(), 1);
-        assert_eq!(key[0], KeyType::BasinMeta.ordinal());
+        assert_eq!(key[0], (KeyType::BasinMeta as u8));
     }
 
     #[test]
@@ -180,7 +178,7 @@ mod tests {
         let end_key = super::ser_key_prefix_end(&prefix);
 
         assert_eq!(end_key.len(), 1);
-        assert_eq!(end_key[0], KeyType::BasinMeta.ordinal() + 1);
+        assert_eq!(end_key[0], (KeyType::BasinMeta as u8) + 1);
     }
 
     #[test]
@@ -188,7 +186,7 @@ mod tests {
         for (input, expected_suffix) in [("test-a", &b"test-b"[..]), ("test-abc", &b"test-abd"[..])]
         {
             let end_key = super::ser_key_prefix_end(&basin_prefix(input));
-            assert_eq!(end_key[0], KeyType::BasinMeta.ordinal());
+            assert_eq!(end_key[0], (KeyType::BasinMeta as u8));
             assert_eq!(&end_key[1..], expected_suffix);
         }
     }
@@ -197,7 +195,7 @@ mod tests {
     fn basin_meta_ser_key_start_after() {
         let key = super::ser_key_start_after(&basin_start_after("my-basin"));
 
-        assert_eq!(key[0], KeyType::BasinMeta.ordinal());
+        assert_eq!(key[0], (KeyType::BasinMeta as u8));
         assert_eq!(&key[1..key.len() - 1], b"my-basin");
         assert_eq!(
             key[key.len() - 1],
