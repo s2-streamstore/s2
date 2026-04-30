@@ -72,6 +72,22 @@ impl Backend {
     ) -> Result<(), StorageError> {
         let has_remaining_records = self.delete_records(stream_id, trim_point).await?;
         if trim_point.end < NonZeroSeqNum::MAX && !has_remaining_records {
+            // Stream became empty due to trim — write a tail position marker so
+            // derive_tail_position() and DOE eligibility checks work correctly.
+            let tail_pos = StreamPosition {
+                seq_num: trim_point.end.get(),
+                timestamp: 0,
+            };
+            let write_ts = kv::timestamp::TimestampSecs::now();
+            let mut wb = WriteBatch::new();
+            wb.put(
+                kv::stream_tail_position::ser_key(stream_id),
+                kv::stream_tail_position::ser_value(tail_pos, write_ts),
+            );
+            static WRITE_OPTS: WriteOptions = WriteOptions {
+                await_durable: true,
+            };
+            self.db.write_with_options(wb, &WRITE_OPTS).await?;
             self.arm_doe_maybe(stream_id).await?;
         }
         self.finalize_trim(stream_id, trim_point).await?;

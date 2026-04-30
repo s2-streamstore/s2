@@ -79,6 +79,9 @@ zstd = "0.13"
 
 [patch.crates-io]
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
+slatedb = { git = "https://github.com/slatedb/slatedb", rev = "a1ce5bc9fe646e75869a55cabe0f159ad358614a" }
+slatedb-common = { git = "https://github.com/slatedb/slatedb", rev = "a1ce5bc9fe646e75869a55cabe0f159ad358614a" }
+slatedb-txn-obj = { git = "https://github.com/slatedb/slatedb", rev = "a1ce5bc9fe646e75869a55cabe0f159ad358614a" }
 
 [profile.dev]
 panic = "abort"
