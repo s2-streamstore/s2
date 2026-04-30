@@ -8,7 +8,7 @@ use futures::{
 };
 use s2_common::{
     encryption::{EncryptionAlgorithm, EncryptionSpec},
-    record::{NonZeroSeqNum, SeqNum, StreamPosition},
+    record::{NonZeroSeqNum, SeqNum, StreamPosition, Timestamp},
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
@@ -97,10 +97,7 @@ impl Backend {
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
             ),
-            self.db_get(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::deser_value,
-            ),
+            self.derive_tail_position(stream_id),
             self.db_get(
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
@@ -115,9 +112,7 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let tail_pos = tail_pos.map(|(pos, _)| pos).unwrap_or(StreamPosition::MIN);
-        self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
-            .await?;
+        let (tail_pos, _write_ts) = tail_pos;
 
         let fencing_token = fencing_token.unwrap_or_default();
 
@@ -144,6 +139,67 @@ impl Backend {
                 matches!(slot, StreamerClientSlot::Ready { client } if client.generation_id() == client_id)
             });
         }))
+    }
+
+    /// Derive the stream tail position by reverse-scanning `StreamRecordData` keys.
+    /// If no records exist, falls back to the explicit `StreamTailPosition` marker key.
+    ///
+    /// Returns `(tail_position, Option<write_timestamp_secs>)`.
+    /// - `write_timestamp_secs` is `Some` only when read from the marker key (empty stream).
+    /// - `write_timestamp_secs` is `None` when derived from the last record.
+    async fn derive_tail_position(
+        &self,
+        stream_id: StreamId,
+    ) -> Result<(StreamPosition, Option<kv::timestamp::TimestampSecs>), StorageError> {
+        // Scan StreamRecordData keys for this stream in reverse order.
+        let lower_bound = kv::stream_record_data::ser_key(stream_id, StreamPosition::MIN);
+        let upper_bound = kv::stream_record_data::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: SeqNum::MAX,
+                timestamp: Timestamp::MAX,
+            },
+        );
+        static SCAN_OPTS: ScanOptions = ScanOptions {
+            durability_filter: DurabilityLevel::Remote,
+            dirty: false,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
+            max_fetch_tasks: 1,
+            order: IterationOrder::Descending,
+        };
+        let mut it = self
+            .db
+            .scan_with_options(lower_bound..upper_bound, &SCAN_OPTS)
+            .await?;
+        if let Some(kv_entry) = it.next().await? {
+            if kv_entry.key.first().copied() == Some(kv::KeyType::StreamRecordData as u8) {
+                let (deser_stream_id, pos) =
+                    kv::stream_record_data::deser_key(kv_entry.key)?;
+                if deser_stream_id == stream_id {
+                    // Found the last record — tail is one past it.
+                    let tail = StreamPosition {
+                        seq_num: pos.seq_num + 1,
+                        timestamp: pos.timestamp,
+                    };
+                    return Ok((tail, None));
+                }
+            }
+        }
+
+        // No records found — fall back to the explicit tail position marker.
+        if let Some((pos, write_ts)) = self
+            .db_get(
+                kv::stream_tail_position::ser_key(stream_id),
+                kv::stream_tail_position::deser_value,
+            )
+            .await?
+        {
+            return Ok((pos, Some(write_ts)));
+        }
+
+        // No marker either — stream starts at MIN.
+        Ok((StreamPosition::MIN, None))
     }
 
     async fn assert_no_records_following_tail(
@@ -389,8 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "invariant violation: stream `testbasin1/stream1` tail_pos")]
-    async fn start_streamer_fails_if_records_exist_after_tail_pos() {
+    async fn start_streamer_derives_tail_from_records_not_marker() {
         let backend = new_test_backend().await;
 
         let basin = BasinName::from_str("testbasin1").unwrap();
@@ -405,13 +460,15 @@ mod tests {
             creation_idempotency_key: None,
         };
 
-        let tail_pos = StreamPosition {
+        // Write a stale tail position marker at seq_num=1.
+        let stale_tail_pos = StreamPosition {
             seq_num: 1,
             timestamp: 123,
         };
+        // Write a record at seq_num=1 (past the marker).
         let record_pos = StreamPosition {
-            seq_num: tail_pos.seq_num,
-            timestamp: tail_pos.timestamp,
+            seq_num: stale_tail_pos.seq_num,
+            timestamp: stale_tail_pos.timestamp,
         };
 
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap();
@@ -425,7 +482,7 @@ mod tests {
         wb.put(
             kv::stream_tail_position::ser_key(stream_id),
             kv::stream_tail_position::ser_value(
-                tail_pos,
+                stale_tail_pos,
                 kv::timestamp::TimestampSecs::from_secs(1),
             ),
         );
@@ -442,10 +499,15 @@ mod tests {
             .await
             .unwrap();
 
-        backend
-            .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())
+        // derive_tail_position should find the record and derive tail as seq_num=2.
+        let (tail_pos, write_ts) = backend
+            .derive_tail_position(stream_id)
             .await
             .unwrap();
+        assert_eq!(tail_pos.seq_num, 2);
+        assert_eq!(tail_pos.timestamp, 123);
+        // Derived from records, not from marker key.
+        assert!(write_ts.is_none());
     }
 
     #[tokio::test]

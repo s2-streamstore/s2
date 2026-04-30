@@ -903,11 +903,6 @@ async fn db_submit_append(
             kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
-    let write_timestamp_secs = kv::timestamp::TimestampSecs::now();
-    wb.put(
-        kv::stream_tail_position::ser_key(stream_id),
-        kv::stream_tail_position::ser_value(next_pos(&records), write_timestamp_secs),
-    );
     static WRITE_OPTS: WriteOptions = WriteOptions {
         await_durable: false,
     };

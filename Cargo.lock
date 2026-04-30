@@ -7297,3 +7297,18 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "slatedb"
+version = "0.11.1"
+source = "git+https://github.com/slatedb/slatedb?rev=a1ce5bc9fe646e75869a55cabe0f159ad358614a#a1ce5bc9fe646e75869a55cabe0f159ad358614a"
+
+[[patch.unused]]
+name = "slatedb-common"
+version = "0.11.1"
+source = "git+https://github.com/slatedb/slatedb?rev=a1ce5bc9fe646e75869a55cabe0f159ad358614a#a1ce5bc9fe646e75869a55cabe0f159ad358614a"
+
+[[patch.unused]]
+name = "slatedb-txn-obj"
+version = "0.11.1"
+source = "git+https://github.com/slatedb/slatedb?rev=a1ce5bc9fe646e75869a55cabe0f159ad358614a#a1ce5bc9fe646e75869a55cabe0f159ad358614a"
