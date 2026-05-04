@@ -2478,6 +2478,8 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
             .as_ref()
             .map(|s| match s {
                 s2_sdk::types::BasinScope::AwsUsEast1 => "aws:us-east-1",
+                s2_sdk::types::BasinScope::AwsUsWest2 => "aws:us-west-2",
+                s2_sdk::types::BasinScope::AwsEuNorth1 => "aws:eu-north-1",
             })
             .unwrap_or("—");
 
@@ -4530,7 +4532,11 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let name_valid = name.len() >= 8 && name.len() <= 48;
 
             // Scope options
-            let scope_opts = [("AWS us-east-1", *scope == BasinScopeOption::AwsUsEast1)];
+            let scope_opts = [
+                ("AWS us-east-1", *scope == BasinScopeOption::AwsUsEast1),
+                ("AWS us-west-2", *scope == BasinScopeOption::AwsUsWest2),
+                ("AWS eu-north-1", *scope == BasinScopeOption::AwsEuNorth1),
+            ];
 
             // Storage class options
             let storage_opts = [

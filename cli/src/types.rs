@@ -173,6 +173,19 @@ impl StreamConfig {
 }
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
+pub enum BasinScope {
+    #[value(name = "aws:us-east-1")]
+    #[serde(rename = "aws:us-east-1")]
+    AwsUsEast1,
+    #[value(name = "aws:us-west-2")]
+    #[serde(rename = "aws:us-west-2")]
+    AwsUsWest2,
+    #[value(name = "aws:eu-north-1")]
+    #[serde(rename = "aws:eu-north-1")]
+    AwsEuNorth1,
+}
+
+#[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {
     Standard,
@@ -284,6 +297,26 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
             stream_config = stream_config.with_delete_on_empty(delete_on_empty.into());
         }
         stream_config
+    }
+}
+
+impl From<BasinScope> for sdk::types::BasinScope {
+    fn from(scope: BasinScope) -> Self {
+        match scope {
+            BasinScope::AwsUsEast1 => sdk::types::BasinScope::AwsUsEast1,
+            BasinScope::AwsUsWest2 => sdk::types::BasinScope::AwsUsWest2,
+            BasinScope::AwsEuNorth1 => sdk::types::BasinScope::AwsEuNorth1,
+        }
+    }
+}
+
+impl From<sdk::types::BasinScope> for BasinScope {
+    fn from(scope: sdk::types::BasinScope) -> Self {
+        match scope {
+            sdk::types::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
+            sdk::types::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
+            sdk::types::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
+        }
     }
 }
 

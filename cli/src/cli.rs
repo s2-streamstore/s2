@@ -13,7 +13,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, BasinScope, Interval, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StorageClass, StreamConfig, StreamMatcher,
     },
@@ -264,6 +264,10 @@ pub struct ListBasinsArgs {
 pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
+
+    /// Cloud provider and region for the basin.
+    #[arg(long)]
+    pub scope: Option<BasinScope>,
 
     #[command(flatten)]
     pub config: BasinConfig,

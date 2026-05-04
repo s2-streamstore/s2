@@ -859,12 +859,18 @@ impl From<BasinConfig> for api::config::BasinConfig {
 pub enum BasinScope {
     /// AWS `us-east-1` region.
     AwsUsEast1,
+    /// AWS `us-west-2` region.
+    AwsUsWest2,
+    /// AWS `eu-north-1` region.
+    AwsEuNorth1,
 }
 
 impl From<api::basin::BasinScope> for BasinScope {
     fn from(value: api::basin::BasinScope) -> Self {
         match value {
             api::basin::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
+            api::basin::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
+            api::basin::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
         }
     }
 }
@@ -873,6 +879,8 @@ impl From<BasinScope> for api::basin::BasinScope {
     fn from(value: BasinScope) -> Self {
         match value {
             BasinScope::AwsUsEast1 => api::basin::BasinScope::AwsUsEast1,
+            BasinScope::AwsUsWest2 => api::basin::BasinScope::AwsUsWest2,
+            BasinScope::AwsEuNorth1 => api::basin::BasinScope::AwsEuNorth1,
         }
     }
 }

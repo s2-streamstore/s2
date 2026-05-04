@@ -824,6 +824,26 @@ fn timestamping_mode_prev(tm: &Option<TimestampingMode>) -> Option<TimestampingM
 pub enum BasinScopeOption {
     #[default]
     AwsUsEast1,
+    AwsUsWest2,
+    AwsEuNorth1,
+}
+
+impl BasinScopeOption {
+    pub fn next(self) -> Self {
+        match self {
+            Self::AwsUsEast1 => Self::AwsUsWest2,
+            Self::AwsUsWest2 => Self::AwsEuNorth1,
+            Self::AwsEuNorth1 => Self::AwsUsEast1,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::AwsUsEast1 => Self::AwsEuNorth1,
+            Self::AwsUsWest2 => Self::AwsUsEast1,
+            Self::AwsEuNorth1 => Self::AwsUsWest2,
+        }
+    }
 }
 
 /// Expiry options for access tokens
@@ -2435,6 +2455,7 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Left | KeyCode::Char('h') => match *selected {
+                            1 => *scope = scope.prev(),
                             2 => *storage_class = storage_class_prev(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_prev(timestamping_mode),
@@ -2442,6 +2463,7 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Right | KeyCode::Char('l') => match *selected {
+                            1 => *scope = scope.next(),
                             2 => *storage_class = storage_class_next(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_next(timestamping_mode),
@@ -4306,6 +4328,8 @@ impl App {
             };
             let sdk_scope = match scope {
                 BasinScopeOption::AwsUsEast1 => s2_sdk::types::BasinScope::AwsUsEast1,
+                BasinScopeOption::AwsUsWest2 => s2_sdk::types::BasinScope::AwsUsWest2,
+                BasinScopeOption::AwsEuNorth1 => s2_sdk::types::BasinScope::AwsEuNorth1,
             };
             let input = s2_sdk::types::CreateBasinInput::new(basin_name)
                 .with_config(config.into())
