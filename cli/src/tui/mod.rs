@@ -1,10 +1,12 @@
 mod app;
 mod event;
+mod text_input;
 mod ui;
 use std::io;
 
 use app::App;
 use crossterm::{
+    cursor::Show,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -19,6 +21,29 @@ pub fn user_agent() -> String {
     format!("s2-tui/{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// RAII guard that restores the terminal on drop, including on panic.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn acquire() -> Result<Self, CliError> {
+        enable_raw_mode()
+            .map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
+        let mut stdout = io::stdout();
+        if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(CliError::RecordReaderInit(format!("terminal setup: {e}")));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
 pub async fn run() -> Result<(), CliError> {
     // Load config and try to create SDK client
     // If access token is missing, we'll start with Setup screen instead of failing
@@ -28,42 +53,12 @@ pub async fn run() -> Result<(), CliError> {
         Err(_) => None, // No access token - will show setup screen
     };
 
-    // Setup terminal
-    enable_raw_mode().map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
-    let backend = CrosstermBackend::new(stdout);
+    let _guard = TerminalGuard::acquire()?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)
         .map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
 
     // Create and run app
     let app = App::new(s2);
-    let result = app.run(&mut terminal).await;
-
-    // Restore terminal - attempt all cleanup steps even if some fail
-    // This is critical: a partially restored terminal leaves the user's shell broken
-    let mut cleanup_errors = Vec::new();
-
-    if let Err(e) = disable_raw_mode() {
-        cleanup_errors.push(format!("disable_raw_mode: {e}"));
-    }
-
-    if let Err(e) = execute!(terminal.backend_mut(), LeaveAlternateScreen) {
-        cleanup_errors.push(format!("leave_alternate_screen: {e}"));
-    }
-
-    if let Err(e) = terminal.show_cursor() {
-        cleanup_errors.push(format!("show_cursor: {e}"));
-    }
-
-    // Log cleanup errors to stderr (won't be visible in alternate screen anyway)
-    if !cleanup_errors.is_empty() {
-        eprintln!(
-            "Warning: terminal cleanup errors: {}",
-            cleanup_errors.join(", ")
-        );
-    }
-
-    result
+    app.run(&mut terminal).await
 }

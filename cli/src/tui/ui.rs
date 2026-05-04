@@ -8,11 +8,14 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph},
 };
 
-use super::app::{
-    AccessTokensState, AgoUnit, App, AppendViewState, BasinsState, BenchViewState,
-    CompressionOption, ExpiryOption, InputMode, MessageLevel, MetricCategory, MetricsType,
-    MetricsViewState, PipState, ReadStartFrom, ReadViewState, RetentionPolicyOption, Screen,
-    SettingsState, SetupState, StreamDetailState, StreamsState, Tab,
+use super::{
+    app::{
+        AccessTokensState, AgoUnit, App, AppendViewState, BasinsState, BenchViewState,
+        CompressionOption, ExpiryOption, InputMode, MessageLevel, MetricCategory, MetricsType,
+        MetricsViewState, PipState, ReadStartFrom, ReadViewState, RetentionPolicyOption, Screen,
+        SettingsState, SetupState, StreamDetailState, StreamsState, Tab,
+    },
+    text_input::cursor_split_at,
 };
 use crate::types::{StorageClass, TimestampingMode};
 
@@ -327,9 +330,7 @@ fn render_text_input_with_cursor(
             Style::default().fg(GRAY_600).italic(),
         )]
     } else if is_editing {
-        let cursor = cursor.min(value.len());
-        let before = &value[..cursor];
-        let after = &value[cursor..];
+        let (before, after) = cursor_split_at(value, cursor);
         vec![
             Span::styled(before.to_string(), Style::default().fg(color)),
             Span::styled(CURSOR, Style::default().fg(CYAN)),
@@ -502,30 +503,13 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
             Span::styled(CURSOR, Style::default().fg(CYAN)),
         ]
     } else {
-        let max_width = 40;
-        let cursor = state.cursor.min(state.access_token.len());
-        let (display, cursor_in_display) = if state.access_token.len() <= max_width {
-            (state.access_token.clone(), cursor)
-        } else {
-            // Show a window around the cursor
-            let half = max_width / 2;
-            let start = cursor.saturating_sub(half);
-            let end = (start + max_width).min(state.access_token.len());
-            let start = if end == state.access_token.len() {
-                end.saturating_sub(max_width)
-            } else {
-                start
-            };
-            (state.access_token[start..end].to_string(), cursor - start)
-        };
-        let before = &display[..cursor_in_display];
-        let after = &display[cursor_in_display..];
+        let (before, after) = state.access_token.split_at_cursor_windowed(40);
         vec![
             Span::styled("Token ", Style::default().fg(TEXT_MUTED)),
             Span::styled("› ", Style::default().fg(CYAN)),
-            Span::styled(before.to_string(), Style::default().fg(WHITE)),
+            Span::styled(before, Style::default().fg(WHITE)),
             Span::styled(CURSOR, Style::default().fg(CYAN)),
-            Span::styled(after.to_string(), Style::default().fg(WHITE)),
+            Span::styled(after, Style::default().fg(WHITE)),
         ]
     };
     lines.push(Line::from(token_display));
@@ -616,13 +600,16 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
 
     let is_editing_token = state.editing && state.selected == 0;
     let token_display = if is_editing_token {
-        state.access_token.clone()
+        state.access_token.value().to_owned()
     } else if state.access_token_masked && !state.access_token.is_empty() {
-        format!("{}...", "*".repeat(20.min(state.access_token.len())))
+        format!(
+            "{}...",
+            "*".repeat(20.min(state.access_token.value().len()))
+        )
     } else if state.access_token.is_empty() {
         "(not set)".to_string()
     } else {
-        state.access_token.clone()
+        state.access_token.value().to_owned()
     };
 
     draw_settings_field(
@@ -632,7 +619,7 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         token_display,
         state.selected == 0,
         if is_editing_token {
-            Some(state.cursor)
+            Some(state.access_token.cursor())
         } else {
             None
         },
@@ -645,11 +632,11 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         if state.account_endpoint.is_empty() {
             "(default)".to_string()
         } else {
-            state.account_endpoint.clone()
+            state.account_endpoint.value().to_owned()
         },
         state.selected == 1,
         if state.editing && state.selected == 1 {
-            Some(state.cursor)
+            Some(state.account_endpoint.cursor())
         } else {
             None
         },
@@ -662,11 +649,11 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         if state.basin_endpoint.is_empty() {
             "(default)".to_string()
         } else {
-            state.basin_endpoint.clone()
+            state.basin_endpoint.value().to_owned()
         },
         state.selected == 2,
         if state.editing && state.selected == 2 {
-            Some(state.cursor)
+            Some(state.basin_endpoint.cursor())
         } else {
             None
         },
@@ -793,9 +780,7 @@ fn draw_settings_field(
     };
 
     let value_display = if let Some(cursor_pos) = cursor {
-        let cursor_pos = cursor_pos.min(value.len());
-        let before = &value[..cursor_pos];
-        let after = &value[cursor_pos..];
+        let (before, after) = cursor_split_at(&value, cursor_pos);
         format!("{}█{}", before, after)
     } else {
         value
