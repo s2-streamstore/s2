@@ -856,6 +856,7 @@ impl From<BasinConfig> for api::config::BasinConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Scope of a basin.
+#[non_exhaustive]
 pub enum BasinScope {
     /// AWS `us-east-1` region.
     AwsUsEast1,
