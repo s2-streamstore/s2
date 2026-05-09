@@ -189,6 +189,6 @@ pub struct CreateBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin scope.
-    /// If omitted when creating, defaults to `aws:us-east-1`.
+    /// If omitted, defaults to `aws:us-east-1`.
     pub scope: Option<BasinScope>,
 }
