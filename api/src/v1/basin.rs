@@ -173,7 +173,7 @@ pub struct CreateOrReconfigureBasinRequest {
     /// Basin reconfiguration.
     pub config: Option<BasinReconfiguration>,
     /// Basin scope.
-    /// If omitted, defaults to `aws:us-east-1`.
+    /// If omitted when creating, defaults to `aws:us-east-1`.
     /// This cannot be reconfigured.
     pub scope: Option<BasinScope>,
 }
@@ -189,6 +189,6 @@ pub struct CreateBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin scope.
-    /// If omitted, defaults to `aws:us-east-1`.
+    /// If omitted when creating, defaults to `aws:us-east-1`.
     pub scope: Option<BasinScope>,
 }

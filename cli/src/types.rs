@@ -316,6 +316,9 @@ impl From<sdk::types::BasinScope> for BasinScope {
             sdk::types::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
             sdk::types::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
             sdk::types::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
+            _ => unreachable!(
+                "s2-cli is released together with s2-sdk; new BasinScope variants are added to both"
+            ),
         }
     }
 }
