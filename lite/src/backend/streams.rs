@@ -116,13 +116,7 @@ impl Backend {
             ));
         }
 
-        struct CreateStreamResolution {
-            meta: kv::stream_meta::StreamMeta,
-            is_reconfigure: bool,
-            prior_doe_min_age: Option<std::time::Duration>,
-        }
-
-        let mut resolution = match (existing_meta, intent) {
+        let (mut meta, is_reconfigure, prior_doe_min_age) = match (existing_meta, intent) {
             (
                 Some(existing),
                 CreateStreamIntent::CreateOnly {
@@ -152,17 +146,17 @@ impl Backend {
                     .delete_on_empty
                     .min_age
                     .filter(|age| !age.is_zero());
-                CreateStreamResolution {
-                    meta: kv::stream_meta::StreamMeta {
+                (
+                    kv::stream_meta::StreamMeta {
                         config: existing.config.reconfigure(reconfiguration),
                         cipher: existing.cipher,
                         created_at: existing.created_at,
                         deleted_at: None,
                         creation_idempotency_key: existing.creation_idempotency_key,
                     },
-                    is_reconfigure: true,
+                    true,
                     prior_doe_min_age,
-                }
+                )
             }
             (
                 None,
@@ -174,46 +168,41 @@ impl Backend {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
-                CreateStreamResolution {
-                    meta: kv::stream_meta::StreamMeta {
+                (
+                    kv::stream_meta::StreamMeta {
                         config,
                         cipher: basin_meta.config.stream_cipher,
                         created_at: OffsetDateTime::now_utc(),
                         deleted_at: None,
                         creation_idempotency_key: new_creation_idempotency_key,
                     },
-                    is_reconfigure: false,
-                    prior_doe_min_age: None,
-                }
+                    false,
+                    None,
+                )
             }
-            (None, CreateStreamIntent::CreateOrReconfigure { reconfiguration }) => {
-                CreateStreamResolution {
-                    meta: kv::stream_meta::StreamMeta {
-                        config: OptionalStreamConfig::default().reconfigure(reconfiguration),
-                        cipher: basin_meta.config.stream_cipher,
-                        created_at: OffsetDateTime::now_utc(),
-                        deleted_at: None,
-                        creation_idempotency_key: None,
-                    },
-                    is_reconfigure: false,
-                    prior_doe_min_age: None,
-                }
-            }
+            (None, CreateStreamIntent::CreateOrReconfigure { reconfiguration }) => (
+                kv::stream_meta::StreamMeta {
+                    config: OptionalStreamConfig::default().reconfigure(reconfiguration),
+                    cipher: basin_meta.config.stream_cipher,
+                    created_at: OffsetDateTime::now_utc(),
+                    deleted_at: None,
+                    creation_idempotency_key: None,
+                },
+                false,
+                None,
+            ),
         };
         let basin_defaults = basin_meta.config.default_stream_config;
-        resolution.meta.config = resolution.meta.config.merge(basin_defaults).into();
+        meta.config = meta.config.merge(basin_defaults).into();
 
-        txn.put(
-            &stream_meta_key,
-            kv::stream_meta::ser_value(&resolution.meta),
-        )?;
+        txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
         let stream_id = StreamId::new(&basin, &stream);
-        if !resolution.is_reconfigure {
+        if !is_reconfigure {
             txn.put(
                 kv::stream_id_mapping::ser_key(stream_id),
                 kv::stream_id_mapping::ser_value(&basin, &stream),
             )?;
-            let created_secs = resolution.meta.created_at.unix_timestamp();
+            let created_secs = meta.created_at.unix_timestamp();
             let created_secs = if created_secs <= 0 {
                 0
             } else if created_secs >= i64::from(u32::MAX) {
@@ -229,18 +218,17 @@ impl Backend {
                 ),
             )?;
         }
-        if let Some(min_age) = resolution
-            .meta
+        if let Some(min_age) = meta
             .config
             .delete_on_empty
             .min_age
             .filter(|age| !age.is_zero())
-            && (!resolution.is_reconfigure || resolution.prior_doe_min_age.is_none())
+            && (!is_reconfigure || prior_doe_min_age.is_none())
         {
             txn.put(
                 kv::stream_doe_deadline::ser_key(
                     kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                        retention_age_or_zero(&resolution.meta.config),
+                        retention_age_or_zero(&meta.config),
                         min_age,
                     )),
                     stream_id,
@@ -254,18 +242,15 @@ impl Backend {
         };
         txn.commit_with_options(&WRITE_OPTS).await?;
 
-        if resolution.is_reconfigure
-            && let Some(client) = self.streamer_client_if_active(&basin, &stream)
-        {
-            client.advise_reconfig(resolution.meta.config.clone());
+        if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
+            client.advise_reconfig(meta.config.clone());
         }
 
-        let is_reconfigure = resolution.is_reconfigure;
         let info = StreamInfo {
             name: stream,
-            created_at: resolution.meta.created_at,
+            created_at: meta.created_at,
             deleted_at: None,
-            cipher: resolution.meta.cipher,
+            cipher: meta.cipher,
         };
 
         Ok(if is_reconfigure {

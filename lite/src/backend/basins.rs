@@ -85,12 +85,7 @@ impl Backend {
             return Err(BasinDeletionPendingError { basin }.into());
         }
 
-        struct CreateBasinResolution {
-            meta: kv::basin_meta::BasinMeta,
-            is_reconfigure: bool,
-        }
-
-        let resolution = match (existing_meta, intent) {
+        let (meta, is_reconfigure) = match (existing_meta, intent) {
             (
                 Some(existing),
                 CreateBasinIntent::CreateOnly {
@@ -114,17 +109,15 @@ impl Backend {
                     Err(BasinAlreadyExistsError { basin }.into())
                 };
             }
-            (Some(existing), CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => {
-                CreateBasinResolution {
-                    meta: kv::basin_meta::BasinMeta {
-                        config: existing.config.reconfigure(reconfiguration),
-                        created_at: existing.created_at,
-                        deleted_at: None,
-                        creation_idempotency_key: existing.creation_idempotency_key,
-                    },
-                    is_reconfigure: true,
-                }
-            }
+            (Some(existing), CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => (
+                kv::basin_meta::BasinMeta {
+                    config: existing.config.reconfigure(reconfiguration),
+                    created_at: existing.created_at,
+                    deleted_at: None,
+                    creation_idempotency_key: existing.creation_idempotency_key,
+                },
+                true,
+            ),
             (
                 None,
                 CreateBasinIntent::CreateOnly {
@@ -135,30 +128,28 @@ impl Backend {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
-                CreateBasinResolution {
-                    meta: kv::basin_meta::BasinMeta {
+                (
+                    kv::basin_meta::BasinMeta {
                         config,
                         created_at: OffsetDateTime::now_utc(),
                         deleted_at: None,
                         creation_idempotency_key: new_creation_idempotency_key,
                     },
-                    is_reconfigure: false,
-                }
+                    false,
+                )
             }
-            (None, CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => {
-                CreateBasinResolution {
-                    meta: kv::basin_meta::BasinMeta {
-                        config: BasinConfig::default().reconfigure(reconfiguration),
-                        created_at: OffsetDateTime::now_utc(),
-                        deleted_at: None,
-                        creation_idempotency_key: None,
-                    },
-                    is_reconfigure: false,
-                }
-            }
+            (None, CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => (
+                kv::basin_meta::BasinMeta {
+                    config: BasinConfig::default().reconfigure(reconfiguration),
+                    created_at: OffsetDateTime::now_utc(),
+                    deleted_at: None,
+                    creation_idempotency_key: None,
+                },
+                false,
+            ),
         };
 
-        txn.put(&meta_key, kv::basin_meta::ser_value(&resolution.meta))?;
+        txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
 
         static WRITE_OPTS: WriteOptions = WriteOptions {
             await_durable: true,
@@ -168,11 +159,11 @@ impl Backend {
         let info = BasinInfo {
             name: basin,
             scope: None,
-            created_at: resolution.meta.created_at,
+            created_at: meta.created_at,
             deleted_at: None,
         };
 
-        Ok(if resolution.is_reconfigure {
+        Ok(if is_reconfigure {
             CreatedOrReconfigured::Reconfigured(info)
         } else {
             CreatedOrReconfigured::Created(info)
