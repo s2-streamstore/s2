@@ -430,12 +430,11 @@ mod tests {
         read_extent::{ReadLimit, ReadUntil},
         record::{Metered, Record},
         types::{
-            basin::BasinName,
+            basin::{BasinName, CreateBasinIntent},
             config::{BasinConfig, OptionalStreamConfig},
-            resources::CreateMode,
             stream::{
-                AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
-                ReadSessionOutput, ReadStart,
+                AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
+                CreateStreamIntent, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart,
             },
         },
     };
@@ -563,8 +562,10 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateBasinIntent::CreateOnly {
+                    config: BasinConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -573,8 +574,10 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateStreamIntent::CreateOnly {
+                    config: OptionalStreamConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -636,8 +639,10 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateBasinIntent::CreateOnly {
+                    config: BasinConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -646,8 +651,10 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateStreamIntent::CreateOnly {
+                    config: OptionalStreamConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -715,8 +722,10 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateBasinIntent::CreateOnly {
+                    config: BasinConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -725,8 +734,10 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateStreamIntent::CreateOnly {
+                    config: OptionalStreamConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -868,8 +879,10 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateBasinIntent::CreateOnly {
+                    config: BasinConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -878,8 +891,10 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateStreamIntent::CreateOnly {
+                    config: OptionalStreamConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -958,8 +973,10 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateBasinIntent::CreateOnly {
+                    config: BasinConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -968,8 +985,10 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateStreamIntent::CreateOnly {
+                    config: OptionalStreamConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();

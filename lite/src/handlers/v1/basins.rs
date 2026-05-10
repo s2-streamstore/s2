@@ -7,9 +7,9 @@ use s2_api::{
 use s2_common::{
     http::extract::HeaderOpt,
     types::{
-        basin::{BasinName, ListBasinsRequest},
+        basin::{BasinName, CreateBasinIntent, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{CreateMode, Page, RequestToken},
+        resources::{Page, RequestToken},
     },
 };
 
@@ -98,7 +98,13 @@ pub async fn create_basin(
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(request.basin, config, CreateMode::CreateOnly(request_token))
+        .create_basin(
+            request.basin,
+            CreateBasinIntent::CreateOnly {
+                config,
+                request_token,
+            },
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(info.into_inner().into())))
 }
@@ -161,13 +167,16 @@ pub async fn create_or_reconfigure_basin(
         request: JsonOpt(request),
     }: CreateOrReconfigureArgs,
 ) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
-    let config: BasinReconfiguration = request
+    let reconfiguration: BasinReconfiguration = request
         .and_then(|req| req.config)
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(basin, config, CreateMode::CreateOrReconfigure)
+        .create_basin(
+            basin,
+            CreateBasinIntent::CreateOrReconfigure { reconfiguration },
+        )
         .await?;
     let status = if info.is_created() {
         StatusCode::CREATED

@@ -7,13 +7,12 @@ use std::{borrow::Cow, path::Path, time::Duration};
 use s2_common::{
     maybe::Maybe,
     types::{
-        basin::BasinName,
+        basin::{BasinName, CreateBasinIntent},
         config::{
             BasinReconfiguration, DeleteOnEmptyReconfiguration, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::CreateMode,
-        stream::StreamName,
+        stream::{CreateStreamIntent, StreamName},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -402,8 +401,7 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
         backend
             .create_basin(
                 basin.clone(),
-                reconfiguration,
-                CreateMode::CreateOrReconfigure,
+                CreateBasinIntent::CreateOrReconfigure { reconfiguration },
             )
             .await
             .map_err(|e| eyre::eyre!("failed to apply basin {:?}: {}", basin.as_ref(), e))?;
@@ -425,8 +423,7 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
                 .create_stream(
                     basin.clone(),
                     stream.clone(),
-                    reconfiguration,
-                    CreateMode::CreateOrReconfigure,
+                    CreateStreamIntent::CreateOrReconfigure { reconfiguration },
                 )
                 .await
                 .map_err(|e| {

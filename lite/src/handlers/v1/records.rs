@@ -468,12 +468,12 @@ mod tests {
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
         types::{
-            basin::{BASIN_HEADER, BasinName},
+            basin::{BASIN_HEADER, BasinName, CreateBasinIntent},
             config::{BasinConfig, OptionalStreamConfig},
-            resources::CreateMode,
             stream::{
                 AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
-                ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
+                CreateStreamIntent, ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput,
+                ReadStart, StreamName,
             },
         },
     };
@@ -518,7 +518,13 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(basin.clone(), basin_config, CreateMode::CreateOnly(None))
+            .create_basin(
+                basin.clone(),
+                CreateBasinIntent::CreateOnly {
+                    config: basin_config,
+                    request_token: None,
+                },
+            )
             .await
             .expect("create basin");
         let stream: StreamName = format!("test-stream-{test_suffix}").parse().unwrap();
@@ -526,8 +532,10 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                stream_config,
-                CreateMode::CreateOnly(None),
+                CreateStreamIntent::CreateOnly {
+                    config: stream_config,
+                    request_token: None,
+                },
             )
             .await
             .expect("create stream");
@@ -542,7 +550,13 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(basin.clone(), basin_config, CreateMode::CreateOnly(None))
+            .create_basin(
+                basin.clone(),
+                CreateBasinIntent::CreateOnly {
+                    config: basin_config,
+                    request_token: None,
+                },
+            )
             .await
             .expect("create basin");
         let stream: StreamName = format!("test-stream-{test_suffix}").parse().unwrap();

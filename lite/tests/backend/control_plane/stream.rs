@@ -5,15 +5,16 @@ use s2_common::{
     encryption::EncryptionAlgorithm,
     maybe::Maybe,
     types::{
+        basin::CreateBasinIntent,
         config::{
             BasinConfig, BasinReconfiguration, OptionalStreamConfig, OptionalTimestampingConfig,
             RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
             TimestampingReconfiguration,
         },
-        resources::{CreateMode, ListItemsRequestParts, RequestToken},
+        resources::{ListItemsRequestParts, RequestToken},
         stream::{
-            AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
-            StreamNameStartAfter,
+            AppendInput, CreateStreamIntent, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart,
+            StreamNamePrefix, StreamNameStartAfter,
         },
     },
 };
@@ -45,8 +46,10 @@ async fn test_create_stream_honors_basin_defaults() {
     backend
         .create_basin(
             basin_name.clone(),
-            basin_config,
-            CreateMode::CreateOnly(None),
+            CreateBasinIntent::CreateOnly {
+                config: basin_config,
+                request_token: None,
+            },
         )
         .await
         .expect("Failed to create basin");
@@ -57,8 +60,10 @@ async fn test_create_stream_honors_basin_defaults() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            OptionalStreamConfig::default(),
-            CreateMode::CreateOnly(None),
+            CreateStreamIntent::CreateOnly {
+                config: OptionalStreamConfig::default(),
+                request_token: None,
+            },
         )
         .await
         .expect("Failed to create stream");
@@ -222,8 +227,10 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            config.clone(),
-            CreateMode::CreateOnly(Some(token1.clone())),
+            CreateStreamIntent::CreateOnly {
+                config: config.clone(),
+                request_token: Some(token1.clone()),
+            },
         )
         .await
         .expect("Failed to create stream");
@@ -238,8 +245,10 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            config.clone(),
-            CreateMode::CreateOnly(Some(token1.clone())),
+            CreateStreamIntent::CreateOnly {
+                config: config.clone(),
+                request_token: Some(token1.clone()),
+            },
         )
         .await
         .expect("Idempotent create should succeed with same request token");
@@ -248,8 +257,10 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            config.clone(),
-            CreateMode::CreateOnly(Some("stream-token-2".parse().unwrap())),
+            CreateStreamIntent::CreateOnly {
+                config: config.clone(),
+                request_token: Some("stream-token-2".parse().unwrap()),
+            },
         )
         .await;
     assert!(matches!(
@@ -263,14 +274,97 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            different_config,
-            CreateMode::CreateOnly(Some(token1)),
+            CreateStreamIntent::CreateOnly {
+                config: different_config,
+                request_token: Some(token1),
+            },
         )
         .await;
     assert!(matches!(
         different_config_result,
         Err(CreateStreamError::StreamAlreadyExists(_))
     ));
+}
+
+#[tokio::test]
+async fn test_create_stream_create_or_reconfigure_preserves_idempotency_key() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "stream-idempotency-key-preserve",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name = test_stream_name("stream-idempotency-key-preserve");
+
+    let config = OptionalStreamConfig {
+        storage_class: Some(StorageClass::Express),
+        ..Default::default()
+    };
+    let token: RequestToken = "stream-token-preserve".parse().unwrap();
+
+    backend
+        .create_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            CreateStreamIntent::CreateOnly {
+                config: config.clone(),
+                request_token: Some(token.clone()),
+            },
+        )
+        .await
+        .expect("Failed to create stream");
+
+    backend
+        .create_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            CreateStreamIntent::CreateOnly {
+                config: config.clone(),
+                request_token: Some(token.clone()),
+            },
+        )
+        .await
+        .expect("Idempotency should work before CreateOrReconfigure");
+
+    backend
+        .create_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            CreateStreamIntent::CreateOrReconfigure {
+                reconfiguration: StreamReconfiguration {
+                    timestamping: Maybe::from(Some(TimestampingReconfiguration {
+                        mode: Maybe::from(Some(TimestampingMode::Arrival)),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("CreateOrReconfigure should succeed");
+
+    let stored_config = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to fetch stream config");
+    assert_eq!(stored_config.storage_class, Some(StorageClass::Express));
+    assert_eq!(
+        stored_config.timestamping.mode,
+        Some(TimestampingMode::Arrival)
+    );
+
+    backend
+        .create_stream(
+            basin_name,
+            stream_name,
+            CreateStreamIntent::CreateOnly {
+                config,
+                request_token: Some(token),
+            },
+        )
+        .await
+        .expect("Idempotency should still work after CreateOrReconfigure");
 }
 
 #[tokio::test]
@@ -284,8 +378,10 @@ async fn test_reconfigure_stream_updates_selected_fields() {
     backend
         .create_basin(
             basin_name.clone(),
-            basin_config,
-            CreateMode::CreateOnly(None),
+            CreateBasinIntent::CreateOnly {
+                config: basin_config,
+                request_token: None,
+            },
         )
         .await
         .expect("Failed to create basin");
@@ -304,8 +400,10 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            initial_config,
-            CreateMode::CreateOnly(None),
+            CreateStreamIntent::CreateOnly {
+                config: initial_config,
+                request_token: None,
+            },
         )
         .await
         .expect("Failed to create stream");
@@ -390,11 +488,11 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
 
     append_payloads(&backend, &basin_name, &stream_name, &[b"seed"]).await;
 
-    let config = OptionalStreamConfig {
-        timestamping: OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientRequire),
+    let reconfiguration = StreamReconfiguration {
+        timestamping: Maybe::from(Some(TimestampingReconfiguration {
+            mode: Maybe::from(Some(TimestampingMode::ClientRequire)),
             ..Default::default()
-        },
+        })),
         ..Default::default()
     };
 
@@ -402,8 +500,7 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            config,
-            CreateMode::CreateOrReconfigure,
+            CreateStreamIntent::CreateOrReconfigure { reconfiguration },
         )
         .await
         .expect("CreateOrReconfigure should succeed for an existing stream");
@@ -437,8 +534,10 @@ async fn test_create_stream_fails_when_basin_deleting() {
         .create_stream(
             basin_name,
             stream_name,
-            OptionalStreamConfig::default(),
-            CreateMode::CreateOnly(None),
+            CreateStreamIntent::CreateOnly {
+                config: OptionalStreamConfig::default(),
+                request_token: None,
+            },
         )
         .await;
 
@@ -482,8 +581,10 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            OptionalStreamConfig::default(),
-            CreateMode::CreateOnly(None),
+            CreateStreamIntent::CreateOnly {
+                config: OptionalStreamConfig::default(),
+                request_token: None,
+            },
         )
         .await;
     assert!(matches!(

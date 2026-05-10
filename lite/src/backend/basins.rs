@@ -1,9 +1,9 @@
 use s2_common::{
     bash::Bash,
     types::{
-        basin::{BasinInfo, BasinName, ListBasinsRequest},
+        basin::{BasinInfo, BasinName, CreateBasinIntent, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
+        resources::{ListItemsRequestParts, Page, RequestToken},
         stream::StreamNameStartAfter,
     },
 };
@@ -72,72 +72,93 @@ impl Backend {
     pub async fn create_basin(
         &self,
         basin: BasinName,
-        config: impl Into<BasinReconfiguration>,
-        mode: CreateMode,
+        intent: CreateBasinIntent,
     ) -> Result<CreatedOrReconfigured<BasinInfo>, CreateBasinError> {
-        let config = config.into();
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
-        let new_creation_idempotency_key = match &mode {
-            CreateMode::CreateOnly(Some(req_token)) => {
-                let resolved = BasinConfig::default().reconfigure(config.clone());
-                Some(creation_idempotency_key(req_token, &resolved))
-            }
-            _ => None,
-        };
-
-        let mut existing_meta_opt = None;
-        if let Some(existing_meta) =
-            db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?
+        let existing_meta = db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?;
+        if let Some(existing_meta) = &existing_meta
+            && existing_meta.deleted_at.is_some()
         {
-            if existing_meta.deleted_at.is_some() {
-                return Err(BasinDeletionPendingError { basin }.into());
-            }
-            match mode {
-                CreateMode::CreateOnly(_) => {
-                    return if new_creation_idempotency_key.is_some()
-                        && existing_meta.creation_idempotency_key == new_creation_idempotency_key
-                    {
-                        Ok(CreatedOrReconfigured::Created(BasinInfo {
-                            name: basin,
-                            scope: None,
-                            created_at: existing_meta.created_at,
-                            deleted_at: None,
-                        }))
-                    } else {
-                        Err(BasinAlreadyExistsError { basin }.into())
-                    };
-                }
-                CreateMode::CreateOrReconfigure => {
-                    existing_meta_opt = Some(existing_meta);
-                }
-            }
+            return Err(BasinDeletionPendingError { basin }.into());
         }
 
-        let is_reconfigure = existing_meta_opt.is_some();
-        let (resolved, created_at, creation_idempotency_key) = match existing_meta_opt {
-            Some(existing) => (
-                existing.config.reconfigure(config),
-                existing.created_at,
-                existing.creation_idempotency_key,
-            ),
-            None => (
-                BasinConfig::default().reconfigure(config),
-                OffsetDateTime::now_utc(),
-                new_creation_idempotency_key,
-            ),
+        struct CreateBasinResolution {
+            meta: kv::basin_meta::BasinMeta,
+            is_reconfigure: bool,
+        }
+
+        let resolution = match (existing_meta, intent) {
+            (
+                Some(existing),
+                CreateBasinIntent::CreateOnly {
+                    config,
+                    request_token,
+                },
+            ) => {
+                let new_creation_idempotency_key = request_token
+                    .as_ref()
+                    .map(|req_token| creation_idempotency_key(req_token, &config));
+                return if new_creation_idempotency_key.is_some()
+                    && existing.creation_idempotency_key == new_creation_idempotency_key
+                {
+                    Ok(CreatedOrReconfigured::Created(BasinInfo {
+                        name: basin,
+                        scope: None,
+                        created_at: existing.created_at,
+                        deleted_at: None,
+                    }))
+                } else {
+                    Err(BasinAlreadyExistsError { basin }.into())
+                };
+            }
+            (Some(existing), CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => {
+                CreateBasinResolution {
+                    meta: kv::basin_meta::BasinMeta {
+                        config: existing.config.reconfigure(reconfiguration),
+                        created_at: existing.created_at,
+                        deleted_at: None,
+                        creation_idempotency_key: existing.creation_idempotency_key,
+                    },
+                    is_reconfigure: true,
+                }
+            }
+            (
+                None,
+                CreateBasinIntent::CreateOnly {
+                    config,
+                    request_token,
+                },
+            ) => {
+                let new_creation_idempotency_key = request_token
+                    .as_ref()
+                    .map(|req_token| creation_idempotency_key(req_token, &config));
+                CreateBasinResolution {
+                    meta: kv::basin_meta::BasinMeta {
+                        config,
+                        created_at: OffsetDateTime::now_utc(),
+                        deleted_at: None,
+                        creation_idempotency_key: new_creation_idempotency_key,
+                    },
+                    is_reconfigure: false,
+                }
+            }
+            (None, CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => {
+                CreateBasinResolution {
+                    meta: kv::basin_meta::BasinMeta {
+                        config: BasinConfig::default().reconfigure(reconfiguration),
+                        created_at: OffsetDateTime::now_utc(),
+                        deleted_at: None,
+                        creation_idempotency_key: None,
+                    },
+                    is_reconfigure: false,
+                }
+            }
         };
 
-        let meta = kv::basin_meta::BasinMeta {
-            config: resolved,
-            created_at,
-            deleted_at: None,
-            creation_idempotency_key,
-        };
-
-        txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
+        txn.put(&meta_key, kv::basin_meta::ser_value(&resolution.meta))?;
 
         static WRITE_OPTS: WriteOptions = WriteOptions {
             await_durable: true,
@@ -147,11 +168,11 @@ impl Backend {
         let info = BasinInfo {
             name: basin,
             scope: None,
-            created_at,
+            created_at: resolution.meta.created_at,
             deleted_at: None,
         };
 
-        Ok(if is_reconfigure {
+        Ok(if resolution.is_reconfigure {
             CreatedOrReconfigured::Reconfigured(info)
         } else {
             CreatedOrReconfigured::Created(info)

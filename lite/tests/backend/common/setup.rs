@@ -6,10 +6,12 @@ use s2_common::{
     encryption::{EncryptionAlgorithm, EncryptionKey, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     types::{
-        basin::BasinName,
+        basin::{BasinName, CreateBasinIntent},
         config::{BasinConfig, OptionalStreamConfig},
-        resources::CreateMode,
-        stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName},
+        stream::{
+            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, CreateStreamIntent,
+            StreamName,
+        },
     },
 };
 use s2_lite::backend::Backend;
@@ -151,7 +153,13 @@ pub fn create_test_record_batch_with_timestamps(
 pub async fn create_test_basin(backend: &Backend, suffix: &str, config: BasinConfig) -> BasinName {
     let basin_name = test_basin_name(suffix);
     backend
-        .create_basin(basin_name.clone(), config, CreateMode::CreateOnly(None))
+        .create_basin(
+            basin_name.clone(),
+            CreateBasinIntent::CreateOnly {
+                config,
+                request_token: None,
+            },
+        )
         .await
         .expect("Failed to create basin");
     basin_name
@@ -168,8 +176,10 @@ pub async fn create_test_stream(
         .create_stream(
             basin.clone(),
             stream_name.clone(),
-            config,
-            CreateMode::CreateOnly(None),
+            CreateStreamIntent::CreateOnly {
+                config,
+                request_token: None,
+            },
         )
         .await
         .expect("Failed to create stream");

@@ -115,19 +115,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateMode {
-    /// Create a new resource.
-    ///
-    /// HTTP POST semantics – idempotent if a request token is provided and the resource was
-    /// previously created using the same token.
-    CreateOnly(Option<RequestToken>),
-    /// Create a new resource or reconfigure if the resource already exists.
-    ///
-    /// HTTP PUT semantics – always idempotent.
-    CreateOrReconfigure,
-}
-
 pub static REQUEST_TOKEN_HEADER: http::HeaderName =
     http::HeaderName::from_static("s2-request-token");
 

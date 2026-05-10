@@ -4,8 +4,8 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
-        stream::{ListStreamsRequest, StreamInfo, StreamName},
+        resources::{ListItemsRequestParts, Page, RequestToken},
+        stream::{CreateStreamIntent, ListStreamsRequest, StreamInfo, StreamName},
     },
 };
 use slatedb::{
@@ -86,10 +86,8 @@ impl Backend {
         &self,
         basin: BasinName,
         stream: StreamName,
-        config: impl Into<StreamReconfiguration>,
-        mode: CreateMode,
+        intent: CreateStreamIntent,
     ) -> Result<CreatedOrReconfigured<StreamInfo>, CreateStreamError> {
-        let config = config.into();
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -108,83 +106,114 @@ impl Backend {
 
         let stream_meta_key = kv::stream_meta::ser_key(&basin, &stream);
 
-        let creation_idempotency_key = match &mode {
-            CreateMode::CreateOnly(Some(req_token)) => {
-                let resolved = OptionalStreamConfig::default().reconfigure(config.clone());
-                Some(creation_idempotency_key(req_token, &resolved))
-            }
-            _ => None,
-        };
-
-        let mut existing_meta_opt = None;
-        let mut prior_doe_min_age = None;
-
-        if let Some(existing_meta) =
-            db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?
+        let existing_meta =
+            db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?;
+        if let Some(existing_meta) = &existing_meta
+            && existing_meta.deleted_at.is_some()
         {
-            if existing_meta.deleted_at.is_some() {
-                return Err(CreateStreamError::StreamDeletionPending(
-                    StreamDeletionPendingError { basin, stream },
-                ));
-            }
-            prior_doe_min_age = existing_meta
-                .config
-                .delete_on_empty
-                .min_age
-                .filter(|age| !age.is_zero());
-            match mode {
-                CreateMode::CreateOnly(_) => {
-                    return if creation_idempotency_key.is_some()
-                        && existing_meta.creation_idempotency_key == creation_idempotency_key
-                    {
-                        Ok(CreatedOrReconfigured::Created(StreamInfo {
-                            name: stream,
-                            created_at: existing_meta.created_at,
-                            deleted_at: None,
-                            cipher: existing_meta.cipher,
-                        }))
-                    } else {
-                        Err(StreamAlreadyExistsError { basin, stream }.into())
-                    };
-                }
-                CreateMode::CreateOrReconfigure => {
-                    existing_meta_opt = Some(existing_meta);
-                }
-            }
+            return Err(CreateStreamError::StreamDeletionPending(
+                StreamDeletionPendingError { basin, stream },
+            ));
         }
 
-        let is_reconfigure = existing_meta_opt.is_some();
-        let (resolved, created_at, cipher) = match existing_meta_opt {
-            Some(existing) => (
-                existing.config.reconfigure(config),
-                existing.created_at,
-                existing.cipher,
-            ),
-            None => (
-                OptionalStreamConfig::default().reconfigure(config),
-                OffsetDateTime::now_utc(),
-                basin_meta.config.stream_cipher,
-            ),
-        };
-        let basin_defaults = &basin_meta.config.default_stream_config;
-        let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
+        struct CreateStreamResolution {
+            meta: kv::stream_meta::StreamMeta,
+            is_reconfigure: bool,
+            prior_doe_min_age: Option<std::time::Duration>,
+        }
 
-        let meta = kv::stream_meta::StreamMeta {
-            config: resolved.clone(),
-            cipher,
-            created_at,
-            deleted_at: None,
-            creation_idempotency_key,
+        let mut resolution = match (existing_meta, intent) {
+            (
+                Some(existing),
+                CreateStreamIntent::CreateOnly {
+                    config,
+                    request_token,
+                },
+            ) => {
+                let new_creation_idempotency_key = request_token
+                    .as_ref()
+                    .map(|req_token| creation_idempotency_key(req_token, &config));
+                return if new_creation_idempotency_key.is_some()
+                    && existing.creation_idempotency_key == new_creation_idempotency_key
+                {
+                    Ok(CreatedOrReconfigured::Created(StreamInfo {
+                        name: stream,
+                        created_at: existing.created_at,
+                        deleted_at: None,
+                        cipher: existing.cipher,
+                    }))
+                } else {
+                    Err(StreamAlreadyExistsError { basin, stream }.into())
+                };
+            }
+            (Some(existing), CreateStreamIntent::CreateOrReconfigure { reconfiguration }) => {
+                let prior_doe_min_age = existing
+                    .config
+                    .delete_on_empty
+                    .min_age
+                    .filter(|age| !age.is_zero());
+                CreateStreamResolution {
+                    meta: kv::stream_meta::StreamMeta {
+                        config: existing.config.reconfigure(reconfiguration),
+                        cipher: existing.cipher,
+                        created_at: existing.created_at,
+                        deleted_at: None,
+                        creation_idempotency_key: existing.creation_idempotency_key,
+                    },
+                    is_reconfigure: true,
+                    prior_doe_min_age,
+                }
+            }
+            (
+                None,
+                CreateStreamIntent::CreateOnly {
+                    config,
+                    request_token,
+                },
+            ) => {
+                let new_creation_idempotency_key = request_token
+                    .as_ref()
+                    .map(|req_token| creation_idempotency_key(req_token, &config));
+                CreateStreamResolution {
+                    meta: kv::stream_meta::StreamMeta {
+                        config,
+                        cipher: basin_meta.config.stream_cipher,
+                        created_at: OffsetDateTime::now_utc(),
+                        deleted_at: None,
+                        creation_idempotency_key: new_creation_idempotency_key,
+                    },
+                    is_reconfigure: false,
+                    prior_doe_min_age: None,
+                }
+            }
+            (None, CreateStreamIntent::CreateOrReconfigure { reconfiguration }) => {
+                CreateStreamResolution {
+                    meta: kv::stream_meta::StreamMeta {
+                        config: OptionalStreamConfig::default().reconfigure(reconfiguration),
+                        cipher: basin_meta.config.stream_cipher,
+                        created_at: OffsetDateTime::now_utc(),
+                        deleted_at: None,
+                        creation_idempotency_key: None,
+                    },
+                    is_reconfigure: false,
+                    prior_doe_min_age: None,
+                }
+            }
         };
+        let basin_defaults = basin_meta.config.default_stream_config;
+        resolution.meta.config = resolution.meta.config.merge(basin_defaults).into();
 
-        txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
+        txn.put(
+            &stream_meta_key,
+            kv::stream_meta::ser_value(&resolution.meta),
+        )?;
         let stream_id = StreamId::new(&basin, &stream);
-        if !is_reconfigure {
+        if !resolution.is_reconfigure {
             txn.put(
                 kv::stream_id_mapping::ser_key(stream_id),
                 kv::stream_id_mapping::ser_value(&basin, &stream),
             )?;
-            let created_secs = created_at.unix_timestamp();
+            let created_secs = resolution.meta.created_at.unix_timestamp();
             let created_secs = if created_secs <= 0 {
                 0
             } else if created_secs >= i64::from(u32::MAX) {
@@ -200,17 +229,18 @@ impl Backend {
                 ),
             )?;
         }
-        if let Some(min_age) = meta
+        if let Some(min_age) = resolution
+            .meta
             .config
             .delete_on_empty
             .min_age
             .filter(|age| !age.is_zero())
-            && (!is_reconfigure || prior_doe_min_age.is_none())
+            && (!resolution.is_reconfigure || resolution.prior_doe_min_age.is_none())
         {
             txn.put(
                 kv::stream_doe_deadline::ser_key(
                     kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                        retention_age_or_zero(&meta.config),
+                        retention_age_or_zero(&resolution.meta.config),
                         min_age,
                     )),
                     stream_id,
@@ -224,15 +254,18 @@ impl Backend {
         };
         txn.commit_with_options(&WRITE_OPTS).await?;
 
-        if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(resolved);
+        if resolution.is_reconfigure
+            && let Some(client) = self.streamer_client_if_active(&basin, &stream)
+        {
+            client.advise_reconfig(resolution.meta.config.clone());
         }
 
+        let is_reconfigure = resolution.is_reconfigure;
         let info = StreamInfo {
             name: stream,
-            created_at,
+            created_at: resolution.meta.created_at,
             deleted_at: None,
-            cipher,
+            cipher: resolution.meta.cipher,
         };
 
         Ok(if is_reconfigure {

@@ -9,8 +9,8 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{CreateMode, Page, RequestToken},
-        stream::{ListStreamsRequest, StreamName},
+        resources::{Page, RequestToken},
+        stream::{CreateStreamIntent, ListStreamsRequest, StreamName},
     },
 };
 
@@ -125,8 +125,10 @@ pub async fn create_stream(
         .create_stream(
             basin,
             request.stream,
-            config,
-            CreateMode::CreateOnly(request_token),
+            CreateStreamIntent::CreateOnly {
+                config,
+                request_token,
+            },
         )
         .await?;
     Ok((StatusCode::CREATED, Json(info.into_inner().into())))
@@ -215,12 +217,16 @@ pub async fn create_or_reconfigure_stream(
         config: JsonOpt(config),
     }: CreateOrReconfigureArgs,
 ) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
-    let config: StreamReconfiguration = config
+    let reconfiguration: StreamReconfiguration = config
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_stream(basin, stream, config, CreateMode::CreateOrReconfigure)
+        .create_stream(
+            basin,
+            stream,
+            CreateStreamIntent::CreateOrReconfigure { reconfiguration },
+        )
         .await?;
     let status = if info.is_created() {
         StatusCode::CREATED

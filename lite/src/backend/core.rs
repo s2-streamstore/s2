@@ -12,8 +12,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        resources::CreateMode,
-        stream::StreamName,
+        stream::{CreateStreamIntent, StreamName},
     },
 };
 use slatedb::{
@@ -328,8 +327,10 @@ impl Backend {
                         .create_stream(
                             basin.clone(),
                             stream.clone(),
-                            OptionalStreamConfig::default(),
-                            CreateMode::CreateOnly(None),
+                            CreateStreamIntent::CreateOnly {
+                                config: OptionalStreamConfig::default(),
+                                request_token: None,
+                            },
                         )
                         .await
                     {
@@ -369,8 +370,8 @@ mod tests {
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
         types::{
+            basin::CreateBasinIntent,
             config::{BasinConfig, OptionalStreamConfig},
-            resources::CreateMode,
         },
     };
     use slatedb::{WriteBatch, config::WriteOptions, object_store};
@@ -483,8 +484,10 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateBasinIntent::CreateOnly {
+                    config: BasinConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -492,8 +495,10 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                CreateStreamIntent::CreateOnly {
+                    config: OptionalStreamConfig::default(),
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
