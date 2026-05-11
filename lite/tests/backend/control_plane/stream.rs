@@ -11,7 +11,7 @@ use s2_common::{
             RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
             TimestampingReconfiguration,
         },
-        resources::{ListItemsRequestParts, RequestToken},
+        resources::RequestToken,
         stream::{
             AppendInput, CreateStreamIntent, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart,
             StreamNamePrefix, StreamNameStartAfter,
@@ -816,13 +816,11 @@ async fn test_list_streams_pagination() {
     let page1 = backend
         .list_streams(
             basin_name.clone(),
-            ListItemsRequestParts {
+            ListStreamsRequest {
                 prefix: StreamNamePrefix::default(),
                 start_after: StreamNameStartAfter::default(),
                 limit: 5.into(),
-            }
-            .try_into()
-            .unwrap(),
+            },
         )
         .await
         .expect("Failed to list streams page 1");
@@ -843,13 +841,11 @@ async fn test_list_streams_pagination() {
     let page2 = backend
         .list_streams(
             basin_name.clone(),
-            ListItemsRequestParts {
+            ListStreamsRequest {
                 prefix: StreamNamePrefix::default(),
                 start_after: page1.values.last().unwrap().name.clone().into(),
                 limit: 5.into(),
-            }
-            .try_into()
-            .unwrap(),
+            },
         )
         .await
         .expect("Failed to list streams page 2");
@@ -870,13 +866,11 @@ async fn test_list_streams_pagination() {
     let page3 = backend
         .list_streams(
             basin_name.clone(),
-            ListItemsRequestParts {
+            ListStreamsRequest {
                 prefix: StreamNamePrefix::default(),
                 start_after: page2.values.last().unwrap().name.clone().into(),
                 limit: 5.into(),
-            }
-            .try_into()
-            .unwrap(),
+            },
         )
         .await
         .expect("Failed to list streams page 3");
@@ -926,13 +920,11 @@ async fn test_list_streams_prefix_filter() {
     let metrics_streams = backend
         .list_streams(
             basin_name.clone(),
-            ListItemsRequestParts {
+            ListStreamsRequest {
                 prefix: "test-stream-metrics-".parse().unwrap(),
                 start_after: StreamNameStartAfter::default(),
                 limit: Default::default(),
-            }
-            .try_into()
-            .unwrap(),
+            },
         )
         .await
         .expect("Failed to list streams with prefix");

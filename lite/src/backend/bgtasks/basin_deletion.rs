@@ -1,7 +1,7 @@
 use futures::{StreamExt, stream};
 use s2_common::types::{
     basin::BasinName,
-    resources::{ListItemsRequestParts, ListLimit, Page},
+    resources::{ListLimit, Page},
     stream::{ListStreamsRequest, StreamNamePrefix, StreamNameStartAfter},
 };
 use slatedb::{
@@ -73,13 +73,11 @@ impl Backend {
         basin: BasinName,
         cursor: StreamNameStartAfter,
     ) -> Result<bool, BasinDeletionError> {
-        let request: ListStreamsRequest = ListItemsRequestParts {
+        let request = ListStreamsRequest {
             prefix: StreamNamePrefix::default(),
             start_after: cursor.clone(),
             limit: ListLimit::MAX,
-        }
-        .try_into()
-        .expect("valid list streams request");
+        };
         let page = self
             .list_streams(basin.clone(), request)
             .await

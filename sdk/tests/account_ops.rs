@@ -219,6 +219,41 @@ async fn list_basins_with_prefix_and_start_after() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
+async fn list_basins_with_start_after_less_than_prefix() -> Result<(), S2Error> {
+    let s2 = s2();
+
+    let prefix = uuid();
+    let basin_name_1: BasinName = format!("{}-a-a", prefix).parse().expect("valid basin name");
+    let basin_name_2: BasinName = format!("{}-a-b", prefix).parse().expect("valid basin name");
+    let basin_name_3: BasinName = format!("{}-b-a", prefix).parse().expect("valid basin name");
+
+    s2.create_basin(CreateBasinInput::new(basin_name_1.clone()))
+        .await?;
+    s2.create_basin(CreateBasinInput::new(basin_name_2.clone()))
+        .await?;
+    s2.create_basin(CreateBasinInput::new(basin_name_3.clone()))
+        .await?;
+
+    let page = s2
+        .list_basins(
+            ListBasinsInput::new()
+                .with_prefix(format!("{}-b", prefix).parse().expect("valid prefix"))
+                .with_start_after(format!("{}-a", prefix).parse().expect("valid start after")),
+        )
+        .await?;
+
+    assert_eq!(page.values.len(), 1);
+    assert_eq!(page.values[0].name, basin_name_3);
+    assert!(!page.has_more);
+
+    s2.delete_basin(DeleteBasinInput::new(basin_name_1)).await?;
+    s2.delete_basin(DeleteBasinInput::new(basin_name_2)).await?;
+    s2.delete_basin(DeleteBasinInput::new(basin_name_3)).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn delete_nonexistent_basin_errors() -> Result<(), S2Error> {
     let s2 = s2();
     let result = s2

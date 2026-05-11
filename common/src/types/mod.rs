@@ -27,9 +27,3 @@ impl From<crate::record::FencingTokenTooLongError> for ValidationError {
         ValidationError(e.to_string())
     }
 }
-
-impl From<resources::StartAfterLessThanPrefixError> for ValidationError {
-    fn from(e: resources::StartAfterLessThanPrefixError) -> Self {
-        ValidationError(e.to_string())
-    }
-}

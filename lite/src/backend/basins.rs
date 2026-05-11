@@ -3,7 +3,7 @@ use s2_common::{
     types::{
         basin::{BasinInfo, BasinName, CreateBasinIntent, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{ListItemsRequestParts, Page, RequestToken},
+        resources::{Page, RequestToken},
         stream::StreamNameStartAfter,
     },
 };
@@ -27,11 +27,11 @@ impl Backend {
         &self,
         request: ListBasinsRequest,
     ) -> Result<Page<BasinInfo>, ListBasinsError> {
-        let ListItemsRequestParts {
+        let ListBasinsRequest {
             prefix,
             start_after,
             limit,
-        } = request.into();
+        } = request;
 
         let key_range = kv::basin_meta::ser_key_range(&prefix, &start_after);
         if key_range.is_empty() {
