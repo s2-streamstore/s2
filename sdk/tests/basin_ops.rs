@@ -217,9 +217,7 @@ async fn list_streams_with_start_after_returns_empty_page(basin: &S2Basin) -> Re
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_start_after_less_than_prefix_errors(
-    basin: &S2Basin,
-) -> Result<(), S2Error> {
+async fn list_streams_with_start_after_less_than_prefix(basin: &S2Basin) -> Result<(), S2Error> {
     let prefix = uuid();
     let stream_name_1: StreamName = format!("{}-a-a", prefix)
         .parse()
@@ -241,21 +239,17 @@ async fn list_streams_with_start_after_less_than_prefix_errors(
         .create_stream(CreateStreamInput::new(stream_name_3.clone()))
         .await?;
 
-    let result = basin
+    let page = basin
         .list_streams(
             ListStreamsInput::new()
                 .with_prefix(format!("{}-b", prefix).parse().expect("valid prefix"))
                 .with_start_after(format!("{}-a", prefix).parse().expect("valid start after")),
         )
-        .await;
+        .await?;
 
-    assert_matches!(
-        result,
-        Err(S2Error::Server(ErrorResponse { code, message, .. })) => {
-            assert_eq!(code, "invalid");
-            assert_eq!(message, "`start_after` must be greater than or equal to the `prefix`");
-        }
-    );
+    assert_eq!(page.values.len(), 1);
+    assert_eq!(page.values[0].name, stream_name_3);
+    assert!(!page.has_more);
 
     Ok(())
 }
