@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use colored::Colorize;
-use s2_api::v1::config as api_config;
 use s2_common::{
     encryption::EncryptionAlgorithm,
     types::{
@@ -16,17 +15,17 @@ use s2_common::{
     },
 };
 use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
-use s2_sdk::{S2, types as s2_config};
+use s2_sdk::S2;
 
-fn basin_config_from_sdk(config: s2_config::BasinConfig) -> miette::Result<BasinConfig> {
-    let config: api_config::BasinConfig = config.into();
+fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> miette::Result<BasinConfig> {
+    let config: s2_api::v1::config::BasinConfig = config.into();
     config
         .try_into()
         .map_err(|e| miette::miette!("invalid basin config returned by server: {}", e))
 }
 
-fn stream_config_from_sdk(config: s2_config::StreamConfig) -> miette::Result<StreamConfig> {
-    let config: api_config::StreamConfig = config.into();
+fn stream_config_from_sdk(config: s2_sdk::types::StreamConfig) -> miette::Result<StreamConfig> {
+    let config: s2_api::v1::config::StreamConfig = config.into();
     let config: OptionalStreamConfig = config
         .try_into()
         .map_err(|e| miette::miette!("invalid stream config returned by server: {}", e))?;
@@ -78,7 +77,7 @@ async fn apply_basin(
     basin: BasinName,
     config: Option<BasinConfigSpec>,
 ) -> miette::Result<()> {
-    let mut input = s2_config::EnsureBasinInput::new(basin.clone());
+    let mut input = s2_sdk::types::EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
         input = input.with_config(BasinConfig::from(c));
     }
@@ -87,10 +86,10 @@ async fn apply_basin(
         .await
         .map_err(|e| miette::miette!("failed to apply basin {:?}: {}", basin.as_ref(), e))?
     {
-        s2_config::ProvisionResult::Created(_) => {
+        s2_sdk::types::ProvisionResult::Created(_) => {
             eprintln!("{}", format!("  basin {basin}").green().bold());
         }
-        s2_config::ProvisionResult::Updated(_) => {
+        s2_sdk::types::ProvisionResult::Updated(_) => {
             eprintln!("{}", format!("  basin {basin} (updated)").yellow().bold());
         }
     }
@@ -103,7 +102,7 @@ async fn apply_stream(
     stream: StreamName,
     config: Option<StreamConfigSpec>,
 ) -> miette::Result<()> {
-    let mut input = s2_config::EnsureStreamInput::new(stream.clone());
+    let mut input = s2_sdk::types::EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
         input = input.with_config(OptionalStreamConfig::from(c));
     }
@@ -116,10 +115,10 @@ async fn apply_stream(
             e
         )
     })? {
-        s2_config::ProvisionResult::Created(_) => {
+        s2_sdk::types::ProvisionResult::Created(_) => {
             eprintln!("{}", format!("  stream {basin}/{stream}").green().bold());
         }
-        s2_config::ProvisionResult::Updated(_) => {
+        s2_sdk::types::ProvisionResult::Updated(_) => {
             eprintln!(
                 "{}",
                 format!("  stream {basin}/{stream} (updated)")
@@ -143,8 +142,8 @@ struct FieldDiff {
     new: String,
 }
 
-fn is_not_found_error(e: &s2_config::S2Error) -> bool {
-    matches!(e, s2_config::S2Error::Server(s2_config::ErrorResponse { code, .. }) if code == "basin_not_found" || code == "stream_not_found")
+fn is_not_found_error(e: &s2_sdk::types::S2Error) -> bool {
+    matches!(e, s2_sdk::types::S2Error::Server(s2_sdk::types::ErrorResponse { code, .. }) if code == "basin_not_found" || code == "stream_not_found")
 }
 
 fn format_storage_class(sc: StorageClass) -> &'static str {
