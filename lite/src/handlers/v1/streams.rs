@@ -9,7 +9,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{CreateMode, EnsureResult, Page, RequestToken},
+        resources::{EnsureResult, Page, ProvisionMode, RequestToken},
         stream::{ListStreamsRequest, StreamName},
     },
 };
@@ -119,11 +119,11 @@ pub async fn create_stream(
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_stream(
+        .provision_stream(
             basin,
             request.stream,
             config,
-            CreateMode::CreateOnly { request_token },
+            ProvisionMode::CreateOnly { request_token },
         )
         .await?;
     Ok((StatusCode::CREATED, Json(info.into_inner().into())))
@@ -217,7 +217,7 @@ pub async fn ensure_stream(
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_stream(basin, stream, config, CreateMode::Ensure)
+        .provision_stream(basin, stream, config, ProvisionMode::Ensure)
         .await?;
     let status = match &info {
         EnsureResult::Created(_) => StatusCode::CREATED,

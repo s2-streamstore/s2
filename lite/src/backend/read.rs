@@ -432,7 +432,7 @@ mod tests {
         types::{
             basin::BasinName,
             config::{BasinConfig, OptionalStreamConfig},
-            resources::CreateMode,
+            resources::ProvisionMode,
             stream::{
                 AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
                 ReadSessionOutput, ReadStart,
@@ -561,10 +561,10 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -572,11 +572,11 @@ mod tests {
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -638,10 +638,10 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -649,11 +649,11 @@ mod tests {
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -721,10 +721,10 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -732,11 +732,11 @@ mod tests {
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -878,10 +878,10 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -889,11 +889,11 @@ mod tests {
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -972,10 +972,10 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -983,11 +983,11 @@ mod tests {
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly {
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )

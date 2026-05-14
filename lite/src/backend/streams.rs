@@ -4,7 +4,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{CreateMode, EnsureResult, ListItemsRequestParts, Page, RequestToken},
+        resources::{EnsureResult, ListItemsRequestParts, Page, ProvisionMode, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
@@ -23,8 +23,8 @@ use super::{
 use crate::{
     backend::{
         error::{
-            BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
-            GetStreamConfigError, ListStreamsError, ReconfigureStreamError, StorageError,
+            BasinDeletionPendingError, BasinNotFoundError, DeleteStreamError, GetStreamConfigError,
+            ListStreamsError, ProvisionStreamError, ReconfigureStreamError, StorageError,
             StreamAlreadyExistsError, StreamDeletionPendingError, StreamNotFoundError,
             StreamerError,
         },
@@ -82,13 +82,13 @@ impl Backend {
         Ok(Page::new(streams, has_more))
     }
 
-    pub async fn create_stream(
+    pub async fn provision_stream(
         &self,
         basin: BasinName,
         stream: StreamName,
         config: OptionalStreamConfig,
-        mode: CreateMode,
-    ) -> Result<EnsureResult<StreamInfo>, CreateStreamError> {
+        mode: ProvisionMode,
+    ) -> Result<EnsureResult<StreamInfo>, ProvisionStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -112,14 +112,14 @@ impl Backend {
         if let Some(existing_meta) = &existing_meta
             && existing_meta.deleted_at.is_some()
         {
-            return Err(CreateStreamError::StreamDeletionPending(
+            return Err(ProvisionStreamError::StreamDeletionPending(
                 StreamDeletionPendingError { basin, stream },
             ));
         }
 
         let basin_defaults = basin_meta.config.default_stream_config.clone();
         let (meta, was_existing, prior_doe_min_age, should_write) = match (existing_meta, mode) {
-            (Some(existing), CreateMode::CreateOnly { request_token }) => {
+            (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -136,7 +136,7 @@ impl Backend {
                     Err(StreamAlreadyExistsError { basin, stream }.into())
                 };
             }
-            (Some(existing), CreateMode::Ensure) => {
+            (Some(existing), ProvisionMode::Ensure) => {
                 let prior_doe_min_age = existing
                     .config
                     .delete_on_empty
@@ -157,7 +157,7 @@ impl Backend {
                     should_write,
                 )
             }
-            (None, CreateMode::CreateOnly { request_token }) => {
+            (None, ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -174,7 +174,7 @@ impl Backend {
                     true,
                 )
             }
-            (None, CreateMode::Ensure) => (
+            (None, ProvisionMode::Ensure) => (
                 kv::stream_meta::StreamMeta {
                     config: config.merge(basin_defaults).into(),
                     cipher: basin_meta.config.stream_cipher,

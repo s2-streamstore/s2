@@ -9,7 +9,7 @@ use s2_common::{
     types::{
         basin::{BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{CreateMode, EnsureResult, Page, RequestToken},
+        resources::{EnsureResult, Page, ProvisionMode, RequestToken},
     },
 };
 
@@ -95,10 +95,10 @@ pub async fn create_basin(
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(
+        .provision_basin(
             request.basin,
             config,
-            CreateMode::CreateOnly { request_token },
+            ProvisionMode::CreateOnly { request_token },
         )
         .await?;
     Ok((StatusCode::CREATED, Json(info.into_inner().into())))
@@ -168,7 +168,7 @@ pub async fn ensure_basin(
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(basin, config, CreateMode::Ensure)
+        .provision_basin(basin, config, ProvisionMode::Ensure)
         .await?;
     let status = match &info {
         EnsureResult::Created(_) => StatusCode::CREATED,

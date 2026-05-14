@@ -115,9 +115,13 @@ where
     }
 }
 
+/// Mode for provisioning a resource.
+///
+/// Provisioning either creates a new resource with create-only semantics, or ensures that
+/// a resource exists with the requested config.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateMode {
-    /// Create a new resource.
+pub enum ProvisionMode {
+    /// Create a new resource only.
     ///
     /// HTTP POST semantics: idempotent if a request token is provided and the resource was
     /// previously created using the same token and config.

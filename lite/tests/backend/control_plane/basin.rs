@@ -6,11 +6,11 @@ use s2_common::{
             BasinConfig, BasinReconfiguration, OptionalStreamConfig, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::{CreateMode, EnsureResult, ListItemsRequestParts, RequestToken},
+        resources::{EnsureResult, ListItemsRequestParts, ProvisionMode, RequestToken},
     },
 };
 use s2_lite::backend::error::{
-    CreateBasinError, DeleteBasinError, GetBasinConfigError, ReconfigureBasinError,
+    DeleteBasinError, GetBasinConfigError, ProvisionBasinError, ReconfigureBasinError,
 };
 
 use super::common::*;
@@ -27,10 +27,10 @@ async fn test_create_basin_idempotency_respects_request_token() {
     let token1: RequestToken = "token-1".parse().unwrap();
 
     let created = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -43,10 +43,10 @@ async fn test_create_basin_idempotency_respects_request_token() {
     ));
 
     let idempotent = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -60,33 +60,33 @@ async fn test_create_basin_idempotency_respects_request_token() {
 
     let different_token: RequestToken = "token-2".parse().unwrap();
     let different_token_result = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(different_token),
             },
         )
         .await;
     assert!(matches!(
         different_token_result,
-        Err(CreateBasinError::BasinAlreadyExists(_))
+        Err(ProvisionBasinError::BasinAlreadyExists(_))
     ));
 
     let mut different_config = config.clone();
     different_config.create_stream_on_append = false;
     let different_config_result = backend
-        .create_basin(
+        .provision_basin(
             basin_name,
             different_config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1),
             },
         )
         .await;
     assert!(matches!(
         different_config_result,
-        Err(CreateBasinError::BasinAlreadyExists(_))
+        Err(ProvisionBasinError::BasinAlreadyExists(_))
     ));
 }
 
@@ -102,10 +102,10 @@ async fn test_ensure_preserves_idempotency_key() {
     let token: RequestToken = "my-request-token".parse().unwrap();
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -113,10 +113,10 @@ async fn test_ensure_preserves_idempotency_key() {
         .expect("Failed to create basin");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -126,15 +126,15 @@ async fn test_ensure_preserves_idempotency_key() {
     let mut updated_config = config.clone();
     updated_config.create_stream_on_read = true;
     backend
-        .create_basin(basin_name.clone(), updated_config, CreateMode::Ensure)
+        .provision_basin(basin_name.clone(), updated_config, ProvisionMode::Ensure)
         .await
         .expect("Ensure should succeed");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -143,7 +143,7 @@ async fn test_ensure_preserves_idempotency_key() {
 }
 
 #[tokio::test]
-async fn test_create_basin_ensure_updates_config() {
+async fn test_provision_basin_ensure_updates_config() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("basin-recreate");
     let initial_config = BasinConfig {
@@ -153,10 +153,10 @@ async fn test_create_basin_ensure_updates_config() {
     };
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             initial_config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -169,10 +169,10 @@ async fn test_create_basin_ensure_updates_config() {
     updated_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             updated_config.clone(),
-            CreateMode::Ensure,
+            ProvisionMode::Ensure,
         )
         .await
         .expect("Ensure should update basin config");
@@ -189,10 +189,10 @@ async fn test_create_basin_ensure_updates_config() {
     );
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             updated_config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -201,7 +201,7 @@ async fn test_create_basin_ensure_updates_config() {
 }
 
 #[tokio::test]
-async fn test_create_basin_ensure_resets_unspecified_config() {
+async fn test_provision_basin_ensure_resets_unspecified_config() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("basin-ensure-reset");
     let initial_config = BasinConfig {
@@ -216,10 +216,10 @@ async fn test_create_basin_ensure_resets_unspecified_config() {
     };
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             initial_config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -227,13 +227,13 @@ async fn test_create_basin_ensure_resets_unspecified_config() {
         .expect("Failed to create basin");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             BasinConfig {
                 create_stream_on_read: true,
                 ..Default::default()
             },
-            CreateMode::Ensure,
+            ProvisionMode::Ensure,
         )
         .await
         .expect("Ensure should reset unspecified fields to defaults");
@@ -256,10 +256,10 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     initial_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             initial_config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -330,10 +330,10 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
     let basin_name = test_basin_name("basin-delete");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             BasinConfig::default(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -365,17 +365,17 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
     ));
 
     let recreate_result = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             BasinConfig::default(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
         .await;
     assert!(matches!(
         recreate_result,
-        Err(CreateBasinError::BasinDeletionPending(_))
+        Err(ProvisionBasinError::BasinDeletionPending(_))
     ));
 
     backend

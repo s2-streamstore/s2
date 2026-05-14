@@ -10,7 +10,7 @@ use s2_common::{
             RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
             TimestampingReconfiguration,
         },
-        resources::{CreateMode, ListItemsRequestParts, RequestToken},
+        resources::{ListItemsRequestParts, ProvisionMode, RequestToken},
         stream::{
             AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
             StreamNameStartAfter,
@@ -18,7 +18,7 @@ use s2_common::{
     },
 };
 use s2_lite::backend::error::{
-    AppendError, CheckTailError, CreateStreamError, DeleteStreamError, GetStreamConfigError,
+    AppendError, CheckTailError, DeleteStreamError, GetStreamConfigError, ProvisionStreamError,
     ReadError, ReconfigureStreamError, StreamDeletionPendingError,
 };
 
@@ -43,10 +43,10 @@ async fn test_create_stream_honors_basin_defaults() {
     };
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             basin_config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -56,11 +56,11 @@ async fn test_create_stream_honors_basin_defaults() {
     let stream_name = test_stream_name("stream-defaults");
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             OptionalStreamConfig::default(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -223,11 +223,11 @@ async fn test_create_stream_idempotency_and_request_token() {
     let token1: RequestToken = "stream-token-1".parse().unwrap();
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -241,11 +241,11 @@ async fn test_create_stream_idempotency_and_request_token() {
     assert_eq!(stored_config.storage_class, Some(StorageClass::Express));
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -253,40 +253,40 @@ async fn test_create_stream_idempotency_and_request_token() {
         .expect("Idempotent create should succeed with same request token");
 
     let different_token_result = backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some("stream-token-2".parse().unwrap()),
             },
         )
         .await;
     assert!(matches!(
         different_token_result,
-        Err(CreateStreamError::StreamAlreadyExists(_))
+        Err(ProvisionStreamError::StreamAlreadyExists(_))
     ));
 
     let mut different_config = config.clone();
     different_config.timestamping.mode = Some(TimestampingMode::Arrival);
     let different_config_result = backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             different_config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1),
             },
         )
         .await;
     assert!(matches!(
         different_config_result,
-        Err(CreateStreamError::StreamAlreadyExists(_))
+        Err(ProvisionStreamError::StreamAlreadyExists(_))
     ));
 }
 
 #[tokio::test]
-async fn test_create_stream_ensure_preserves_idempotency_key() {
+async fn test_provision_stream_ensure_preserves_idempotency_key() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
@@ -303,11 +303,11 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
     let token: RequestToken = "stream-token-preserve".parse().unwrap();
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -315,11 +315,11 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
         .expect("Failed to create stream");
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             config.clone(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -327,7 +327,7 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
         .expect("Idempotency should work before Ensure");
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             OptionalStreamConfig {
@@ -337,7 +337,7 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
                 },
                 ..Default::default()
             },
-            CreateMode::Ensure,
+            ProvisionMode::Ensure,
         )
         .await
         .expect("Ensure should succeed");
@@ -353,11 +353,11 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
     );
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name,
             stream_name,
             config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: Some(token),
             },
         )
@@ -374,10 +374,10 @@ async fn test_reconfigure_stream_updates_selected_fields() {
     basin_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
             basin_config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -395,11 +395,11 @@ async fn test_reconfigure_stream_updates_selected_fields() {
     };
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             initial_config,
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -476,7 +476,7 @@ async fn test_reconfigure_stream_updates_active_streamer() {
 }
 
 #[tokio::test]
-async fn test_create_stream_ensure_updates_active_streamer() {
+async fn test_provision_stream_ensure_updates_active_streamer() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "stream-ensure-active",
         "stream",
@@ -495,11 +495,11 @@ async fn test_create_stream_ensure_updates_active_streamer() {
     };
 
     backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             config,
-            CreateMode::Ensure,
+            ProvisionMode::Ensure,
         )
         .await
         .expect("Ensure should succeed for an existing stream");
@@ -530,11 +530,11 @@ async fn test_create_stream_fails_when_basin_deleting() {
 
     let stream_name = test_stream_name("blocked");
     let result = backend
-        .create_stream(
+        .provision_stream(
             basin_name,
             stream_name,
             OptionalStreamConfig::default(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -542,7 +542,7 @@ async fn test_create_stream_fails_when_basin_deleting() {
 
     assert!(matches!(
         result,
-        Err(CreateStreamError::BasinDeletionPending(_))
+        Err(ProvisionStreamError::BasinDeletionPending(_))
     ));
 }
 
@@ -577,18 +577,18 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
     assert!(info.deleted_at.is_some());
 
     let recreate_result = backend
-        .create_stream(
+        .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
             OptionalStreamConfig::default(),
-            CreateMode::CreateOnly {
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
         .await;
     assert!(matches!(
         recreate_result,
-        Err(CreateStreamError::StreamDeletionPending(
+        Err(ProvisionStreamError::StreamDeletionPending(
             StreamDeletionPendingError { basin, stream }
         )) if basin == basin_name && stream == stream_name
     ));

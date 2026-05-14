@@ -3,7 +3,7 @@ use s2_common::{
     types::{
         basin::{BasinInfo, BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{CreateMode, EnsureResult, ListItemsRequestParts, Page, RequestToken},
+        resources::{EnsureResult, ListItemsRequestParts, Page, ProvisionMode, RequestToken},
         stream::StreamNameStartAfter,
     },
 };
@@ -16,8 +16,8 @@ use time::OffsetDateTime;
 use super::{Backend, bgtasks::BgtaskTrigger, store::db_txn_get};
 use crate::backend::{
     error::{
-        BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, CreateBasinError,
-        DeleteBasinError, GetBasinConfigError, ListBasinsError, ReconfigureBasinError,
+        BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, DeleteBasinError,
+        GetBasinConfigError, ListBasinsError, ProvisionBasinError, ReconfigureBasinError,
     },
     kv,
 };
@@ -69,12 +69,12 @@ impl Backend {
         Ok(Page::new(basins, has_more))
     }
 
-    pub async fn create_basin(
+    pub async fn provision_basin(
         &self,
         basin: BasinName,
         config: BasinConfig,
-        mode: CreateMode,
-    ) -> Result<EnsureResult<BasinInfo>, CreateBasinError> {
+        mode: ProvisionMode,
+    ) -> Result<EnsureResult<BasinInfo>, ProvisionBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -87,7 +87,7 @@ impl Backend {
         }
 
         let (meta, was_existing, should_write) = match (existing_meta, mode) {
-            (Some(existing), CreateMode::CreateOnly { request_token }) => {
+            (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -104,7 +104,7 @@ impl Backend {
                     Err(BasinAlreadyExistsError { basin }.into())
                 };
             }
-            (Some(existing), CreateMode::Ensure) => {
+            (Some(existing), ProvisionMode::Ensure) => {
                 let should_write = existing.config != config;
                 (
                     kv::basin_meta::BasinMeta {
@@ -117,7 +117,7 @@ impl Backend {
                     should_write,
                 )
             }
-            (None, CreateMode::CreateOnly { request_token }) => {
+            (None, ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -132,7 +132,7 @@ impl Backend {
                     true,
                 )
             }
-            (None, CreateMode::Ensure) => (
+            (None, ProvisionMode::Ensure) => (
                 kv::basin_meta::BasinMeta {
                     config,
                     created_at: OffsetDateTime::now_utc(),

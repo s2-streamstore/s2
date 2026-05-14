@@ -10,7 +10,7 @@ use s2_common::types::{
         BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
         RetentionPolicy, StorageClass, TimestampingMode,
     },
-    resources::CreateMode,
+    resources::ProvisionMode,
     stream::StreamName,
 };
 use serde::{Deserialize, Serialize};
@@ -371,7 +371,7 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
         let config = basin_spec.config.map(BasinConfig::from).unwrap_or_default();
 
         backend
-            .create_basin(basin.clone(), config, CreateMode::Ensure)
+            .provision_basin(basin.clone(), config, ProvisionMode::Ensure)
             .await
             .map_err(|e| eyre::eyre!("failed to apply basin {:?}: {}", basin.as_ref(), e))?;
 
@@ -389,7 +389,7 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
                 .unwrap_or_default();
 
             backend
-                .create_stream(basin.clone(), stream.clone(), config, CreateMode::Ensure)
+                .provision_stream(basin.clone(), stream.clone(), config, ProvisionMode::Ensure)
                 .await
                 .map_err(|e| {
                     eyre::eyre!(
