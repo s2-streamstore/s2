@@ -3,7 +3,6 @@
 use std::{path::Path, time::Duration};
 
 use colored::Colorize;
-use s2_api::v1::config as api_config;
 use s2_common::{encryption::EncryptionAlgorithm, types::config as common_config};
 use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
 use s2_sdk::{
@@ -175,8 +174,7 @@ async fn apply_basin(
 ) -> miette::Result<()> {
     let mut input = EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        let config: api_config::BasinConfig = common_config::BasinConfig::from(c).into();
-        input = input.with_config(config);
+        input = input.with_config(common_config::BasinConfig::from(c));
     }
     match s2
         .ensure_basin(input)
@@ -201,8 +199,7 @@ async fn apply_stream(
 ) -> miette::Result<()> {
     let mut input = EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        let config: api_config::StreamConfig = common_config::OptionalStreamConfig::from(c).into();
-        input = input.with_config(config);
+        input = input.with_config(common_config::OptionalStreamConfig::from(c));
     }
     let basin_client = s2.basin(basin.clone());
     match basin_client.ensure_stream(input).await.map_err(|e| {
@@ -296,6 +293,17 @@ fn merge_stream_config(
     stream_config_from_common(config.merge(basin_defaults))
 }
 
+fn default_stream_config_field(field: &'static str) -> &'static str {
+    match field {
+        "storage_class" => "default_stream_config.storage_class",
+        "retention_policy" => "default_stream_config.retention_policy",
+        "timestamping.mode" => "default_stream_config.timestamping.mode",
+        "timestamping.uncapped" => "default_stream_config.timestamping.uncapped",
+        "delete_on_empty.min_age" => "default_stream_config.delete_on_empty.min_age",
+        _ => field,
+    }
+}
+
 fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
@@ -335,7 +343,7 @@ fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<Field
     let desired_dsc = desired.default_stream_config.clone().unwrap_or_default();
     for sd in diff_stream_configs(&existing_dsc, &desired_dsc) {
         diffs.push(FieldDiff {
-            field: sd.field,
+            field: default_stream_config_field(sd.field),
             old: sd.old,
             new: sd.new,
         });
@@ -429,7 +437,11 @@ fn spec_basin_fields(spec: &BasinConfigSpec) -> Vec<FieldDiff> {
     }
     if let Some(ref dsc) = spec.default_stream_config {
         for f in spec_stream_fields(dsc) {
-            fields.push(f);
+            fields.push(FieldDiff {
+                field: default_stream_config_field(f.field),
+                old: f.old,
+                new: f.new,
+            });
         }
     }
 
