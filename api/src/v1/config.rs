@@ -140,6 +140,15 @@ impl From<types::config::TimestampingConfig> for TimestampingConfig {
     }
 }
 
+impl From<types::config::OptionalTimestampingConfig> for TimestampingConfig {
+    fn from(value: types::config::OptionalTimestampingConfig) -> Self {
+        Self {
+            mode: value.mode.map(Into::into),
+            uncapped: value.uncapped,
+        }
+    }
+}
+
 impl From<TimestampingConfig> for types::config::OptionalTimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
@@ -208,6 +217,14 @@ impl From<types::config::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     fn from(value: types::config::DeleteOnEmptyConfig) -> Self {
         Self {
             min_age_secs: value.min_age.as_secs(),
+        }
+    }
+}
+
+impl From<types::config::OptionalDeleteOnEmptyConfig> for DeleteOnEmptyConfig {
+    fn from(value: types::config::OptionalDeleteOnEmptyConfig) -> Self {
+        Self {
+            min_age_secs: value.min_age.unwrap_or_default().as_secs(),
         }
     }
 }
@@ -337,6 +354,28 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
+        }
+    }
+}
+
+impl From<types::config::OptionalStreamConfig> for StreamConfig {
+    fn from(value: types::config::OptionalStreamConfig) -> Self {
+        let types::config::OptionalStreamConfig {
+            storage_class,
+            retention_policy,
+            timestamping,
+            delete_on_empty,
+        } = value;
+
+        let timestamping = (timestamping.mode.is_some() || timestamping.uncapped.is_some())
+            .then(|| timestamping.into());
+        let delete_on_empty = delete_on_empty.min_age.map(|_| delete_on_empty.into());
+
+        Self {
+            storage_class: storage_class.map(Into::into),
+            retention_policy: retention_policy.map(Into::into),
+            timestamping,
+            delete_on_empty,
         }
     }
 }
@@ -999,6 +1038,42 @@ mod tests {
         assert!(
             TimestampingConfig::to_opt(types::config::OptionalTimestampingConfig::default())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn optional_stream_config_into_api_preserves_explicit_zero_delete_on_empty() {
+        let api: StreamConfig = types::config::OptionalStreamConfig {
+            delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
+            ..Default::default()
+        }
+        .into();
+
+        assert_eq!(
+            api.delete_on_empty,
+            Some(DeleteOnEmptyConfig { min_age_secs: 0 })
+        );
+    }
+
+    #[test]
+    fn optional_stream_config_into_api_preserves_nested_timestamping_omission() {
+        let api: StreamConfig = types::config::OptionalStreamConfig {
+            timestamping: types::config::OptionalTimestampingConfig {
+                mode: Some(types::config::TimestampingMode::Arrival),
+                uncapped: None,
+            },
+            ..Default::default()
+        }
+        .into();
+
+        assert_eq!(
+            api.timestamping,
+            Some(TimestampingConfig {
+                mode: Some(TimestampingMode::Arrival),
+                uncapped: None
+            })
         );
     }
 

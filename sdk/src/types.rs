@@ -948,53 +948,6 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
     }
 }
 
-#[cfg(feature = "_hidden")]
-fn api_timestamping_config_from_common(
-    config: s2_common::types::config::OptionalTimestampingConfig,
-) -> Option<api::config::TimestampingConfig> {
-    (config.mode.is_some() || config.uncapped.is_some()).then(|| api::config::TimestampingConfig {
-        mode: config.mode.map(Into::into),
-        uncapped: config.uncapped,
-    })
-}
-
-#[cfg(feature = "_hidden")]
-fn api_delete_on_empty_config_from_common(
-    config: s2_common::types::config::OptionalDeleteOnEmptyConfig,
-) -> Option<api::config::DeleteOnEmptyConfig> {
-    config
-        .min_age
-        .map(|min_age| api::config::DeleteOnEmptyConfig {
-            min_age_secs: min_age.as_secs(),
-        })
-}
-
-#[cfg(feature = "_hidden")]
-fn api_stream_config_from_common(
-    config: s2_common::types::config::OptionalStreamConfig,
-) -> api::config::StreamConfig {
-    api::config::StreamConfig {
-        storage_class: config.storage_class.map(Into::into),
-        retention_policy: config.retention_policy.map(Into::into),
-        timestamping: api_timestamping_config_from_common(config.timestamping),
-        delete_on_empty: api_delete_on_empty_config_from_common(config.delete_on_empty),
-    }
-}
-
-#[cfg(feature = "_hidden")]
-fn api_basin_config_from_common(
-    config: s2_common::types::config::BasinConfig,
-) -> api::config::BasinConfig {
-    let default_stream_config = api_stream_config_from_common(config.default_stream_config);
-    api::config::BasinConfig {
-        default_stream_config: (default_stream_config != api::config::StreamConfig::default())
-            .then_some(default_stream_config),
-        stream_cipher: config.stream_cipher.map(Into::into),
-        create_stream_on_append: config.create_stream_on_append,
-        create_stream_on_read: config.create_stream_on_read,
-    }
-}
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
@@ -1058,7 +1011,7 @@ impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinReques
     fn from(value: EnsureBasinInput) -> Self {
         let config = value
             .common_config
-            .map(api_basin_config_from_common)
+            .map(Into::into)
             .or_else(|| value.config.map(Into::into));
         let request = if config.is_some() || value.scope.is_some() {
             Some(api::basin::EnsureBasinRequest {
@@ -2785,7 +2738,7 @@ impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>)
             value.name,
             value
                 .common_config
-                .map(api_stream_config_from_common)
+                .map(Into::into)
                 .or_else(|| value.config.map(Into::into)),
         )
     }
