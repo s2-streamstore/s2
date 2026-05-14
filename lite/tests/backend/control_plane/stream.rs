@@ -366,6 +366,58 @@ async fn test_provision_stream_ensure_preserves_idempotency_key() {
 }
 
 #[tokio::test]
+async fn test_provision_stream_idempotency_ignores_changed_basin_defaults() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "stream-idempotency-defaults",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name = test_stream_name("stream-idempotency-defaults");
+    let config = OptionalStreamConfig::default();
+    let token: RequestToken = "stream-token-defaults".parse().unwrap();
+
+    backend
+        .provision_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
+                request_token: Some(token.clone()),
+            },
+        )
+        .await
+        .expect("Failed to create stream");
+
+    backend
+        .reconfigure_basin(
+            basin_name.clone(),
+            BasinReconfiguration {
+                default_stream_config: Maybe::from(Some(StreamReconfiguration {
+                    storage_class: Maybe::from(Some(StorageClass::Standard)),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Failed to reconfigure basin defaults");
+
+    backend
+        .provision_stream(
+            basin_name,
+            stream_name,
+            config,
+            ProvisionMode::CreateOnly {
+                request_token: Some(token),
+            },
+        )
+        .await
+        .expect("Idempotency key should be based on the raw create config");
+}
+
+#[tokio::test]
 async fn test_reconfigure_stream_updates_selected_fields() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("stream-reconfigure");
