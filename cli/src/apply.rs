@@ -3,6 +3,7 @@
 use std::{path::Path, time::Duration};
 
 use colored::Colorize;
+use s2_api::v1 as api;
 use s2_lite::init::{
     BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec, StorageClassSpec,
     StreamConfigSpec, TimestampingModeSpec, TimestampingSpec,
@@ -90,6 +91,46 @@ fn stream_config_from_spec(s: StreamConfigSpec) -> StreamConfig {
     r
 }
 
+fn api_timestamping_config_from_spec(ts: TimestampingSpec) -> api::config::TimestampingConfig {
+    api::config::TimestampingConfig {
+        mode: ts.mode.map(|mode| timestamping_mode_from_spec(mode).into()),
+        uncapped: ts.uncapped,
+    }
+}
+
+fn api_delete_on_empty_config_from_spec(
+    doe: DeleteOnEmptySpec,
+) -> Option<api::config::DeleteOnEmptyConfig> {
+    doe.min_age.map(|min_age| api::config::DeleteOnEmptyConfig {
+        min_age_secs: min_age.0.as_secs(),
+    })
+}
+
+fn api_stream_config_from_spec(s: StreamConfigSpec) -> api::config::StreamConfig {
+    api::config::StreamConfig {
+        storage_class: s.storage_class.map(|sc| storage_class_from_spec(sc).into()),
+        retention_policy: s
+            .retention_policy
+            .map(|rp| retention_policy_from_spec(rp).into()),
+        timestamping: s.timestamping.map(api_timestamping_config_from_spec),
+        delete_on_empty: s
+            .delete_on_empty
+            .and_then(api_delete_on_empty_config_from_spec),
+    }
+}
+
+fn api_basin_config_from_spec(s: BasinConfigSpec) -> api::config::BasinConfig {
+    api::config::BasinConfig {
+        default_stream_config: s.default_stream_config.map(api_stream_config_from_spec),
+        stream_cipher: s.stream_cipher.map(|algorithm| {
+            let algorithm: EncryptionAlgorithm = encryption_algorithm_from_spec(algorithm);
+            algorithm.into()
+        }),
+        create_stream_on_append: s.create_stream_on_append.unwrap_or_default(),
+        create_stream_on_read: s.create_stream_on_read.unwrap_or_default(),
+    }
+}
+
 fn basin_config_from_spec(s: BasinConfigSpec) -> BasinConfig {
     let mut r = BasinConfig::new();
     if let Some(dsc) = s.default_stream_config {
@@ -147,7 +188,7 @@ async fn apply_basin(
 ) -> miette::Result<()> {
     let mut input = EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        input = input.with_config(basin_config_from_spec(c));
+        input = input.with_api_config(api_basin_config_from_spec(c));
     }
     match s2
         .ensure_basin(input)
@@ -172,7 +213,7 @@ async fn apply_stream(
 ) -> miette::Result<()> {
     let mut input = EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        input = input.with_config(stream_config_from_spec(c));
+        input = input.with_api_config(api_stream_config_from_spec(c));
     }
     let basin_client = s2.basin(basin.clone());
     match basin_client.ensure_stream(input).await.map_err(|e| {
@@ -259,48 +300,50 @@ fn effective_delete_on_empty_min_age_secs(doe: Option<&DeleteOnEmptyConfig>) -> 
     doe.map(|cfg| cfg.min_age_secs).unwrap_or(0)
 }
 
-fn merge_stream_config(
-    config: StreamConfig,
-    basin_defaults: Option<&StreamConfig>,
+fn merge_stream_config_specs(
+    config: Option<&StreamConfigSpec>,
+    basin_defaults: Option<&StreamConfigSpec>,
 ) -> StreamConfig {
+    let timestamping = config.and_then(|cfg| cfg.timestamping.as_ref());
     let default_timestamping = basin_defaults.and_then(|cfg| cfg.timestamping.as_ref());
-    let timestamping = config.timestamping.as_ref();
+    let delete_on_empty = config.and_then(|cfg| cfg.delete_on_empty.as_ref());
     let default_delete_on_empty = basin_defaults.and_then(|cfg| cfg.delete_on_empty.as_ref());
 
-    let delete_on_empty_min_age_secs = config
-        .delete_on_empty
-        .as_ref()
-        .map(|cfg| cfg.min_age_secs)
-        .or_else(|| default_delete_on_empty.map(|cfg| cfg.min_age_secs))
-        .unwrap_or_default();
+    let storage_class = config
+        .and_then(|cfg| cfg.storage_class.clone())
+        .or_else(|| basin_defaults.and_then(|cfg| cfg.storage_class.clone()))
+        .map(storage_class_from_spec)
+        .unwrap_or(StorageClass::Express);
+
+    let retention_policy = config
+        .and_then(|cfg| cfg.retention_policy)
+        .or_else(|| basin_defaults.and_then(|cfg| cfg.retention_policy))
+        .map(retention_policy_from_spec)
+        .unwrap_or(RetentionPolicy::Age(7 * 24 * 60 * 60));
 
     let timestamping = TimestampingConfig::new()
         .with_mode(
             timestamping
-                .and_then(|cfg| cfg.mode)
-                .or_else(|| default_timestamping.and_then(|cfg| cfg.mode))
+                .and_then(|cfg| cfg.mode.clone())
+                .or_else(|| default_timestamping.and_then(|cfg| cfg.mode.clone()))
+                .map(timestamping_mode_from_spec)
                 .unwrap_or(TimestampingMode::ClientPrefer),
         )
         .with_uncapped(
             timestamping
-                .map(|cfg| cfg.uncapped)
-                .or_else(|| default_timestamping.map(|cfg| cfg.uncapped))
+                .and_then(|cfg| cfg.uncapped)
+                .or_else(|| default_timestamping.and_then(|cfg| cfg.uncapped))
                 .unwrap_or_default(),
         );
 
+    let delete_on_empty_min_age_secs = delete_on_empty
+        .and_then(|cfg| cfg.min_age.map(|age| age.0.as_secs()))
+        .or_else(|| default_delete_on_empty.and_then(|cfg| cfg.min_age.map(|age| age.0.as_secs())))
+        .unwrap_or_default();
+
     let mut merged = StreamConfig::new()
-        .with_storage_class(
-            config
-                .storage_class
-                .or_else(|| basin_defaults.and_then(|cfg| cfg.storage_class))
-                .unwrap_or(StorageClass::Express),
-        )
-        .with_retention_policy(
-            config
-                .retention_policy
-                .or_else(|| basin_defaults.and_then(|cfg| cfg.retention_policy))
-                .unwrap_or(RetentionPolicy::Age(7 * 24 * 60 * 60)),
-        )
+        .with_storage_class(storage_class)
+        .with_retention_policy(retention_policy)
         .with_timestamping(timestamping);
 
     if delete_on_empty_min_age_secs > 0 {
@@ -569,6 +612,10 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
             .clone()
             .map(basin_config_from_spec)
             .unwrap_or_default();
+        let desired_basin_default_stream_config = basin_spec
+            .config
+            .as_ref()
+            .and_then(|config| config.default_stream_config.clone());
 
         let basin_action = match s2.get_basin_config(basin.clone()).await {
             Ok(existing) => {
@@ -607,13 +654,9 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 
             let stream_action = match basin_client.get_stream_config(stream.clone()).await {
                 Ok(existing) => {
-                    let desired_stream_config = merge_stream_config(
-                        stream_spec
-                            .config
-                            .clone()
-                            .map(stream_config_from_spec)
-                            .unwrap_or_default(),
-                        desired_basin_config.default_stream_config.as_ref(),
+                    let desired_stream_config = merge_stream_config_specs(
+                        stream_spec.config.as_ref(),
+                        desired_basin_default_stream_config.as_ref(),
                     );
                     let diffs = diff_stream_configs(&existing, &desired_stream_config);
                     if diffs.is_empty() {
@@ -644,4 +687,63 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_stream_config_preserves_omitted_timestamping_fields() {
+        let config = api_stream_config_from_spec(StreamConfigSpec {
+            storage_class: None,
+            retention_policy: None,
+            timestamping: Some(TimestampingSpec {
+                mode: Some(TimestampingModeSpec::Arrival),
+                uncapped: None,
+            }),
+            delete_on_empty: None,
+        });
+
+        let timestamping = config.timestamping.expect("timestamping is set");
+        assert_eq!(
+            timestamping.mode,
+            Some(api::config::TimestampingMode::Arrival)
+        );
+        assert_eq!(timestamping.uncapped, None);
+    }
+
+    #[test]
+    fn dry_run_merge_uses_basin_defaults_for_omitted_nested_fields() {
+        let basin_defaults = StreamConfigSpec {
+            storage_class: Some(StorageClassSpec::Standard),
+            retention_policy: None,
+            timestamping: Some(TimestampingSpec {
+                mode: None,
+                uncapped: Some(true),
+            }),
+            delete_on_empty: Some(DeleteOnEmptySpec {
+                min_age: Some(s2_lite::init::HumanDuration(Duration::from_secs(60))),
+            }),
+        };
+        let stream_config = StreamConfigSpec {
+            storage_class: None,
+            retention_policy: Some(RetentionPolicySpec::try_from("infinite".to_string()).unwrap()),
+            timestamping: Some(TimestampingSpec {
+                mode: Some(TimestampingModeSpec::Arrival),
+                uncapped: None,
+            }),
+            delete_on_empty: Some(DeleteOnEmptySpec { min_age: None }),
+        };
+
+        let merged = merge_stream_config_specs(Some(&stream_config), Some(&basin_defaults));
+
+        assert_eq!(merged.storage_class, Some(StorageClass::Standard));
+        assert_eq!(merged.retention_policy, Some(RetentionPolicy::Infinite));
+        let timestamping = merged.timestamping.expect("timestamping is set");
+        assert_eq!(timestamping.mode, Some(TimestampingMode::Arrival));
+        assert!(timestamping.uncapped);
+        let delete_on_empty = merged.delete_on_empty.expect("delete-on-empty is set");
+        assert_eq!(delete_on_empty.min_age_secs, 60);
+    }
 }

@@ -964,6 +964,7 @@ pub struct EnsureBasinInput {
     ///
     /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
     pub scope: Option<BasinScope>,
+    api_config: Option<api::config::BasinConfig>,
 }
 
 #[cfg(feature = "_hidden")]
@@ -974,6 +975,7 @@ impl EnsureBasinInput {
             name,
             config: None,
             scope: None,
+            api_config: None,
         }
     }
 
@@ -981,6 +983,16 @@ impl EnsureBasinInput {
     pub fn with_config(self, config: BasinConfig) -> Self {
         Self {
             config: Some(config),
+            api_config: None,
+            ..self
+        }
+    }
+
+    /// Set the desired configuration using the raw API shape.
+    pub fn with_api_config(self, config: s2_api::v1::config::BasinConfig) -> Self {
+        Self {
+            config: None,
+            api_config: Some(config),
             ..self
         }
     }
@@ -997,9 +1009,10 @@ impl EnsureBasinInput {
 #[cfg(feature = "_hidden")]
 impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
     fn from(value: EnsureBasinInput) -> Self {
-        let request = if value.config.is_some() || value.scope.is_some() {
+        let config = value.api_config.or_else(|| value.config.map(Into::into));
+        let request = if config.is_some() || value.scope.is_some() {
             Some(api::basin::EnsureBasinRequest {
-                config: value.config.map(Into::into),
+                config,
                 scope: value.scope.map(Into::into),
             })
         } else {
@@ -2679,19 +2692,34 @@ pub struct EnsureStreamInput {
     /// global defaults before comparing or writing. If `None`, the stream is ensured using those
     /// defaults.
     pub config: Option<StreamConfig>,
+    api_config: Option<api::config::StreamConfig>,
 }
 
 #[cfg(feature = "_hidden")]
 impl EnsureStreamInput {
     /// Create a new [`EnsureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
-        Self { name, config: None }
+        Self {
+            name,
+            config: None,
+            api_config: None,
+        }
     }
 
     /// Set the desired configuration for the stream.
     pub fn with_config(self, config: StreamConfig) -> Self {
         Self {
             config: Some(config),
+            api_config: None,
+            ..self
+        }
+    }
+
+    /// Set the desired configuration using the raw API shape.
+    pub fn with_api_config(self, config: s2_api::v1::config::StreamConfig) -> Self {
+        Self {
+            config: None,
+            api_config: Some(config),
             ..self
         }
     }
@@ -2700,7 +2728,10 @@ impl EnsureStreamInput {
 #[cfg(feature = "_hidden")]
 impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
     fn from(value: EnsureStreamInput) -> Self {
-        (value.name, value.config.map(Into::into))
+        (
+            value.name,
+            value.api_config.or_else(|| value.config.map(Into::into)),
+        )
     }
 }
 
