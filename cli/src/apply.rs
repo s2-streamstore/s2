@@ -1,8 +1,9 @@
 //! Declarative basin/stream configuration via a JSON spec file.
 
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use colored::Colorize;
+use s2_api::v1::config as api_config;
 use s2_common::{encryption::EncryptionAlgorithm, types::config as common_config};
 use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
 use s2_sdk::{
@@ -13,79 +14,23 @@ use s2_sdk::{
     },
 };
 
-fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> common_config::BasinConfig {
-    common_config::BasinConfig {
-        default_stream_config: config
-            .default_stream_config
-            .map(stream_config_from_sdk)
-            .map(Into::into)
-            .unwrap_or_default(),
-        stream_cipher: config.stream_cipher,
-        create_stream_on_append: config.create_stream_on_append,
-        create_stream_on_read: config.create_stream_on_read,
-    }
+fn basin_config_from_sdk(
+    config: s2_sdk::types::BasinConfig,
+) -> miette::Result<common_config::BasinConfig> {
+    let config: api_config::BasinConfig = config.into();
+    config
+        .try_into()
+        .map_err(|e| miette::miette!("invalid basin config returned by server: {}", e))
 }
 
-fn storage_class_from_sdk(s: s2_sdk::types::StorageClass) -> common_config::StorageClass {
-    match s {
-        s2_sdk::types::StorageClass::Standard => common_config::StorageClass::Standard,
-        s2_sdk::types::StorageClass::Express => common_config::StorageClass::Express,
-    }
-}
-
-fn retention_policy_from_sdk(rp: s2_sdk::types::RetentionPolicy) -> common_config::RetentionPolicy {
-    match rp {
-        s2_sdk::types::RetentionPolicy::Age(secs) => {
-            common_config::RetentionPolicy::Age(Duration::from_secs(secs))
-        }
-        s2_sdk::types::RetentionPolicy::Infinite => common_config::RetentionPolicy::Infinite(),
-    }
-}
-
-fn timestamping_mode_from_sdk(
-    m: s2_sdk::types::TimestampingMode,
-) -> common_config::TimestampingMode {
-    match m {
-        s2_sdk::types::TimestampingMode::ClientPrefer => {
-            common_config::TimestampingMode::ClientPrefer
-        }
-        s2_sdk::types::TimestampingMode::ClientRequire => {
-            common_config::TimestampingMode::ClientRequire
-        }
-        s2_sdk::types::TimestampingMode::Arrival => common_config::TimestampingMode::Arrival,
-    }
-}
-
-fn stream_config_from_sdk(config: s2_sdk::types::StreamConfig) -> common_config::StreamConfig {
-    let timestamping = config
-        .timestamping
-        .map(|timestamping| common_config::TimestampingConfig {
-            mode: timestamping
-                .mode
-                .map(timestamping_mode_from_sdk)
-                .unwrap_or_default(),
-            uncapped: timestamping.uncapped,
-        })
-        .unwrap_or_default();
-    let delete_on_empty = config
-        .delete_on_empty
-        .map(|delete_on_empty| common_config::DeleteOnEmptyConfig {
-            min_age: Duration::from_secs(delete_on_empty.min_age_secs),
-        })
-        .unwrap_or_default();
-
-    common_config::StreamConfig {
-        storage_class: config
-            .storage_class
-            .map(storage_class_from_sdk)
-            .unwrap_or_default(),
-        retention_policy: config
-            .retention_policy
-            .map(retention_policy_from_sdk)
-            .unwrap_or_default(),
-        timestamping,
-        delete_on_empty,
-    }
+fn stream_config_from_sdk(
+    config: s2_sdk::types::StreamConfig,
+) -> miette::Result<common_config::StreamConfig> {
+    let config: api_config::StreamConfig = config.into();
+    let config: common_config::OptionalStreamConfig = config
+        .try_into()
+        .map_err(|e| miette::miette!("invalid stream config returned by server: {}", e))?;
+    Ok(config.into())
 }
 
 fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
@@ -495,7 +440,7 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 
         let basin_action = match s2.get_basin_config(basin.clone()).await {
             Ok(existing) => {
-                let existing = basin_config_from_sdk(existing);
+                let existing = basin_config_from_sdk(existing)?;
                 let diffs = diff_basin_config(&existing, &desired_basin_common_config);
                 if diffs.is_empty() {
                     ResourceAction::Unchanged
@@ -531,7 +476,7 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 
             let stream_action = match basin_client.get_stream_config(stream.clone()).await {
                 Ok(existing) => {
-                    let existing = stream_config_from_sdk(existing);
+                    let existing = stream_config_from_sdk(existing)?;
                     let desired_stream_config = merge_stream_config(
                         stream_spec
                             .config
@@ -573,6 +518,8 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use s2_lite::init::{
         DeleteOnEmptySpec, RetentionPolicySpec, StorageClassSpec, TimestampingModeSpec,
         TimestampingSpec,
