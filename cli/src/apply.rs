@@ -13,27 +13,12 @@ use s2_sdk::{
     },
 };
 
-struct DryRunBasinConfig {
-    default_stream_config: common_config::StreamConfig,
-    stream_cipher: Option<EncryptionAlgorithm>,
-    create_stream_on_append: bool,
-    create_stream_on_read: bool,
-}
-
-fn dry_run_basin_config_from_common(config: common_config::BasinConfig) -> DryRunBasinConfig {
-    DryRunBasinConfig {
-        default_stream_config: config.default_stream_config.into(),
-        stream_cipher: config.stream_cipher,
-        create_stream_on_append: config.create_stream_on_append,
-        create_stream_on_read: config.create_stream_on_read,
-    }
-}
-
-fn dry_run_basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> DryRunBasinConfig {
-    DryRunBasinConfig {
+fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> common_config::BasinConfig {
+    common_config::BasinConfig {
         default_stream_config: config
             .default_stream_config
             .map(stream_config_from_sdk)
+            .map(Into::into)
             .unwrap_or_default(),
         stream_cipher: config.stream_cipher,
         create_stream_on_append: config.create_stream_on_append,
@@ -257,7 +242,10 @@ fn default_stream_config_field(field: &'static str) -> &'static str {
     }
 }
 
-fn diff_basin_config(existing: &DryRunBasinConfig, desired: &DryRunBasinConfig) -> Vec<FieldDiff> {
+fn diff_basin_config(
+    existing: &common_config::BasinConfig,
+    desired: &common_config::BasinConfig,
+) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
     if existing.stream_cipher != desired.stream_cipher {
@@ -292,10 +280,9 @@ fn diff_basin_config(existing: &DryRunBasinConfig, desired: &DryRunBasinConfig) 
         });
     }
 
-    for sd in diff_stream_configs(
-        &existing.default_stream_config,
-        &desired.default_stream_config,
-    ) {
+    let existing_dsc: common_config::StreamConfig = existing.default_stream_config.clone().into();
+    let desired_dsc: common_config::StreamConfig = desired.default_stream_config.clone().into();
+    for sd in diff_stream_configs(&existing_dsc, &desired_dsc) {
         diffs.push(FieldDiff {
             field: default_stream_config_field(sd.field),
             old: sd.old,
@@ -503,15 +490,13 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
             .clone()
             .map(common_config::BasinConfig::from)
             .unwrap_or_default();
-        let desired_basin_config =
-            dry_run_basin_config_from_common(desired_basin_common_config.clone());
         let desired_basin_default_stream_config =
             desired_basin_common_config.default_stream_config.clone();
 
         let basin_action = match s2.get_basin_config(basin.clone()).await {
             Ok(existing) => {
-                let existing = dry_run_basin_config_from_sdk(existing);
-                let diffs = diff_basin_config(&existing, &desired_basin_config);
+                let existing = basin_config_from_sdk(existing);
+                let diffs = diff_basin_config(&existing, &desired_basin_common_config);
                 if diffs.is_empty() {
                     ResourceAction::Unchanged
                 } else {
