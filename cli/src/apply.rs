@@ -15,7 +15,6 @@ use s2_common::{
     },
 };
 use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
-use s2_sdk::S2;
 
 fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> miette::Result<BasinConfig> {
     let config: s2_api::v1::config::BasinConfig = config.into();
@@ -51,7 +50,7 @@ pub fn load(path: &Path) -> miette::Result<ResourcesSpec> {
     Ok(spec)
 }
 
-pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
+pub async fn apply(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
@@ -73,7 +72,7 @@ pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 }
 
 async fn apply_basin(
-    s2: &S2,
+    s2: &s2_sdk::S2,
     basin: BasinName,
     config: Option<BasinConfigSpec>,
 ) -> miette::Result<()> {
@@ -97,7 +96,7 @@ async fn apply_basin(
 }
 
 async fn apply_stream(
-    s2: &S2,
+    s2: &s2_sdk::S2,
     basin: BasinName,
     stream: StreamName,
     config: Option<StreamConfigSpec>,
@@ -415,7 +414,7 @@ fn print_stream_create(basin: &str, stream: &str, spec: &Option<StreamConfigSpec
     }
 }
 
-pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
+pub async fn dry_run(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
