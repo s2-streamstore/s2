@@ -136,8 +136,8 @@ pub async fn create_stream(
         .map(Into::into);
     let (outcome, info) = match info {
         ProvisionResult::Created(info) => ("created", info),
-        ProvisionResult::Updated(info) => ("updated", info),
         ProvisionResult::Noop(info) => ("noop", info),
+        ProvisionResult::Updated(_) => unreachable!("CreateOnly mode never produces Updated"),
     };
     Ok((
         StatusCode::CREATED,
