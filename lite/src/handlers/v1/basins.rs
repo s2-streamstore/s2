@@ -169,12 +169,13 @@ pub async fn ensure_basin(
         .unwrap_or_default();
     let info = backend
         .provision_basin(basin, config, ProvisionMode::Ensure)
-        .await?;
-    let status = match &info {
-        ProvisionResult::Created(_) => StatusCode::CREATED,
-        ProvisionResult::Updated(_) => StatusCode::OK,
+        .await?
+        .map(Into::into);
+    let (status, info) = match info {
+        ProvisionResult::Created(info) => (StatusCode::CREATED, info),
+        ProvisionResult::Updated(info) => (StatusCode::OK, info),
     };
-    Ok((status, Json(info.into_inner().into())))
+    Ok((status, Json(info)))
 }
 
 #[derive(FromRequest)]
