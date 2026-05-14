@@ -1,9 +1,9 @@
 use s2_common::{
     bash::Bash,
     types::{
-        basin::{BasinInfo, BasinName, CreateBasinIntent, ListBasinsRequest},
+        basin::{BasinInfo, BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{ListItemsRequestParts, Page, RequestToken},
+        resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
         stream::StreamNameStartAfter,
     },
 };
@@ -72,7 +72,8 @@ impl Backend {
     pub async fn create_basin(
         &self,
         basin: BasinName,
-        intent: CreateBasinIntent,
+        config: BasinConfig,
+        mode: CreateMode,
     ) -> Result<EnsureResult<BasinInfo>, CreateBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
@@ -85,14 +86,8 @@ impl Backend {
             return Err(BasinDeletionPendingError { basin }.into());
         }
 
-        let (meta, was_existing, should_write) = match (existing_meta, intent) {
-            (
-                Some(existing),
-                CreateBasinIntent::CreateOnly {
-                    config,
-                    request_token,
-                },
-            ) => {
+        let (meta, was_existing, should_write) = match (existing_meta, mode) {
+            (Some(existing), CreateMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -109,7 +104,7 @@ impl Backend {
                     Err(BasinAlreadyExistsError { basin }.into())
                 };
             }
-            (Some(existing), CreateBasinIntent::Ensure { config }) => {
+            (Some(existing), CreateMode::Ensure) => {
                 let should_write = existing.config != config;
                 (
                     kv::basin_meta::BasinMeta {
@@ -122,13 +117,7 @@ impl Backend {
                     should_write,
                 )
             }
-            (
-                None,
-                CreateBasinIntent::CreateOnly {
-                    config,
-                    request_token,
-                },
-            ) => {
+            (None, CreateMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -143,7 +132,7 @@ impl Backend {
                     true,
                 )
             }
-            (None, CreateBasinIntent::Ensure { config }) => (
+            (None, CreateMode::Ensure) => (
                 kv::basin_meta::BasinMeta {
                     config,
                     created_at: OffsetDateTime::now_utc(),

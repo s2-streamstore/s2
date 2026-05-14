@@ -7,9 +7,9 @@ use s2_api::{
 use s2_common::{
     http::extract::HeaderOpt,
     types::{
-        basin::{BasinName, CreateBasinIntent, ListBasinsRequest},
+        basin::{BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{Page, RequestToken},
+        resources::{CreateMode, Page, RequestToken},
     },
 };
 
@@ -97,10 +97,8 @@ pub async fn create_basin(
     let info = backend
         .create_basin(
             request.basin,
-            CreateBasinIntent::CreateOnly {
-                config,
-                request_token,
-            },
+            config,
+            CreateMode::CreateOnly { request_token },
         )
         .await?;
     Ok((StatusCode::CREATED, Json(info.into_inner().into())))
@@ -170,7 +168,7 @@ pub async fn ensure_basin(
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(basin, CreateBasinIntent::Ensure { config })
+        .create_basin(basin, config, CreateMode::Ensure)
         .await?;
     let status = if info.is_created() {
         StatusCode::CREATED

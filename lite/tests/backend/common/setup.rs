@@ -6,12 +6,10 @@ use s2_common::{
     encryption::{EncryptionAlgorithm, EncryptionKey, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     types::{
-        basin::{BasinName, CreateBasinIntent},
+        basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        stream::{
-            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, CreateStreamIntent,
-            StreamName,
-        },
+        resources::CreateMode,
+        stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName},
     },
 };
 use s2_lite::backend::Backend;
@@ -155,8 +153,8 @@ pub async fn create_test_basin(backend: &Backend, suffix: &str, config: BasinCon
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config,
+            config,
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -176,8 +174,8 @@ pub async fn create_test_stream(
         .create_stream(
             basin.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config,
+            config,
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )

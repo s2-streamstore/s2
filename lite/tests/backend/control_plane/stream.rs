@@ -5,16 +5,15 @@ use s2_common::{
     encryption::EncryptionAlgorithm,
     maybe::Maybe,
     types::{
-        basin::CreateBasinIntent,
         config::{
             BasinConfig, BasinReconfiguration, OptionalStreamConfig, OptionalTimestampingConfig,
             RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
             TimestampingReconfiguration,
         },
-        resources::{ListItemsRequestParts, RequestToken},
+        resources::{CreateMode, ListItemsRequestParts, RequestToken},
         stream::{
-            AppendInput, CreateStreamIntent, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart,
-            StreamNamePrefix, StreamNameStartAfter,
+            AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
+            StreamNameStartAfter,
         },
     },
 };
@@ -46,8 +45,8 @@ async fn test_create_stream_honors_basin_defaults() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: basin_config,
+            basin_config,
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -60,8 +59,8 @@ async fn test_create_stream_honors_basin_defaults() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: OptionalStreamConfig::default(),
+            OptionalStreamConfig::default(),
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -227,8 +226,8 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -245,8 +244,8 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -257,8 +256,8 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some("stream-token-2".parse().unwrap()),
             },
         )
@@ -274,8 +273,8 @@ async fn test_create_stream_idempotency_and_request_token() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: different_config,
+            different_config,
+            CreateMode::CreateOnly {
                 request_token: Some(token1),
             },
         )
@@ -307,8 +306,8 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -319,8 +318,8 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -331,15 +330,14 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::Ensure {
-                config: OptionalStreamConfig {
-                    timestamping: OptionalTimestampingConfig {
-                        mode: Some(TimestampingMode::Arrival),
-                        ..Default::default()
-                    },
+            OptionalStreamConfig {
+                timestamping: OptionalTimestampingConfig {
+                    mode: Some(TimestampingMode::Arrival),
                     ..Default::default()
                 },
+                ..Default::default()
             },
+            CreateMode::Ensure,
         )
         .await
         .expect("Ensure should succeed");
@@ -358,8 +356,8 @@ async fn test_create_stream_ensure_preserves_idempotency_key() {
         .create_stream(
             basin_name,
             stream_name,
-            CreateStreamIntent::CreateOnly {
-                config,
+            config,
+            CreateMode::CreateOnly {
                 request_token: Some(token),
             },
         )
@@ -378,8 +376,8 @@ async fn test_reconfigure_stream_updates_selected_fields() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: basin_config,
+            basin_config,
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -400,8 +398,8 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: initial_config,
+            initial_config,
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -500,7 +498,8 @@ async fn test_create_stream_ensure_updates_active_streamer() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::Ensure { config },
+            config,
+            CreateMode::Ensure,
         )
         .await
         .expect("Ensure should succeed for an existing stream");
@@ -534,8 +533,8 @@ async fn test_create_stream_fails_when_basin_deleting() {
         .create_stream(
             basin_name,
             stream_name,
-            CreateStreamIntent::CreateOnly {
-                config: OptionalStreamConfig::default(),
+            OptionalStreamConfig::default(),
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -581,8 +580,8 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOnly {
-                config: OptionalStreamConfig::default(),
+            OptionalStreamConfig::default(),
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )

@@ -1,12 +1,12 @@
 use s2_common::{
     maybe::Maybe,
     types::{
-        basin::{BasinNamePrefix, BasinNameStartAfter, CreateBasinIntent, ListBasinsRequest},
+        basin::{BasinNamePrefix, BasinNameStartAfter, ListBasinsRequest},
         config::{
             BasinConfig, BasinReconfiguration, OptionalStreamConfig, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::{ListItemsRequestParts, RequestToken},
+        resources::{CreateMode, ListItemsRequestParts, RequestToken},
     },
 };
 use s2_lite::backend::{
@@ -30,8 +30,8 @@ async fn test_create_basin_idempotency_respects_request_token() {
     let created = backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -46,8 +46,8 @@ async fn test_create_basin_idempotency_respects_request_token() {
     let idempotent = backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -63,8 +63,8 @@ async fn test_create_basin_idempotency_respects_request_token() {
     let different_token_result = backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(different_token),
             },
         )
@@ -79,8 +79,8 @@ async fn test_create_basin_idempotency_respects_request_token() {
     let different_config_result = backend
         .create_basin(
             basin_name,
-            CreateBasinIntent::CreateOnly {
-                config: different_config,
+            different_config,
+            CreateMode::CreateOnly {
                 request_token: Some(token1),
             },
         )
@@ -105,8 +105,8 @@ async fn test_ensure_preserves_idempotency_key() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -116,8 +116,8 @@ async fn test_ensure_preserves_idempotency_key() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -127,20 +127,15 @@ async fn test_ensure_preserves_idempotency_key() {
     let mut updated_config = config.clone();
     updated_config.create_stream_on_read = true;
     backend
-        .create_basin(
-            basin_name.clone(),
-            CreateBasinIntent::Ensure {
-                config: updated_config,
-            },
-        )
+        .create_basin(basin_name.clone(), updated_config, CreateMode::Ensure)
         .await
         .expect("Ensure should succeed");
 
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            CreateMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -161,8 +156,8 @@ async fn test_create_basin_ensure_updates_config() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: initial_config.clone(),
+            initial_config.clone(),
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -177,9 +172,8 @@ async fn test_create_basin_ensure_updates_config() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::Ensure {
-                config: updated_config.clone(),
-            },
+            updated_config.clone(),
+            CreateMode::Ensure,
         )
         .await
         .expect("Ensure should update basin config");
@@ -198,8 +192,8 @@ async fn test_create_basin_ensure_updates_config() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: updated_config,
+            updated_config,
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -225,8 +219,8 @@ async fn test_create_basin_ensure_resets_unspecified_config() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: initial_config,
+            initial_config,
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -236,12 +230,11 @@ async fn test_create_basin_ensure_resets_unspecified_config() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::Ensure {
-                config: BasinConfig {
-                    create_stream_on_read: true,
-                    ..Default::default()
-                },
+            BasinConfig {
+                create_stream_on_read: true,
+                ..Default::default()
             },
+            CreateMode::Ensure,
         )
         .await
         .expect("Ensure should reset unspecified fields to defaults");
@@ -266,8 +259,8 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: initial_config.clone(),
+            initial_config.clone(),
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -340,8 +333,8 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: BasinConfig::default(),
+            BasinConfig::default(),
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -375,8 +368,8 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
     let recreate_result = backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: BasinConfig::default(),
+            BasinConfig::default(),
+            CreateMode::CreateOnly {
                 request_token: None,
             },
         )

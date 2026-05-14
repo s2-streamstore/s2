@@ -12,7 +12,8 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        stream::{CreateStreamIntent, StreamName},
+        resources::CreateMode,
+        stream::StreamName,
     },
 };
 use slatedb::{
@@ -327,8 +328,8 @@ impl Backend {
                         .create_stream(
                             basin.clone(),
                             stream.clone(),
-                            CreateStreamIntent::CreateOnly {
-                                config: OptionalStreamConfig::default(),
+                            OptionalStreamConfig::default(),
+                            CreateMode::CreateOnly {
                                 request_token: None,
                             },
                         )
@@ -370,8 +371,8 @@ mod tests {
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
         types::{
-            basin::CreateBasinIntent,
             config::{BasinConfig, OptionalStreamConfig},
+            resources::CreateMode,
         },
     };
     use slatedb::{WriteBatch, config::WriteOptions, object_store};
@@ -484,8 +485,8 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: BasinConfig::default(),
+                BasinConfig::default(),
+                CreateMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -495,8 +496,8 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                CreateStreamIntent::CreateOnly {
-                    config: OptionalStreamConfig::default(),
+                OptionalStreamConfig::default(),
+                CreateMode::CreateOnly {
                     request_token: None,
                 },
             )

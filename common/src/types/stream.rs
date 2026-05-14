@@ -15,10 +15,7 @@ use crate::{
         FencingToken, Metered, MeteredExt, MeteredSize, Record, RecordDecryptionError, SeqNum,
         Sequenced, StoredRecord, StreamPosition, Timestamp, decrypt_stored_record, encrypt_record,
     },
-    types::{
-        config::OptionalStreamConfig,
-        resources::{ListItemsRequest, RequestToken},
-    },
+    types::resources::ListItemsRequest,
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -173,35 +170,6 @@ pub struct StreamInfo {
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
     pub cipher: Option<EncryptionAlgorithm>,
-}
-
-/// Stream creation operation intent.
-///
-/// Separates POST-style create-only requests, which carry a complete creation config and optional
-/// idempotency token, from PUT-style ensure requests, which carry the desired
-/// complete config.
-#[derive(Debug)]
-pub enum CreateStreamIntent {
-    /// Create a new stream.
-    ///
-    /// HTTP POST semantics: idempotent if a request token is provided and the stream was previously
-    /// created using the same token and config.
-    CreateOnly {
-        /// Complete stream configuration for a new stream.
-        config: OptionalStreamConfig,
-        /// Optional request token used to make create retries idempotent.
-        request_token: Option<RequestToken>,
-    },
-    /// Ensure a stream exists with the requested config.
-    ///
-    /// HTTP PUT semantics: always idempotent. The requested config is merged with the current
-    /// basin default stream config and global defaults before validation. When the stream already
-    /// exists, its stored config is set to that effective config unless it already matches.
-    Ensure {
-        /// Requested stream configuration. Missing fields are filled from the current basin
-        /// defaults before comparing or writing.
-        config: OptionalStreamConfig,
-    },
 }
 
 #[derive(Debug, Clone)]

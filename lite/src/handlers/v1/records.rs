@@ -468,12 +468,12 @@ mod tests {
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
         types::{
-            basin::{BASIN_HEADER, BasinName, CreateBasinIntent},
+            basin::{BASIN_HEADER, BasinName},
             config::{BasinConfig, OptionalStreamConfig},
+            resources::CreateMode,
             stream::{
                 AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
-                CreateStreamIntent, ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput,
-                ReadStart, StreamName,
+                ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
             },
         },
     };
@@ -520,8 +520,8 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: basin_config,
+                basin_config,
+                CreateMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -532,8 +532,8 @@ mod tests {
             .create_stream(
                 basin.clone(),
                 stream.clone(),
-                CreateStreamIntent::CreateOnly {
-                    config: stream_config,
+                stream_config,
+                CreateMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -552,8 +552,8 @@ mod tests {
         backend
             .create_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: basin_config,
+                basin_config,
+                CreateMode::CreateOnly {
                     request_token: None,
                 },
             )

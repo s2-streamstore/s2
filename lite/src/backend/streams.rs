@@ -4,8 +4,8 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{ListItemsRequestParts, Page, RequestToken},
-        stream::{CreateStreamIntent, ListStreamsRequest, StreamInfo, StreamName},
+        resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
+        stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
 use slatedb::{
@@ -86,7 +86,8 @@ impl Backend {
         &self,
         basin: BasinName,
         stream: StreamName,
-        intent: CreateStreamIntent,
+        config: OptionalStreamConfig,
+        mode: CreateMode,
     ) -> Result<EnsureResult<StreamInfo>, CreateStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
@@ -117,14 +118,8 @@ impl Backend {
         }
 
         let basin_defaults = basin_meta.config.default_stream_config.clone();
-        let (meta, was_existing, prior_doe_min_age, should_write) = match (existing_meta, intent) {
-            (
-                Some(existing),
-                CreateStreamIntent::CreateOnly {
-                    config,
-                    request_token,
-                },
-            ) => {
+        let (meta, was_existing, prior_doe_min_age, should_write) = match (existing_meta, mode) {
+            (Some(existing), CreateMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -141,7 +136,7 @@ impl Backend {
                     Err(StreamAlreadyExistsError { basin, stream }.into())
                 };
             }
-            (Some(existing), CreateStreamIntent::Ensure { config }) => {
+            (Some(existing), CreateMode::Ensure) => {
                 let prior_doe_min_age = existing
                     .config
                     .delete_on_empty
@@ -162,13 +157,7 @@ impl Backend {
                     should_write,
                 )
             }
-            (
-                None,
-                CreateStreamIntent::CreateOnly {
-                    config,
-                    request_token,
-                },
-            ) => {
+            (None, CreateMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
@@ -185,7 +174,7 @@ impl Backend {
                     true,
                 )
             }
-            (None, CreateStreamIntent::Ensure { config }) => (
+            (None, CreateMode::Ensure) => (
                 kv::stream_meta::StreamMeta {
                     config: config.merge(basin_defaults).into(),
                     cipher: basin_meta.config.stream_cipher,

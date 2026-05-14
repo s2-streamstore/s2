@@ -115,6 +115,24 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateMode {
+    /// Create a new resource.
+    ///
+    /// HTTP POST semantics: idempotent if a request token is provided and the resource was
+    /// previously created using the same token and config.
+    CreateOnly {
+        /// Optional request token used to make create retries idempotent.
+        request_token: Option<RequestToken>,
+    },
+    /// Ensure a resource exists with the requested config.
+    ///
+    /// HTTP PUT semantics: always idempotent. Defaults are applied before validation. When the
+    /// resource already exists, its stored config is set to the effective requested config unless
+    /// it already matches.
+    Ensure,
+}
+
 pub static REQUEST_TOKEN_HEADER: http::HeaderName =
     http::HeaderName::from_static("s2-request-token");
 

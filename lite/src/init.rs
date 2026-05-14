@@ -5,12 +5,13 @@
 use std::{borrow::Cow, path::Path, time::Duration};
 
 use s2_common::types::{
-    basin::{BasinName, CreateBasinIntent},
+    basin::BasinName,
     config::{
         BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
         RetentionPolicy, StorageClass, TimestampingMode,
     },
-    stream::{CreateStreamIntent, StreamName},
+    resources::CreateMode,
+    stream::StreamName,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -370,7 +371,7 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
         let config = basin_spec.config.map(BasinConfig::from).unwrap_or_default();
 
         backend
-            .create_basin(basin.clone(), CreateBasinIntent::Ensure { config })
+            .create_basin(basin.clone(), config, CreateMode::Ensure)
             .await
             .map_err(|e| eyre::eyre!("failed to apply basin {:?}: {}", basin.as_ref(), e))?;
 
@@ -388,11 +389,7 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
                 .unwrap_or_default();
 
             backend
-                .create_stream(
-                    basin.clone(),
-                    stream.clone(),
-                    CreateStreamIntent::Ensure { config },
-                )
+                .create_stream(basin.clone(), stream.clone(), config, CreateMode::Ensure)
                 .await
                 .map_err(|e| {
                     eyre::eyre!(

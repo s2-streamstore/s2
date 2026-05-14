@@ -7,13 +7,7 @@ use super::{
     ValidationError,
     strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
 };
-use crate::{
-    caps,
-    types::{
-        config::BasinConfig,
-        resources::{ListItemsRequest, RequestToken},
-    },
-};
+use crate::{caps, types::resources::ListItemsRequest};
 
 pub static BASIN_HEADER: http::HeaderName = http::HeaderName::from_static("s2-basin");
 
@@ -224,33 +218,6 @@ pub struct BasinInfo {
     pub scope: Option<BasinScope>,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
-}
-
-/// Basin creation operation intent.
-///
-/// Separates POST-style create-only requests, which carry a complete creation config and optional
-/// idempotency token, from PUT-style ensure requests, which carry the desired
-/// complete config.
-#[derive(Debug)]
-pub enum CreateBasinIntent {
-    /// Create a new basin.
-    ///
-    /// HTTP POST semantics: idempotent if a request token is provided and the basin was previously
-    /// created using the same token and config.
-    CreateOnly {
-        /// Complete basin configuration for a new basin.
-        config: BasinConfig,
-        /// Optional request token used to make create retries idempotent.
-        request_token: Option<RequestToken>,
-    },
-    /// Ensure a basin exists with the requested config.
-    ///
-    /// HTTP PUT semantics: always idempotent. Defaults are applied before validation. When the
-    /// basin already exists, its config is set to this desired config unless it already matches.
-    Ensure {
-        /// Complete basin configuration to ensure.
-        config: BasinConfig,
-    },
 }
 
 #[cfg(test)]
