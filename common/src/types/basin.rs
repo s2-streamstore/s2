@@ -10,7 +10,7 @@ use super::{
 use crate::{
     caps,
     types::{
-        config::{BasinConfig, BasinReconfiguration},
+        config::BasinConfig,
         resources::{ListItemsRequest, RequestToken},
     },
 };
@@ -229,8 +229,8 @@ pub struct BasinInfo {
 /// Basin creation operation intent.
 ///
 /// Separates POST-style create-only requests, which carry a complete creation config and optional
-/// idempotency token, from PUT-style create-or-reconfigure requests, which carry only a
-/// reconfiguration patch.
+/// idempotency token, from PUT-style ensure requests, which carry the desired
+/// complete config.
 #[derive(Debug)]
 pub enum CreateBasinIntent {
     /// Create a new basin.
@@ -243,13 +243,13 @@ pub enum CreateBasinIntent {
         /// Optional request token used to make create retries idempotent.
         request_token: Option<RequestToken>,
     },
-    /// Create a new basin or reconfigure it if it already exists.
+    /// Ensure a basin exists with the requested config.
     ///
-    /// HTTP PUT semantics: always idempotent. When the basin already exists, unspecified fields in
-    /// the reconfiguration preserve the existing config.
-    CreateOrReconfigure {
-        /// Basin reconfiguration patch to apply on create-or-reconfigure.
-        reconfiguration: BasinReconfiguration,
+    /// HTTP PUT semantics: always idempotent. Defaults are applied before validation. When the
+    /// basin already exists, its config is set to this desired config unless it already matches.
+    Ensure {
+        /// Complete basin configuration to ensure.
+        config: BasinConfig,
     },
 }
 

@@ -5,7 +5,7 @@ use s2_common::types::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::config::{BasinConfig, BasinReconfiguration};
+use super::config::BasinConfig;
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,12 +169,12 @@ pub enum BasinState {
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct CreateOrReconfigureBasinRequest {
-    /// Basin reconfiguration.
-    pub config: Option<BasinReconfiguration>,
+pub struct EnsureBasinRequest {
+    /// Desired basin configuration.
+    pub config: Option<BasinConfig>,
     /// Basin scope.
     /// If omitted when creating, defaults to `aws:us-east-1`.
-    /// This cannot be reconfigured.
+    /// This cannot be changed.
     pub scope: Option<BasinScope>,
 }
 

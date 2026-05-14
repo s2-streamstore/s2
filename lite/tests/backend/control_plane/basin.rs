@@ -10,7 +10,7 @@ use s2_common::{
     },
 };
 use s2_lite::backend::{
-    CreatedOrReconfigured,
+    EnsureResult,
     error::{CreateBasinError, DeleteBasinError, GetBasinConfigError, ReconfigureBasinError},
 };
 
@@ -39,7 +39,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Failed to create basin");
     assert!(matches!(
         created,
-        CreatedOrReconfigured::Created(ref info) if info.deleted_at.is_none()
+        EnsureResult::Created(ref info) if info.deleted_at.is_none()
             && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 
@@ -55,7 +55,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Idempotent create should succeed with same request token");
     assert!(matches!(
         idempotent,
-        CreatedOrReconfigured::Created(ref info) if info.deleted_at.is_none()
+        EnsureResult::Created(ref info) if info.deleted_at.is_none()
             && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 
@@ -92,7 +92,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
 }
 
 #[tokio::test]
-async fn test_create_or_reconfigure_preserves_idempotency_key() {
+async fn test_ensure_preserves_idempotency_key() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("idempotency-key-preserve");
     let config = BasinConfig {
@@ -122,19 +122,19 @@ async fn test_create_or_reconfigure_preserves_idempotency_key() {
             },
         )
         .await
-        .expect("Idempotency should work before CreateOrReconfigure");
+        .expect("Idempotency should work before Ensure");
 
-    let reconfiguration = BasinReconfiguration {
-        create_stream_on_read: Maybe::from(true),
-        ..Default::default()
-    };
+    let mut updated_config = config.clone();
+    updated_config.create_stream_on_read = true;
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOrReconfigure { reconfiguration },
+            CreateBasinIntent::Ensure {
+                config: updated_config,
+            },
         )
         .await
-        .expect("CreateOrReconfigure should succeed");
+        .expect("Ensure should succeed");
 
     backend
         .create_basin(
@@ -145,11 +145,11 @@ async fn test_create_or_reconfigure_preserves_idempotency_key() {
             },
         )
         .await
-        .expect("Idempotency should still work after CreateOrReconfigure");
+        .expect("Idempotency should still work after Ensure");
 }
 
 #[tokio::test]
-async fn test_create_basin_create_or_reconfigure_updates_config() {
+async fn test_create_basin_ensure_updates_config() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("basin-recreate");
     let initial_config = BasinConfig {
@@ -177,12 +177,12 @@ async fn test_create_basin_create_or_reconfigure_updates_config() {
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOrReconfigure {
-                reconfiguration: updated_config.clone().into(),
+            CreateBasinIntent::Ensure {
+                config: updated_config.clone(),
             },
         )
         .await
-        .expect("CreateOrReconfigure should update basin config");
+        .expect("Ensure should update basin config");
 
     let stored_config = backend
         .get_basin_config(basin_name.clone())
@@ -208,9 +208,9 @@ async fn test_create_basin_create_or_reconfigure_updates_config() {
 }
 
 #[tokio::test]
-async fn test_create_basin_create_or_reconfigure_preserves_unspecified_config() {
+async fn test_create_basin_ensure_resets_unspecified_config() {
     let backend = create_backend().await;
-    let basin_name = test_basin_name("basin-reconfigure-preserve");
+    let basin_name = test_basin_name("basin-ensure-reset");
     let initial_config = BasinConfig {
         create_stream_on_append: true,
         create_stream_on_read: false,
@@ -236,30 +236,24 @@ async fn test_create_basin_create_or_reconfigure_preserves_unspecified_config() 
     backend
         .create_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOrReconfigure {
-                reconfiguration: BasinReconfiguration {
-                    create_stream_on_read: Maybe::from(true),
+            CreateBasinIntent::Ensure {
+                config: BasinConfig {
+                    create_stream_on_read: true,
                     ..Default::default()
                 },
             },
         )
         .await
-        .expect("CreateOrReconfigure should preserve unspecified fields");
+        .expect("Ensure should reset unspecified fields to defaults");
 
     let stored_config = backend
         .get_basin_config(basin_name)
         .await
         .expect("Failed to fetch basin config");
-    assert!(stored_config.create_stream_on_append);
+    assert!(!stored_config.create_stream_on_append);
     assert!(stored_config.create_stream_on_read);
-    assert_eq!(
-        stored_config.default_stream_config.storage_class,
-        Some(StorageClass::Standard)
-    );
-    assert_eq!(
-        stored_config.default_stream_config.retention_policy,
-        Some(RetentionPolicy::Infinite())
-    );
+    assert_eq!(stored_config.default_stream_config.storage_class, None);
+    assert_eq!(stored_config.default_stream_config.retention_policy, None);
 }
 
 #[tokio::test]

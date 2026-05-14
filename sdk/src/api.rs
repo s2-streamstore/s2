@@ -10,7 +10,7 @@ use http::{
 };
 use prost::{self, Message};
 #[cfg(feature = "_hidden")]
-use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
+use s2_api::v1::basin::EnsureBasinRequest;
 use s2_api::v1::{
     access::{
         AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
@@ -145,10 +145,10 @@ impl AccountClient {
     }
 
     #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_basin(
+    pub async fn ensure_basin(
         &self,
         name: BasinName,
-        request: Option<CreateOrReconfigureBasinRequest>,
+        request: Option<EnsureBasinRequest>,
     ) -> Result<(bool, BasinInfo), ApiError> {
         let url = self.base_url.join(&format!("v1/basins/{name}"))?;
         let request = match request {
@@ -299,10 +299,10 @@ impl BasinClient {
     }
 
     #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_stream(
+    pub async fn ensure_stream(
         &self,
         name: StreamName,
-        config: Option<StreamReconfiguration>,
+        config: Option<StreamConfig>,
     ) -> Result<(bool, StreamInfo), ApiError> {
         let url = self
             .base_url

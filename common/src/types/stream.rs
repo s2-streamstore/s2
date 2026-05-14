@@ -16,7 +16,7 @@ use crate::{
         Sequenced, StoredRecord, StreamPosition, Timestamp, decrypt_stored_record, encrypt_record,
     },
     types::{
-        config::{OptionalStreamConfig, StreamReconfiguration},
+        config::OptionalStreamConfig,
         resources::{ListItemsRequest, RequestToken},
     },
 };
@@ -178,8 +178,8 @@ pub struct StreamInfo {
 /// Stream creation operation intent.
 ///
 /// Separates POST-style create-only requests, which carry a complete creation config and optional
-/// idempotency token, from PUT-style create-or-reconfigure requests, which carry only a
-/// reconfiguration patch.
+/// idempotency token, from PUT-style ensure requests, which carry the desired
+/// complete config.
 #[derive(Debug)]
 pub enum CreateStreamIntent {
     /// Create a new stream.
@@ -192,13 +192,13 @@ pub enum CreateStreamIntent {
         /// Optional request token used to make create retries idempotent.
         request_token: Option<RequestToken>,
     },
-    /// Create a new stream or reconfigure it if it already exists.
+    /// Ensure a stream exists with the requested config.
     ///
-    /// HTTP PUT semantics: always idempotent. When the stream already exists, unspecified fields in
-    /// the reconfiguration preserve the existing config.
-    CreateOrReconfigure {
-        /// Stream reconfiguration patch to apply on create-or-reconfigure.
-        reconfiguration: StreamReconfiguration,
+    /// HTTP PUT semantics: always idempotent. Defaults are applied before validation. When the
+    /// stream already exists, its config is set to this desired config unless it already matches.
+    Ensure {
+        /// Complete stream configuration to ensure before basin defaults are merged.
+        config: OptionalStreamConfig,
     },
 }
 

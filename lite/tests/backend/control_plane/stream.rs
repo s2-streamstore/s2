@@ -287,7 +287,7 @@ async fn test_create_stream_idempotency_and_request_token() {
 }
 
 #[tokio::test]
-async fn test_create_stream_create_or_reconfigure_preserves_idempotency_key() {
+async fn test_create_stream_ensure_preserves_idempotency_key() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
@@ -298,7 +298,7 @@ async fn test_create_stream_create_or_reconfigure_preserves_idempotency_key() {
     let stream_name = test_stream_name("stream-idempotency-key-preserve");
 
     let config = OptionalStreamConfig {
-        storage_class: Some(StorageClass::Express),
+        storage_class: Some(StorageClass::Standard),
         ..Default::default()
     };
     let token: RequestToken = "stream-token-preserve".parse().unwrap();
@@ -325,24 +325,24 @@ async fn test_create_stream_create_or_reconfigure_preserves_idempotency_key() {
             },
         )
         .await
-        .expect("Idempotency should work before CreateOrReconfigure");
+        .expect("Idempotency should work before Ensure");
 
     backend
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOrReconfigure {
-                reconfiguration: StreamReconfiguration {
-                    timestamping: Maybe::from(Some(TimestampingReconfiguration {
-                        mode: Maybe::from(Some(TimestampingMode::Arrival)),
+            CreateStreamIntent::Ensure {
+                config: OptionalStreamConfig {
+                    timestamping: OptionalTimestampingConfig {
+                        mode: Some(TimestampingMode::Arrival),
                         ..Default::default()
-                    })),
+                    },
                     ..Default::default()
                 },
             },
         )
         .await
-        .expect("CreateOrReconfigure should succeed");
+        .expect("Ensure should succeed");
 
     let stored_config = backend
         .get_stream_config(basin_name.clone(), stream_name.clone())
@@ -364,7 +364,7 @@ async fn test_create_stream_create_or_reconfigure_preserves_idempotency_key() {
             },
         )
         .await
-        .expect("Idempotency should still work after CreateOrReconfigure");
+        .expect("Idempotency should still work after Ensure");
 }
 
 #[tokio::test]
@@ -478,9 +478,9 @@ async fn test_reconfigure_stream_updates_active_streamer() {
 }
 
 #[tokio::test]
-async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
+async fn test_create_stream_ensure_updates_active_streamer() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "stream-create-or-reconfigure-active",
+        "stream-ensure-active",
         "stream",
         OptionalStreamConfig::default(),
     )
@@ -488,11 +488,11 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
 
     append_payloads(&backend, &basin_name, &stream_name, &[b"seed"]).await;
 
-    let reconfiguration = StreamReconfiguration {
-        timestamping: Maybe::from(Some(TimestampingReconfiguration {
-            mode: Maybe::from(Some(TimestampingMode::ClientRequire)),
+    let config = OptionalStreamConfig {
+        timestamping: OptionalTimestampingConfig {
+            mode: Some(TimestampingMode::ClientRequire),
             ..Default::default()
-        })),
+        },
         ..Default::default()
     };
 
@@ -500,10 +500,10 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         .create_stream(
             basin_name.clone(),
             stream_name.clone(),
-            CreateStreamIntent::CreateOrReconfigure { reconfiguration },
+            CreateStreamIntent::Ensure { config },
         )
         .await
-        .expect("CreateOrReconfigure should succeed for an existing stream");
+        .expect("Ensure should succeed for an existing stream");
 
     check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await

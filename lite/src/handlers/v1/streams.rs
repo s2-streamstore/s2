@@ -22,10 +22,7 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::streams::LIST, get(list_streams))
         .route(super::paths::streams::CREATE, post(create_stream))
         .route(super::paths::streams::GET_CONFIG, get(get_stream_config))
-        .route(
-            super::paths::streams::CREATE_OR_RECONFIGURE,
-            put(create_or_reconfigure_stream),
-        )
+        .route(super::paths::streams::ENSURE, put(ensure_stream))
         .route(super::paths::streams::DELETE, delete(delete_stream))
         .route(
             super::paths::streams::RECONFIGURE,
@@ -177,20 +174,20 @@ pub async fn get_stream_config(
 
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
-pub struct CreateOrReconfigureArgs {
+pub struct EnsureArgs {
     #[from_request(via(Header))]
     basin: BasinName,
     #[from_request(via(Path))]
     stream: StreamName,
-    config: JsonOpt<v1t::config::StreamReconfiguration>,
+    config: JsonOpt<v1t::config::StreamConfig>,
 }
 
-/// Create or reconfigure a stream.
+/// Ensure a stream.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
-    path = super::paths::streams::CREATE_OR_RECONFIGURE,
+    path = super::paths::streams::ENSURE,
     tag = super::paths::streams::TAG,
-    request_body = Option<v1t::config::StreamReconfiguration>,
+    request_body = Option<v1t::config::StreamConfig>,
     params(v1t::StreamNamePathSegment),
     responses(
         (status = StatusCode::OK, body = v1t::stream::StreamInfo),
@@ -209,24 +206,20 @@ pub struct CreateOrReconfigureArgs {
         ), description = "Endpoint for the basin"),
     )
 ))]
-pub async fn create_or_reconfigure_stream(
+pub async fn ensure_stream(
     State(backend): State<Backend>,
-    CreateOrReconfigureArgs {
+    EnsureArgs {
         basin,
         stream,
         config: JsonOpt(config),
-    }: CreateOrReconfigureArgs,
+    }: EnsureArgs,
 ) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
-    let reconfiguration: StreamReconfiguration = config
+    let config: OptionalStreamConfig = config
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_stream(
-            basin,
-            stream,
-            CreateStreamIntent::CreateOrReconfigure { reconfiguration },
-        )
+        .create_stream(basin, stream, CreateStreamIntent::Ensure { config })
         .await?;
     let status = if info.is_created() {
         StatusCode::CREATED

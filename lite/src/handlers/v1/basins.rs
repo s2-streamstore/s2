@@ -21,10 +21,7 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::basins::LIST, get(list_basins))
         .route(super::paths::basins::CREATE, post(create_basin))
         .route(super::paths::basins::GET_CONFIG, get(get_basin_config))
-        .route(
-            super::paths::basins::CREATE_OR_RECONFIGURE,
-            put(create_or_reconfigure_basin),
-        )
+        .route(super::paths::basins::ENSURE, put(ensure_basin))
         .route(super::paths::basins::DELETE, delete(delete_basin))
         .route(super::paths::basins::RECONFIGURE, patch(reconfigure_basin))
 }
@@ -140,18 +137,18 @@ pub async fn get_basin_config(
 
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
-pub struct CreateOrReconfigureArgs {
+pub struct EnsureArgs {
     #[from_request(via(Path))]
     basin: BasinName,
-    request: JsonOpt<v1t::basin::CreateOrReconfigureBasinRequest>,
+    request: JsonOpt<v1t::basin::EnsureBasinRequest>,
 }
 
-/// Create or reconfigure a basin.
+/// Ensure a basin.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
-    path = super::paths::basins::CREATE_OR_RECONFIGURE,
+    path = super::paths::basins::ENSURE,
     tag = super::paths::basins::TAG,
-    request_body = Option<v1t::basin::CreateOrReconfigureBasinRequest>,
+    request_body = Option<v1t::basin::EnsureBasinRequest>,
     params(v1t::BasinNamePathSegment),
     responses(
         (status = StatusCode::OK, body = v1t::basin::BasinInfo),
@@ -160,23 +157,20 @@ pub struct CreateOrReconfigureArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
 ))]
-pub async fn create_or_reconfigure_basin(
+pub async fn ensure_basin(
     State(backend): State<Backend>,
-    CreateOrReconfigureArgs {
+    EnsureArgs {
         basin,
         request: JsonOpt(request),
-    }: CreateOrReconfigureArgs,
+    }: EnsureArgs,
 ) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
-    let reconfiguration: BasinReconfiguration = request
+    let config: BasinConfig = request
         .and_then(|req| req.config)
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(
-            basin,
-            CreateBasinIntent::CreateOrReconfigure { reconfiguration },
-        )
+        .create_basin(basin, CreateBasinIntent::Ensure { config })
         .await?;
     let status = if info.is_created() {
         StatusCode::CREATED

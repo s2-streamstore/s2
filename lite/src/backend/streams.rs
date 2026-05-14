@@ -16,7 +16,7 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend, CreatedOrReconfigured,
+    Backend, EnsureResult,
     store::db_txn_get,
     streamer::{doe_arm_delay, retention_age_or_zero},
 };
@@ -87,7 +87,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         intent: CreateStreamIntent,
-    ) -> Result<CreatedOrReconfigured<StreamInfo>, CreateStreamError> {
+    ) -> Result<EnsureResult<StreamInfo>, CreateStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -116,7 +116,8 @@ impl Backend {
             ));
         }
 
-        let (mut meta, is_reconfigure, prior_doe_min_age) = match (existing_meta, intent) {
+        let basin_defaults = basin_meta.config.default_stream_config.clone();
+        let (meta, was_existing, prior_doe_min_age, should_write) = match (existing_meta, intent) {
             (
                 Some(existing),
                 CreateStreamIntent::CreateOnly {
@@ -130,7 +131,7 @@ impl Backend {
                 return if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
-                    Ok(CreatedOrReconfigured::Created(StreamInfo {
+                    Ok(EnsureResult::Created(StreamInfo {
                         name: stream,
                         created_at: existing.created_at,
                         deleted_at: None,
@@ -140,15 +141,17 @@ impl Backend {
                     Err(StreamAlreadyExistsError { basin, stream }.into())
                 };
             }
-            (Some(existing), CreateStreamIntent::CreateOrReconfigure { reconfiguration }) => {
+            (Some(existing), CreateStreamIntent::Ensure { config }) => {
                 let prior_doe_min_age = existing
                     .config
                     .delete_on_empty
                     .min_age
                     .filter(|age| !age.is_zero());
+                let config: OptionalStreamConfig = config.merge(basin_defaults.clone()).into();
+                let should_write = existing.config != config;
                 (
                     kv::stream_meta::StreamMeta {
-                        config: existing.config.reconfigure(reconfiguration),
+                        config,
                         cipher: existing.cipher,
                         created_at: existing.created_at,
                         deleted_at: None,
@@ -156,6 +159,7 @@ impl Backend {
                     },
                     true,
                     prior_doe_min_age,
+                    should_write,
                 )
             }
             (
@@ -170,7 +174,7 @@ impl Backend {
                     .map(|req_token| creation_idempotency_key(req_token, &config));
                 (
                     kv::stream_meta::StreamMeta {
-                        config,
+                        config: config.merge(basin_defaults.clone()).into(),
                         cipher: basin_meta.config.stream_cipher,
                         created_at: OffsetDateTime::now_utc(),
                         deleted_at: None,
@@ -178,11 +182,12 @@ impl Backend {
                     },
                     false,
                     None,
+                    true,
                 )
             }
-            (None, CreateStreamIntent::CreateOrReconfigure { reconfiguration }) => (
+            (None, CreateStreamIntent::Ensure { config }) => (
                 kv::stream_meta::StreamMeta {
-                    config: OptionalStreamConfig::default().reconfigure(reconfiguration),
+                    config: config.merge(basin_defaults).into(),
                     cipher: basin_meta.config.stream_cipher,
                     created_at: OffsetDateTime::now_utc(),
                     deleted_at: None,
@@ -190,59 +195,63 @@ impl Backend {
                 },
                 false,
                 None,
+                true,
             ),
         };
-        let basin_defaults = basin_meta.config.default_stream_config;
-        meta.config = meta.config.merge(basin_defaults).into();
 
-        txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
-        let stream_id = StreamId::new(&basin, &stream);
-        if !is_reconfigure {
-            txn.put(
-                kv::stream_id_mapping::ser_key(stream_id),
-                kv::stream_id_mapping::ser_value(&basin, &stream),
-            )?;
-            let created_secs = meta.created_at.unix_timestamp();
-            let created_secs = if created_secs <= 0 {
-                0
-            } else if created_secs >= i64::from(u32::MAX) {
-                u32::MAX
-            } else {
-                created_secs as u32
+        if should_write {
+            txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
+            let stream_id = StreamId::new(&basin, &stream);
+            if !was_existing {
+                txn.put(
+                    kv::stream_id_mapping::ser_key(stream_id),
+                    kv::stream_id_mapping::ser_value(&basin, &stream),
+                )?;
+                let created_secs = meta.created_at.unix_timestamp();
+                let created_secs = if created_secs <= 0 {
+                    0
+                } else if created_secs >= i64::from(u32::MAX) {
+                    u32::MAX
+                } else {
+                    created_secs as u32
+                };
+                txn.put(
+                    kv::stream_tail_position::ser_key(stream_id),
+                    kv::stream_tail_position::ser_value(
+                        StreamPosition::MIN,
+                        kv::timestamp::TimestampSecs::from_secs(created_secs),
+                    ),
+                )?;
+            }
+            if let Some(min_age) = meta
+                .config
+                .delete_on_empty
+                .min_age
+                .filter(|age| !age.is_zero())
+                && (!was_existing || prior_doe_min_age.is_none())
+            {
+                txn.put(
+                    kv::stream_doe_deadline::ser_key(
+                        kv::timestamp::TimestampSecs::after(doe_arm_delay(
+                            retention_age_or_zero(&meta.config),
+                            min_age,
+                        )),
+                        stream_id,
+                    ),
+                    kv::stream_doe_deadline::ser_value(min_age),
+                )?;
+            }
+
+            static WRITE_OPTS: WriteOptions = WriteOptions {
+                await_durable: true,
             };
-            txn.put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(
-                    StreamPosition::MIN,
-                    kv::timestamp::TimestampSecs::from_secs(created_secs),
-                ),
-            )?;
+            txn.commit_with_options(&WRITE_OPTS).await?;
         }
-        if let Some(min_age) = meta
-            .config
-            .delete_on_empty
-            .min_age
-            .filter(|age| !age.is_zero())
-            && (!is_reconfigure || prior_doe_min_age.is_none())
+
+        if should_write
+            && was_existing
+            && let Some(client) = self.streamer_client_if_active(&basin, &stream)
         {
-            txn.put(
-                kv::stream_doe_deadline::ser_key(
-                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                        retention_age_or_zero(&meta.config),
-                        min_age,
-                    )),
-                    stream_id,
-                ),
-                kv::stream_doe_deadline::ser_value(min_age),
-            )?;
-        }
-
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        txn.commit_with_options(&WRITE_OPTS).await?;
-
-        if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
             client.advise_reconfig(meta.config.clone());
         }
 
@@ -253,10 +262,10 @@ impl Backend {
             cipher: meta.cipher,
         };
 
-        Ok(if is_reconfigure {
-            CreatedOrReconfigured::Reconfigured(info)
+        Ok(if was_existing {
+            EnsureResult::Updated(info)
         } else {
-            CreatedOrReconfigured::Created(info)
+            EnsureResult::Created(info)
         })
     }
 

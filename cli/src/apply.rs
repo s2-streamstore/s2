@@ -10,11 +10,9 @@ use s2_lite::init::{
 use s2_sdk::{
     S2,
     types::{
-        BasinConfig, BasinName, BasinReconfiguration, CreateOrReconfigureBasinInput,
-        CreateOrReconfigureStreamInput, CreateOrReconfigured, DeleteOnEmptyConfig,
-        DeleteOnEmptyReconfiguration, EncryptionAlgorithm, ErrorResponse, RetentionPolicy, S2Error,
-        StorageClass, StreamConfig, StreamName, StreamReconfiguration, TimestampingConfig,
-        TimestampingMode, TimestampingReconfiguration,
+        BasinConfig, BasinName, DeleteOnEmptyConfig, EncryptionAlgorithm, EnsureBasinInput,
+        EnsureResult, EnsureStreamInput, ErrorResponse, RetentionPolicy, S2Error, StorageClass,
+        StreamConfig, StreamName, TimestampingConfig, TimestampingMode,
     },
 };
 
@@ -56,8 +54,8 @@ fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
     }
 }
 
-fn timestamping_reconfiguration_from_spec(ts: TimestampingSpec) -> TimestampingReconfiguration {
-    let mut tsr = TimestampingReconfiguration::new();
+fn timestamping_config_from_spec(ts: TimestampingSpec) -> TimestampingConfig {
+    let mut tsr = TimestampingConfig::new();
     if let Some(m) = ts.mode {
         tsr = tsr.with_mode(timestamping_mode_from_spec(m));
     }
@@ -67,18 +65,16 @@ fn timestamping_reconfiguration_from_spec(ts: TimestampingSpec) -> TimestampingR
     tsr
 }
 
-fn delete_on_empty_reconfiguration_from_spec(
-    doe: DeleteOnEmptySpec,
-) -> DeleteOnEmptyReconfiguration {
-    let mut doer = DeleteOnEmptyReconfiguration::new();
+fn delete_on_empty_config_from_spec(doe: DeleteOnEmptySpec) -> DeleteOnEmptyConfig {
+    let mut doer = DeleteOnEmptyConfig::new();
     if let Some(ma) = doe.min_age {
         doer = doer.with_min_age(ma.0);
     }
     doer
 }
 
-fn stream_reconfiguration_from_spec(s: StreamConfigSpec) -> StreamReconfiguration {
-    let mut r = StreamReconfiguration::new();
+fn stream_config_from_spec(s: StreamConfigSpec) -> StreamConfig {
+    let mut r = StreamConfig::new();
     if let Some(sc) = s.storage_class {
         r = r.with_storage_class(storage_class_from_spec(sc));
     }
@@ -86,18 +82,18 @@ fn stream_reconfiguration_from_spec(s: StreamConfigSpec) -> StreamReconfiguratio
         r = r.with_retention_policy(retention_policy_from_spec(rp));
     }
     if let Some(ts) = s.timestamping {
-        r = r.with_timestamping(timestamping_reconfiguration_from_spec(ts));
+        r = r.with_timestamping(timestamping_config_from_spec(ts));
     }
     if let Some(doe) = s.delete_on_empty {
-        r = r.with_delete_on_empty(delete_on_empty_reconfiguration_from_spec(doe));
+        r = r.with_delete_on_empty(delete_on_empty_config_from_spec(doe));
     }
     r
 }
 
-fn basin_reconfiguration_from_spec(s: BasinConfigSpec) -> BasinReconfiguration {
-    let mut r = BasinReconfiguration::new();
+fn basin_config_from_spec(s: BasinConfigSpec) -> BasinConfig {
+    let mut r = BasinConfig::new();
     if let Some(dsc) = s.default_stream_config {
-        r = r.with_default_stream_config(stream_reconfiguration_from_spec(dsc));
+        r = r.with_default_stream_config(stream_config_from_spec(dsc));
     }
     if let Some(algorithm) = s.stream_cipher {
         r = r.with_stream_cipher(encryption_algorithm_from_spec(algorithm));
@@ -149,23 +145,20 @@ async fn apply_basin(
     basin: BasinName,
     config: Option<BasinConfigSpec>,
 ) -> miette::Result<()> {
-    let mut input = CreateOrReconfigureBasinInput::new(basin.clone());
+    let mut input = EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        input = input.with_config(basin_reconfiguration_from_spec(c));
+        input = input.with_config(basin_config_from_spec(c));
     }
     match s2
-        .create_or_reconfigure_basin(input)
+        .ensure_basin(input)
         .await
         .map_err(|e| miette::miette!("failed to apply basin {:?}: {}", basin.as_ref(), e))?
     {
-        CreateOrReconfigured::Created(_) => {
+        EnsureResult::Created(_) => {
             eprintln!("{}", format!("  basin {basin}").green().bold());
         }
-        CreateOrReconfigured::Reconfigured(_) => {
-            eprintln!(
-                "{}",
-                format!("  basin {basin} (reconfigured)").yellow().bold()
-            );
+        EnsureResult::Updated(_) => {
+            eprintln!("{}", format!("  basin {basin} (updated)").yellow().bold());
         }
     }
     Ok(())
@@ -177,29 +170,26 @@ async fn apply_stream(
     stream: StreamName,
     config: Option<StreamConfigSpec>,
 ) -> miette::Result<()> {
-    let mut input = CreateOrReconfigureStreamInput::new(stream.clone());
+    let mut input = EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        input = input.with_config(stream_reconfiguration_from_spec(c));
+        input = input.with_config(stream_config_from_spec(c));
     }
     let basin_client = s2.basin(basin.clone());
-    match basin_client
-        .create_or_reconfigure_stream(input)
-        .await
-        .map_err(|e| {
-            miette::miette!(
-                "failed to apply stream {:?}/{:?}: {}",
-                basin.as_ref(),
-                stream.as_ref(),
-                e
-            )
-        })? {
-        CreateOrReconfigured::Created(_) => {
+    match basin_client.ensure_stream(input).await.map_err(|e| {
+        miette::miette!(
+            "failed to apply stream {:?}/{:?}: {}",
+            basin.as_ref(),
+            stream.as_ref(),
+            e
+        )
+    })? {
+        EnsureResult::Created(_) => {
             eprintln!("{}", format!("  stream {basin}/{stream}").green().bold());
         }
-        CreateOrReconfigured::Reconfigured(_) => {
+        EnsureResult::Updated(_) => {
             eprintln!(
                 "{}",
-                format!("  stream {basin}/{stream} (reconfigured)")
+                format!("  stream {basin}/{stream} (updated)")
                     .yellow()
                     .bold()
             );
@@ -210,7 +200,7 @@ async fn apply_stream(
 
 enum ResourceAction {
     Create,
-    Reconfigure(Vec<FieldDiff>),
+    Ensure(Vec<FieldDiff>),
     Unchanged,
 }
 
@@ -269,15 +259,64 @@ fn effective_delete_on_empty_min_age_secs(doe: Option<&DeleteOnEmptyConfig>) -> 
     doe.map(|cfg| cfg.min_age_secs).unwrap_or(0)
 }
 
-fn diff_basin_config(existing: &BasinConfig, spec: &BasinConfigSpec) -> Vec<FieldDiff> {
+fn merge_stream_config(
+    config: StreamConfig,
+    basin_defaults: Option<&StreamConfig>,
+) -> StreamConfig {
+    let default_timestamping = basin_defaults.and_then(|cfg| cfg.timestamping.as_ref());
+    let timestamping = config.timestamping.as_ref();
+    let default_delete_on_empty = basin_defaults.and_then(|cfg| cfg.delete_on_empty.as_ref());
+
+    let delete_on_empty_min_age_secs = config
+        .delete_on_empty
+        .as_ref()
+        .map(|cfg| cfg.min_age_secs)
+        .or_else(|| default_delete_on_empty.map(|cfg| cfg.min_age_secs))
+        .unwrap_or_default();
+
+    let timestamping = TimestampingConfig::new()
+        .with_mode(
+            timestamping
+                .and_then(|cfg| cfg.mode)
+                .or_else(|| default_timestamping.and_then(|cfg| cfg.mode))
+                .unwrap_or(TimestampingMode::ClientPrefer),
+        )
+        .with_uncapped(
+            timestamping
+                .map(|cfg| cfg.uncapped)
+                .or_else(|| default_timestamping.map(|cfg| cfg.uncapped))
+                .unwrap_or_default(),
+        );
+
+    let mut merged = StreamConfig::new()
+        .with_storage_class(
+            config
+                .storage_class
+                .or_else(|| basin_defaults.and_then(|cfg| cfg.storage_class))
+                .unwrap_or(StorageClass::Express),
+        )
+        .with_retention_policy(
+            config
+                .retention_policy
+                .or_else(|| basin_defaults.and_then(|cfg| cfg.retention_policy))
+                .unwrap_or(RetentionPolicy::Age(7 * 24 * 60 * 60)),
+        )
+        .with_timestamping(timestamping);
+
+    if delete_on_empty_min_age_secs > 0 {
+        merged = merged.with_delete_on_empty(
+            DeleteOnEmptyConfig::new()
+                .with_min_age(Duration::from_secs(delete_on_empty_min_age_secs)),
+        );
+    }
+
+    merged
+}
+
+fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
-    if let Some(algorithm) = spec
-        .stream_cipher
-        .clone()
-        .map(encryption_algorithm_from_spec)
-        && existing.stream_cipher != Some(algorithm)
-    {
+    if existing.stream_cipher != desired.stream_cipher {
         diffs.push(FieldDiff {
             field: "stream_cipher",
             old: existing
@@ -285,108 +324,96 @@ fn diff_basin_config(existing: &BasinConfig, spec: &BasinConfigSpec) -> Vec<Fiel
                 .map(format_encryption_algorithm)
                 .unwrap_or("none")
                 .to_string(),
-            new: format_encryption_algorithm(algorithm).to_string(),
+            new: desired
+                .stream_cipher
+                .map(format_encryption_algorithm)
+                .unwrap_or("none")
+                .to_string(),
         });
     }
 
-    if let Some(v) = spec.create_stream_on_append
-        && existing.create_stream_on_append != v
-    {
+    if existing.create_stream_on_append != desired.create_stream_on_append {
         diffs.push(FieldDiff {
             field: "create_stream_on_append",
             old: existing.create_stream_on_append.to_string(),
-            new: v.to_string(),
+            new: desired.create_stream_on_append.to_string(),
         });
     }
 
-    if let Some(v) = spec.create_stream_on_read
-        && existing.create_stream_on_read != v
-    {
+    if existing.create_stream_on_read != desired.create_stream_on_read {
         diffs.push(FieldDiff {
             field: "create_stream_on_read",
             old: existing.create_stream_on_read.to_string(),
-            new: v.to_string(),
+            new: desired.create_stream_on_read.to_string(),
         });
     }
 
-    if let Some(ref spec_dsc) = spec.default_stream_config {
-        let existing_dsc = existing.default_stream_config.clone().unwrap_or_default();
-        let stream_diffs = diff_stream_config(&existing_dsc, spec_dsc);
-        for sd in stream_diffs {
-            diffs.push(FieldDiff {
-                field: sd.field,
-                old: sd.old,
-                new: sd.new,
-            });
-        }
+    let existing_dsc = existing.default_stream_config.clone().unwrap_or_default();
+    let desired_dsc = desired.default_stream_config.clone().unwrap_or_default();
+    for sd in diff_stream_configs(&existing_dsc, &desired_dsc) {
+        diffs.push(FieldDiff {
+            field: sd.field,
+            old: sd.old,
+            new: sd.new,
+        });
     }
 
     diffs
 }
 
-fn diff_stream_config(existing: &StreamConfig, spec: &StreamConfigSpec) -> Vec<FieldDiff> {
+fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
-    if let Some(ref sc) = spec.storage_class {
-        let existing_sc = effective_storage_class(existing.storage_class);
-        let spec_sc = storage_class_from_spec(sc.clone());
-        if existing_sc != spec_sc {
-            diffs.push(FieldDiff {
-                field: "storage_class",
-                old: format_storage_class(existing_sc).to_string(),
-                new: format_storage_class(spec_sc).to_string(),
-            });
-        }
+    let existing_sc = effective_storage_class(existing.storage_class);
+    let desired_sc = effective_storage_class(desired.storage_class);
+    if existing_sc != desired_sc {
+        diffs.push(FieldDiff {
+            field: "storage_class",
+            old: format_storage_class(existing_sc).to_string(),
+            new: format_storage_class(desired_sc).to_string(),
+        });
     }
 
-    if let Some(ref rp) = spec.retention_policy {
-        let existing_rp = effective_retention_policy(existing.retention_policy);
-        let spec_rp = retention_policy_from_spec(*rp);
-        if existing_rp != spec_rp {
-            diffs.push(FieldDiff {
-                field: "retention_policy",
-                old: format_retention_policy(existing_rp),
-                new: format_retention_policy(spec_rp),
-            });
-        }
+    let existing_rp = effective_retention_policy(existing.retention_policy);
+    let desired_rp = effective_retention_policy(desired.retention_policy);
+    if existing_rp != desired_rp {
+        diffs.push(FieldDiff {
+            field: "retention_policy",
+            old: format_retention_policy(existing_rp),
+            new: format_retention_policy(desired_rp),
+        });
     }
 
-    if let Some(ref ts) = spec.timestamping {
-        let existing_ts = existing.timestamping.as_ref();
-        if let Some(ref mode) = ts.mode {
-            let spec_mode = timestamping_mode_from_spec(mode.clone());
-            if effective_timestamping_mode(existing_ts) != spec_mode {
-                diffs.push(FieldDiff {
-                    field: "timestamping.mode",
-                    old: format_timestamping_mode(effective_timestamping_mode(existing_ts))
-                        .to_string(),
-                    new: format_timestamping_mode(spec_mode).to_string(),
-                });
-            }
-        }
-        if let Some(uncapped) = ts.uncapped
-            && effective_timestamping_uncapped(existing_ts) != uncapped
-        {
-            diffs.push(FieldDiff {
-                field: "timestamping.uncapped",
-                old: effective_timestamping_uncapped(existing_ts).to_string(),
-                new: uncapped.to_string(),
-            });
-        }
+    let existing_ts = existing.timestamping.as_ref();
+    let desired_ts = desired.timestamping.as_ref();
+    let existing_mode = effective_timestamping_mode(existing_ts);
+    let desired_mode = effective_timestamping_mode(desired_ts);
+    if existing_mode != desired_mode {
+        diffs.push(FieldDiff {
+            field: "timestamping.mode",
+            old: format_timestamping_mode(existing_mode).to_string(),
+            new: format_timestamping_mode(desired_mode).to_string(),
+        });
     }
 
-    if let Some(ref doe) = spec.delete_on_empty
-        && let Some(ref min_age) = doe.min_age
-        && effective_delete_on_empty_min_age_secs(existing.delete_on_empty.as_ref())
-            != min_age.0.as_secs()
-    {
+    let existing_uncapped = effective_timestamping_uncapped(existing_ts);
+    let desired_uncapped = effective_timestamping_uncapped(desired_ts);
+    if existing_uncapped != desired_uncapped {
+        diffs.push(FieldDiff {
+            field: "timestamping.uncapped",
+            old: existing_uncapped.to_string(),
+            new: desired_uncapped.to_string(),
+        });
+    }
+
+    let existing_min_age =
+        effective_delete_on_empty_min_age_secs(existing.delete_on_empty.as_ref());
+    let desired_min_age = effective_delete_on_empty_min_age_secs(desired.delete_on_empty.as_ref());
+    if existing_min_age != desired_min_age {
         diffs.push(FieldDiff {
             field: "delete_on_empty.min_age",
-            old: humantime::format_duration(Duration::from_secs(
-                effective_delete_on_empty_min_age_secs(existing.delete_on_empty.as_ref()),
-            ))
-            .to_string(),
-            new: humantime::format_duration(min_age.0).to_string(),
+            old: humantime::format_duration(Duration::from_secs(existing_min_age)).to_string(),
+            new: humantime::format_duration(Duration::from_secs(desired_min_age)).to_string(),
         });
     }
 
@@ -482,7 +509,7 @@ fn print_basin_result(basin: &str, action: &ResourceAction) {
         ResourceAction::Create => {
             println!("{}", format!("+ basin {basin}").green().bold());
         }
-        ResourceAction::Reconfigure(diffs) => {
+        ResourceAction::Ensure(diffs) => {
             println!("{}", format!("~ basin {basin}").yellow().bold());
             for diff in diffs {
                 println!("    {}: {} → {}", diff.field, diff.old.dimmed(), diff.new);
@@ -499,7 +526,7 @@ fn print_stream_result(basin: &str, stream: &str, action: &ResourceAction) {
         ResourceAction::Create => {
             println!("{}", format!("  + stream {basin}/{stream}").green().bold());
         }
-        ResourceAction::Reconfigure(diffs) => {
+        ResourceAction::Ensure(diffs) => {
             println!("{}", format!("  ~ stream {basin}/{stream}").yellow().bold());
             for diff in diffs {
                 println!("      {}: {} → {}", diff.field, diff.old.dimmed(), diff.new);
@@ -537,18 +564,19 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
             .name
             .parse()
             .map_err(|e| miette::miette!("invalid basin name {:?}: {}", basin_spec.name, e))?;
+        let desired_basin_config = basin_spec
+            .config
+            .clone()
+            .map(basin_config_from_spec)
+            .unwrap_or_default();
 
         let basin_action = match s2.get_basin_config(basin.clone()).await {
             Ok(existing) => {
-                if let Some(ref config) = basin_spec.config {
-                    let diffs = diff_basin_config(&existing, config);
-                    if diffs.is_empty() {
-                        ResourceAction::Unchanged
-                    } else {
-                        ResourceAction::Reconfigure(diffs)
-                    }
-                } else {
+                let diffs = diff_basin_config(&existing, &desired_basin_config);
+                if diffs.is_empty() {
                     ResourceAction::Unchanged
+                } else {
+                    ResourceAction::Ensure(diffs)
                 }
             }
             Err(e) if is_not_found_error(&e) => ResourceAction::Create,
@@ -579,15 +607,19 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 
             let stream_action = match basin_client.get_stream_config(stream.clone()).await {
                 Ok(existing) => {
-                    if let Some(ref config) = stream_spec.config {
-                        let diffs = diff_stream_config(&existing, config);
-                        if diffs.is_empty() {
-                            ResourceAction::Unchanged
-                        } else {
-                            ResourceAction::Reconfigure(diffs)
-                        }
-                    } else {
+                    let desired_stream_config = merge_stream_config(
+                        stream_spec
+                            .config
+                            .clone()
+                            .map(stream_config_from_spec)
+                            .unwrap_or_default(),
+                        desired_basin_config.default_stream_config.as_ref(),
+                    );
+                    let diffs = diff_stream_configs(&existing, &desired_stream_config);
+                    if diffs.is_empty() {
                         ResourceAction::Unchanged
+                    } else {
+                        ResourceAction::Ensure(diffs)
                     }
                 }
                 Err(e) if is_not_found_error(&e) => ResourceAction::Create,

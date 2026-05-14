@@ -27,19 +27,19 @@ pub struct StreamHandle {
 pub const FOLLOWER_MAX_LAG: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreatedOrReconfigured<T> {
+pub enum EnsureResult<T> {
     Created(T),
-    Reconfigured(T),
+    Updated(T),
 }
 
-impl<T> CreatedOrReconfigured<T> {
+impl<T> EnsureResult<T> {
     pub fn is_created(&self) -> bool {
         matches!(self, Self::Created(_))
     }
 
     pub fn into_inner(self) -> T {
         match self {
-            Self::Created(v) | Self::Reconfigured(v) => v,
+            Self::Created(v) | Self::Updated(v) => v,
         }
     }
 }

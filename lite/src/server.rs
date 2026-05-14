@@ -74,7 +74,7 @@ pub struct LiteArgs {
 
     /// Path to a JSON file defining basins and streams to create at startup.
     ///
-    /// Uses create-or-reconfigure semantics, so it is safe to run on repeated
+    /// Uses ensure semantics, so it is safe to run on repeated
     /// restarts. Can also be set via S2LITE_INIT_FILE environment variable.
     #[arg(long, env = "S2LITE_INIT_FILE")]
     pub init_file: Option<PathBuf>,

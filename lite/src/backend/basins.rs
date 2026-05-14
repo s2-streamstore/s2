@@ -13,7 +13,7 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, CreatedOrReconfigured, bgtasks::BgtaskTrigger, store::db_txn_get};
+use super::{Backend, EnsureResult, bgtasks::BgtaskTrigger, store::db_txn_get};
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, CreateBasinError,
@@ -73,7 +73,7 @@ impl Backend {
         &self,
         basin: BasinName,
         intent: CreateBasinIntent,
-    ) -> Result<CreatedOrReconfigured<BasinInfo>, CreateBasinError> {
+    ) -> Result<EnsureResult<BasinInfo>, CreateBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -85,7 +85,7 @@ impl Backend {
             return Err(BasinDeletionPendingError { basin }.into());
         }
 
-        let (meta, is_reconfigure) = match (existing_meta, intent) {
+        let (meta, was_existing, should_write) = match (existing_meta, intent) {
             (
                 Some(existing),
                 CreateBasinIntent::CreateOnly {
@@ -99,7 +99,7 @@ impl Backend {
                 return if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
-                    Ok(CreatedOrReconfigured::Created(BasinInfo {
+                    Ok(EnsureResult::Created(BasinInfo {
                         name: basin,
                         scope: None,
                         created_at: existing.created_at,
@@ -109,15 +109,19 @@ impl Backend {
                     Err(BasinAlreadyExistsError { basin }.into())
                 };
             }
-            (Some(existing), CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => (
-                kv::basin_meta::BasinMeta {
-                    config: existing.config.reconfigure(reconfiguration),
-                    created_at: existing.created_at,
-                    deleted_at: None,
-                    creation_idempotency_key: existing.creation_idempotency_key,
-                },
-                true,
-            ),
+            (Some(existing), CreateBasinIntent::Ensure { config }) => {
+                let should_write = existing.config != config;
+                (
+                    kv::basin_meta::BasinMeta {
+                        config,
+                        created_at: existing.created_at,
+                        deleted_at: None,
+                        creation_idempotency_key: existing.creation_idempotency_key,
+                    },
+                    true,
+                    should_write,
+                )
+            }
             (
                 None,
                 CreateBasinIntent::CreateOnly {
@@ -136,25 +140,29 @@ impl Backend {
                         creation_idempotency_key: new_creation_idempotency_key,
                     },
                     false,
+                    true,
                 )
             }
-            (None, CreateBasinIntent::CreateOrReconfigure { reconfiguration }) => (
+            (None, CreateBasinIntent::Ensure { config }) => (
                 kv::basin_meta::BasinMeta {
-                    config: BasinConfig::default().reconfigure(reconfiguration),
+                    config,
                     created_at: OffsetDateTime::now_utc(),
                     deleted_at: None,
                     creation_idempotency_key: None,
                 },
                 false,
+                true,
             ),
         };
 
-        txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
+        if should_write {
+            txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
 
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        txn.commit_with_options(&WRITE_OPTS).await?;
+            static WRITE_OPTS: WriteOptions = WriteOptions {
+                await_durable: true,
+            };
+            txn.commit_with_options(&WRITE_OPTS).await?;
+        }
 
         let info = BasinInfo {
             name: basin,
@@ -163,10 +171,10 @@ impl Backend {
             deleted_at: None,
         };
 
-        Ok(if is_reconfigure {
-            CreatedOrReconfigured::Reconfigured(info)
+        Ok(if was_existing {
+            EnsureResult::Updated(info)
         } else {
-            CreatedOrReconfigured::Created(info)
+            EnsureResult::Created(info)
         })
     }
 

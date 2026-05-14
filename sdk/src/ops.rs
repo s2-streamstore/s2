@@ -3,9 +3,7 @@ use futures::StreamExt;
 #[cfg(feature = "_hidden")]
 use crate::client::Connect;
 #[cfg(feature = "_hidden")]
-use crate::types::{
-    CreateOrReconfigureBasinInput, CreateOrReconfigureStreamInput, CreateOrReconfigured,
-};
+use crate::types::{EnsureBasinInput, EnsureResult, EnsureStreamInput};
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
     producer::{Producer, ProducerConfig},
@@ -107,29 +105,27 @@ impl S2 {
         Ok(info.try_into()?)
     }
 
-    /// Create or reconfigure a basin.
+    /// Ensure a basin.
     ///
-    /// Creates the basin if it doesn't exist, or reconfigures it to match the provided
-    /// configuration if it does. Uses HTTP PUT semantics — always idempotent.
+    /// Creates the basin if it doesn't exist, or ensures its config exactly matches the
+    /// provided configuration after defaults are applied. Uses HTTP PUT semantics — always
+    /// idempotent.
     ///
-    /// Returns [`CreateOrReconfigured::Created`] with the basin info if the basin was newly
-    /// created, or [`CreateOrReconfigured::Reconfigured`] if it already existed.
+    /// Returns [`EnsureResult::Created`] with the basin info if the basin was newly
+    /// created, or [`EnsureResult::Updated`] if it already existed.
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_basin(
+    pub async fn ensure_basin(
         &self,
-        input: CreateOrReconfigureBasinInput,
-    ) -> Result<CreateOrReconfigured<BasinInfo>, S2Error> {
+        input: EnsureBasinInput,
+    ) -> Result<EnsureResult<BasinInfo>, S2Error> {
         let (name, request) = input.into();
-        let (was_created, info) = self
-            .client
-            .create_or_reconfigure_basin(name, request)
-            .await?;
+        let (was_created, info) = self.client.ensure_basin(name, request).await?;
         let info = info.try_into()?;
         Ok(if was_created {
-            CreateOrReconfigured::Created(info)
+            EnsureResult::Created(info)
         } else {
-            CreateOrReconfigured::Reconfigured(info)
+            EnsureResult::Updated(info)
         })
     }
 
@@ -326,29 +322,27 @@ impl S2Basin {
         Ok(info.try_into()?)
     }
 
-    /// Create or reconfigure a stream.
+    /// Ensure a stream.
     ///
-    /// Creates the stream if it doesn't exist, or reconfigures it to match the provided
-    /// configuration if it does. Uses HTTP PUT semantics — always idempotent.
+    /// Creates the stream if it doesn't exist, or ensures its config exactly matches the
+    /// provided configuration after defaults are applied. Uses HTTP PUT semantics — always
+    /// idempotent.
     ///
-    /// Returns [`CreateOrReconfigured::Created`] with the stream info if the stream was newly
-    /// created, or [`CreateOrReconfigured::Reconfigured`] if it already existed.
+    /// Returns [`EnsureResult::Created`] with the stream info if the stream was newly
+    /// created, or [`EnsureResult::Updated`] if it already existed.
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_stream(
+    pub async fn ensure_stream(
         &self,
-        input: CreateOrReconfigureStreamInput,
-    ) -> Result<CreateOrReconfigured<StreamInfo>, S2Error> {
+        input: EnsureStreamInput,
+    ) -> Result<EnsureResult<StreamInfo>, S2Error> {
         let (name, config) = input.into();
-        let (was_created, info) = self
-            .client
-            .create_or_reconfigure_stream(name, config)
-            .await?;
+        let (was_created, info) = self.client.ensure_stream(name, config).await?;
         let info = info.try_into()?;
         Ok(if was_created {
-            CreateOrReconfigured::Created(info)
+            EnsureResult::Created(info)
         } else {
-            CreateOrReconfigured::Reconfigured(info)
+            EnsureResult::Updated(info)
         })
     }
 

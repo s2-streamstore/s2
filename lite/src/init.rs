@@ -4,16 +4,13 @@
 
 use std::{borrow::Cow, path::Path, time::Duration};
 
-use s2_common::{
-    maybe::Maybe,
-    types::{
-        basin::{BasinName, CreateBasinIntent},
-        config::{
-            BasinReconfiguration, DeleteOnEmptyReconfiguration, RetentionPolicy, StorageClass,
-            StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
-        },
-        stream::{CreateStreamIntent, StreamName},
+use s2_common::types::{
+    basin::{BasinName, CreateBasinIntent},
+    config::{
+        BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
+        RetentionPolicy, StorageClass, TimestampingMode,
     },
+    stream::{CreateStreamIntent, StreamName},
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -272,64 +269,41 @@ impl schemars::JsonSchema for HumanDuration {
     }
 }
 
-impl From<BasinConfigSpec> for BasinReconfiguration {
+impl From<BasinConfigSpec> for BasinConfig {
     fn from(s: BasinConfigSpec) -> Self {
-        BasinReconfiguration {
-            default_stream_config: s
-                .default_stream_config
-                .map(|dsc| Some(StreamReconfiguration::from(dsc)))
-                .map_or(Maybe::Unspecified, Maybe::Specified),
-            stream_cipher: s
-                .stream_cipher
-                .map(|algorithm| Some(algorithm.into()))
-                .map_or(Maybe::Unspecified, Maybe::Specified),
-            create_stream_on_append: s
-                .create_stream_on_append
-                .map_or(Maybe::Unspecified, Maybe::Specified),
-            create_stream_on_read: s
-                .create_stream_on_read
-                .map_or(Maybe::Unspecified, Maybe::Specified),
+        BasinConfig {
+            default_stream_config: s.default_stream_config.map(Into::into).unwrap_or_default(),
+            stream_cipher: s.stream_cipher.map(Into::into),
+            create_stream_on_append: s.create_stream_on_append.unwrap_or_default(),
+            create_stream_on_read: s.create_stream_on_read.unwrap_or_default(),
         }
     }
 }
 
-impl From<StreamConfigSpec> for StreamReconfiguration {
+impl From<TimestampingSpec> for OptionalTimestampingConfig {
+    fn from(s: TimestampingSpec) -> Self {
+        OptionalTimestampingConfig {
+            mode: s.mode.map(Into::into),
+            uncapped: s.uncapped,
+        }
+    }
+}
+
+impl From<DeleteOnEmptySpec> for OptionalDeleteOnEmptyConfig {
+    fn from(s: DeleteOnEmptySpec) -> Self {
+        OptionalDeleteOnEmptyConfig {
+            min_age: s.min_age.map(|h| h.0),
+        }
+    }
+}
+
+impl From<StreamConfigSpec> for OptionalStreamConfig {
     fn from(s: StreamConfigSpec) -> Self {
-        StreamReconfiguration {
-            storage_class: s
-                .storage_class
-                .map(|sc| Some(StorageClass::from(sc)))
-                .map_or(Maybe::Unspecified, Maybe::Specified),
-            retention_policy: s
-                .retention_policy
-                .map(|rp| Some(rp.0))
-                .map_or(Maybe::Unspecified, Maybe::Specified),
-            timestamping: s
-                .timestamping
-                .map(|ts| {
-                    Some(TimestampingReconfiguration {
-                        mode: ts
-                            .mode
-                            .map(|m| Some(TimestampingMode::from(m)))
-                            .map_or(Maybe::Unspecified, Maybe::Specified),
-                        uncapped: ts
-                            .uncapped
-                            .map(Some)
-                            .map_or(Maybe::Unspecified, Maybe::Specified),
-                    })
-                })
-                .map_or(Maybe::Unspecified, Maybe::Specified),
-            delete_on_empty: s
-                .delete_on_empty
-                .map(|doe| {
-                    Some(DeleteOnEmptyReconfiguration {
-                        min_age: doe
-                            .min_age
-                            .map(|h| Some(h.0))
-                            .map_or(Maybe::Unspecified, Maybe::Specified),
-                    })
-                })
-                .map_or(Maybe::Unspecified, Maybe::Specified),
+        OptionalStreamConfig {
+            storage_class: s.storage_class.map(Into::into),
+            retention_policy: s.retention_policy.map(|rp| rp.0),
+            timestamping: s.timestamping.map(Into::into).unwrap_or_default(),
+            delete_on_empty: s.delete_on_empty.map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -393,16 +367,10 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
             .parse()
             .map_err(|e| eyre::eyre!("invalid basin name {:?}: {}", basin_spec.name, e))?;
 
-        let reconfiguration = basin_spec
-            .config
-            .map(BasinReconfiguration::from)
-            .unwrap_or_default();
+        let config = basin_spec.config.map(BasinConfig::from).unwrap_or_default();
 
         backend
-            .create_basin(
-                basin.clone(),
-                CreateBasinIntent::CreateOrReconfigure { reconfiguration },
-            )
+            .create_basin(basin.clone(), CreateBasinIntent::Ensure { config })
             .await
             .map_err(|e| eyre::eyre!("failed to apply basin {:?}: {}", basin.as_ref(), e))?;
 
@@ -414,16 +382,16 @@ pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
                 .parse()
                 .map_err(|e| eyre::eyre!("invalid stream name {:?}: {}", stream_spec.name, e))?;
 
-            let reconfiguration = stream_spec
+            let config = stream_spec
                 .config
-                .map(StreamReconfiguration::from)
+                .map(OptionalStreamConfig::from)
                 .unwrap_or_default();
 
             backend
                 .create_stream(
                     basin.clone(),
                     stream.clone(),
-                    CreateStreamIntent::CreateOrReconfigure { reconfiguration },
+                    CreateStreamIntent::Ensure { config },
                 )
                 .await
                 .map_err(|e| {
@@ -575,13 +543,13 @@ mod tests {
             create_stream_on_append: Some(true),
             create_stream_on_read: None,
         };
-        let reconfig = BasinReconfiguration::from(spec);
-        assert!(matches!(
-            reconfig.create_stream_on_append,
-            Maybe::Specified(true)
-        ));
-        assert!(matches!(reconfig.create_stream_on_read, Maybe::Unspecified));
-        assert!(matches!(reconfig.default_stream_config, Maybe::Unspecified));
+        let config = BasinConfig::from(spec);
+        assert!(config.create_stream_on_append);
+        assert!(!config.create_stream_on_read);
+        assert_eq!(
+            config.default_stream_config,
+            OptionalStreamConfig::default()
+        );
     }
 
     #[test]
@@ -670,16 +638,13 @@ mod tests {
             timestamping: None,
             delete_on_empty: None,
         };
-        let reconfig = StreamReconfiguration::from(spec);
-        assert!(matches!(
-            reconfig.storage_class,
-            Maybe::Specified(Some(StorageClass::Standard))
-        ));
-        assert!(matches!(
-            reconfig.retention_policy,
-            Maybe::Specified(Some(RetentionPolicy::Infinite()))
-        ));
-        assert!(matches!(reconfig.timestamping, Maybe::Unspecified));
-        assert!(matches!(reconfig.delete_on_empty, Maybe::Unspecified));
+        let config = OptionalStreamConfig::from(spec);
+        assert_eq!(config.storage_class, Some(StorageClass::Standard));
+        assert_eq!(config.retention_policy, Some(RetentionPolicy::Infinite()));
+        assert_eq!(config.timestamping, OptionalTimestampingConfig::default());
+        assert_eq!(
+            config.delete_on_empty,
+            OptionalDeleteOnEmptyConfig::default()
+        );
     }
 }
