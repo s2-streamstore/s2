@@ -4,30 +4,26 @@ use std::path::Path;
 
 use colored::Colorize;
 use s2_api::v1::config as api_config;
-use s2_common::{encryption::EncryptionAlgorithm, types::config as common_config};
-use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
-use s2_sdk::{
-    S2,
-    types::{
-        BasinName, EnsureBasinInput, EnsureStreamInput, ErrorResponse, ProvisionResult, S2Error,
-        StreamName,
+use s2_common::{
+    encryption::EncryptionAlgorithm,
+    types::config::{
+        BasinConfig, OptionalStreamConfig, RetentionPolicy, StorageClass, StreamConfig,
+        TimestampingMode,
     },
 };
+use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
+use s2_sdk::{S2, types as s2_config};
 
-fn basin_config_from_sdk(
-    config: s2_sdk::types::BasinConfig,
-) -> miette::Result<common_config::BasinConfig> {
+fn basin_config_from_sdk(config: s2_config::BasinConfig) -> miette::Result<BasinConfig> {
     let config: api_config::BasinConfig = config.into();
     config
         .try_into()
         .map_err(|e| miette::miette!("invalid basin config returned by server: {}", e))
 }
 
-fn stream_config_from_sdk(
-    config: s2_sdk::types::StreamConfig,
-) -> miette::Result<common_config::StreamConfig> {
+fn stream_config_from_sdk(config: s2_config::StreamConfig) -> miette::Result<StreamConfig> {
     let config: api_config::StreamConfig = config.into();
-    let config: common_config::OptionalStreamConfig = config
+    let config: OptionalStreamConfig = config
         .try_into()
         .map_err(|e| miette::miette!("invalid stream config returned by server: {}", e))?;
     Ok(config.into())
@@ -56,7 +52,7 @@ pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin: BasinName = basin_spec
+        let basin: s2_config::BasinName = basin_spec
             .name
             .parse()
             .map_err(|e| miette::miette!("invalid basin name {:?}: {}", basin_spec.name, e))?;
@@ -64,7 +60,7 @@ pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
         apply_basin(s2, basin.clone(), basin_spec.config).await?;
 
         for stream_spec in basin_spec.streams {
-            let stream: StreamName = stream_spec.name.parse().map_err(|e| {
+            let stream: s2_config::StreamName = stream_spec.name.parse().map_err(|e| {
                 miette::miette!("invalid stream name {:?}: {}", stream_spec.name, e)
             })?;
             apply_stream(s2, basin.clone(), stream, stream_spec.config).await?;
@@ -75,22 +71,22 @@ pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 
 async fn apply_basin(
     s2: &S2,
-    basin: BasinName,
+    basin: s2_config::BasinName,
     config: Option<BasinConfigSpec>,
 ) -> miette::Result<()> {
-    let mut input = EnsureBasinInput::new(basin.clone());
+    let mut input = s2_config::EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        input = input.with_config(common_config::BasinConfig::from(c));
+        input = input.with_config(BasinConfig::from(c));
     }
     match s2
         .ensure_basin(input)
         .await
         .map_err(|e| miette::miette!("failed to apply basin {:?}: {}", basin.as_ref(), e))?
     {
-        ProvisionResult::Created(_) => {
+        s2_config::ProvisionResult::Created(_) => {
             eprintln!("{}", format!("  basin {basin}").green().bold());
         }
-        ProvisionResult::Updated(_) => {
+        s2_config::ProvisionResult::Updated(_) => {
             eprintln!("{}", format!("  basin {basin} (updated)").yellow().bold());
         }
     }
@@ -99,13 +95,13 @@ async fn apply_basin(
 
 async fn apply_stream(
     s2: &S2,
-    basin: BasinName,
-    stream: StreamName,
+    basin: s2_config::BasinName,
+    stream: s2_config::StreamName,
     config: Option<StreamConfigSpec>,
 ) -> miette::Result<()> {
-    let mut input = EnsureStreamInput::new(stream.clone());
+    let mut input = s2_config::EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        input = input.with_config(common_config::OptionalStreamConfig::from(c));
+        input = input.with_config(OptionalStreamConfig::from(c));
     }
     let basin_client = s2.basin(basin.clone());
     match basin_client.ensure_stream(input).await.map_err(|e| {
@@ -116,10 +112,10 @@ async fn apply_stream(
             e
         )
     })? {
-        ProvisionResult::Created(_) => {
+        s2_config::ProvisionResult::Created(_) => {
             eprintln!("{}", format!("  stream {basin}/{stream}").green().bold());
         }
-        ProvisionResult::Updated(_) => {
+        s2_config::ProvisionResult::Updated(_) => {
             eprintln!(
                 "{}",
                 format!("  stream {basin}/{stream} (updated)")
@@ -143,36 +139,36 @@ struct FieldDiff {
     new: String,
 }
 
-fn is_not_found_error(e: &S2Error) -> bool {
-    matches!(e, S2Error::Server(ErrorResponse { code, .. }) if code == "basin_not_found" || code == "stream_not_found")
+fn is_not_found_error(e: &s2_config::S2Error) -> bool {
+    matches!(e, s2_config::S2Error::Server(s2_config::ErrorResponse { code, .. }) if code == "basin_not_found" || code == "stream_not_found")
 }
 
-fn format_storage_class(sc: common_config::StorageClass) -> &'static str {
+fn format_storage_class(sc: StorageClass) -> &'static str {
     match sc {
-        common_config::StorageClass::Standard => "standard",
-        common_config::StorageClass::Express => "express",
+        StorageClass::Standard => "standard",
+        StorageClass::Express => "express",
     }
 }
 
-fn format_retention_policy(rp: common_config::RetentionPolicy) -> String {
+fn format_retention_policy(rp: RetentionPolicy) -> String {
     match rp {
-        common_config::RetentionPolicy::Age(age) => humantime::format_duration(age).to_string(),
-        common_config::RetentionPolicy::Infinite() => "infinite".to_string(),
+        RetentionPolicy::Age(age) => humantime::format_duration(age).to_string(),
+        RetentionPolicy::Infinite() => "infinite".to_string(),
     }
 }
 
-fn format_timestamping_mode(m: common_config::TimestampingMode) -> &'static str {
+fn format_timestamping_mode(m: TimestampingMode) -> &'static str {
     match m {
-        common_config::TimestampingMode::ClientPrefer => "client-prefer",
-        common_config::TimestampingMode::ClientRequire => "client-require",
-        common_config::TimestampingMode::Arrival => "arrival",
+        TimestampingMode::ClientPrefer => "client-prefer",
+        TimestampingMode::ClientRequire => "client-require",
+        TimestampingMode::Arrival => "arrival",
     }
 }
 
 fn merge_stream_config(
-    config: common_config::OptionalStreamConfig,
-    basin_defaults: common_config::OptionalStreamConfig,
-) -> common_config::StreamConfig {
+    config: OptionalStreamConfig,
+    basin_defaults: OptionalStreamConfig,
+) -> StreamConfig {
     config.merge(basin_defaults)
 }
 
@@ -187,10 +183,7 @@ fn default_stream_config_field(field: &'static str) -> &'static str {
     }
 }
 
-fn diff_basin_config(
-    existing: &common_config::BasinConfig,
-    desired: &common_config::BasinConfig,
-) -> Vec<FieldDiff> {
+fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
     if existing.stream_cipher != desired.stream_cipher {
@@ -225,8 +218,8 @@ fn diff_basin_config(
         });
     }
 
-    let existing_dsc: common_config::StreamConfig = existing.default_stream_config.clone().into();
-    let desired_dsc: common_config::StreamConfig = desired.default_stream_config.clone().into();
+    let existing_dsc: StreamConfig = existing.default_stream_config.clone().into();
+    let desired_dsc: StreamConfig = desired.default_stream_config.clone().into();
     for sd in diff_stream_configs(&existing_dsc, &desired_dsc) {
         diffs.push(FieldDiff {
             field: default_stream_config_field(sd.field),
@@ -238,10 +231,7 @@ fn diff_basin_config(
     diffs
 }
 
-fn diff_stream_configs(
-    existing: &common_config::StreamConfig,
-    desired: &common_config::StreamConfig,
-) -> Vec<FieldDiff> {
+fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
     if existing.storage_class != desired.storage_class {
@@ -426,22 +416,22 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin: BasinName = basin_spec
+        let basin: s2_config::BasinName = basin_spec
             .name
             .parse()
             .map_err(|e| miette::miette!("invalid basin name {:?}: {}", basin_spec.name, e))?;
-        let desired_basin_common_config = basin_spec
+        let desired_basin_config = basin_spec
             .config
             .clone()
-            .map(common_config::BasinConfig::from)
+            .map(BasinConfig::from)
             .unwrap_or_default();
         let desired_basin_default_stream_config =
-            desired_basin_common_config.default_stream_config.clone();
+            desired_basin_config.default_stream_config.clone();
 
         let basin_action = match s2.get_basin_config(basin.clone()).await {
             Ok(existing) => {
                 let existing = basin_config_from_sdk(existing)?;
-                let diffs = diff_basin_config(&existing, &desired_basin_common_config);
+                let diffs = diff_basin_config(&existing, &desired_basin_config);
                 if diffs.is_empty() {
                     ResourceAction::Unchanged
                 } else {
@@ -470,7 +460,7 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
         let basin_client = s2.basin(basin.clone());
 
         for stream_spec in basin_spec.streams {
-            let stream: StreamName = stream_spec.name.parse().map_err(|e| {
+            let stream: s2_config::StreamName = stream_spec.name.parse().map_err(|e| {
                 miette::miette!("invalid stream name {:?}: {}", stream_spec.name, e)
             })?;
 
@@ -481,7 +471,7 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
                         stream_spec
                             .config
                             .clone()
-                            .map(common_config::OptionalStreamConfig::from)
+                            .map(OptionalStreamConfig::from)
                             .unwrap_or_default(),
                         desired_basin_default_stream_config.clone(),
                     );
@@ -529,7 +519,7 @@ mod tests {
 
     #[test]
     fn common_stream_config_preserves_omitted_timestamping_fields() {
-        let config = common_config::OptionalStreamConfig::from(StreamConfigSpec {
+        let config = OptionalStreamConfig::from(StreamConfigSpec {
             storage_class: None,
             retention_policy: None,
             timestamping: Some(TimestampingSpec {
@@ -539,10 +529,7 @@ mod tests {
             delete_on_empty: None,
         });
 
-        assert_eq!(
-            config.timestamping.mode,
-            Some(common_config::TimestampingMode::Arrival)
-        );
+        assert_eq!(config.timestamping.mode, Some(TimestampingMode::Arrival));
         assert_eq!(config.timestamping.uncapped, None);
     }
 
@@ -570,19 +557,13 @@ mod tests {
         };
 
         let merged = merge_stream_config(
-            common_config::OptionalStreamConfig::from(stream_config),
-            common_config::OptionalStreamConfig::from(basin_defaults),
+            OptionalStreamConfig::from(stream_config),
+            OptionalStreamConfig::from(basin_defaults),
         );
 
-        assert_eq!(merged.storage_class, common_config::StorageClass::Standard);
-        assert_eq!(
-            merged.retention_policy,
-            common_config::RetentionPolicy::Infinite()
-        );
-        assert_eq!(
-            merged.timestamping.mode,
-            common_config::TimestampingMode::Arrival
-        );
+        assert_eq!(merged.storage_class, StorageClass::Standard);
+        assert_eq!(merged.retention_policy, RetentionPolicy::Infinite());
+        assert_eq!(merged.timestamping.mode, TimestampingMode::Arrival);
         assert!(merged.timestamping.uncapped);
         assert_eq!(merged.delete_on_empty.min_age, Duration::from_secs(60));
     }
