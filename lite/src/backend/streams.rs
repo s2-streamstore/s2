@@ -118,7 +118,7 @@ impl Backend {
         }
 
         let basin_defaults = basin_meta.config.default_stream_config.clone();
-        let (result, prior_doe_min_age, should_write) = match (existing_meta, mode) {
+        let (outcome, prior_doe_min_age, should_write) = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
@@ -186,11 +186,11 @@ impl Backend {
         };
 
         if should_write {
-            let meta = result.inner();
+            let meta = outcome.inner();
 
             txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;
             let stream_id = StreamId::new(&basin, &stream);
-            if matches!(&result, ProvisionResult::Created(_)) {
+            if matches!(&outcome, ProvisionResult::Created(_)) {
                 txn.put(
                     kv::stream_id_mapping::ser_key(stream_id),
                     kv::stream_id_mapping::ser_value(&basin, &stream),
@@ -216,7 +216,7 @@ impl Backend {
                 .delete_on_empty
                 .min_age
                 .filter(|age| !age.is_zero())
-                && (matches!(&result, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
+                && (matches!(&outcome, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
             {
                 txn.put(
                     kv::stream_doe_deadline::ser_key(
@@ -237,13 +237,13 @@ impl Backend {
         }
 
         if should_write
-            && let ProvisionResult::Updated(meta) = &result
+            && let ProvisionResult::Updated(meta) = &outcome
             && let Some(client) = self.streamer_client_if_active(&basin, &stream)
         {
             client.advise_reconfig(meta.config.clone());
         }
 
-        Ok(result.map(|meta| StreamInfo {
+        Ok(outcome.map(|meta| StreamInfo {
             name: stream,
             created_at: meta.created_at,
             deleted_at: None,

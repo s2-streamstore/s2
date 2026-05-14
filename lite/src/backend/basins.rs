@@ -86,7 +86,7 @@ impl Backend {
             return Err(BasinDeletionPendingError { basin }.into());
         }
 
-        let (result, should_write) = match (existing_meta, mode) {
+        let (outcome, should_write) = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
@@ -142,7 +142,7 @@ impl Backend {
         };
 
         if should_write {
-            let meta = result.inner();
+            let meta = outcome.inner();
             txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 
             static WRITE_OPTS: WriteOptions = WriteOptions {
@@ -151,7 +151,7 @@ impl Backend {
             txn.commit_with_options(&WRITE_OPTS).await?;
         }
 
-        Ok(result.map(|meta| BasinInfo {
+        Ok(outcome.map(|meta| BasinInfo {
             name: basin,
             scope: None,
             created_at: meta.created_at,
