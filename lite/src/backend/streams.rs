@@ -142,16 +142,17 @@ impl Backend {
                     .delete_on_empty
                     .min_age
                     .filter(|age| !age.is_zero());
-                let config: OptionalStreamConfig = config.merge(basin_defaults).into();
+                let desired_config = config.merge(basin_defaults.clone());
+                let current_config = existing.config.clone().merge(basin_defaults);
                 let meta = kv::stream_meta::StreamMeta {
-                    config,
+                    config: desired_config.clone().into(),
                     cipher: existing.cipher,
                     created_at: existing.created_at,
                     deleted_at: None,
                     creation_idempotency_key: existing.creation_idempotency_key,
                 };
                 (
-                    if existing.config == meta.config {
+                    if current_config == desired_config {
                         ProvisionResult::Noop(meta)
                     } else {
                         ProvisionResult::Updated(meta)

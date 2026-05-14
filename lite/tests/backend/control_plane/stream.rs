@@ -371,6 +371,51 @@ async fn test_provision_stream_ensure_preserves_idempotency_key() {
 }
 
 #[tokio::test]
+async fn test_provision_stream_ensure_noops_when_effective_config_matches() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "stream-ensure-effective-noop",
+        BasinConfig {
+            default_stream_config: OptionalStreamConfig {
+                storage_class: Some(StorageClass::Express),
+                retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(
+                    10 * 24 * 60 * 60,
+                ))),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let stream_name = test_stream_name("stream-ensure-effective-noop");
+    let config = OptionalStreamConfig {
+        storage_class: Some(StorageClass::Standard),
+        retention_policy: Some(RetentionPolicy::Infinite()),
+        ..Default::default()
+    };
+
+    backend
+        .provision_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
+        )
+        .await
+        .expect("Failed to create stream");
+
+    let ensured = backend
+        .provision_stream(basin_name, stream_name, config, ProvisionMode::Ensure)
+        .await
+        .expect("Ensure should succeed");
+
+    assert!(matches!(ensured, ProvisionResult::Noop(_)));
+}
+
+#[tokio::test]
 async fn test_provision_stream_idempotency_ignores_changed_basin_defaults() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
