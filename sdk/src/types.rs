@@ -902,11 +902,6 @@ pub enum EnsureResult<T> {
 
 #[cfg(feature = "_hidden")]
 impl<T> EnsureResult<T> {
-    /// Returns `true` if the resource was newly created.
-    pub fn is_created(&self) -> bool {
-        matches!(self, Self::Created(_))
-    }
-
     /// Unwrap the inner value regardless of variant.
     pub fn into_inner(self) -> T {
         match self {

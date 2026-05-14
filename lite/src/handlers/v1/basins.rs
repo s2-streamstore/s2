@@ -13,7 +13,10 @@ use s2_common::{
     },
 };
 
-use crate::{backend::Backend, handlers::v1::error::ServiceError};
+use crate::{
+    backend::{Backend, EnsureResult},
+    handlers::v1::error::ServiceError,
+};
 
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{delete, get, patch, post, put};
@@ -170,10 +173,9 @@ pub async fn ensure_basin(
     let info = backend
         .create_basin(basin, config, CreateMode::Ensure)
         .await?;
-    let status = if info.is_created() {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
+    let status = match &info {
+        EnsureResult::Created(_) => StatusCode::CREATED,
+        EnsureResult::Updated(_) => StatusCode::OK,
     };
     Ok((status, Json(info.into_inner().into())))
 }
