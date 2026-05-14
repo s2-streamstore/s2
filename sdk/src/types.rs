@@ -948,6 +948,53 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
     }
 }
 
+#[cfg(feature = "_hidden")]
+fn api_timestamping_config_from_common(
+    config: s2_common::types::config::OptionalTimestampingConfig,
+) -> Option<api::config::TimestampingConfig> {
+    (config.mode.is_some() || config.uncapped.is_some()).then(|| api::config::TimestampingConfig {
+        mode: config.mode.map(Into::into),
+        uncapped: config.uncapped,
+    })
+}
+
+#[cfg(feature = "_hidden")]
+fn api_delete_on_empty_config_from_common(
+    config: s2_common::types::config::OptionalDeleteOnEmptyConfig,
+) -> Option<api::config::DeleteOnEmptyConfig> {
+    config
+        .min_age
+        .map(|min_age| api::config::DeleteOnEmptyConfig {
+            min_age_secs: min_age.as_secs(),
+        })
+}
+
+#[cfg(feature = "_hidden")]
+fn api_stream_config_from_common(
+    config: s2_common::types::config::OptionalStreamConfig,
+) -> api::config::StreamConfig {
+    api::config::StreamConfig {
+        storage_class: config.storage_class.map(Into::into),
+        retention_policy: config.retention_policy.map(Into::into),
+        timestamping: api_timestamping_config_from_common(config.timestamping),
+        delete_on_empty: api_delete_on_empty_config_from_common(config.delete_on_empty),
+    }
+}
+
+#[cfg(feature = "_hidden")]
+fn api_basin_config_from_common(
+    config: s2_common::types::config::BasinConfig,
+) -> api::config::BasinConfig {
+    let default_stream_config = api_stream_config_from_common(config.default_stream_config);
+    api::config::BasinConfig {
+        default_stream_config: (default_stream_config != api::config::StreamConfig::default())
+            .then_some(default_stream_config),
+        stream_cipher: config.stream_cipher.map(Into::into),
+        create_stream_on_append: config.create_stream_on_append,
+        create_stream_on_read: config.create_stream_on_read,
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
@@ -964,7 +1011,7 @@ pub struct EnsureBasinInput {
     ///
     /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
     pub scope: Option<BasinScope>,
-    api_config: Option<api::config::BasinConfig>,
+    common_config: Option<s2_common::types::config::BasinConfig>,
 }
 
 #[cfg(feature = "_hidden")]
@@ -975,7 +1022,7 @@ impl EnsureBasinInput {
             name,
             config: None,
             scope: None,
-            api_config: None,
+            common_config: None,
         }
     }
 
@@ -983,16 +1030,16 @@ impl EnsureBasinInput {
     pub fn with_config(self, config: BasinConfig) -> Self {
         Self {
             config: Some(config),
-            api_config: None,
+            common_config: None,
             ..self
         }
     }
 
-    /// Set the desired configuration using the raw API shape.
-    pub fn with_api_config(self, config: s2_api::v1::config::BasinConfig) -> Self {
+    /// Set the desired configuration using the internal config model.
+    pub fn with_common_config(self, config: s2_common::types::config::BasinConfig) -> Self {
         Self {
             config: None,
-            api_config: Some(config),
+            common_config: Some(config),
             ..self
         }
     }
@@ -1009,7 +1056,10 @@ impl EnsureBasinInput {
 #[cfg(feature = "_hidden")]
 impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
     fn from(value: EnsureBasinInput) -> Self {
-        let config = value.api_config.or_else(|| value.config.map(Into::into));
+        let config = value
+            .common_config
+            .map(api_basin_config_from_common)
+            .or_else(|| value.config.map(Into::into));
         let request = if config.is_some() || value.scope.is_some() {
             Some(api::basin::EnsureBasinRequest {
                 config,
@@ -2692,7 +2742,7 @@ pub struct EnsureStreamInput {
     /// global defaults before comparing or writing. If `None`, the stream is ensured using those
     /// defaults.
     pub config: Option<StreamConfig>,
-    api_config: Option<api::config::StreamConfig>,
+    common_config: Option<s2_common::types::config::OptionalStreamConfig>,
 }
 
 #[cfg(feature = "_hidden")]
@@ -2702,7 +2752,7 @@ impl EnsureStreamInput {
         Self {
             name,
             config: None,
-            api_config: None,
+            common_config: None,
         }
     }
 
@@ -2710,16 +2760,19 @@ impl EnsureStreamInput {
     pub fn with_config(self, config: StreamConfig) -> Self {
         Self {
             config: Some(config),
-            api_config: None,
+            common_config: None,
             ..self
         }
     }
 
-    /// Set the desired configuration using the raw API shape.
-    pub fn with_api_config(self, config: s2_api::v1::config::StreamConfig) -> Self {
+    /// Set the desired configuration using the internal config model.
+    pub fn with_common_config(
+        self,
+        config: s2_common::types::config::OptionalStreamConfig,
+    ) -> Self {
         Self {
             config: None,
-            api_config: Some(config),
+            common_config: Some(config),
             ..self
         }
     }
@@ -2730,7 +2783,10 @@ impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>)
     fn from(value: EnsureStreamInput) -> Self {
         (
             value.name,
-            value.api_config.or_else(|| value.config.map(Into::into)),
+            value
+                .common_config
+                .map(api_stream_config_from_common)
+                .or_else(|| value.config.map(Into::into)),
         )
     }
 }

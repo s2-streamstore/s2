@@ -4762,6 +4762,7 @@ dependencies = [
  "rstest",
  "rustls",
  "s2-api",
+ "s2-common",
  "s2-lite",
  "s2-sdk",
  "serde",
