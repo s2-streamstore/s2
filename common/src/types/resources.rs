@@ -171,6 +171,14 @@ impl<T> ProvisionResult<T> {
             Self::Updated(t) => ProvisionResult::Updated(f(t)),
         }
     }
+
+    /// Fallibly map the inner value while preserving whether the resource was created or updated.
+    pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<ProvisionResult<U>, E> {
+        match self {
+            Self::Created(t) => Ok(ProvisionResult::Created(f(t)?)),
+            Self::Updated(t) => Ok(ProvisionResult::Updated(f(t)?)),
+        }
+    }
 }
 
 pub static REQUEST_TOKEN_HEADER: http::HeaderName =

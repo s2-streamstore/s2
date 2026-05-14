@@ -120,13 +120,11 @@ impl S2 {
         input: EnsureBasinInput,
     ) -> Result<ProvisionResult<BasinInfo>, S2Error> {
         let (name, request) = input.into();
-        let (was_created, info) = self.client.ensure_basin(name, request).await?;
-        let info = info.try_into()?;
-        Ok(if was_created {
-            ProvisionResult::Created(info)
-        } else {
-            ProvisionResult::Updated(info)
-        })
+        Ok(self
+            .client
+            .ensure_basin(name, request)
+            .await?
+            .try_map(BasinInfo::try_from)?)
     }
 
     /// Get basin configuration.
@@ -337,13 +335,11 @@ impl S2Basin {
         input: EnsureStreamInput,
     ) -> Result<ProvisionResult<StreamInfo>, S2Error> {
         let (name, config) = input.into();
-        let (was_created, info) = self.client.ensure_stream(name, config).await?;
-        let info = info.try_into()?;
-        Ok(if was_created {
-            ProvisionResult::Created(info)
-        } else {
-            ProvisionResult::Updated(info)
-        })
+        Ok(self
+            .client
+            .ensure_stream(name, config)
+            .await?
+            .try_map(StreamInfo::try_from)?)
     }
 
     /// Get stream configuration.

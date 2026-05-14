@@ -43,6 +43,8 @@ use crate::{
         RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
+#[cfg(feature = "_hidden")]
+use crate::types::ProvisionResult;
 
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
@@ -149,15 +151,20 @@ impl AccountClient {
         &self,
         name: BasinName,
         request: Option<EnsureBasinRequest>,
-    ) -> Result<(bool, BasinInfo), ApiError> {
+    ) -> Result<ProvisionResult<BasinInfo>, ApiError> {
         let url = self.base_url.join(&format!("v1/basins/{name}"))?;
         let request = match request {
             Some(body) => self.put(url).json(&body).build()?,
             None => self.put(url).build()?,
         };
         let response = self.request(request).send().await?;
-        let was_created = response.status() == StatusCode::CREATED;
-        Ok((was_created, response.json::<BasinInfo>()?))
+        let status = response.status();
+        let info = response.json::<BasinInfo>()?;
+        Ok(if status == StatusCode::CREATED {
+            ProvisionResult::Created(info)
+        } else {
+            ProvisionResult::Updated(info)
+        })
     }
 
     pub async fn delete_basin(
@@ -303,7 +310,7 @@ impl BasinClient {
         &self,
         name: StreamName,
         config: Option<StreamConfig>,
-    ) -> Result<(bool, StreamInfo), ApiError> {
+    ) -> Result<ProvisionResult<StreamInfo>, ApiError> {
         let url = self
             .base_url
             .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
@@ -312,8 +319,13 @@ impl BasinClient {
             None => self.put(url).build()?,
         };
         let response = self.request(request).send().await?;
-        let was_created = response.status() == StatusCode::CREATED;
-        Ok((was_created, response.json::<StreamInfo>()?))
+        let status = response.status();
+        let info = response.json::<StreamInfo>()?;
+        Ok(if status == StatusCode::CREATED {
+            ProvisionResult::Created(info)
+        } else {
+            ProvisionResult::Updated(info)
+        })
     }
 
     pub async fn delete_stream(
