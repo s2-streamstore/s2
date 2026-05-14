@@ -3,7 +3,7 @@ use s2_common::{
     types::{
         basin::{BasinInfo, BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
+        resources::{CreateMode, EnsureResult, ListItemsRequestParts, Page, RequestToken},
         stream::StreamNameStartAfter,
     },
 };
@@ -13,7 +13,7 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, EnsureResult, bgtasks::BgtaskTrigger, store::db_txn_get};
+use super::{Backend, bgtasks::BgtaskTrigger, store::db_txn_get};
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, CreateBasinError,

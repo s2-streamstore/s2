@@ -4,7 +4,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
+        resources::{CreateMode, EnsureResult, ListItemsRequestParts, Page, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
@@ -16,7 +16,7 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend, EnsureResult,
+    Backend,
     store::db_txn_get,
     streamer::{doe_arm_delay, retention_age_or_zero},
 };

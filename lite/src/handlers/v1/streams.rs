@@ -9,15 +9,12 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{CreateMode, Page, RequestToken},
+        resources::{CreateMode, EnsureResult, Page, RequestToken},
         stream::{ListStreamsRequest, StreamName},
     },
 };
 
-use crate::{
-    backend::{Backend, EnsureResult},
-    handlers::v1::error::ServiceError,
-};
+use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
 pub fn router() -> axum::Router<Backend> {
     use axum::routing::{delete, get, patch, post, put};

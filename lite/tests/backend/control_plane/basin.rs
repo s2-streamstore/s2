@@ -6,12 +6,11 @@ use s2_common::{
             BasinConfig, BasinReconfiguration, OptionalStreamConfig, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::{CreateMode, ListItemsRequestParts, RequestToken},
+        resources::{CreateMode, EnsureResult, ListItemsRequestParts, RequestToken},
     },
 };
-use s2_lite::backend::{
-    EnsureResult,
-    error::{CreateBasinError, DeleteBasinError, GetBasinConfigError, ReconfigureBasinError},
+use s2_lite::backend::error::{
+    CreateBasinError, DeleteBasinError, GetBasinConfigError, ReconfigureBasinError,
 };
 
 use super::common::*;

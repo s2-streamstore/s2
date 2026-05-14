@@ -25,17 +25,3 @@ pub struct StreamHandle {
 }
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnsureResult<T> {
-    Created(T),
-    Updated(T),
-}
-
-impl<T> EnsureResult<T> {
-    pub fn into_inner(self) -> T {
-        match self {
-            Self::Created(v) | Self::Updated(v) => v,
-        }
-    }
-}

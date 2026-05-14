@@ -42,6 +42,10 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
+/// Result of an ensure operation.
+#[doc(hidden)]
+#[cfg(feature = "_hidden")]
+pub use s2_common::types::resources::EnsureResult;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -882,30 +886,6 @@ impl From<BasinScope> for api::basin::BasinScope {
             BasinScope::AwsUsEast1 => api::basin::BasinScope::AwsUsEast1,
             BasinScope::AwsUsWest2 => api::basin::BasinScope::AwsUsWest2,
             BasinScope::AwsEuNorth1 => api::basin::BasinScope::AwsEuNorth1,
-        }
-    }
-}
-
-/// Result of an ensure operation.
-///
-/// Indicates whether the resource was newly created or an existing resource was
-/// made to match the requested config. Both variants hold the resource's current state.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnsureResult<T> {
-    /// Resource was newly created.
-    Created(T),
-    /// Resource already existed; its config now matches the requested config.
-    Updated(T),
-}
-
-#[cfg(feature = "_hidden")]
-impl<T> EnsureResult<T> {
-    /// Unwrap the inner value regardless of variant.
-    pub fn into_inner(self) -> T {
-        match self {
-            Self::Created(t) | Self::Updated(t) => t,
         }
     }
 }
