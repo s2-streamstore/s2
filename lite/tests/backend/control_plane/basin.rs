@@ -6,7 +6,7 @@ use s2_common::{
             BasinConfig, BasinReconfiguration, OptionalStreamConfig, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::{EnsureResult, ListItemsRequestParts, ProvisionMode, RequestToken},
+        resources::{ListItemsRequestParts, ProvisionMode, ProvisionResult, RequestToken},
     },
 };
 use s2_lite::backend::error::{
@@ -38,7 +38,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Failed to create basin");
     assert!(matches!(
         created,
-        EnsureResult::Created(ref info) if info.deleted_at.is_none()
+        ProvisionResult::Created(ref info) if info.deleted_at.is_none()
             && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 
@@ -54,7 +54,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Idempotent create should succeed with same request token");
     assert!(matches!(
         idempotent,
-        EnsureResult::Created(ref info) if info.deleted_at.is_none()
+        ProvisionResult::Created(ref info) if info.deleted_at.is_none()
             && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 

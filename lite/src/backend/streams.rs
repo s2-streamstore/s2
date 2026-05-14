@@ -4,7 +4,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{EnsureResult, ListItemsRequestParts, Page, ProvisionMode, RequestToken},
+        resources::{ListItemsRequestParts, Page, ProvisionMode, ProvisionResult, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
@@ -88,7 +88,7 @@ impl Backend {
         stream: StreamName,
         config: OptionalStreamConfig,
         mode: ProvisionMode,
-    ) -> Result<EnsureResult<StreamInfo>, ProvisionStreamError> {
+    ) -> Result<ProvisionResult<StreamInfo>, ProvisionStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -126,7 +126,7 @@ impl Backend {
                 return if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
-                    Ok(EnsureResult::Created(StreamInfo {
+                    Ok(ProvisionResult::Created(StreamInfo {
                         name: stream,
                         created_at: existing.created_at,
                         deleted_at: None,
@@ -252,9 +252,9 @@ impl Backend {
         };
 
         Ok(if was_existing {
-            EnsureResult::Updated(info)
+            ProvisionResult::Updated(info)
         } else {
-            EnsureResult::Created(info)
+            ProvisionResult::Created(info)
         })
     }
 

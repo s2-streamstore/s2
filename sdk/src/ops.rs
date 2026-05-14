@@ -3,7 +3,7 @@ use futures::StreamExt;
 #[cfg(feature = "_hidden")]
 use crate::client::Connect;
 #[cfg(feature = "_hidden")]
-use crate::types::{EnsureBasinInput, EnsureResult, EnsureStreamInput};
+use crate::types::{EnsureBasinInput, EnsureStreamInput, ProvisionResult};
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
     producer::{Producer, ProducerConfig},
@@ -111,21 +111,21 @@ impl S2 {
     /// provided configuration after defaults are applied. Uses HTTP PUT semantics — always
     /// idempotent.
     ///
-    /// Returns [`EnsureResult::Created`] with the basin info if the basin was newly
-    /// created, or [`EnsureResult::Updated`] if it already existed.
+    /// Returns [`ProvisionResult::Created`] with the basin info if the basin was newly
+    /// created, or [`ProvisionResult::Updated`] if it already existed.
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
     pub async fn ensure_basin(
         &self,
         input: EnsureBasinInput,
-    ) -> Result<EnsureResult<BasinInfo>, S2Error> {
+    ) -> Result<ProvisionResult<BasinInfo>, S2Error> {
         let (name, request) = input.into();
         let (was_created, info) = self.client.ensure_basin(name, request).await?;
         let info = info.try_into()?;
         Ok(if was_created {
-            EnsureResult::Created(info)
+            ProvisionResult::Created(info)
         } else {
-            EnsureResult::Updated(info)
+            ProvisionResult::Updated(info)
         })
     }
 
@@ -328,21 +328,21 @@ impl S2Basin {
     /// configuration after basin defaults and global defaults are applied. Uses HTTP PUT semantics
     /// and is always idempotent.
     ///
-    /// Returns [`EnsureResult::Created`] with the stream info if the stream was newly
-    /// created, or [`EnsureResult::Updated`] if it already existed.
+    /// Returns [`ProvisionResult::Created`] with the stream info if the stream was newly
+    /// created, or [`ProvisionResult::Updated`] if it already existed.
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
     pub async fn ensure_stream(
         &self,
         input: EnsureStreamInput,
-    ) -> Result<EnsureResult<StreamInfo>, S2Error> {
+    ) -> Result<ProvisionResult<StreamInfo>, S2Error> {
         let (name, config) = input.into();
         let (was_created, info) = self.client.ensure_stream(name, config).await?;
         let info = info.try_into()?;
         Ok(if was_created {
-            EnsureResult::Created(info)
+            ProvisionResult::Created(info)
         } else {
-            EnsureResult::Updated(info)
+            ProvisionResult::Updated(info)
         })
     }
 

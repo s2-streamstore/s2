@@ -11,7 +11,7 @@ use s2_sdk::{
     S2,
     types::{
         BasinConfig, BasinName, DeleteOnEmptyConfig, EncryptionAlgorithm, EnsureBasinInput,
-        EnsureResult, EnsureStreamInput, ErrorResponse, RetentionPolicy, S2Error, StorageClass,
+        EnsureStreamInput, ErrorResponse, ProvisionResult, RetentionPolicy, S2Error, StorageClass,
         StreamConfig, StreamName, TimestampingConfig, TimestampingMode,
     },
 };
@@ -154,10 +154,10 @@ async fn apply_basin(
         .await
         .map_err(|e| miette::miette!("failed to apply basin {:?}: {}", basin.as_ref(), e))?
     {
-        EnsureResult::Created(_) => {
+        ProvisionResult::Created(_) => {
             eprintln!("{}", format!("  basin {basin}").green().bold());
         }
-        EnsureResult::Updated(_) => {
+        ProvisionResult::Updated(_) => {
             eprintln!("{}", format!("  basin {basin} (updated)").yellow().bold());
         }
     }
@@ -183,10 +183,10 @@ async fn apply_stream(
             e
         )
     })? {
-        EnsureResult::Created(_) => {
+        ProvisionResult::Created(_) => {
             eprintln!("{}", format!("  stream {basin}/{stream}").green().bold());
         }
-        EnsureResult::Updated(_) => {
+        ProvisionResult::Updated(_) => {
             eprintln!(
                 "{}",
                 format!("  stream {basin}/{stream} (updated)")

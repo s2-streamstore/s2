@@ -137,19 +137,19 @@ pub enum ProvisionMode {
     Ensure,
 }
 
-/// Result of an ensure operation.
+/// Result of provisioning a resource.
 ///
 /// Indicates whether the resource was newly created or an existing resource was
 /// made to match the requested config. Both variants hold the resource's current state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnsureResult<T> {
+pub enum ProvisionResult<T> {
     /// Resource was newly created.
     Created(T),
     /// Resource already existed and now matches the requested config.
     Updated(T),
 }
 
-impl<T> EnsureResult<T> {
+impl<T> ProvisionResult<T> {
     /// Unwrap the inner value regardless of variant.
     pub fn into_inner(self) -> T {
         match self {

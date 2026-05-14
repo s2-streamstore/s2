@@ -3,7 +3,7 @@ use s2_common::{
     types::{
         basin::{BasinInfo, BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{EnsureResult, ListItemsRequestParts, Page, ProvisionMode, RequestToken},
+        resources::{ListItemsRequestParts, Page, ProvisionMode, ProvisionResult, RequestToken},
         stream::StreamNameStartAfter,
     },
 };
@@ -74,7 +74,7 @@ impl Backend {
         basin: BasinName,
         config: BasinConfig,
         mode: ProvisionMode,
-    ) -> Result<EnsureResult<BasinInfo>, ProvisionBasinError> {
+    ) -> Result<ProvisionResult<BasinInfo>, ProvisionBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -94,7 +94,7 @@ impl Backend {
                 return if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
-                    Ok(EnsureResult::Created(BasinInfo {
+                    Ok(ProvisionResult::Created(BasinInfo {
                         name: basin,
                         scope: None,
                         created_at: existing.created_at,
@@ -161,9 +161,9 @@ impl Backend {
         };
 
         Ok(if was_existing {
-            EnsureResult::Updated(info)
+            ProvisionResult::Updated(info)
         } else {
-            EnsureResult::Created(info)
+            ProvisionResult::Created(info)
         })
     }
 

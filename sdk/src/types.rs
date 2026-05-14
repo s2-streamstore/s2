@@ -42,10 +42,10 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
-/// Result of an ensure operation.
+/// Result of provisioning a resource.
 #[doc(hidden)]
 #[cfg(feature = "_hidden")]
-pub use s2_common::types::resources::EnsureResult;
+pub use s2_common::types::resources::ProvisionResult;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.

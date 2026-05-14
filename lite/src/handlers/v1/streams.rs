@@ -9,7 +9,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{EnsureResult, Page, ProvisionMode, RequestToken},
+        resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
         stream::{ListStreamsRequest, StreamName},
     },
 };
@@ -220,8 +220,8 @@ pub async fn ensure_stream(
         .provision_stream(basin, stream, config, ProvisionMode::Ensure)
         .await?;
     let status = match &info {
-        EnsureResult::Created(_) => StatusCode::CREATED,
-        EnsureResult::Updated(_) => StatusCode::OK,
+        ProvisionResult::Created(_) => StatusCode::CREATED,
+        ProvisionResult::Updated(_) => StatusCode::OK,
     };
     Ok((status, Json(info.into_inner().into())))
 }
