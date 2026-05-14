@@ -2698,10 +2698,11 @@ impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
 pub struct EnsureStreamInput {
     /// Stream name.
     pub name: StreamName,
-    /// Desired configuration for the stream.
+    /// Desired stream configuration before basin defaults are applied.
     ///
-    /// If `None`, the stream is ensured using the basin's default stream
-    /// configuration.
+    /// Missing fields are filled from the current basin default stream configuration and then
+    /// global defaults before comparing or writing. If `None`, the stream is ensured using those
+    /// defaults.
     pub config: Option<StreamConfig>,
 }
 

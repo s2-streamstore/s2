@@ -194,10 +194,12 @@ pub enum CreateStreamIntent {
     },
     /// Ensure a stream exists with the requested config.
     ///
-    /// HTTP PUT semantics: always idempotent. Defaults are applied before validation. When the
-    /// stream already exists, its config is set to this desired config unless it already matches.
+    /// HTTP PUT semantics: always idempotent. The requested config is merged with the current
+    /// basin default stream config and global defaults before validation. When the stream already
+    /// exists, its stored config is set to that effective config unless it already matches.
     Ensure {
-        /// Complete stream configuration to ensure before basin defaults are merged.
+        /// Requested stream configuration. Missing fields are filled from the current basin
+        /// defaults before comparing or writing.
         config: OptionalStreamConfig,
     },
 }

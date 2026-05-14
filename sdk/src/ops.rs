@@ -324,9 +324,9 @@ impl S2Basin {
 
     /// Ensure a stream.
     ///
-    /// Creates the stream if it doesn't exist, or ensures its config exactly matches the
-    /// provided configuration after defaults are applied. Uses HTTP PUT semantics — always
-    /// idempotent.
+    /// Creates the stream if it doesn't exist, or ensures its config exactly matches the provided
+    /// configuration after basin defaults and global defaults are applied. Uses HTTP PUT semantics
+    /// and is always idempotent.
     ///
     /// Returns [`EnsureResult::Created`] with the stream info if the stream was newly
     /// created, or [`EnsureResult::Updated`] if it already existed.
