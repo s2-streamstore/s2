@@ -118,7 +118,7 @@ impl Backend {
         }
 
         let basin_defaults = basin_meta.config.default_stream_config.clone();
-        let (meta, was_existing, prior_doe_min_age, should_write) = match (existing_meta, mode) {
+        let (result, prior_doe_min_age, should_write) = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
@@ -145,14 +145,13 @@ impl Backend {
                 let config: OptionalStreamConfig = config.merge(basin_defaults.clone()).into();
                 let should_write = existing.config != config;
                 (
-                    kv::stream_meta::StreamMeta {
+                    ProvisionResult::Updated(kv::stream_meta::StreamMeta {
                         config,
                         cipher: existing.cipher,
                         created_at: existing.created_at,
                         deleted_at: None,
                         creation_idempotency_key: existing.creation_idempotency_key,
-                    },
-                    true,
+                    }),
                     prior_doe_min_age,
                     should_write,
                 )
@@ -162,36 +161,38 @@ impl Backend {
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
                 (
-                    kv::stream_meta::StreamMeta {
+                    ProvisionResult::Created(kv::stream_meta::StreamMeta {
                         config: config.merge(basin_defaults.clone()).into(),
                         cipher: basin_meta.config.stream_cipher,
                         created_at: OffsetDateTime::now_utc(),
                         deleted_at: None,
                         creation_idempotency_key: new_creation_idempotency_key,
-                    },
-                    false,
+                    }),
                     None,
                     true,
                 )
             }
             (None, ProvisionMode::Ensure) => (
-                kv::stream_meta::StreamMeta {
+                ProvisionResult::Created(kv::stream_meta::StreamMeta {
                     config: config.merge(basin_defaults).into(),
                     cipher: basin_meta.config.stream_cipher,
                     created_at: OffsetDateTime::now_utc(),
                     deleted_at: None,
                     creation_idempotency_key: None,
-                },
-                false,
+                }),
                 None,
                 true,
             ),
         };
 
         if should_write {
-            txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
+            let meta = match &result {
+                ProvisionResult::Created(meta) | ProvisionResult::Updated(meta) => meta,
+            };
+
+            txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;
             let stream_id = StreamId::new(&basin, &stream);
-            if !was_existing {
+            if matches!(&result, ProvisionResult::Created(_)) {
                 txn.put(
                     kv::stream_id_mapping::ser_key(stream_id),
                     kv::stream_id_mapping::ser_value(&basin, &stream),
@@ -217,7 +218,7 @@ impl Backend {
                 .delete_on_empty
                 .min_age
                 .filter(|age| !age.is_zero())
-                && (!was_existing || prior_doe_min_age.is_none())
+                && (matches!(&result, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
             {
                 txn.put(
                     kv::stream_doe_deadline::ser_key(
@@ -238,24 +239,18 @@ impl Backend {
         }
 
         if should_write
-            && was_existing
+            && let ProvisionResult::Updated(meta) = &result
             && let Some(client) = self.streamer_client_if_active(&basin, &stream)
         {
             client.advise_reconfig(meta.config.clone());
         }
 
-        let info = StreamInfo {
+        Ok(result.map(|meta| StreamInfo {
             name: stream,
             created_at: meta.created_at,
             deleted_at: None,
             cipher: meta.cipher,
-        };
-
-        Ok(if was_existing {
-            ProvisionResult::Updated(info)
-        } else {
-            ProvisionResult::Created(info)
-        })
+        }))
     }
 
     pub(super) async fn stream_id_mapping(

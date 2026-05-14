@@ -150,6 +150,14 @@ pub enum ProvisionResult<T> {
 }
 
 impl<T> ProvisionResult<T> {
+    /// Map the inner value while preserving whether the resource was created or updated.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> ProvisionResult<U> {
+        match self {
+            Self::Created(t) => ProvisionResult::Created(f(t)),
+            Self::Updated(t) => ProvisionResult::Updated(f(t)),
+        }
+    }
+
     /// Unwrap the inner value regardless of variant.
     pub fn into_inner(self) -> T {
         match self {

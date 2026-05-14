@@ -86,7 +86,7 @@ impl Backend {
             return Err(BasinDeletionPendingError { basin }.into());
         }
 
-        let (meta, was_existing, should_write) = match (existing_meta, mode) {
+        let (result, should_write) = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
@@ -107,13 +107,12 @@ impl Backend {
             (Some(existing), ProvisionMode::Ensure) => {
                 let should_write = existing.config != config;
                 (
-                    kv::basin_meta::BasinMeta {
+                    ProvisionResult::Updated(kv::basin_meta::BasinMeta {
                         config,
                         created_at: existing.created_at,
                         deleted_at: None,
                         creation_idempotency_key: existing.creation_idempotency_key,
-                    },
-                    true,
+                    }),
                     should_write,
                 )
             }
@@ -122,30 +121,31 @@ impl Backend {
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
                 (
-                    kv::basin_meta::BasinMeta {
+                    ProvisionResult::Created(kv::basin_meta::BasinMeta {
                         config,
                         created_at: OffsetDateTime::now_utc(),
                         deleted_at: None,
                         creation_idempotency_key: new_creation_idempotency_key,
-                    },
-                    false,
+                    }),
                     true,
                 )
             }
             (None, ProvisionMode::Ensure) => (
-                kv::basin_meta::BasinMeta {
+                ProvisionResult::Created(kv::basin_meta::BasinMeta {
                     config,
                     created_at: OffsetDateTime::now_utc(),
                     deleted_at: None,
                     creation_idempotency_key: None,
-                },
-                false,
+                }),
                 true,
             ),
         };
 
         if should_write {
-            txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
+            let meta = match &result {
+                ProvisionResult::Created(meta) | ProvisionResult::Updated(meta) => meta,
+            };
+            txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 
             static WRITE_OPTS: WriteOptions = WriteOptions {
                 await_durable: true,
@@ -153,18 +153,12 @@ impl Backend {
             txn.commit_with_options(&WRITE_OPTS).await?;
         }
 
-        let info = BasinInfo {
+        Ok(result.map(|meta| BasinInfo {
             name: basin,
             scope: None,
             created_at: meta.created_at,
             deleted_at: None,
-        };
-
-        Ok(if was_existing {
-            ProvisionResult::Updated(info)
-        } else {
-            ProvisionResult::Created(info)
-        })
+        }))
     }
 
     pub async fn get_basin_config(
