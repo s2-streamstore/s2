@@ -6,9 +6,13 @@ use colored::Colorize;
 use s2_api::v1::config as api_config;
 use s2_common::{
     encryption::EncryptionAlgorithm,
-    types::config::{
-        BasinConfig, OptionalStreamConfig, RetentionPolicy, StorageClass, StreamConfig,
-        TimestampingMode,
+    types::{
+        basin::BasinName,
+        config::{
+            BasinConfig, OptionalStreamConfig, RetentionPolicy, StorageClass, StreamConfig,
+            TimestampingMode,
+        },
+        stream::StreamName,
     },
 };
 use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
@@ -52,7 +56,7 @@ pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin: s2_config::BasinName = basin_spec
+        let basin: BasinName = basin_spec
             .name
             .parse()
             .map_err(|e| miette::miette!("invalid basin name {:?}: {}", basin_spec.name, e))?;
@@ -60,7 +64,7 @@ pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
         apply_basin(s2, basin.clone(), basin_spec.config).await?;
 
         for stream_spec in basin_spec.streams {
-            let stream: s2_config::StreamName = stream_spec.name.parse().map_err(|e| {
+            let stream: StreamName = stream_spec.name.parse().map_err(|e| {
                 miette::miette!("invalid stream name {:?}: {}", stream_spec.name, e)
             })?;
             apply_stream(s2, basin.clone(), stream, stream_spec.config).await?;
@@ -71,7 +75,7 @@ pub async fn apply(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
 
 async fn apply_basin(
     s2: &S2,
-    basin: s2_config::BasinName,
+    basin: BasinName,
     config: Option<BasinConfigSpec>,
 ) -> miette::Result<()> {
     let mut input = s2_config::EnsureBasinInput::new(basin.clone());
@@ -95,8 +99,8 @@ async fn apply_basin(
 
 async fn apply_stream(
     s2: &S2,
-    basin: s2_config::BasinName,
-    stream: s2_config::StreamName,
+    basin: BasinName,
+    stream: StreamName,
     config: Option<StreamConfigSpec>,
 ) -> miette::Result<()> {
     let mut input = s2_config::EnsureStreamInput::new(stream.clone());
@@ -416,7 +420,7 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin: s2_config::BasinName = basin_spec
+        let basin: BasinName = basin_spec
             .name
             .parse()
             .map_err(|e| miette::miette!("invalid basin name {:?}: {}", basin_spec.name, e))?;
@@ -460,7 +464,7 @@ pub async fn dry_run(s2: &S2, spec: ResourcesSpec) -> miette::Result<()> {
         let basin_client = s2.basin(basin.clone());
 
         for stream_spec in basin_spec.streams {
-            let stream: s2_config::StreamName = stream_spec.name.parse().map_err(|e| {
+            let stream: StreamName = stream_spec.name.parse().map_err(|e| {
                 miette::miette!("invalid stream name {:?}: {}", stream_spec.name, e)
             })?;
 
