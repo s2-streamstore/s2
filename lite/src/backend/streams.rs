@@ -186,9 +186,7 @@ impl Backend {
         };
 
         if should_write {
-            let meta = match &result {
-                ProvisionResult::Created(meta) | ProvisionResult::Updated(meta) => meta,
-            };
+            let meta = result.inner();
 
             txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;
             let stream_id = StreamId::new(&basin, &stream);

@@ -150,6 +150,13 @@ pub enum ProvisionResult<T> {
 }
 
 impl<T> ProvisionResult<T> {
+    /// Borrow the inner value regardless of variant.
+    pub fn inner(&self) -> &T {
+        match self {
+            Self::Created(t) | Self::Updated(t) => t,
+        }
+    }
+
     /// Map the inner value while preserving whether the resource was created or updated.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> ProvisionResult<U> {
         match self {

@@ -142,9 +142,7 @@ impl Backend {
         };
 
         if should_write {
-            let meta = match &result {
-                ProvisionResult::Created(meta) | ProvisionResult::Updated(meta) => meta,
-            };
+            let meta = result.inner();
             txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 
             static WRITE_OPTS: WriteOptions = WriteOptions {
