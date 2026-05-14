@@ -177,13 +177,6 @@ fn format_timestamping_mode(m: TimestampingMode) -> &'static str {
     }
 }
 
-fn merge_stream_config(
-    config: OptionalStreamConfig,
-    basin_defaults: OptionalStreamConfig,
-) -> StreamConfig {
-    config.merge(basin_defaults)
-}
-
 fn default_stream_config_field(field: &'static str) -> &'static str {
     match field {
         "storage_class" => "default_stream_config.storage_class",
@@ -479,14 +472,12 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()>
             let stream_action = match basin_client.get_stream_config(stream.clone()).await {
                 Ok(existing) => {
                     let existing = stream_config_from_sdk(existing)?;
-                    let desired_stream_config = merge_stream_config(
-                        stream_spec
-                            .config
-                            .clone()
-                            .map(OptionalStreamConfig::from)
-                            .unwrap_or_default(),
-                        desired_basin_default_stream_config.clone(),
-                    );
+                    let desired_stream_config = stream_spec
+                        .config
+                        .clone()
+                        .map(OptionalStreamConfig::from)
+                        .unwrap_or_default()
+                        .merge(desired_basin_default_stream_config.clone());
                     let diffs = diff_stream_configs(&existing, &desired_stream_config);
                     if diffs.is_empty() {
                         ResourceAction::Unchanged
@@ -568,10 +559,8 @@ mod tests {
             delete_on_empty: Some(DeleteOnEmptySpec { min_age: None }),
         };
 
-        let merged = merge_stream_config(
-            OptionalStreamConfig::from(stream_config),
-            OptionalStreamConfig::from(basin_defaults),
-        );
+        let merged = OptionalStreamConfig::from(stream_config)
+            .merge(OptionalStreamConfig::from(basin_defaults));
 
         assert_eq!(merged.storage_class, StorageClass::Standard);
         assert_eq!(merged.retention_policy, RetentionPolicy::Infinite());
