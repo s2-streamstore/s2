@@ -118,7 +118,7 @@ impl Backend {
         }
 
         let basin_defaults = basin_meta.config.default_stream_config;
-        let (outcome, prior_doe_min_age, should_write) = match (existing_meta, mode) {
+        let (outcome, prior_doe_min_age) = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
@@ -126,7 +126,7 @@ impl Backend {
                 return if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
-                    Ok(ProvisionResult::Created(StreamInfo {
+                    Ok(ProvisionResult::Noop(StreamInfo {
                         name: stream,
                         created_at: existing.created_at,
                         deleted_at: None,
@@ -143,17 +143,20 @@ impl Backend {
                     .min_age
                     .filter(|age| !age.is_zero());
                 let config: OptionalStreamConfig = config.merge(basin_defaults).into();
-                let should_write = existing.config != config;
+                let meta = kv::stream_meta::StreamMeta {
+                    config,
+                    cipher: existing.cipher,
+                    created_at: existing.created_at,
+                    deleted_at: None,
+                    creation_idempotency_key: existing.creation_idempotency_key,
+                };
                 (
-                    ProvisionResult::Updated(kv::stream_meta::StreamMeta {
-                        config,
-                        cipher: existing.cipher,
-                        created_at: existing.created_at,
-                        deleted_at: None,
-                        creation_idempotency_key: existing.creation_idempotency_key,
-                    }),
+                    if existing.config == meta.config {
+                        ProvisionResult::Noop(meta)
+                    } else {
+                        ProvisionResult::Updated(meta)
+                    },
                     prior_doe_min_age,
-                    should_write,
                 )
             }
             (None, ProvisionMode::CreateOnly { request_token }) => {
@@ -169,7 +172,6 @@ impl Backend {
                         creation_idempotency_key: new_creation_idempotency_key,
                     }),
                     None,
-                    true,
                 )
             }
             (None, ProvisionMode::Ensure) => (
@@ -181,11 +183,10 @@ impl Backend {
                     creation_idempotency_key: None,
                 }),
                 None,
-                true,
             ),
         };
 
-        if should_write {
+        if !matches!(&outcome, ProvisionResult::Noop(_)) {
             let meta = outcome.inner();
 
             txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;
@@ -236,8 +237,7 @@ impl Backend {
             txn.commit_with_options(&WRITE_OPTS).await?;
         }
 
-        if should_write
-            && let ProvisionResult::Updated(meta) = &outcome
+        if let ProvisionResult::Updated(meta) = &outcome
             && let Some(client) = self.streamer_client_if_active(&basin, &stream)
         {
             client.advise_reconfig(meta.config.clone());

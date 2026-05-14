@@ -9,7 +9,7 @@ use s2_common::{
     types::{
         basin::{BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
+        resources::{PROVISION_RESULT_HEADER, Page, ProvisionMode, ProvisionResult, RequestToken},
     },
 };
 
@@ -88,7 +88,14 @@ pub async fn create_basin(
         request_token: HeaderOpt(request_token),
         request,
     }: CreateArgs,
-) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
+) -> Result<
+    (
+        StatusCode,
+        [(http::HeaderName, &'static str); 1],
+        Json<v1t::basin::BasinInfo>,
+    ),
+    ServiceError,
+> {
     let config: BasinConfig = request
         .config
         .map(TryInto::try_into)
@@ -100,8 +107,18 @@ pub async fn create_basin(
             config,
             ProvisionMode::CreateOnly { request_token },
         )
-        .await?;
-    Ok((StatusCode::CREATED, Json(info.into_inner().into())))
+        .await?
+        .map(Into::into);
+    let (outcome, info) = match info {
+        ProvisionResult::Created(info) => ("created", info),
+        ProvisionResult::Updated(info) => ("updated", info),
+        ProvisionResult::Noop(info) => ("noop", info),
+    };
+    Ok((
+        StatusCode::CREATED,
+        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        Json(info),
+    ))
 }
 
 #[derive(FromRequest)]
@@ -161,7 +178,14 @@ pub async fn ensure_basin(
         basin,
         request: JsonOpt(request),
     }: EnsureArgs,
-) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
+) -> Result<
+    (
+        StatusCode,
+        [(http::HeaderName, &'static str); 1],
+        Json<v1t::basin::BasinInfo>,
+    ),
+    ServiceError,
+> {
     let config: BasinConfig = request
         .and_then(|req| req.config)
         .map(TryInto::try_into)
@@ -171,11 +195,16 @@ pub async fn ensure_basin(
         .provision_basin(basin, config, ProvisionMode::Ensure)
         .await?
         .map(Into::into);
-    let (status, info) = match info {
-        ProvisionResult::Created(info) => (StatusCode::CREATED, info),
-        ProvisionResult::Updated(info) => (StatusCode::OK, info),
+    let (status, outcome, info) = match info {
+        ProvisionResult::Created(info) => (StatusCode::CREATED, "created", info),
+        ProvisionResult::Updated(info) => (StatusCode::OK, "updated", info),
+        ProvisionResult::Noop(info) => (StatusCode::OK, "noop", info),
     };
-    Ok((status, Json(info)))
+    Ok((
+        status,
+        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        Json(info),
+    ))
 }
 
 #[derive(FromRequest)]

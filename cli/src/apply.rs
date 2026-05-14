@@ -91,6 +91,9 @@ async fn apply_basin(
         s2_sdk::types::ProvisionResult::Updated(_) => {
             eprintln!("{}", format!("  basin {basin} (updated)").yellow().bold());
         }
+        s2_sdk::types::ProvisionResult::Noop(_) => {
+            eprintln!("{}", format!("  basin {basin} (unchanged)").dimmed());
+        }
     }
     Ok(())
 }
@@ -101,11 +104,12 @@ async fn apply_stream(
     stream: StreamName,
     config: Option<StreamConfigSpec>,
 ) -> miette::Result<()> {
+    let basin_client = s2.basin(basin.clone());
+
     let mut input = s2_sdk::types::EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
         input = input.with_config(OptionalStreamConfig::from(c));
     }
-    let basin_client = s2.basin(basin.clone());
     match basin_client.ensure_stream(input).await.map_err(|e| {
         miette::miette!(
             "failed to apply stream {:?}/{:?}: {}",
@@ -123,6 +127,12 @@ async fn apply_stream(
                 format!("  stream {basin}/{stream} (updated)")
                     .yellow()
                     .bold()
+            );
+        }
+        s2_sdk::types::ProvisionResult::Noop(_) => {
+            eprintln!(
+                "{}",
+                format!("  stream {basin}/{stream} (unchanged)").dimmed()
             );
         }
     }

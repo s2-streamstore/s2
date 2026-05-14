@@ -139,50 +139,56 @@ pub enum ProvisionMode {
 
 /// Result of provisioning a resource.
 ///
-/// Indicates whether the resource was newly created or an existing resource was
-/// made to match the requested config. Both variants hold the resource's current state.
+/// Indicates whether provisioning created, updated, or skipped writing a resource.
+/// All variants hold the resource's current state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvisionResult<T> {
     /// Resource was newly created.
     Created(T),
     /// Resource already existed and now matches the requested config.
     Updated(T),
+    /// Resource already existed and no write was performed.
+    Noop(T),
 }
 
 impl<T> ProvisionResult<T> {
     /// Borrow the inner value regardless of variant.
     pub fn inner(&self) -> &T {
         match self {
-            Self::Created(t) | Self::Updated(t) => t,
+            Self::Created(t) | Self::Updated(t) | Self::Noop(t) => t,
         }
     }
 
     /// Unwrap the inner value regardless of variant.
     pub fn into_inner(self) -> T {
         match self {
-            Self::Created(t) | Self::Updated(t) => t,
+            Self::Created(t) | Self::Updated(t) | Self::Noop(t) => t,
         }
     }
 
-    /// Map the inner value while preserving whether the resource was created or updated.
+    /// Map the inner value while preserving the provisioning outcome.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> ProvisionResult<U> {
         match self {
             Self::Created(t) => ProvisionResult::Created(f(t)),
             Self::Updated(t) => ProvisionResult::Updated(f(t)),
+            Self::Noop(t) => ProvisionResult::Noop(f(t)),
         }
     }
 
-    /// Fallibly map the inner value while preserving whether the resource was created or updated.
+    /// Fallibly map the inner value while preserving the provisioning outcome.
     pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<ProvisionResult<U>, E> {
         match self {
             Self::Created(t) => Ok(ProvisionResult::Created(f(t)?)),
             Self::Updated(t) => Ok(ProvisionResult::Updated(f(t)?)),
+            Self::Noop(t) => Ok(ProvisionResult::Noop(f(t)?)),
         }
     }
 }
 
 pub static REQUEST_TOKEN_HEADER: http::HeaderName =
     http::HeaderName::from_static("s2-request-token");
+pub static PROVISION_RESULT_HEADER: http::HeaderName =
+    http::HeaderName::from_static("s2-provision-result");
 
 pub const MAX_REQUEST_TOKEN_LENGTH: usize = 36;
 

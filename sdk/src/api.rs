@@ -28,7 +28,9 @@ use s2_api::v1::{
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
 };
-use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
+use s2_common::{
+    encryption::S2_ENCRYPTION_KEY_HEADER, types::resources::PROVISION_RESULT_HEADER,
+};
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
@@ -52,6 +54,24 @@ const ACCEPT_PROTO: &str = "application/protobuf";
 const S2_REQUEST_TOKEN: &str = "s2-request-token";
 const S2_BASIN: &str = "s2-basin";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
+
+#[cfg(feature = "_hidden")]
+fn provision_result_from_response<T>(
+    status: StatusCode,
+    headers: &HeaderMap,
+    value: T,
+) -> ProvisionResult<T> {
+    match headers
+        .get(&PROVISION_RESULT_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("created") => ProvisionResult::Created(value),
+        Some("noop") => ProvisionResult::Noop(value),
+        Some("updated") => ProvisionResult::Updated(value),
+        _ if status == StatusCode::CREATED => ProvisionResult::Created(value),
+        _ => ProvisionResult::Updated(value),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AccountClient {
@@ -159,12 +179,9 @@ impl AccountClient {
         };
         let response = self.request(request).send().await?;
         let status = response.status();
+        let result = provision_result_from_response(status, response.headers(), ());
         let info = response.json::<BasinInfo>()?;
-        Ok(if status == StatusCode::CREATED {
-            ProvisionResult::Created(info)
-        } else {
-            ProvisionResult::Updated(info)
-        })
+        Ok(result.map(|()| info))
     }
 
     pub async fn delete_basin(
@@ -320,12 +337,9 @@ impl BasinClient {
         };
         let response = self.request(request).send().await?;
         let status = response.status();
+        let result = provision_result_from_response(status, response.headers(), ());
         let info = response.json::<StreamInfo>()?;
-        Ok(if status == StatusCode::CREATED {
-            ProvisionResult::Created(info)
-        } else {
-            ProvisionResult::Updated(info)
-        })
+        Ok(result.map(|()| info))
     }
 
     pub async fn delete_stream(

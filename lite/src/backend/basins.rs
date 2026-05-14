@@ -86,7 +86,7 @@ impl Backend {
             return Err(BasinDeletionPendingError { basin }.into());
         }
 
-        let (outcome, should_write) = match (existing_meta, mode) {
+        let outcome = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
@@ -94,7 +94,7 @@ impl Backend {
                 return if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
-                    Ok(ProvisionResult::Created(BasinInfo {
+                    Ok(ProvisionResult::Noop(BasinInfo {
                         name: basin,
                         scope: None,
                         created_at: existing.created_at,
@@ -105,43 +105,38 @@ impl Backend {
                 };
             }
             (Some(existing), ProvisionMode::Ensure) => {
-                let should_write = existing.config != config;
-                (
-                    ProvisionResult::Updated(kv::basin_meta::BasinMeta {
-                        config,
-                        created_at: existing.created_at,
-                        deleted_at: None,
-                        creation_idempotency_key: existing.creation_idempotency_key,
-                    }),
-                    should_write,
-                )
+                let meta = kv::basin_meta::BasinMeta {
+                    config,
+                    created_at: existing.created_at,
+                    deleted_at: None,
+                    creation_idempotency_key: existing.creation_idempotency_key,
+                };
+                if existing.config == meta.config {
+                    ProvisionResult::Noop(meta)
+                } else {
+                    ProvisionResult::Updated(meta)
+                }
             }
             (None, ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
-                (
-                    ProvisionResult::Created(kv::basin_meta::BasinMeta {
-                        config,
-                        created_at: OffsetDateTime::now_utc(),
-                        deleted_at: None,
-                        creation_idempotency_key: new_creation_idempotency_key,
-                    }),
-                    true,
-                )
-            }
-            (None, ProvisionMode::Ensure) => (
                 ProvisionResult::Created(kv::basin_meta::BasinMeta {
                     config,
                     created_at: OffsetDateTime::now_utc(),
                     deleted_at: None,
-                    creation_idempotency_key: None,
-                }),
-                true,
-            ),
+                    creation_idempotency_key: new_creation_idempotency_key,
+                })
+            }
+            (None, ProvisionMode::Ensure) => ProvisionResult::Created(kv::basin_meta::BasinMeta {
+                config,
+                created_at: OffsetDateTime::now_utc(),
+                deleted_at: None,
+                creation_idempotency_key: None,
+            }),
         };
 
-        if should_write {
+        if !matches!(&outcome, ProvisionResult::Noop(_)) {
             let meta = outcome.inner();
             txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 

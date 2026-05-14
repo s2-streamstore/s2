@@ -112,7 +112,8 @@ impl S2 {
     /// idempotent.
     ///
     /// Returns [`ProvisionResult::Created`] with the basin info if the basin was newly
-    /// created, or [`ProvisionResult::Updated`] if it already existed.
+    /// created, [`ProvisionResult::Updated`] if its config changed, or
+    /// [`ProvisionResult::Noop`] if no write was needed.
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
     pub async fn ensure_basin(
@@ -327,7 +328,8 @@ impl S2Basin {
     /// and is always idempotent.
     ///
     /// Returns [`ProvisionResult::Created`] with the stream info if the stream was newly
-    /// created, or [`ProvisionResult::Updated`] if it already existed.
+    /// created, [`ProvisionResult::Updated`] if its config changed, or
+    /// [`ProvisionResult::Noop`] if no write was needed.
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
     pub async fn ensure_stream(

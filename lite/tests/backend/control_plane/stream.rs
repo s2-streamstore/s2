@@ -10,7 +10,7 @@ use s2_common::{
             RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
             TimestampingReconfiguration,
         },
-        resources::{ListItemsRequestParts, ProvisionMode, RequestToken},
+        resources::{ListItemsRequestParts, ProvisionMode, ProvisionResult, RequestToken},
         stream::{
             AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
             StreamNameStartAfter,
@@ -240,7 +240,7 @@ async fn test_create_stream_idempotency_and_request_token() {
         .expect("Failed to fetch stored stream config");
     assert_eq!(stored_config.storage_class, Some(StorageClass::Express));
 
-    backend
+    let idempotent = backend
         .provision_stream(
             basin_name.clone(),
             stream_name.clone(),
@@ -251,6 +251,11 @@ async fn test_create_stream_idempotency_and_request_token() {
         )
         .await
         .expect("Idempotent create should succeed with same request token");
+    assert!(matches!(
+        idempotent,
+        ProvisionResult::Noop(ref info) if info.deleted_at.is_none()
+            && info.created_at <= time::OffsetDateTime::now_utc()
+    ));
 
     let different_token_result = backend
         .provision_stream(

@@ -54,7 +54,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Idempotent create should succeed with same request token");
     assert!(matches!(
         idempotent,
-        ProvisionResult::Created(ref info) if info.deleted_at.is_none()
+        ProvisionResult::Noop(ref info) if info.deleted_at.is_none()
             && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 

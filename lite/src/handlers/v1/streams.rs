@@ -9,7 +9,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
+        resources::{PROVISION_RESULT_HEADER, Page, ProvisionMode, ProvisionResult, RequestToken},
         stream::{ListStreamsRequest, StreamName},
     },
 };
@@ -112,7 +112,14 @@ pub async fn create_stream(
         basin,
         request,
     }: CreateArgs,
-) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
+) -> Result<
+    (
+        StatusCode,
+        [(http::HeaderName, &'static str); 1],
+        Json<v1t::stream::StreamInfo>,
+    ),
+    ServiceError,
+> {
     let config: OptionalStreamConfig = request
         .config
         .map(TryInto::try_into)
@@ -125,8 +132,18 @@ pub async fn create_stream(
             config,
             ProvisionMode::CreateOnly { request_token },
         )
-        .await?;
-    Ok((StatusCode::CREATED, Json(info.into_inner().into())))
+        .await?
+        .map(Into::into);
+    let (outcome, info) = match info {
+        ProvisionResult::Created(info) => ("created", info),
+        ProvisionResult::Updated(info) => ("updated", info),
+        ProvisionResult::Noop(info) => ("noop", info),
+    };
+    Ok((
+        StatusCode::CREATED,
+        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        Json(info),
+    ))
 }
 
 #[derive(FromRequest)]
@@ -211,7 +228,14 @@ pub async fn ensure_stream(
         stream,
         config: JsonOpt(config),
     }: EnsureArgs,
-) -> Result<(StatusCode, Json<v1t::stream::StreamInfo>), ServiceError> {
+) -> Result<
+    (
+        StatusCode,
+        [(http::HeaderName, &'static str); 1],
+        Json<v1t::stream::StreamInfo>,
+    ),
+    ServiceError,
+> {
     let config: OptionalStreamConfig = config
         .map(TryInto::try_into)
         .transpose()?
@@ -220,11 +244,16 @@ pub async fn ensure_stream(
         .provision_stream(basin, stream, config, ProvisionMode::Ensure)
         .await?
         .map(Into::into);
-    let (status, info) = match info {
-        ProvisionResult::Created(info) => (StatusCode::CREATED, info),
-        ProvisionResult::Updated(info) => (StatusCode::OK, info),
+    let (status, outcome, info) = match info {
+        ProvisionResult::Created(info) => (StatusCode::CREATED, "created", info),
+        ProvisionResult::Updated(info) => (StatusCode::OK, "updated", info),
+        ProvisionResult::Noop(info) => (StatusCode::OK, "noop", info),
     };
-    Ok((status, Json(info)))
+    Ok((
+        status,
+        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        Json(info),
+    ))
 }
 
 #[derive(FromRequest)]
