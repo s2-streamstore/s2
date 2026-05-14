@@ -3,6 +3,7 @@
 use std::{path::Path, time::Duration};
 
 use colored::Colorize;
+use s2_api::v1::config as api_config;
 use s2_common::{encryption::EncryptionAlgorithm, types::config as common_config};
 use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
 use s2_sdk::{
@@ -174,7 +175,8 @@ async fn apply_basin(
 ) -> miette::Result<()> {
     let mut input = EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        input = input.with_common_config(common_config::BasinConfig::from(c));
+        let config: api_config::BasinConfig = common_config::BasinConfig::from(c).into();
+        input = input.with_config(config);
     }
     match s2
         .ensure_basin(input)
@@ -199,7 +201,8 @@ async fn apply_stream(
 ) -> miette::Result<()> {
     let mut input = EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        input = input.with_common_config(common_config::OptionalStreamConfig::from(c));
+        let config: api_config::StreamConfig = common_config::OptionalStreamConfig::from(c).into();
+        input = input.with_config(config);
     }
     let basin_client = s2.basin(basin.clone());
     match basin_client.ensure_stream(input).await.map_err(|e| {

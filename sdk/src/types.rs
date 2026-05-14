@@ -959,12 +959,11 @@ pub struct EnsureBasinInput {
     /// Desired configuration for the basin.
     ///
     /// If `None`, the basin is ensured with the default configuration.
-    pub config: Option<BasinConfig>,
+    config: Option<api::config::BasinConfig>,
     /// Scope of the basin.
     ///
     /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
     pub scope: Option<BasinScope>,
-    common_config: Option<s2_common::types::config::BasinConfig>,
 }
 
 #[cfg(feature = "_hidden")]
@@ -975,24 +974,13 @@ impl EnsureBasinInput {
             name,
             config: None,
             scope: None,
-            common_config: None,
         }
     }
 
     /// Set the desired configuration for the basin.
-    pub fn with_config(self, config: BasinConfig) -> Self {
+    pub fn with_config(self, config: impl Into<s2_api::v1::config::BasinConfig>) -> Self {
         Self {
-            config: Some(config),
-            common_config: None,
-            ..self
-        }
-    }
-
-    /// Set the desired configuration using the internal config model.
-    pub fn with_common_config(self, config: s2_common::types::config::BasinConfig) -> Self {
-        Self {
-            config: None,
-            common_config: Some(config),
+            config: Some(config.into()),
             ..self
         }
     }
@@ -1009,10 +997,7 @@ impl EnsureBasinInput {
 #[cfg(feature = "_hidden")]
 impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
     fn from(value: EnsureBasinInput) -> Self {
-        let config = value
-            .common_config
-            .map(Into::into)
-            .or_else(|| value.config.map(Into::into));
+        let config = value.config;
         let request = if config.is_some() || value.scope.is_some() {
             Some(api::basin::EnsureBasinRequest {
                 config,
@@ -2694,38 +2679,20 @@ pub struct EnsureStreamInput {
     /// Missing fields are filled from the current basin default stream configuration and then
     /// global defaults before comparing or writing. If `None`, the stream is ensured using those
     /// defaults.
-    pub config: Option<StreamConfig>,
-    common_config: Option<s2_common::types::config::OptionalStreamConfig>,
+    config: Option<api::config::StreamConfig>,
 }
 
 #[cfg(feature = "_hidden")]
 impl EnsureStreamInput {
     /// Create a new [`EnsureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
-        Self {
-            name,
-            config: None,
-            common_config: None,
-        }
+        Self { name, config: None }
     }
 
     /// Set the desired configuration for the stream.
-    pub fn with_config(self, config: StreamConfig) -> Self {
+    pub fn with_config(self, config: impl Into<s2_api::v1::config::StreamConfig>) -> Self {
         Self {
-            config: Some(config),
-            common_config: None,
-            ..self
-        }
-    }
-
-    /// Set the desired configuration using the internal config model.
-    pub fn with_common_config(
-        self,
-        config: s2_common::types::config::OptionalStreamConfig,
-    ) -> Self {
-        Self {
-            config: None,
-            common_config: Some(config),
+            config: Some(config.into()),
             ..self
         }
     }
@@ -2734,13 +2701,7 @@ impl EnsureStreamInput {
 #[cfg(feature = "_hidden")]
 impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
     fn from(value: EnsureStreamInput) -> Self {
-        (
-            value.name,
-            value
-                .common_config
-                .map(Into::into)
-                .or_else(|| value.config.map(Into::into)),
-        )
+        (value.name, value.config)
     }
 }
 
