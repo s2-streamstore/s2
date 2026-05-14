@@ -219,12 +219,11 @@ pub async fn ensure_stream(
     let info = backend
         .provision_stream(basin, stream, config, ProvisionMode::Ensure)
         .await?
-        .map(Into::into);
-    let (status, info) = match info {
+        .map(|info| Json(info.into()));
+    Ok(match info {
         ProvisionResult::Created(info) => (StatusCode::CREATED, info),
         ProvisionResult::Updated(info) => (StatusCode::OK, info),
-    };
-    Ok((status, Json(info)))
+    })
 }
 
 #[derive(FromRequest)]
