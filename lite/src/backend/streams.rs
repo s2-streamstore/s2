@@ -117,7 +117,7 @@ impl Backend {
             ));
         }
 
-        let basin_defaults = basin_meta.config.default_stream_config.clone();
+        let basin_defaults = basin_meta.config.default_stream_config;
         let (outcome, prior_doe_min_age, should_write) = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
@@ -142,7 +142,7 @@ impl Backend {
                     .delete_on_empty
                     .min_age
                     .filter(|age| !age.is_zero());
-                let config: OptionalStreamConfig = config.merge(basin_defaults.clone()).into();
+                let config: OptionalStreamConfig = config.merge(basin_defaults).into();
                 let should_write = existing.config != config;
                 (
                     ProvisionResult::Updated(kv::stream_meta::StreamMeta {
@@ -162,7 +162,7 @@ impl Backend {
                     .map(|req_token| creation_idempotency_key(req_token, &config));
                 (
                     ProvisionResult::Created(kv::stream_meta::StreamMeta {
-                        config: config.merge(basin_defaults.clone()).into(),
+                        config: config.merge(basin_defaults).into(),
                         cipher: basin_meta.config.stream_cipher,
                         created_at: OffsetDateTime::now_utc(),
                         deleted_at: None,
