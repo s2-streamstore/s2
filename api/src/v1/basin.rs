@@ -170,7 +170,7 @@ pub enum BasinState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct EnsureBasinRequest {
-    /// Desired basin configuration.
+    /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin scope.
     /// If omitted when creating, defaults to `aws:us-east-1`.
