@@ -85,7 +85,6 @@ pub enum Command {
     /// Revoke an access token.
     RevokeAccessToken {
         /// ID of the access token to revoke.
-        #[arg(long)]
         id: AccessTokenId,
     },
 
@@ -316,7 +315,6 @@ pub struct ListAccessTokensArgs {
 #[derive(Args, Debug)]
 pub struct IssueAccessTokenArgs {
     /// Access token ID.
-    #[arg(long)]
     pub id: AccessTokenId,
 
     /// Token validity duration (e.g., "30d", "1w", "24h"). Token expires after this duration from
