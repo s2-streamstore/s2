@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use s2_common::{
     maybe::Maybe,
     types::{
         basin::{BasinNamePrefix, BasinNameStartAfter, ListBasinsRequest},
         config::{
-            BasinConfig, BasinReconfiguration, OptionalStreamConfig, RetentionPolicy, StorageClass,
-            StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
+            BasinConfig, BasinReconfiguration, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
+            RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
+            TimestampingReconfiguration,
         },
         resources::{ListItemsRequestParts, ProvisionMode, ProvisionResult, RequestToken},
     },
@@ -246,6 +249,48 @@ async fn test_provision_basin_ensure_resets_unspecified_config() {
     assert!(stored_config.create_stream_on_read);
     assert_eq!(stored_config.default_stream_config.storage_class, None);
     assert_eq!(stored_config.default_stream_config.retention_policy, None);
+}
+
+#[tokio::test]
+async fn test_provision_basin_ensure_noops_with_explicit_zero_delete_on_empty() {
+    let backend = create_backend().await;
+    let basin_name = test_basin_name("basin-zero-doe-noop");
+    let config = BasinConfig {
+        default_stream_config: OptionalStreamConfig {
+            delete_on_empty: OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    backend
+        .provision_basin(
+            basin_name.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
+        )
+        .await
+        .expect("Failed to create basin");
+
+    let ensured = backend
+        .provision_basin(basin_name.clone(), config, ProvisionMode::Ensure)
+        .await
+        .expect("Ensure should succeed");
+
+    assert!(matches!(ensured, ProvisionResult::Noop(_)));
+
+    let stored_config = backend
+        .get_basin_config(basin_name)
+        .await
+        .expect("Failed to fetch basin config");
+    assert_eq!(
+        stored_config.default_stream_config.delete_on_empty.min_age,
+        Some(Duration::ZERO)
+    );
 }
 
 #[tokio::test]

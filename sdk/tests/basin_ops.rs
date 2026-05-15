@@ -567,7 +567,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), S2E
             retention_policy: Some(RetentionPolicy::Age(86400)),
             timestamping: Some(TimestampingConfig {
                 mode: Some(TimestampingMode::ClientRequire),
-                uncapped: true,
+                uncapped: Some(true),
                 ..
             }),
             delete_on_empty: Some(DeleteOnEmptyConfig {
@@ -701,10 +701,10 @@ async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<()
             .await?;
 
         let retrieved = basin.get_stream_config(stream_name.clone()).await?;
-        match retrieved.timestamping {
-            Some(timestamping) => assert_eq!(timestamping.uncapped, uncapped),
-            None => assert!(!uncapped),
-        }
+        let timestamping = retrieved
+            .timestamping
+            .expect("explicit uncapped setting should be preserved");
+        assert_eq!(timestamping.uncapped, Some(uncapped));
 
         basin
             .delete_stream(DeleteStreamInput::new(stream_name))
@@ -964,10 +964,10 @@ async fn reconfigure_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Resu
             ))
             .await?;
 
-        match config.timestamping {
-            Some(timestamping) => assert_eq!(timestamping.uncapped, uncapped),
-            None => assert!(!uncapped),
-        }
+        let timestamping = config
+            .timestamping
+            .expect("explicit uncapped setting should be preserved");
+        assert_eq!(timestamping.uncapped, Some(uncapped));
 
         basin
             .delete_stream(DeleteStreamInput::new(stream_name))

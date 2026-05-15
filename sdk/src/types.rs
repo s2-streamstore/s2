@@ -612,7 +612,7 @@ pub struct TimestampingConfig {
     /// Whether client-specified timestamps are allowed to exceed the arrival time.
     ///
     /// Defaults to `false` (client timestamps are capped at the arrival time).
-    pub uncapped: bool,
+    pub uncapped: Option<bool>,
 }
 
 impl TimestampingConfig {
@@ -631,7 +631,10 @@ impl TimestampingConfig {
 
     /// Set whether client-specified timestamps are allowed to exceed the arrival time.
     pub fn with_uncapped(self, uncapped: bool) -> Self {
-        Self { uncapped, ..self }
+        Self {
+            uncapped: Some(uncapped),
+            ..self
+        }
     }
 }
 
@@ -639,7 +642,7 @@ impl From<api::config::TimestampingConfig> for TimestampingConfig {
     fn from(value: api::config::TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: value.uncapped.unwrap_or_default(),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -648,7 +651,7 @@ impl From<TimestampingConfig> for api::config::TimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: Some(value.uncapped),
+            uncapped: value.uncapped,
         }
     }
 }

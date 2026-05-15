@@ -6,9 +6,9 @@ use s2_common::{
     maybe::Maybe,
     types::{
         config::{
-            BasinConfig, BasinReconfiguration, OptionalStreamConfig, OptionalTimestampingConfig,
-            RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
-            TimestampingReconfiguration,
+            BasinConfig, BasinReconfiguration, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
+            OptionalTimestampingConfig, RetentionPolicy, StorageClass, StreamReconfiguration,
+            TimestampingMode, TimestampingReconfiguration,
         },
         resources::{ListItemsRequestParts, ProvisionMode, ProvisionResult, RequestToken},
         stream::{
@@ -406,6 +406,57 @@ async fn test_provision_stream_ensure_noops_when_effective_config_matches() {
         )
         .await
         .expect("Failed to create stream");
+
+    let ensured = backend
+        .provision_stream(basin_name, stream_name, config, ProvisionMode::Ensure)
+        .await
+        .expect("Ensure should succeed");
+
+    assert!(matches!(ensured, ProvisionResult::Noop(_)));
+}
+
+#[tokio::test]
+async fn test_provision_stream_preserves_explicit_zero_delete_on_empty() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "stream-zero-doe",
+        BasinConfig {
+            default_stream_config: OptionalStreamConfig {
+                delete_on_empty: OptionalDeleteOnEmptyConfig {
+                    min_age: Some(Duration::from_secs(60)),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let stream_name = test_stream_name("stream-zero-doe");
+    let config = OptionalStreamConfig {
+        delete_on_empty: OptionalDeleteOnEmptyConfig {
+            min_age: Some(Duration::ZERO),
+        },
+        ..Default::default()
+    };
+
+    backend
+        .provision_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
+        )
+        .await
+        .expect("Failed to create stream");
+
+    let stored_config = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to fetch stream config");
+    assert_eq!(stored_config.delete_on_empty.min_age, Some(Duration::ZERO));
 
     let ensured = backend
         .provision_stream(basin_name, stream_name, config, ProvisionMode::Ensure)

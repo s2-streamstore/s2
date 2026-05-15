@@ -202,14 +202,9 @@ pub struct DeleteOnEmptyConfig {
 
 impl DeleteOnEmptyConfig {
     pub fn to_opt(config: types::config::OptionalDeleteOnEmptyConfig) -> Option<Self> {
-        let min_age = config.min_age.unwrap_or_default();
-        if min_age > Duration::ZERO {
-            Some(DeleteOnEmptyConfig {
-                min_age_secs: min_age.as_secs(),
-            })
-        } else {
-            None
-        }
+        config.min_age.map(|min_age| DeleteOnEmptyConfig {
+            min_age_secs: min_age.as_secs(),
+        })
     }
 }
 
@@ -1026,13 +1021,9 @@ mod tests {
         // default stream config -> None
         assert!(StreamConfig::to_opt(types::config::OptionalStreamConfig::default()).is_none());
 
-        // delete_on_empty: None or Some(ZERO) -> None
+        // delete_on_empty: None -> None
         let doe_none = types::config::OptionalDeleteOnEmptyConfig { min_age: None };
-        let doe_zero = types::config::OptionalDeleteOnEmptyConfig {
-            min_age: Some(Duration::ZERO),
-        };
         assert!(DeleteOnEmptyConfig::to_opt(doe_none).is_none());
-        assert!(DeleteOnEmptyConfig::to_opt(doe_zero).is_none());
 
         // default timestamping -> None
         assert!(
@@ -1050,6 +1041,22 @@ mod tests {
             ..Default::default()
         }
         .into();
+
+        assert_eq!(
+            api.delete_on_empty,
+            Some(DeleteOnEmptyConfig { min_age_secs: 0 })
+        );
+    }
+
+    #[test]
+    fn optional_stream_config_to_opt_preserves_explicit_zero_delete_on_empty() {
+        let api = StreamConfig::to_opt(types::config::OptionalStreamConfig {
+            delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
+            ..Default::default()
+        })
+        .unwrap();
 
         assert_eq!(
             api.delete_on_empty,

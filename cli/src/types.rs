@@ -378,7 +378,7 @@ impl From<sdk::types::TimestampingConfig> for TimestampingConfig {
     fn from(config: sdk::types::TimestampingConfig) -> Self {
         TimestampingConfig {
             timestamping_mode: config.mode.map(Into::into),
-            timestamping_uncapped: Some(config.uncapped),
+            timestamping_uncapped: config.uncapped,
         }
     }
 }

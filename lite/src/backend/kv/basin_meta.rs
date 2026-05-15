@@ -125,7 +125,7 @@ pub fn deser_value(bytes: Bytes) -> Result<BasinMeta, DeserializationError> {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, time::Duration};
 
     use bytes::Bytes;
     use proptest::prelude::*;
@@ -133,7 +133,7 @@ mod tests {
         bash::Bash,
         types::{
             basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
-            config::BasinConfig,
+            config::{BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig},
         },
     };
     use time::OffsetDateTime;
@@ -244,6 +244,12 @@ mod tests {
     fn value_roundtrip_basin_meta() {
         let config = BasinConfig {
             create_stream_on_append: true,
+            default_stream_config: OptionalStreamConfig {
+                delete_on_empty: OptionalDeleteOnEmptyConfig {
+                    min_age: Some(Duration::ZERO),
+                },
+                ..Default::default()
+            },
             ..Default::default()
         };
         let created_at = OffsetDateTime::from_unix_timestamp(1234567890)
@@ -276,6 +282,14 @@ mod tests {
         assert_eq!(
             basin_meta.config.create_stream_on_read,
             decoded.config.create_stream_on_read
+        );
+        assert_eq!(
+            basin_meta
+                .config
+                .default_stream_config
+                .delete_on_empty
+                .min_age,
+            decoded.config.default_stream_config.delete_on_empty.min_age
         );
         assert_eq!(basin_meta.created_at, decoded.created_at);
         assert_eq!(basin_meta.deleted_at, decoded.deleted_at);
