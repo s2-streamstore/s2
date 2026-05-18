@@ -51,7 +51,7 @@ s2-common = { workspace = true, features = ["clap"] }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-slatedb = { workspace = true }
+slatedb = { workspace = true, features = ["lz4", "zstd"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }

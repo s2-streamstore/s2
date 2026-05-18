@@ -59,7 +59,7 @@ schemars = "1.2"
 secrecy = "0.10.3"
 serde = "1.0"
 serde_json = "1.0"
-slatedb = { version = "0.13.0", features = ["lz4", "zstd"] }
+slatedb = "0.13.0"
 sonic-rs = "0.5"
 strum = "0.28"
 tabled = "0.20"
