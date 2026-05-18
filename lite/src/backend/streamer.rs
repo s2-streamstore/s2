@@ -20,9 +20,7 @@ use s2_common::{
         StoredRecord, StoredSequencedRecord, StreamPosition, Timestamp,
     },
     types::{
-        config::{
-            OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy, TimestampingMode,
-        },
+        config::{RetentionPolicy, StreamConfig, TimestampingConfig, TimestampingMode},
         stream::{
             AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
             StoredAppendRecordParts,
@@ -61,14 +59,6 @@ pub(super) fn doe_arm_delay(retention_age: Duration, min_age: Duration) -> Durat
     retention_age
         .saturating_add(min_age)
         .saturating_add(DOE_DEADLINE_REFRESH_PERIOD)
-}
-
-pub(super) fn retention_age_or_zero(config: &OptionalStreamConfig) -> Duration {
-    config
-        .retention_policy
-        .unwrap_or_default()
-        .age()
-        .unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +205,7 @@ pub(super) struct Spawner {
     pub generation_id: StreamerGenerationId,
     pub db: slatedb::Db,
     pub stream_id: StreamId,
-    pub config: OptionalStreamConfig,
+    pub config: StreamConfig,
     pub cipher: Option<EncryptionAlgorithm>,
     pub tail_pos: StreamPosition,
     pub fencing_token: FencingToken,
@@ -309,7 +299,7 @@ struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
-    config: OptionalStreamConfig,
+    config: StreamConfig,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -402,8 +392,7 @@ impl Streamer {
         };
         match self.sequence_records(input) {
             Ok(sequenced_records) => {
-                let retention = self.config.retention_policy.unwrap_or_default();
-                let doe_deadline = self.maybe_doe_deadline(retention.age());
+                let doe_deadline = self.maybe_doe_deadline();
                 if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
@@ -422,7 +411,7 @@ impl Streamer {
                     db_submit_append(
                         self.db.clone(),
                         self.stream_id,
-                        retention,
+                        self.config.retention_policy,
                         doe_deadline,
                         sequenced_records,
                         self.fencing_token
@@ -442,16 +431,9 @@ impl Streamer {
         }
     }
 
-    fn maybe_doe_deadline(
-        &mut self,
-        retention_age: Option<Duration>,
-    ) -> Option<DeleteOnEmptyDeadline> {
-        let retention_age = retention_age?;
-        let min_age = self
-            .config
-            .delete_on_empty
-            .min_age
-            .filter(|d| !d.is_zero())?;
+    fn maybe_doe_deadline(&mut self) -> Option<DeleteOnEmptyDeadline> {
+        let retention_age = self.config.retention_policy.age()?;
+        let min_age = self.config.delete_on_empty.min_age()?;
         let now = Instant::now();
         if self
             .last_doe_deadline_at
@@ -616,7 +598,7 @@ enum Message {
         reply_tx: oneshot::Sender<StreamPosition>,
     },
     Reconfigure {
-        config: OptionalStreamConfig,
+        config: StreamConfig,
     },
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
 }
@@ -698,7 +680,7 @@ impl StreamerClient {
         })
     }
 
-    pub(super) fn advise_reconfig(&self, config: OptionalStreamConfig) -> bool {
+    pub(super) fn advise_reconfig(&self, config: StreamConfig) -> bool {
         self.msg_tx.send(Message::Reconfigure { config }).is_ok()
     }
 
@@ -814,10 +796,8 @@ fn sequenced_records(
     batch: StoredAppendRecordBatch,
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
-    config: &OptionalTimestampingConfig,
+    config: &TimestampingConfig,
 ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
-    let mode = config.mode.unwrap_or_default();
-    let uncapped = config.uncapped.unwrap_or_default();
     let mut sequenced_records = Vec::with_capacity(batch.len());
     let mut max_timestamp = prev_max_timestamp;
     let now = timestamp_now();
@@ -836,12 +816,12 @@ fn sequenced_records(
                 max_assignable_seq_num,
             })?;
         }
-        let mut timestamp = match mode {
+        let mut timestamp = match config.mode {
             TimestampingMode::ClientPrefer => timestamp.unwrap_or(now),
             TimestampingMode::ClientRequire => timestamp.ok_or(AppendTimestampRequiredError)?,
             TimestampingMode::Arrival => now,
         };
-        if !uncapped && timestamp > now {
+        if !config.uncapped && timestamp > now {
             timestamp = now;
         }
         if timestamp < max_timestamp {
@@ -969,9 +949,9 @@ mod tests {
 
     #[test]
     fn sequenced_records_client_prefer_with_timestamps() {
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientPrefer),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientPrefer,
+            uncapped: false,
         };
 
         let records: StoredAppendRecordBatch = vec![
@@ -993,9 +973,9 @@ mod tests {
     #[test]
     fn sequenced_records_client_prefer_without_timestamps() {
         let now = timestamp_now();
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientPrefer),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientPrefer,
+            uncapped: false,
         };
 
         let records: StoredAppendRecordBatch = vec![
@@ -1016,9 +996,9 @@ mod tests {
 
     #[test]
     fn sequenced_records_client_require_missing_timestamp() {
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientRequire),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientRequire,
+            uncapped: false,
         };
 
         let records: StoredAppendRecordBatch = vec![test_record(vec![1, 2, 3].into(), None)]
@@ -1035,9 +1015,9 @@ mod tests {
 
     #[test]
     fn sequenced_records_client_require_with_timestamps() {
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientRequire),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientRequire,
+            uncapped: false,
         };
 
         let records: StoredAppendRecordBatch = vec![
@@ -1057,9 +1037,9 @@ mod tests {
     #[test]
     fn sequenced_records_arrival_mode() {
         let now = timestamp_now();
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::Arrival),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::Arrival,
+            uncapped: false,
         };
 
         let records: StoredAppendRecordBatch = vec![
@@ -1078,9 +1058,9 @@ mod tests {
 
     #[test]
     fn sequenced_records_timestamp_monotonicity() {
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientPrefer),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientPrefer,
+            uncapped: false,
         };
 
         let records: StoredAppendRecordBatch = vec![
@@ -1101,9 +1081,9 @@ mod tests {
 
     #[test]
     fn sequenced_records_prev_max_timestamp_enforced() {
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientPrefer),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientPrefer,
+            uncapped: false,
         };
 
         let records: StoredAppendRecordBatch = vec![
@@ -1123,9 +1103,9 @@ mod tests {
     #[test]
     fn sequenced_records_future_timestamp_capped() {
         let now = timestamp_now();
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientPrefer),
-            uncapped: Some(false),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientPrefer,
+            uncapped: false,
         };
 
         let future = now + 10_000;
@@ -1143,9 +1123,9 @@ mod tests {
     #[test]
     fn sequenced_records_future_timestamp_uncapped() {
         let now = timestamp_now();
-        let config = OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientPrefer),
-            uncapped: Some(true),
+        let config = TimestampingConfig {
+            mode: TimestampingMode::ClientPrefer,
+            uncapped: true,
         };
 
         let future = now + 10_000;
@@ -1162,7 +1142,7 @@ mod tests {
 
     #[test]
     fn sequenced_records_seq_num_assignment() {
-        let config = OptionalTimestampingConfig::default();
+        let config = TimestampingConfig::default();
 
         let records: StoredAppendRecordBatch = vec![
             test_record(vec![1].into(), None),
@@ -1182,7 +1162,7 @@ mod tests {
 
     #[test]
     fn sequenced_records_reject_aes256gcm_records_past_random_nonce_limit() {
-        let config = OptionalTimestampingConfig::default();
+        let config = TimestampingConfig::default();
         let first_record = test_encrypted_record(
             vec![1, 2, 3].into(),
             None,
@@ -1214,7 +1194,7 @@ mod tests {
 
     #[test]
     fn sequenced_records_allow_aes256gcm_command_records_past_random_nonce_limit() {
-        let config = OptionalTimestampingConfig::default();
+        let config = TimestampingConfig::default();
         let max_assignable_seq_num = test_encrypted_record(
             vec![1, 2, 3].into(),
             None,
@@ -1271,7 +1251,7 @@ mod tests {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
-            config: OptionalStreamConfig::default(),
+            config: StreamConfig::default(),
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,

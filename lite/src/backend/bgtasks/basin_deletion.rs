@@ -134,7 +134,7 @@ mod tests {
 
     use s2_common::types::{
         basin::BasinName,
-        config::BasinConfig,
+        config::{BasinConfig, StreamConfig},
         resources::ListLimit,
         stream::{StreamName, StreamNameStartAfter},
     };
@@ -154,7 +154,7 @@ mod tests {
 
     fn stream_meta(deleted_at: Option<OffsetDateTime>) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
-            config: Default::default(),
+            config: StreamConfig::default(),
             cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at,

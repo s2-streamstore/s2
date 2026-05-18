@@ -364,7 +364,7 @@ mod tests {
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
         types::{
-            config::{BasinConfig, OptionalStreamConfig},
+            config::{BasinConfig, OptionalStreamConfig, StreamConfig},
             resources::ProvisionMode,
         },
     };
@@ -393,7 +393,7 @@ mod tests {
         let stream_id = StreamId::new(&basin, &stream);
 
         let meta = kv::stream_meta::StreamMeta {
-            config: OptionalStreamConfig::default(),
+            config: StreamConfig::default(),
             cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,

@@ -184,6 +184,9 @@ impl ServiceError {
                 ReconfigureStreamError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
+                ReconfigureStreamError::BasinDeletionPending(e) => {
+                    standard(ErrorCode::BasinDeletionPending, e.to_string())
+                }
                 ReconfigureStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
