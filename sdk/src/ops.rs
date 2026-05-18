@@ -114,8 +114,6 @@ impl S2 {
     /// Returns [`ProvisionResult::Created`] with the basin info if the basin was newly
     /// created, [`ProvisionResult::Updated`] if its config changed, or
     /// [`ProvisionResult::Noop`] if no write was needed.
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
     pub async fn ensure_basin(
         &self,
         input: EnsureBasinInput,
@@ -330,8 +328,6 @@ impl S2Basin {
     /// Returns [`ProvisionResult::Created`] with the stream info if the stream was newly
     /// created, [`ProvisionResult::Updated`] if its config changed, or
     /// [`ProvisionResult::Noop`] if no write was needed.
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
     pub async fn ensure_stream(
         &self,
         input: EnsureStreamInput,
