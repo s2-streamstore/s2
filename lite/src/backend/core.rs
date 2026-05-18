@@ -8,7 +8,7 @@ use futures::{
 };
 use s2_common::{
     encryption::{EncryptionAlgorithm, EncryptionSpec},
-    record::{NonZeroSeqNum, SeqNum, StreamPosition, Timestamp},
+    record::{NonZeroSeqNum, SeqNum, StreamPosition},
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
@@ -325,34 +325,22 @@ async fn derive_tail_position(
     db: &slatedb::Db,
     stream_id: StreamId,
 ) -> Result<StreamPosition, StorageError> {
-    let lower_bound = kv::stream_record_timestamp::ser_key(stream_id, StreamPosition::MIN);
-    let upper_bound = kv::stream_record_timestamp::ser_key(
-        stream_id,
-        StreamPosition {
-            seq_num: SeqNum::MAX,
-            timestamp: Timestamp::MAX,
-        },
-    );
+    let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
     let scan_opts = ScanOptions {
         durability_filter: DurabilityLevel::Remote,
         order: IterationOrder::Descending,
         ..Default::default()
     };
-    let mut it = db
-        .scan_with_options(lower_bound..upper_bound, &scan_opts)
-        .await?;
+    let mut it = db.scan_prefix_with_options(prefix, &scan_opts).await?;
     if let Some(kv_entry) = it.next().await? {
-        if kv_entry.key.first().copied() == Some(kv::KeyType::StreamRecordTimestamp as u8) {
-            let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv_entry.key)?;
-            if deser_stream_id == stream_id {
-                kv::stream_record_timestamp::deser_value(kv_entry.value)?;
-                // Found the last record — tail is one past it.
-                return Ok(StreamPosition {
-                    seq_num: pos.seq_num + 1,
-                    timestamp: pos.timestamp,
-                });
-            }
-        }
+        let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv_entry.key)?;
+        debug_assert_eq!(deser_stream_id, stream_id);
+        kv::stream_record_timestamp::deser_value(kv_entry.value)?;
+        // Found the last record — tail is one past it.
+        return Ok(StreamPosition {
+            seq_num: pos.seq_num + 1,
+            timestamp: pos.timestamp,
+        });
     }
 
     let read_opts = ReadOptions {
