@@ -2,8 +2,6 @@ use futures::StreamExt;
 
 #[cfg(feature = "_hidden")]
 use crate::client::Connect;
-#[cfg(feature = "_hidden")]
-use crate::types::{EnsureBasinInput, EnsureStreamInput, ProvisionResult};
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
     producer::{Producer, ProducerConfig},
@@ -11,11 +9,12 @@ use crate::{
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
-        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput,
-        ListBasinsInput, ListStreamsInput, Metric, Page, ReadBatch, ReadInput,
-        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo,
-        StreamName, StreamPosition, Streaming,
+        EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
+        GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
+        ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
+        ListStreamsInput, Metric, Page, ReadBatch, ReadInput, ReconfigureBasinInput,
+        ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo, StreamName,
+        StreamPosition, Streaming,
     },
 };
 
@@ -107,25 +106,22 @@ impl S2 {
 
     /// Ensure a basin.
     ///
-    /// Creates the basin if it doesn't exist, or ensures its config exactly matches the
-    /// provided configuration after defaults are applied. Uses HTTP PUT semantics — always
-    /// idempotent.
+    /// If the basin doesn't exist, creates the basin with specified configuration.
     ///
-    /// Returns [`ProvisionResult::Created`] with the basin info if the basin was newly
-    /// created, [`ProvisionResult::Updated`] if its config changed, or
-    /// [`ProvisionResult::Noop`] if no write was needed.
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
+    /// If the basin already exists:
+    /// - Its configuration is updated to the specified configuration, if different.
+    /// - Its configuration is unchanged, if the specified configuration is same.
     pub async fn ensure_basin(
         &self,
         input: EnsureBasinInput,
-    ) -> Result<ProvisionResult<BasinInfo>, S2Error> {
+    ) -> Result<EnsureOutput<BasinInfo>, S2Error> {
         let (name, request) = input.into();
         Ok(self
             .client
             .ensure_basin(name, request)
             .await?
-            .try_map(BasinInfo::try_from)?)
+            .try_map(BasinInfo::try_from)?
+            .into())
     }
 
     /// Get basin configuration.
@@ -323,25 +319,22 @@ impl S2Basin {
 
     /// Ensure a stream.
     ///
-    /// Creates the stream if it doesn't exist, or ensures its config exactly matches the provided
-    /// configuration after basin defaults and global defaults are applied. Uses HTTP PUT semantics
-    /// and is always idempotent.
+    /// If the stream doesn't exist, creates the stream with specified configuration.
     ///
-    /// Returns [`ProvisionResult::Created`] with the stream info if the stream was newly
-    /// created, [`ProvisionResult::Updated`] if its config changed, or
-    /// [`ProvisionResult::Noop`] if no write was needed.
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
+    /// If the stream already exists:
+    /// - Its configuration is updated to the specified configuration, if different.
+    /// - Its configuration is unchanged, if the specified configuration is same.
     pub async fn ensure_stream(
         &self,
         input: EnsureStreamInput,
-    ) -> Result<ProvisionResult<StreamInfo>, S2Error> {
+    ) -> Result<EnsureOutput<StreamInfo>, S2Error> {
         let (name, config) = input.into();
         Ok(self
             .client
             .ensure_stream(name, config)
             .await?
-            .try_map(StreamInfo::try_from)?)
+            .try_map(StreamInfo::try_from)?
+            .into())
     }
 
     /// Get stream configuration.

@@ -42,10 +42,6 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
-/// Result of provisioning a resource.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
-pub use s2_common::types::resources::ProvisionResult;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -57,7 +53,9 @@ pub use s2_common::types::stream::StreamNameStartAfter;
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
-use s2_common::{maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH};
+use s2_common::{
+    maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH, types::resources::ProvisionResult,
+};
 use secrecy::SecretString;
 
 use crate::api::{ApiError, ApiErrorResponse};
@@ -779,7 +777,7 @@ impl From<StreamConfig> for api::config::StreamConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 /// Configuration for a basin.
 pub struct BasinConfig {
@@ -905,7 +903,7 @@ pub struct CreateBasinInput {
     pub config: Option<BasinConfig>,
     /// Scope of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1).
+    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
     pub scope: Option<BasinScope>,
     idempotency_token: String,
 }
@@ -954,22 +952,19 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
 pub struct EnsureBasinInput {
     /// Basin name.
     pub name: BasinName,
-    /// Desired configuration for the basin.
+    /// Configuration for the basin.
     ///
-    /// If `None`, the basin is ensured with the default configuration.
-    config: Option<api::config::BasinConfig>,
+    /// See [`BasinConfig`] for defaults.
+    pub config: Option<BasinConfig>,
     /// Scope of the basin.
     ///
     /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
     pub scope: Option<BasinScope>,
 }
 
-#[cfg(feature = "_hidden")]
 impl EnsureBasinInput {
     /// Create a new [`EnsureBasinInput`] with the given basin name.
     pub fn new(name: BasinName) -> Self {
@@ -980,10 +975,10 @@ impl EnsureBasinInput {
         }
     }
 
-    /// Set the desired configuration for the basin.
-    pub fn with_config(self, config: impl Into<s2_api::v1::config::BasinConfig>) -> Self {
+    /// Set the configuration for the basin.
+    pub fn with_config(self, config: BasinConfig) -> Self {
         Self {
-            config: Some(config.into()),
+            config: Some(config),
             ..self
         }
     }
@@ -997,19 +992,40 @@ impl EnsureBasinInput {
     }
 }
 
-#[cfg(feature = "_hidden")]
 impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
     fn from(value: EnsureBasinInput) -> Self {
         let config = value.config;
         let request = if config.is_some() || value.scope.is_some() {
             Some(api::basin::EnsureBasinRequest {
-                config,
+                config: config.map(Into::into),
                 scope: value.scope.map(Into::into),
             })
         } else {
             None
         };
         (value.name, request)
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Output for `ensure` operations ([`ensure_basin`](crate::S2::ensure_basin),
+/// [`ensure_stream`](crate::S2Basin::ensure_stream)).
+pub enum EnsureOutput<T> {
+    /// Resource created.
+    Created(T),
+    /// Resource already existed, and its config was updated.
+    ConfigUpdated(T),
+    /// Resource already existed, and its config is unchanged.
+    ConfigUnchanged(T),
+}
+
+impl<T> From<ProvisionResult<T>> for EnsureOutput<T> {
+    fn from(result: ProvisionResult<T>) -> Self {
+        match result {
+            ProvisionResult::Created(info) => EnsureOutput::Created(info),
+            ProvisionResult::Updated(info) => EnsureOutput::ConfigUpdated(info),
+            ProvisionResult::Noop(info) => EnsureOutput::ConfigUnchanged(info),
+        }
     }
 }
 
@@ -1073,7 +1089,7 @@ impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Input for [`S2::list_all_basins`](crate::S2::list_all_basins).
+/// Input for [`list_all_basins`](crate::S2::list_all_basins) operation.
 pub struct ListAllBasinsInput {
     /// Filter basins whose names begin with this value.
     ///
@@ -1456,7 +1472,7 @@ impl From<ListAccessTokensInput> for api::access::ListAccessTokensRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Input for [`S2::list_all_access_tokens`](crate::S2::list_all_access_tokens).
+/// Input for [`list_all_access_tokens`](crate::S2::list_all_access_tokens) operation.
 pub struct ListAllAccessTokensInput {
     /// Filter access tokens whose IDs begin with this value.
     ///
@@ -2550,7 +2566,7 @@ impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Input for [`S2Basin::list_all_streams`](crate::S2Basin::list_all_streams).
+/// Input for [`list_all_streams`](crate::S2Basin::list_all_streams) operation.
 pub struct ListAllStreamsInput {
     /// Filter streams whose names begin with this value.
     ///
@@ -2672,39 +2688,33 @@ impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
 #[non_exhaustive]
 /// Input for [`ensure_stream`](crate::S2Basin::ensure_stream)
 /// operation.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
 pub struct EnsureStreamInput {
     /// Stream name.
     pub name: StreamName,
-    /// Desired stream configuration before basin defaults are applied.
+    /// Configuration for the stream.
     ///
-    /// Missing fields are filled from the current basin default stream configuration and then
-    /// global defaults before comparing or writing. If `None`, the stream is ensured using those
-    /// defaults.
-    config: Option<api::config::StreamConfig>,
+    /// See [`StreamConfig`] for defaults.
+    pub config: Option<StreamConfig>,
 }
 
-#[cfg(feature = "_hidden")]
 impl EnsureStreamInput {
     /// Create a new [`EnsureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
         Self { name, config: None }
     }
 
-    /// Set the desired configuration for the stream.
-    pub fn with_config(self, config: impl Into<s2_api::v1::config::StreamConfig>) -> Self {
+    /// Set the configuration for the stream.
+    pub fn with_config(self, config: StreamConfig) -> Self {
         Self {
-            config: Some(config.into()),
+            config: Some(config),
             ..self
         }
     }
 }
 
-#[cfg(feature = "_hidden")]
 impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
     fn from(value: EnsureStreamInput) -> Self {
-        (value.name, value.config)
+        (value.name, value.config.map(Into::into))
     }
 }
 

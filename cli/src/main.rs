@@ -143,7 +143,7 @@ async fn run() -> Result<(), CliError> {
     }
 
     if let Command::Apply(ApplyArgs { schema: true, .. }) = &command {
-        let schema = s2_lite::init::json_schema();
+        let schema = s2_common::resource_spec::json_schema();
         println!(
             "{}",
             serde_json::to_string_pretty(&schema).expect("valid schema")

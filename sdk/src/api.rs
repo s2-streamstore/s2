@@ -1,5 +1,14 @@
 use std::{ops::Deref, pin::Pin, sync::Arc, time::Duration};
 
+use crate::{
+    client::{self, StreamingResponse, UnaryResponse},
+    frame_signal::FrameSignal,
+    retry::{RetryBackoff, RetryBackoffBuilder},
+    types::{
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
+        RetryConfig, S2Config, S2Endpoints, StreamName,
+    },
+};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -9,14 +18,14 @@ use http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, InvalidHeaderValue},
 };
 use prost::{self, Message};
-#[cfg(feature = "_hidden")]
-use s2_api::v1::basin::EnsureBasinRequest;
 use s2_api::v1::{
     access::{
         AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
         ListAccessTokensResponse,
     },
-    basin::{BasinInfo, CreateBasinRequest, ListBasinsRequest, ListBasinsResponse},
+    basin::{
+        BasinInfo, CreateBasinRequest, EnsureBasinRequest, ListBasinsRequest, ListBasinsResponse,
+    },
     config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration},
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
@@ -30,23 +39,12 @@ use s2_api::v1::{
 };
 use s2_common::{
     encryption::S2_ENCRYPTION_KEY_HEADER, types::resources::PROVISION_RESULT_HEADER,
+    types::resources::ProvisionResult,
 };
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 use url::Url;
-
-use crate::{
-    client::{self, StreamingResponse, UnaryResponse},
-    frame_signal::FrameSignal,
-    retry::{RetryBackoff, RetryBackoffBuilder},
-    types::{
-        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
-        RetryConfig, S2Config, S2Endpoints, StreamName,
-    },
-};
-#[cfg(feature = "_hidden")]
-use crate::types::ProvisionResult;
 
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
@@ -54,24 +52,6 @@ const ACCEPT_PROTO: &str = "application/protobuf";
 const S2_REQUEST_TOKEN: &str = "s2-request-token";
 const S2_BASIN: &str = "s2-basin";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
-
-#[cfg(feature = "_hidden")]
-fn provision_result_from_response<T>(
-    status: StatusCode,
-    headers: &HeaderMap,
-    value: T,
-) -> ProvisionResult<T> {
-    match headers
-        .get(&PROVISION_RESULT_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        Some("created") => ProvisionResult::Created(value),
-        Some("noop") => ProvisionResult::Noop(value),
-        Some("updated") => ProvisionResult::Updated(value),
-        _ if status == StatusCode::CREATED => ProvisionResult::Created(value),
-        _ => ProvisionResult::Updated(value),
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct AccountClient {
@@ -166,7 +146,6 @@ impl AccountClient {
         Ok(response.json::<BasinConfig>()?)
     }
 
-    #[cfg(feature = "_hidden")]
     pub async fn ensure_basin(
         &self,
         name: BasinName,
@@ -179,9 +158,13 @@ impl AccountClient {
         };
         let response = self.request(request).send().await?;
         let status = response.status();
-        let result = provision_result_from_response(status, response.headers(), ());
+        let provision_result_header_value = provision_result_header_value(&response);
         let info = response.json::<BasinInfo>()?;
-        Ok(result.map(|()| info))
+        Ok(provision_result_from_parts(
+            status,
+            provision_result_header_value.as_deref(),
+            info,
+        ))
     }
 
     pub async fn delete_basin(
@@ -322,7 +305,6 @@ impl BasinClient {
         Ok(response.json::<StreamConfig>()?)
     }
 
-    #[cfg(feature = "_hidden")]
     pub async fn ensure_stream(
         &self,
         name: StreamName,
@@ -337,9 +319,13 @@ impl BasinClient {
         };
         let response = self.request(request).send().await?;
         let status = response.status();
-        let result = provision_result_from_response(status, response.headers(), ());
+        let provision_result_header_value = provision_result_header_value(&response);
         let info = response.json::<StreamInfo>()?;
-        Ok(result.map(|()| info))
+        Ok(provision_result_from_parts(
+            status,
+            provision_result_header_value.as_deref(),
+            info,
+        ))
     }
 
     pub async fn delete_stream(
@@ -905,7 +891,6 @@ impl BaseClient {
             .compression(self.compression)
     }
 
-    #[cfg(feature = "_hidden")]
     pub fn put(&self, url: Url) -> client::RequestBuilder {
         client::RequestBuilder::put(url)
             .timeout(self.request_timeout)
@@ -1203,6 +1188,28 @@ impl IgnoreNotFound for Result<UnaryResponse, ApiError> {
             Err(ApiError::Server(StatusCode::NOT_FOUND, _)) if enabled => Ok(()),
             Err(err) => Err(err),
         }
+    }
+}
+
+fn provision_result_header_value(response: &UnaryResponse) -> Option<String> {
+    response
+        .headers()
+        .get(&PROVISION_RESULT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn provision_result_from_parts<T>(
+    status: StatusCode,
+    header_value: Option<&str>,
+    info: T,
+) -> ProvisionResult<T> {
+    match header_value {
+        Some("created") => ProvisionResult::Created(info),
+        Some("noop") => ProvisionResult::Noop(info),
+        Some("updated") => ProvisionResult::Updated(info),
+        _ if status == StatusCode::CREATED => ProvisionResult::Created(info),
+        _ => ProvisionResult::Updated(info),
     }
 }
 

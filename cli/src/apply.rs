@@ -5,30 +5,172 @@ use std::path::Path;
 use colored::Colorize;
 use s2_common::{
     encryption::EncryptionAlgorithm,
+    resource_spec::{
+        self, BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec,
+        StorageClassSpec, StreamConfigSpec, TimestampingModeSpec, TimestampingSpec,
+    },
     types::{
         basin::BasinName,
         config::{
-            BasinConfig, OptionalStreamConfig, RetentionPolicy, StorageClass, StreamConfig,
+            BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
+            OptionalTimestampingConfig, RetentionPolicy, StorageClass, StreamConfig,
             TimestampingMode,
         },
         stream::StreamName,
     },
 };
-use s2_lite::init::{BasinConfigSpec, ResourcesSpec, StreamConfigSpec};
 
-fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> miette::Result<BasinConfig> {
-    let config: s2_api::v1::config::BasinConfig = config.into();
-    config
-        .try_into()
-        .map_err(|e| miette::miette!("invalid basin config returned by server: {}", e))
+fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> BasinConfig {
+    BasinConfig {
+        default_stream_config: config
+            .default_stream_config
+            .map(optional_stream_config_from_sdk)
+            .unwrap_or_default(),
+        stream_cipher: config.stream_cipher,
+        create_stream_on_append: config.create_stream_on_append,
+        create_stream_on_read: config.create_stream_on_read,
+    }
 }
 
-fn stream_config_from_sdk(config: s2_sdk::types::StreamConfig) -> miette::Result<StreamConfig> {
-    let config: s2_api::v1::config::StreamConfig = config.into();
-    let config: OptionalStreamConfig = config
-        .try_into()
-        .map_err(|e| miette::miette!("invalid stream config returned by server: {}", e))?;
-    Ok(config.into())
+fn stream_config_from_sdk(config: s2_sdk::types::StreamConfig) -> StreamConfig {
+    optional_stream_config_from_sdk(config).into()
+}
+
+fn optional_stream_config_from_sdk(config: s2_sdk::types::StreamConfig) -> OptionalStreamConfig {
+    OptionalStreamConfig {
+        storage_class: config.storage_class.map(storage_class_from_sdk),
+        retention_policy: config.retention_policy.map(retention_policy_from_sdk),
+        timestamping: config
+            .timestamping
+            .map(timestamping_from_sdk)
+            .unwrap_or_default(),
+        delete_on_empty: config
+            .delete_on_empty
+            .map(delete_on_empty_from_sdk)
+            .unwrap_or_default(),
+    }
+}
+
+fn storage_class_from_sdk(storage_class: s2_sdk::types::StorageClass) -> StorageClass {
+    match storage_class {
+        s2_sdk::types::StorageClass::Standard => StorageClass::Standard,
+        s2_sdk::types::StorageClass::Express => StorageClass::Express,
+    }
+}
+
+fn retention_policy_from_sdk(retention_policy: s2_sdk::types::RetentionPolicy) -> RetentionPolicy {
+    match retention_policy {
+        s2_sdk::types::RetentionPolicy::Age(secs) => {
+            RetentionPolicy::Age(std::time::Duration::from_secs(secs))
+        }
+        s2_sdk::types::RetentionPolicy::Infinite => RetentionPolicy::Infinite(),
+    }
+}
+
+fn timestamping_from_sdk(
+    timestamping: s2_sdk::types::TimestampingConfig,
+) -> OptionalTimestampingConfig {
+    OptionalTimestampingConfig {
+        mode: timestamping.mode.map(timestamping_mode_from_sdk),
+        uncapped: timestamping.uncapped,
+    }
+}
+
+fn timestamping_mode_from_sdk(mode: s2_sdk::types::TimestampingMode) -> TimestampingMode {
+    match mode {
+        s2_sdk::types::TimestampingMode::ClientPrefer => TimestampingMode::ClientPrefer,
+        s2_sdk::types::TimestampingMode::ClientRequire => TimestampingMode::ClientRequire,
+        s2_sdk::types::TimestampingMode::Arrival => TimestampingMode::Arrival,
+    }
+}
+
+fn delete_on_empty_from_sdk(
+    delete_on_empty: s2_sdk::types::DeleteOnEmptyConfig,
+) -> OptionalDeleteOnEmptyConfig {
+    OptionalDeleteOnEmptyConfig {
+        min_age: Some(std::time::Duration::from_secs(delete_on_empty.min_age_secs)),
+    }
+}
+
+fn basin_config_spec_to_sdk(config: BasinConfigSpec) -> s2_sdk::types::BasinConfig {
+    let mut sdk_config = s2_sdk::types::BasinConfig::new();
+    if let Some(default_stream_config) = config.default_stream_config {
+        sdk_config =
+            sdk_config.with_default_stream_config(stream_config_spec_to_sdk(default_stream_config));
+    }
+    if let Some(stream_cipher) = config.stream_cipher {
+        sdk_config = sdk_config.with_stream_cipher(stream_cipher.into());
+    }
+    if let Some(create_stream_on_append) = config.create_stream_on_append {
+        sdk_config = sdk_config.with_create_stream_on_append(create_stream_on_append);
+    }
+    if let Some(create_stream_on_read) = config.create_stream_on_read {
+        sdk_config = sdk_config.with_create_stream_on_read(create_stream_on_read);
+    }
+    sdk_config
+}
+
+fn stream_config_spec_to_sdk(config: StreamConfigSpec) -> s2_sdk::types::StreamConfig {
+    let mut sdk_config = s2_sdk::types::StreamConfig::new();
+    if let Some(storage_class) = config.storage_class {
+        sdk_config = sdk_config.with_storage_class(storage_class_spec_to_sdk(storage_class));
+    }
+    if let Some(retention_policy) = config.retention_policy {
+        sdk_config =
+            sdk_config.with_retention_policy(retention_policy_spec_to_sdk(retention_policy));
+    }
+    if let Some(timestamping) = config.timestamping {
+        sdk_config = sdk_config.with_timestamping(timestamping_spec_to_sdk(timestamping));
+    }
+    if let Some(delete_on_empty) = config.delete_on_empty {
+        sdk_config = sdk_config.with_delete_on_empty(delete_on_empty_spec_to_sdk(delete_on_empty));
+    }
+    sdk_config
+}
+
+fn storage_class_spec_to_sdk(storage_class: StorageClassSpec) -> s2_sdk::types::StorageClass {
+    match storage_class {
+        StorageClassSpec::Standard => s2_sdk::types::StorageClass::Standard,
+        StorageClassSpec::Express => s2_sdk::types::StorageClass::Express,
+    }
+}
+
+fn retention_policy_spec_to_sdk(
+    retention_policy: RetentionPolicySpec,
+) -> s2_sdk::types::RetentionPolicy {
+    match retention_policy.0 {
+        RetentionPolicy::Age(duration) => s2_sdk::types::RetentionPolicy::Age(duration.as_secs()),
+        RetentionPolicy::Infinite() => s2_sdk::types::RetentionPolicy::Infinite,
+    }
+}
+
+fn timestamping_spec_to_sdk(timestamping: TimestampingSpec) -> s2_sdk::types::TimestampingConfig {
+    let mut sdk_config = s2_sdk::types::TimestampingConfig::new();
+    if let Some(mode) = timestamping.mode {
+        sdk_config = sdk_config.with_mode(timestamping_mode_spec_to_sdk(mode));
+    }
+    if let Some(uncapped) = timestamping.uncapped {
+        sdk_config = sdk_config.with_uncapped(uncapped);
+    }
+    sdk_config
+}
+
+fn timestamping_mode_spec_to_sdk(mode: TimestampingModeSpec) -> s2_sdk::types::TimestampingMode {
+    match mode {
+        TimestampingModeSpec::ClientPrefer => s2_sdk::types::TimestampingMode::ClientPrefer,
+        TimestampingModeSpec::ClientRequire => s2_sdk::types::TimestampingMode::ClientRequire,
+        TimestampingModeSpec::Arrival => s2_sdk::types::TimestampingMode::Arrival,
+    }
+}
+
+fn delete_on_empty_spec_to_sdk(
+    delete_on_empty: DeleteOnEmptySpec,
+) -> s2_sdk::types::DeleteOnEmptyConfig {
+    let mut sdk_config = s2_sdk::types::DeleteOnEmptyConfig::new();
+    if let Some(min_age) = delete_on_empty.min_age {
+        sdk_config = sdk_config.with_min_age(min_age.0);
+    }
+    sdk_config
 }
 
 fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
@@ -39,7 +181,7 @@ fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
 }
 
 pub fn validate(spec: &ResourcesSpec) -> miette::Result<()> {
-    s2_lite::init::validate(spec).map_err(|e| miette::miette!("{}", e))
+    resource_spec::validate(spec).map_err(|e| miette::miette!("{}", e))
 }
 
 pub fn load(path: &Path) -> miette::Result<ResourcesSpec> {
@@ -78,21 +220,24 @@ async fn apply_basin(
 ) -> miette::Result<()> {
     let mut input = s2_sdk::types::EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        input = input.with_config(BasinConfig::from(c));
+        input = input.with_config(basin_config_spec_to_sdk(c));
     }
     match s2
         .ensure_basin(input)
         .await
         .map_err(|e| miette::miette!("failed to apply basin {:?}: {}", basin.as_ref(), e))?
     {
-        s2_sdk::types::ProvisionResult::Created(_) => {
-            eprintln!("{}", format!("  basin {basin}").green().bold());
+        s2_sdk::types::EnsureOutput::Created(_) => {
+            eprintln!("{}", format!("  basin {basin} (created)").green().bold());
         }
-        s2_sdk::types::ProvisionResult::Updated(_) => {
-            eprintln!("{}", format!("  basin {basin} (updated)").yellow().bold());
+        s2_sdk::types::EnsureOutput::ConfigUpdated(_) => {
+            eprintln!(
+                "{}",
+                format!("  basin {basin} (config updated)").yellow().bold()
+            );
         }
-        s2_sdk::types::ProvisionResult::Noop(_) => {
-            eprintln!("{}", format!("  basin {basin} (unchanged)").dimmed());
+        s2_sdk::types::EnsureOutput::ConfigUnchanged(_) => {
+            eprintln!("{}", format!("  basin {basin} (config unchanged)").dimmed());
         }
     }
     Ok(())
@@ -108,7 +253,7 @@ async fn apply_stream(
 
     let mut input = s2_sdk::types::EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        input = input.with_config(OptionalStreamConfig::from(c));
+        input = input.with_config(stream_config_spec_to_sdk(c));
     }
     match basin_client.ensure_stream(input).await.map_err(|e| {
         miette::miette!(
@@ -118,21 +263,26 @@ async fn apply_stream(
             e
         )
     })? {
-        s2_sdk::types::ProvisionResult::Created(_) => {
-            eprintln!("{}", format!("  stream {basin}/{stream}").green().bold());
-        }
-        s2_sdk::types::ProvisionResult::Updated(_) => {
+        s2_sdk::types::EnsureOutput::Created(_) => {
             eprintln!(
                 "{}",
-                format!("  stream {basin}/{stream} (updated)")
+                format!("  stream {basin}/{stream} (created)")
+                    .green()
+                    .bold()
+            );
+        }
+        s2_sdk::types::EnsureOutput::ConfigUpdated(_) => {
+            eprintln!(
+                "{}",
+                format!("  stream {basin}/{stream} (config updated)")
                     .yellow()
                     .bold()
             );
         }
-        s2_sdk::types::ProvisionResult::Noop(_) => {
+        s2_sdk::types::EnsureOutput::ConfigUnchanged(_) => {
             eprintln!(
                 "{}",
-                format!("  stream {basin}/{stream} (unchanged)").dimmed()
+                format!("  stream {basin}/{stream} (config unchanged)").dimmed()
             );
         }
     }
@@ -435,7 +585,7 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()>
 
         let basin_action = match s2.get_basin_config(basin.clone()).await {
             Ok(existing) => {
-                let existing = basin_config_from_sdk(existing)?;
+                let existing = basin_config_from_sdk(existing);
                 let diffs = diff_basin_config(&existing, &desired_basin_config);
                 if diffs.is_empty() {
                     ResourceAction::Unchanged
@@ -471,7 +621,7 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()>
 
             let stream_action = match basin_client.get_stream_config(stream.clone()).await {
                 Ok(existing) => {
-                    let existing = stream_config_from_sdk(existing)?;
+                    let existing = stream_config_from_sdk(existing);
                     let desired_stream_config = stream_spec
                         .config
                         .clone()

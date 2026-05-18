@@ -33,7 +33,6 @@ dashmap = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
-humantime = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }
@@ -44,7 +43,6 @@ rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true, features = ["axum"] }
 s2-common = { workspace = true, features = ["clap"] }
-schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "zstd"] }

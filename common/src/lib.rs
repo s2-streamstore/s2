@@ -8,4 +8,5 @@ pub mod http;
 pub mod maybe;
 pub mod read_extent;
 pub mod record;
+pub mod resource_spec;
 pub mod types;
