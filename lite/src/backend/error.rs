@@ -457,6 +457,8 @@ pub enum ReconfigureStreamError {
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
+    #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),

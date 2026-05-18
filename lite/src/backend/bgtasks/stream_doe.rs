@@ -15,7 +15,7 @@ use crate::{
         Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
         kv::{self, timestamp::TimestampSecs},
-        streamer::{doe_arm_delay, retention_age_or_zero},
+        streamer::doe_arm_delay,
     },
     stream_id::StreamId,
 };
@@ -160,11 +160,13 @@ impl Backend {
         if meta.deleted_at.is_some() {
             return Ok(());
         }
-        let Some(min_age) = meta.config.delete_on_empty.min_age.filter(|d| !d.is_zero()) else {
+        let Some(min_age) = meta.config.delete_on_empty.min_age() else {
             return Ok(());
         };
-        let deadline =
-            TimestampSecs::after(doe_arm_delay(retention_age_or_zero(&meta.config), min_age));
+        let deadline = TimestampSecs::after(doe_arm_delay(
+            meta.config.retention_policy.age().unwrap_or_default(),
+            min_age,
+        ));
         self.db
             .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
@@ -185,7 +187,7 @@ mod tests {
         types::{
             basin::BasinName,
             config::{
-                DeleteOnEmptyReconfiguration, OptionalStreamConfig, RetentionPolicy,
+                BasinConfig, DeleteOnEmptyReconfiguration, OptionalStreamConfig, RetentionPolicy,
                 StreamReconfiguration,
             },
             stream::StreamName,
@@ -211,7 +213,7 @@ mod tests {
         created_at: OffsetDateTime,
     ) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
-            config,
+            config: config.into(),
             cipher: None,
             created_at,
             deleted_at: None,
@@ -230,6 +232,19 @@ mod tests {
         meta: kv::stream_meta::StreamMeta,
     ) -> StreamId {
         let stream_id = StreamId::new(basin, stream);
+        backend
+            .db
+            .put(
+                kv::basin_meta::ser_key(basin),
+                kv::basin_meta::ser_value(&kv::basin_meta::BasinMeta {
+                    config: BasinConfig::default(),
+                    created_at: OffsetDateTime::now_utc(),
+                    deleted_at: None,
+                    creation_idempotency_key: None,
+                }),
+            )
+            .await
+            .unwrap();
         backend
             .db
             .put(
