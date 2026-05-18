@@ -140,7 +140,6 @@ impl Backend {
     #[instrument(ret, err, skip(self))]
     async fn stream_has_records(&self, stream_id: StreamId) -> Result<bool, StorageError> {
         let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
-        // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
         let mut it = self.db.scan_prefix(prefix).await?;
         let Some(kv) = it.next().await? else {
             return Ok(false);
