@@ -908,10 +908,11 @@ async fn db_submit_append(
         kv::stream_tail_position::ser_key(stream_id),
         kv::stream_tail_position::ser_value(next_pos(&records), write_timestamp_secs),
     );
-    static WRITE_OPTS: WriteOptions = WriteOptions {
+    let write_opts = WriteOptions {
         await_durable: false,
+        ..Default::default()
     };
-    let write_handle = db.write_with_options(wb, &WRITE_OPTS).await?;
+    let write_handle = db.write_with_options(wb, &write_opts).await?;
     Ok(InFlightAppend {
         db_seq: write_handle.seqnum(),
         records,

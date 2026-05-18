@@ -8,8 +8,8 @@ use s2_common::{
     },
 };
 use slatedb::{
-    IsolationLevel, IterationOrder,
-    config::{DurabilityLevel, ScanOptions, WriteOptions},
+    IsolationLevel,
+    config::{DurabilityLevel, ScanOptions},
 };
 use time::OffsetDateTime;
 
@@ -38,15 +38,11 @@ impl Backend {
             return Ok(Page::new_empty());
         }
 
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-            order: IterationOrder::Ascending,
+            ..Default::default()
         };
-        let mut it = self.db.scan_with_options(key_range, &SCAN_OPTS).await?;
+        let mut it = self.db.scan_with_options(key_range, &scan_opts).await?;
 
         let mut basins = Vec::with_capacity(limit.as_usize());
         let mut has_more = false;
@@ -140,10 +136,7 @@ impl Backend {
             let meta = outcome.inner();
             txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 
-            static WRITE_OPTS: WriteOptions = WriteOptions {
-                await_durable: true,
-            };
-            txn.commit_with_options(&WRITE_OPTS).await?;
+            txn.commit().await?;
         }
 
         Ok(outcome.map(|meta| BasinInfo {
@@ -188,10 +181,7 @@ impl Backend {
 
         txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
 
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        txn.commit_with_options(&WRITE_OPTS).await?;
+        txn.commit().await?;
 
         Ok(meta.config)
     }
@@ -209,10 +199,7 @@ impl Backend {
                 kv::basin_deletion_pending::ser_key(&basin),
                 kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
             )?;
-            static WRITE_OPTS: WriteOptions = WriteOptions {
-                await_durable: true,
-            };
-            txn.commit_with_options(&WRITE_OPTS).await?;
+            txn.commit().await?;
             self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
         }
         Ok(())

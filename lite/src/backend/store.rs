@@ -20,14 +20,13 @@ impl Backend {
         key: K,
         deser: impl FnOnce(Bytes) -> Result<V, kv::DeserializationError>,
     ) -> Result<Option<V>, StorageError> {
-        static READ_OPTS: ReadOptions = ReadOptions {
+        let read_opts = ReadOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            cache_blocks: true,
+            ..Default::default()
         };
         let value = self
             .db
-            .get_with_options(key, &READ_OPTS)
+            .get_with_options(key, &read_opts)
             .await?
             .map(deser)
             .transpose()?;
@@ -40,15 +39,6 @@ pub(super) async fn db_txn_get<K: AsRef<[u8]> + Send, V>(
     key: K,
     deser: impl FnOnce(Bytes) -> Result<V, kv::DeserializationError>,
 ) -> Result<Option<V>, StorageError> {
-    static READ_OPTS: ReadOptions = ReadOptions {
-        durability_filter: DurabilityLevel::Memory,
-        dirty: false,
-        cache_blocks: true,
-    };
-    let value = txn
-        .get_with_options(key, &READ_OPTS)
-        .await?
-        .map(deser)
-        .transpose()?;
+    let value = txn.get(key).await?.map(deser).transpose()?;
     Ok(value)
 }
