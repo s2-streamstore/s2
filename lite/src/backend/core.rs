@@ -112,8 +112,6 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let (tail_pos, _write_ts) = tail_pos;
-
         let fencing_token = fencing_token.unwrap_or_default();
 
         if trim_point == Some(..NonZeroSeqNum::MAX) {
@@ -143,14 +141,10 @@ impl Backend {
 
     /// Derive the stream tail position by reverse-scanning lightweight timestamp index keys.
     /// If no records exist, falls back to the explicit `StreamTailPosition` marker key.
-    ///
-    /// Returns `(tail_position, Option<write_timestamp_secs>)`.
-    /// - `write_timestamp_secs` is `Some` only when read from the marker key (empty stream).
-    /// - `write_timestamp_secs` is `None` when derived from the last record.
     async fn derive_tail_position(
         &self,
         stream_id: StreamId,
-    ) -> Result<(StreamPosition, Option<kv::timestamp::TimestampSecs>), StorageError> {
+    ) -> Result<StreamPosition, StorageError> {
         let lower_bound = kv::stream_record_timestamp::ser_key(stream_id, StreamPosition::MIN);
         let upper_bound = kv::stream_record_timestamp::ser_key(
             stream_id,
@@ -178,24 +172,24 @@ impl Backend {
                         seq_num: pos.seq_num + 1,
                         timestamp: pos.timestamp,
                     };
-                    return Ok((tail, None));
+                    return Ok(tail);
                 }
             }
         }
 
         // No records found — fall back to the explicit tail position marker.
-        if let Some((pos, write_ts)) = self
+        if let Some((pos, _)) = self
             .db_get(
                 kv::stream_tail_position::ser_key(stream_id),
                 kv::stream_tail_position::deser_value,
             )
             .await?
         {
-            return Ok((pos, Some(write_ts)));
+            return Ok(pos);
         }
 
         // No marker either — stream starts at MIN.
-        Ok((StreamPosition::MIN, None))
+        Ok(StreamPosition::MIN)
     }
 
     fn streamer_client_slot(&self, basin: &BasinName, stream: &StreamName) -> StreamerClientSlot {
@@ -458,11 +452,9 @@ mod tests {
         backend.db.write(wb).await.unwrap();
 
         // derive_tail_position should find the record and derive tail as seq_num=2.
-        let (tail_pos, write_ts) = backend.derive_tail_position(stream_id).await.unwrap();
+        let tail_pos = backend.derive_tail_position(stream_id).await.unwrap();
         assert_eq!(tail_pos.seq_num, 2);
         assert_eq!(tail_pos.timestamp, 123);
-        // Derived from records, not from marker key.
-        assert!(write_ts.is_none());
     }
 
     #[tokio::test]
