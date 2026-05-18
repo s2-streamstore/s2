@@ -3,10 +3,7 @@ use std::time::Duration;
 use futures::{StreamExt, stream};
 use indexmap::IndexMap;
 use itertools::Itertools;
-use s2_common::{
-    record::{SeqNum, StreamPosition, Timestamp},
-    types::resources::Page,
-};
+use s2_common::types::resources::Page;
 use slatedb::{
     WriteBatch,
     config::{DurabilityLevel, ScanOptions},
@@ -142,23 +139,9 @@ impl Backend {
 
     #[instrument(ret, err, skip(self))]
     async fn stream_has_records(&self, stream_id: StreamId) -> Result<bool, StorageError> {
-        let start_key = kv::stream_record_timestamp::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: SeqNum::MIN,
-                timestamp: Timestamp::MIN,
-            },
-        );
-        // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
-        let mut it = self.db.scan(start_key..).await?;
-        let Some(kv) = it.next().await? else {
-            return Ok(false);
-        };
-        if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp as u8) {
-            return Ok(false);
-        }
-        let (candidate_stream_id, _pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
-        Ok(candidate_stream_id == stream_id)
+        let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
+        let mut it = self.db.scan_prefix(prefix).await?;
+        Ok(it.next().await?.is_some())
     }
 
     pub(super) async fn arm_doe_maybe(&self, stream_id: StreamId) -> Result<(), StorageError> {
