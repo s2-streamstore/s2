@@ -1,5 +1,6 @@
 use std::ops::RangeTo;
 
+use bytes::Bytes;
 use futures::{StreamExt, stream};
 use s2_common::{
     record::{NonZeroSeqNum, StreamPosition},
@@ -19,6 +20,11 @@ use crate::{
 const PENDING_LIST_LIMIT: usize = 128;
 const CONCURRENCY: usize = 4;
 const DELETE_BATCH_SIZE: usize = 10_000;
+
+struct PendingRecordDelete {
+    timestamp_key: Bytes,
+    pos: StreamPosition,
+}
 
 impl Backend {
     pub(super) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
@@ -67,22 +73,7 @@ impl Backend {
         trim_point: RangeTo<NonZeroSeqNum>,
     ) -> Result<(), StorageError> {
         let empty_tail_pos = self.delete_records(stream_id, trim_point).await?;
-        if trim_point.end < NonZeroSeqNum::MAX
-            && let Some(tail_pos) = empty_tail_pos
-        {
-            // Stream became empty due to trim — write a tail position marker so
-            // derive_tail_position() and DOE eligibility checks work correctly.
-            let write_ts = kv::timestamp::TimestampSecs::now();
-            let mut wb = WriteBatch::new();
-            wb.put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(tail_pos, write_ts),
-            );
-            let write_opts = WriteOptions {
-                await_durable: true,
-                ..Default::default()
-            };
-            self.db.write_with_options(wb, &write_opts).await?;
+        if trim_point.end < NonZeroSeqNum::MAX && empty_tail_pos.is_some() {
             self.arm_doe_maybe(stream_id).await?;
         }
         self.finalize_trim(stream_id, trim_point).await?;
@@ -104,40 +95,64 @@ impl Backend {
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
         let mut has_remaining_records = false;
-        let mut empty_tail_pos: Option<StreamPosition> = None;
+        // Keep one delete out of flushed batches so an empty trim can write
+        // the tail marker in the same batch that deletes the final record.
+        let mut pending_delete: Option<PendingRecordDelete> = None;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, stream_id);
             if pos.seq_num >= trim_point.end.get() {
                 has_remaining_records = true;
+                if let Some(pending) = pending_delete.take() {
+                    batch.delete(pending.timestamp_key);
+                    batch.delete(kv::stream_record_data::ser_key(stream_id, pending.pos));
+                    batch_size += 1;
+                }
                 break;
             }
-            batch.delete(kv.key);
-            batch.delete(kv::stream_record_data::ser_key(stream_id, pos));
-            let tail_pos = StreamPosition {
-                seq_num: pos.seq_num + 1,
-                timestamp: pos.timestamp,
+
+            let next_pending = PendingRecordDelete {
+                timestamp_key: kv.key,
+                pos,
             };
-            if match empty_tail_pos {
-                Some(current) => tail_pos.seq_num > current.seq_num,
-                None => true,
-            } {
-                empty_tail_pos = Some(tail_pos);
+            if let Some(pending) = pending_delete.replace(next_pending) {
+                batch.delete(pending.timestamp_key);
+                batch.delete(kv::stream_record_data::ser_key(stream_id, pending.pos));
+                batch_size += 1;
+                if batch_size >= DELETE_BATCH_SIZE {
+                    self.db.write(batch).await?;
+                    batch = WriteBatch::new();
+                    batch_size = 0;
+                }
             }
-            batch_size += 1;
-            if batch_size >= DELETE_BATCH_SIZE {
-                self.db.write(batch).await?;
-                batch = WriteBatch::new();
-                batch_size = 0;
-            }
-        }
-        if batch_size > 0 {
-            self.db.write(batch).await?;
         }
         if has_remaining_records {
+            if batch_size > 0 {
+                self.db.write(batch).await?;
+            }
             Ok(None)
+        } else if let Some(pending) = pending_delete {
+            let empty_tail_pos = StreamPosition {
+                seq_num: pending.pos.seq_num + 1,
+                timestamp: pending.pos.timestamp,
+            };
+            batch.delete(pending.timestamp_key);
+            batch.delete(kv::stream_record_data::ser_key(stream_id, pending.pos));
+            batch.put(
+                kv::stream_tail_position::ser_key(stream_id),
+                kv::stream_tail_position::ser_value(
+                    empty_tail_pos,
+                    kv::timestamp::TimestampSecs::now(),
+                ),
+            );
+            let write_opts = WriteOptions {
+                await_durable: true,
+                ..Default::default()
+            };
+            self.db.write_with_options(batch, &write_opts).await?;
+            Ok(Some(empty_tail_pos))
         } else {
-            Ok(empty_tail_pos)
+            Ok(None)
         }
     }
 
@@ -206,6 +221,68 @@ mod tests {
 
     fn trim_point(seq_num: SeqNum) -> RangeTo<NonZeroSeqNum> {
         ..NonZeroSeqNum::new(seq_num).expect("trim point must be non-zero")
+    }
+
+    #[tokio::test]
+    async fn delete_records_writes_tail_marker_before_returning_empty_tail() {
+        let backend = test_backend().await;
+        let stream_id: StreamId = [6u8; StreamId::LEN].into();
+        let metered = test_record();
+        let pos = StreamPosition {
+            seq_num: SeqNum::MIN,
+            timestamp: 5000,
+        };
+
+        backend
+            .db
+            .put(
+                kv::stream_record_data::ser_key(stream_id, pos),
+                kv::stream_record_data::ser_value(metered.as_ref()),
+            )
+            .await
+            .unwrap();
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(stream_id, pos),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .await
+            .unwrap();
+
+        let tail_pos = backend
+            .delete_records(stream_id, trim_point(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            tail_pos,
+            Some(StreamPosition {
+                seq_num: 1,
+                timestamp: 5000,
+            })
+        );
+
+        let data = backend
+            .db
+            .get(kv::stream_record_data::ser_key(stream_id, pos))
+            .await
+            .unwrap();
+        let timestamp = backend
+            .db
+            .get(kv::stream_record_timestamp::ser_key(stream_id, pos))
+            .await
+            .unwrap();
+        assert!(data.is_none());
+        assert!(timestamp.is_none());
+
+        let tail_bytes = backend
+            .db
+            .get(kv::stream_tail_position::ser_key(stream_id))
+            .await
+            .unwrap()
+            .expect("empty stream tail marker should be written");
+        let (marker_pos, _) = kv::stream_tail_position::deser_value(tail_bytes).unwrap();
+        assert_eq!(marker_pos, tail_pos.unwrap());
     }
 
     #[tokio::test]
