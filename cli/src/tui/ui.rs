@@ -4611,7 +4611,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             scope_spans.extend(render_text_input_with_cursor(
                 scope,
                 *selected == 1 && *editing,
-                "aws:us-east-1",
+                "server default",
                 CYAN,
                 *cursor,
             ));

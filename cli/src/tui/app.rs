@@ -3624,7 +3624,7 @@ impl App {
             KeyCode::Char('c') => {
                 self.input_mode = InputMode::CreateBasin {
                     name: String::new(),
-                    scope: "aws:us-east-1".to_owned(),
+                    scope: String::new(),
                     create_stream_on_append: false,
                     create_stream_on_read: false,
                     storage_class: None,
