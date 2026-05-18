@@ -3,21 +3,21 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use s2_common::{
-    encryption::{EncryptionMode, EncryptionSpec},
+    encryption::{EncryptionAlgorithm, EncryptionKey, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        resources::CreateMode,
-        stream::{
-            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StoredAppendInput,
-            StreamName,
-        },
+        resources::ProvisionMode,
+        stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName},
     },
 };
 use s2_lite::backend::Backend;
 use slatedb::{Db, config::Settings, object_store::memory::InMemory};
 use uuid::Uuid;
+
+const TEST_AEGIS256_KEY: [u8; 32] = [0x42; 32];
+const TEST_AES256_GCM_KEY: [u8; 32] = [0x24; 32];
 
 pub async fn create_in_memory_db() -> Db {
     let object_store = Arc::new(InMemory::new());
@@ -46,49 +46,64 @@ pub fn test_stream_name(suffix: &str) -> StreamName {
     format!("test-stream-{}", suffix).parse().unwrap()
 }
 
-pub fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
-    use s2_common::types::config::OptionalEncryptionConfig;
-    OptionalStreamConfig {
-        encryption: OptionalEncryptionConfig {
-            allowed_modes: Some(
-                [
-                    EncryptionMode::Plain,
-                    EncryptionMode::Aegis256,
-                    EncryptionMode::Aes256Gcm,
-                ]
-                .into(),
-            ),
-        },
-        ..Default::default()
-    }
-}
-
-pub fn all_encryption_modes_basin_config() -> BasinConfig {
+pub fn basin_config_with_stream_cipher(stream_cipher: EncryptionAlgorithm) -> BasinConfig {
     BasinConfig {
-        default_stream_config: all_encryption_modes_stream_config(),
-        ..Default::default()
-    }
-}
-
-pub fn aegis_only_encryption_stream_config() -> OptionalStreamConfig {
-    use s2_common::types::config::OptionalEncryptionConfig;
-    OptionalStreamConfig {
-        encryption: OptionalEncryptionConfig {
-            allowed_modes: Some([EncryptionMode::Aegis256].into()),
-        },
-        ..Default::default()
-    }
-}
-
-pub fn aegis_only_encryption_basin_config() -> BasinConfig {
-    BasinConfig {
-        default_stream_config: aegis_only_encryption_stream_config(),
+        default_stream_config: OptionalStreamConfig::default(),
+        stream_cipher: Some(stream_cipher),
         ..Default::default()
     }
 }
 
 pub fn aegis256_encryption_spec() -> EncryptionSpec {
-    EncryptionSpec::aegis256([0x42; 32])
+    EncryptionSpec::aegis256(TEST_AEGIS256_KEY)
+}
+
+pub fn aegis256_encryption_key() -> EncryptionKey {
+    EncryptionKey::new(TEST_AEGIS256_KEY)
+}
+
+pub fn aes256_gcm_encryption_key() -> EncryptionKey {
+    EncryptionKey::new(TEST_AES256_GCM_KEY)
+}
+
+pub fn encryption_key_for_spec(encryption: &EncryptionSpec) -> Option<EncryptionKey> {
+    match encryption {
+        EncryptionSpec::Plain => None,
+        // Test helpers use fixed key material for encrypted cases.
+        EncryptionSpec::Aegis256(_) => Some(aegis256_encryption_key()),
+        EncryptionSpec::Aes256Gcm(_) => Some(aes256_gcm_encryption_key()),
+    }
+}
+
+pub async fn setup_backend_for_encryption_spec(
+    basin_suffix: &str,
+    stream_suffix: &str,
+    encryption: &EncryptionSpec,
+) -> (Backend, BasinName, StreamName) {
+    match encryption {
+        EncryptionSpec::Plain => {
+            setup_backend_with_stream(basin_suffix, stream_suffix, OptionalStreamConfig::default())
+                .await
+        }
+        EncryptionSpec::Aegis256(_) => {
+            setup_backend_with_basin_and_stream(
+                basin_suffix,
+                stream_suffix,
+                basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+                OptionalStreamConfig::default(),
+            )
+            .await
+        }
+        EncryptionSpec::Aes256Gcm(_) => {
+            setup_backend_with_basin_and_stream(
+                basin_suffix,
+                stream_suffix,
+                basin_config_with_stream_cipher(EncryptionAlgorithm::Aes256Gcm),
+                OptionalStreamConfig::default(),
+            )
+            .await
+        }
+    }
 }
 
 pub fn create_test_record(body: Bytes) -> AppendRecord {
@@ -136,7 +151,13 @@ pub fn create_test_record_batch_with_timestamps(
 pub async fn create_test_basin(backend: &Backend, suffix: &str, config: BasinConfig) -> BasinName {
     let basin_name = test_basin_name(suffix);
     backend
-        .create_basin(basin_name.clone(), config, CreateMode::CreateOnly(None))
+        .provision_basin(
+            basin_name.clone(),
+            config,
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
+        )
         .await
         .expect("Failed to create basin");
     basin_name
@@ -150,11 +171,13 @@ pub async fn create_test_stream(
 ) -> StreamName {
     let stream_name = test_stream_name(suffix);
     backend
-        .create_stream(
+        .provision_stream(
             basin.clone(),
             stream_name.clone(),
             config,
-            CreateMode::CreateOnly(None),
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
         )
         .await
         .expect("Failed to create stream");
@@ -213,10 +236,11 @@ pub async fn append_payloads_with_encryption(
         match_seq_num: None,
         fencing_token: None,
     };
-    let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    let input = input.encrypt(encryption, stream_id.as_bytes());
     backend
-        .append(basin.clone(), stream.clone(), input)
+        .open_for_append(basin, stream, encryption_key_for_spec(encryption))
+        .await
+        .expect("Failed to open append handle")
+        .append(input)
         .await
         .expect("Failed to append payloads")
 }
@@ -233,19 +257,12 @@ pub async fn append_timestamped_payloads(
         fencing_token: None,
     };
     backend
-        .append(basin.clone(), stream.clone(), input)
+        .open_for_append(basin, stream, None)
+        .await
+        .expect("Failed to open append handle")
+        .append(input)
         .await
         .expect("Failed to append timestamped payloads")
-}
-
-pub fn encrypt_input_for_stream(
-    input: AppendInput,
-    basin: &BasinName,
-    stream: &StreamName,
-    encryption: &EncryptionSpec,
-) -> StoredAppendInput {
-    let stream_id = s2_lite::backend::StreamId::new(basin, stream);
-    input.encrypt(encryption, stream_id.as_bytes())
 }
 
 pub async fn append_repeat(

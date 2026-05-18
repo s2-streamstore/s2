@@ -8,26 +8,24 @@ use std::{
     time::Duration,
 };
 
-use enum_ordinalize::Ordinalize;
-use enumset::EnumSet;
 use futures::{
     FutureExt as _,
     future::{BoxFuture, OptionFuture},
 };
+use parking_lot::Mutex;
 use s2_common::{
-    encryption::EncryptionMode,
+    encryption::EncryptionAlgorithm,
     record::{
         CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
         StoredRecord, StoredSequencedRecord, StreamPosition, Timestamp,
     },
     types::{
         config::{
-            DEFAULT_ALLOWED_ENCRYPTION_MODES, OptionalStreamConfig, OptionalTimestampingConfig,
-            RetentionPolicy, TimestampingMode,
+            OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy, TimestampingMode,
         },
         stream::{
-            AppendAck, AppendInput, AppendRecord, AppendRecordParts, StoredAppendInput,
-            StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
+            AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
+            StoredAppendRecordParts,
         },
     },
 };
@@ -48,7 +46,7 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, EncryptionModeNotAllowedError, RequestDroppedError, StorageError,
+            DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
             StreamerMissingInActionError,
         },
         kv,
@@ -75,11 +73,11 @@ pub(super) fn retention_age_or_zero(config: &OptionalStreamConfig) -> Duration {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct StreamerId(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct StreamerGenerationId(u64);
 
-impl StreamerId {
-    fn next() -> Self {
+impl StreamerGenerationId {
+    pub(super) fn next() -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
@@ -105,10 +103,139 @@ struct DbSubmitAppendOptions {
     trim_point: Option<RangeTo<SeqNum>>,
 }
 
+#[derive(Debug, Default)]
+struct LeaseState {
+    active: usize,
+    closed: bool,
+}
+
+#[derive(Debug)]
+struct StreamerLeaseState {
+    state: Arc<Mutex<LeaseState>>,
+}
+
+impl StreamerLeaseState {
+    fn new() -> (Self, StreamerClientLeaseState) {
+        let state = Arc::new(Mutex::new(LeaseState::default()));
+        (
+            Self {
+                state: state.clone(),
+            },
+            StreamerClientLeaseState { state },
+        )
+    }
+
+    fn close_if_idle(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.closed {
+            return true;
+        }
+        if state.active == 0 {
+            state.closed = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for StreamerLeaseState {
+    fn drop(&mut self) {
+        self.state.lock().closed = true;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StreamerClientLeaseState {
+    state: Arc<Mutex<LeaseState>>,
+}
+
+pub(super) struct StreamerClientLeaseGuard {
+    state: Arc<Mutex<LeaseState>>,
+}
+
+impl Drop for StreamerClientLeaseGuard {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        assert!(state.active > 0, "lease count underflow");
+        state.active -= 1;
+    }
+}
+
+impl StreamerClientLeaseState {
+    fn try_acquire(&self) -> Result<StreamerClientLeaseGuard, StreamerMissingInActionError> {
+        {
+            let mut state = self.state.lock();
+            if state.closed {
+                return Err(StreamerMissingInActionError);
+            }
+            state.active += 1;
+        }
+        Ok(StreamerClientLeaseGuard {
+            state: self.state.clone(),
+        })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state.lock().closed
+    }
+}
+
+pub(super) struct GuardedStreamerClient {
+    client: StreamerClient,
+    _guard: StreamerClientLeaseGuard,
+}
+
+impl GuardedStreamerClient {
+    pub(super) fn stream_id(&self) -> StreamId {
+        self.client.stream_id
+    }
+
+    pub(super) fn cipher(&self) -> Option<EncryptionAlgorithm> {
+        self.client.cipher
+    }
+
+    pub(super) async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
+        self.client.check_tail().await
+    }
+
+    pub(super) async fn follow(
+        &self,
+        start_seq_num: SeqNum,
+    ) -> Result<
+        Result<broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>, StreamPosition>,
+        StreamerMissingInActionError,
+    > {
+        self.client.follow(start_seq_num).await
+    }
+
+    pub(super) async fn append_permit(
+        &self,
+        input: StoredAppendInput,
+    ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
+        self.client.append_permit(input).await
+    }
+
+    pub(super) async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
+        self.client.terminal_trim().await
+    }
+
+    pub(super) async fn terminal_trim_if_delete_on_empty_eligible(
+        &self,
+        pending: Vec<DeleteOnEmptyEntry>,
+    ) -> Result<bool, DeleteStreamError> {
+        self.client
+            .terminal_trim_if_delete_on_empty_eligible(pending)
+            .await
+    }
+}
+
 pub(super) struct Spawner {
+    pub generation_id: StreamerGenerationId,
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: OptionalStreamConfig,
+    pub cipher: Option<EncryptionAlgorithm>,
     pub tail: PersistedStreamTail,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
@@ -118,11 +245,16 @@ pub(super) struct Spawner {
 }
 
 impl Spawner {
-    pub fn spawn(self, on_exit: impl FnOnce(StreamerId) + Send + 'static) -> StreamerClient {
+    pub fn spawn(
+        self,
+        on_exit: impl FnOnce(StreamerGenerationId) + Send + 'static,
+    ) -> StreamerClient {
         let Self {
+            generation_id,
             db,
             stream_id,
             config,
+            cipher,
             tail,
             fencing_token,
             trim_point,
@@ -136,6 +268,7 @@ impl Spawner {
         } = tail;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (streamer_lease_state, client_lease_state) = StreamerLeaseState::new();
         let streamer = Streamer {
             db,
             stream_id,
@@ -157,23 +290,23 @@ impl Spawner {
             pending_appends: append::PendingAppends::new(),
             stable_pos: tail_pos,
             follow_tx: broadcast::Sender::new(super::FOLLOWER_MAX_LAG),
-            active_followers: 0,
+            lease_state: streamer_lease_state,
             durability_notifier,
             bgtask_trigger_tx,
         };
 
-        let id = StreamerId::next();
-
         tokio::spawn(async move {
             streamer.run(msg_rx).await;
-            on_exit(id);
+            on_exit(generation_id);
         });
 
         StreamerClient {
-            id,
+            generation_id,
             stream_id,
+            cipher,
             msg_tx,
             append_inflight_bytes: append_inflight_bytes_sema,
+            lease_state: client_lease_state,
         }
     }
 }
@@ -211,7 +344,7 @@ struct Streamer {
     pending_appends: append::PendingAppends,
     stable_pos: StreamPosition,
     follow_tx: broadcast::Sender<Vec<Metered<StoredSequencedRecord>>>,
-    active_followers: usize,
+    lease_state: StreamerLeaseState,
     durability_notifier: DurabilityNotifier,
     bgtask_trigger_tx: broadcast::Sender<BgtaskTrigger>,
 }
@@ -250,17 +383,11 @@ impl Streamer {
                 match_seq_num,
             })?;
         }
-        let allowed_encryption_modes = self
-            .config
-            .encryption
-            .allowed_modes
-            .unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
         sequenced_records(
             records,
             first_seq_num,
             next_assignable_pos.timestamp,
             &self.config.timestamping,
-            allowed_encryption_modes,
         )
     }
 
@@ -383,19 +510,19 @@ impl Streamer {
             return;
         }
 
-        let record: AppendRecord = AppendRecordParts {
+        let record: StoredAppendRecord = StoredAppendRecordParts {
             timestamp: Some(Timestamp::MAX),
             record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
         }
         .try_into()
         .expect("valid append record");
-        let input = AppendInput {
+        let input = StoredAppendInput {
             records: vec![record].try_into().expect("valid append batch"),
             match_seq_num: None,
             fencing_token: None,
         };
         let (append_reply_tx, append_reply_rx) = oneshot::channel();
-        self.handle_append(input.into(), None, append_reply_tx, AppendType::Terminal);
+        self.handle_append(input, None, append_reply_tx, AppendType::Terminal);
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
                 Ok(Ok(_)) => Ok(true),
@@ -528,13 +655,7 @@ impl Streamer {
                             reply_tx,
                         } => {
                             let reply = if start_seq_num == self.stable_pos.seq_num {
-                                self.active_followers += 1;
-                                Ok(FollowReceiver {
-                                    _guard: FollowGuard {
-                                        msg_tx: self.msg_tx.clone(),
-                                    },
-                                    rx: self.follow_tx.subscribe(),
-                                })
+                                Ok(self.follow_tx.subscribe())
                             } else {
                                 Err(self.stable_pos)
                             };
@@ -545,10 +666,6 @@ impl Streamer {
                         }
                         Message::Reconfigure { config } => {
                             self.config = config;
-                        }
-                        Message::FollowerDropped => {
-                            assert!(self.active_followers > 0, "follow guard count underflow");
-                            self.active_followers -= 1;
                         }
                         Message::DurabilityStatus(status) => {
                             match status {
@@ -569,7 +686,7 @@ impl Streamer {
                     }
                 }
                 _ = dormancy.as_mut() => {
-                    if self.active_followers == 0 {
+                    if self.lease_state.close_if_idle() {
                         break;
                     }
                 }
@@ -591,7 +708,9 @@ enum Message {
     },
     Follow {
         start_seq_num: SeqNum,
-        reply_tx: oneshot::Sender<Result<FollowReceiver, StreamPosition>>,
+        reply_tx: oneshot::Sender<
+            Result<broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>, StreamPosition>,
+        >,
     },
     CheckTail {
         reply_tx: oneshot::Sender<StreamPosition>,
@@ -599,55 +718,37 @@ enum Message {
     Reconfigure {
         config: OptionalStreamConfig,
     },
-    FollowerDropped,
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
-}
-
-pub(super) struct FollowReceiver {
-    _guard: FollowGuard,
-    rx: broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>,
-}
-
-impl FollowReceiver {
-    pub async fn recv(
-        &mut self,
-    ) -> Result<Vec<Metered<StoredSequencedRecord>>, broadcast::error::RecvError> {
-        self.rx.recv().await
-    }
-}
-
-struct FollowGuard {
-    msg_tx: mpsc::UnboundedSender<Message>,
-}
-
-impl Drop for FollowGuard {
-    fn drop(&mut self) {
-        let _ = self.msg_tx.send(Message::FollowerDropped);
-    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct StreamerClient {
-    id: StreamerId,
+    generation_id: StreamerGenerationId,
     stream_id: StreamId,
+    cipher: Option<EncryptionAlgorithm>,
     msg_tx: mpsc::UnboundedSender<Message>,
     append_inflight_bytes: Arc<Semaphore>,
+    lease_state: StreamerClientLeaseState,
 }
 
 impl StreamerClient {
-    pub fn id(&self) -> StreamerId {
-        self.id
+    pub(super) fn generation_id(&self) -> StreamerGenerationId {
+        self.generation_id
     }
 
-    pub fn is_dead(&self) -> bool {
-        self.msg_tx.is_closed()
+    pub(super) fn is_dead(&self) -> bool {
+        self.lease_state.is_closed()
     }
 
-    pub fn stream_id(&self) -> StreamId {
-        self.stream_id
+    pub(super) fn guard(self) -> Result<GuardedStreamerClient, StreamerMissingInActionError> {
+        let _guard = self.lease_state.try_acquire()?;
+        Ok(GuardedStreamerClient {
+            client: self,
+            _guard,
+        })
     }
 
-    pub async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
+    async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::CheckTail { reply_tx })
@@ -655,10 +756,13 @@ impl StreamerClient {
         reply_rx.await.map_err(|_| StreamerMissingInActionError)
     }
 
-    pub async fn follow(
+    async fn follow(
         &self,
         start_seq_num: SeqNum,
-    ) -> Result<Result<FollowReceiver, StreamPosition>, StreamerMissingInActionError> {
+    ) -> Result<
+        Result<broadcast::Receiver<Vec<Metered<StoredSequencedRecord>>>, StreamPosition>,
+        StreamerMissingInActionError,
+    > {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::Follow {
@@ -669,7 +773,7 @@ impl StreamerClient {
         reply_rx.await.map_err(|_| StreamerMissingInActionError)
     }
 
-    pub async fn append_permit(
+    pub(super) async fn append_permit(
         &self,
         input: StoredAppendInput,
     ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
@@ -694,11 +798,11 @@ impl StreamerClient {
         })
     }
 
-    pub fn advise_reconfig(&self, config: OptionalStreamConfig) -> bool {
+    pub(super) fn advise_reconfig(&self, config: OptionalStreamConfig) -> bool {
         self.msg_tx.send(Message::Reconfigure { config }).is_ok()
     }
 
-    pub async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
+    async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
         let record: StoredAppendRecord = StoredAppendRecordParts {
             timestamp: Some(Timestamp::MAX),
             record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
@@ -727,7 +831,7 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::EncryptionModeNotAllowed(_) => {
+                AppendErrorInternal::MaxSeqNum(_) => {
                     unreachable!("terminal append is plaintext command record")
                 }
             }),
@@ -830,19 +934,19 @@ async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<boo
         },
     );
     // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
-    static SCAN_OPTS: ScanOptions = ScanOptions {
+    let scan_opts = ScanOptions {
         durability_filter: DurabilityLevel::Memory,
-        dirty: false,
         read_ahead_bytes: 1,
         cache_blocks: false,
         max_fetch_tasks: 1,
+        ..Default::default()
     };
-    let mut it = db.scan_with_options(start_key.., &SCAN_OPTS).await?;
+    let mut it = db.scan_with_options(start_key.., &scan_opts).await?;
     // TODO: post-filtering on TTL, because SL8 0.12+ will stop doing it at query-time.
     let Some(kv) = it.next().await? else {
         return Ok(false);
     };
-    if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp.ordinal()) {
+    if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp as u8) {
         return Ok(false);
     }
     let (candidate_stream_id, _pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
@@ -854,7 +958,6 @@ fn sequenced_records(
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
-    allowed_encryption_modes: EnumSet<EncryptionMode>,
 ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
     let mode = config.mode.unwrap_or_default();
     let uncapped = config.uncapped.unwrap_or_default();
@@ -866,14 +969,15 @@ fn sequenced_records(
         .map(|record| record.into_parts())
         .enumerate()
     {
-        match record.as_ref().into_inner() {
-            StoredRecord::Plaintext(Record::Command(_)) => {}
-            sr @ StoredRecord::Plaintext(_) | sr @ StoredRecord::Encrypted { .. } => {
-                let mode = sr.encryption_mode();
-                if !allowed_encryption_modes.contains(mode) {
-                    Err(EncryptionModeNotAllowedError(mode))?;
-                }
-            }
+        let assigned_seq_num = first_seq_num + i as u64;
+
+        let max_assignable_seq_num = record.as_ref().into_inner().max_assignable_seq_num();
+        if assigned_seq_num > max_assignable_seq_num {
+            Err(MaxSeqNumError {
+                first_seq_num,
+                assigned_seq_num,
+                max_assignable_seq_num,
+            })?;
         }
         let mut timestamp = match mode {
             TimestampingMode::ClientPrefer => timestamp.unwrap_or(now),
@@ -890,7 +994,7 @@ fn sequenced_records(
         }
 
         sequenced_records.push(record.sequenced(StreamPosition {
-            seq_num: first_seq_num + i as u64,
+            seq_num: assigned_seq_num,
             timestamp,
         }));
     }
@@ -953,10 +1057,11 @@ async fn db_submit_append(
             write_timestamp: write_timestamp_secs,
         }),
     );
-    static WRITE_OPTS: WriteOptions = WriteOptions {
+    let write_opts = WriteOptions {
         await_durable: false,
+        ..Default::default()
     };
-    let write_handle = db.write_with_options(wb, &WRITE_OPTS).await?;
+    let write_handle = db.write_with_options(wb, &write_opts).await?;
     Ok(InFlightAppend {
         db_seq: write_handle.seqnum(),
         records,
@@ -969,7 +1074,7 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
-        encryption::{EncryptionMode, EncryptionSpec},
+        encryption::EncryptionSpec,
         record::{EnvelopeRecord, Metered, Record, StoredRecord},
         types::stream::{
             StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
@@ -996,11 +1101,15 @@ mod tests {
         parts.try_into().unwrap()
     }
 
-    fn test_encrypted_record(body: Bytes, timestamp: Option<Timestamp>) -> StoredAppendRecord {
+    fn test_encrypted_record(
+        body: Bytes,
+        timestamp: Option<Timestamp>,
+        encryption: &EncryptionSpec,
+    ) -> StoredAppendRecord {
         let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
         let record = s2_common::record::encrypt_record(
             Metered::from(Record::Envelope(envelope)),
-            &EncryptionSpec::aegis256([0x42; 32]),
+            encryption,
             b"test-streamer",
         );
         let parts = StoredAppendRecordParts { timestamp, record };
@@ -1021,8 +1130,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -1046,8 +1154,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -1067,7 +1174,7 @@ mod tests {
             .try_into()
             .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES);
+        let result = sequenced_records(records, 100, 0, &config);
 
         assert!(matches!(
             result,
@@ -1089,8 +1196,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 900);
@@ -1112,8 +1218,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(result[0].position().timestamp >= now);
@@ -1135,8 +1240,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -1158,14 +1262,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(
-            records,
-            100,
-            1000,
-            &config,
-            DEFAULT_ALLOWED_ENCRYPTION_MODES,
-        )
-        .unwrap();
+        let result = sequenced_records(records, 100, 1000, &config).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -1186,8 +1283,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].position().timestamp <= now + 100);
@@ -1207,8 +1303,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].position().timestamp, future);
@@ -1226,8 +1321,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 42, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 42, 0, &config).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().seq_num, 42);
@@ -1236,39 +1330,59 @@ mod tests {
     }
 
     #[test]
-    fn sequenced_records_skip_encryption_check_for_command_records() {
+    fn sequenced_records_reject_aes256gcm_records_past_random_nonce_limit() {
         let config = OptionalTimestampingConfig::default();
-        let allowed_modes = [EncryptionMode::Aegis256].into();
+        let first_record = test_encrypted_record(
+            vec![1, 2, 3].into(),
+            None,
+            &EncryptionSpec::aes256_gcm([0x24; 32]),
+        );
+        let max_assignable_seq_num = first_record.parts().record.max_assignable_seq_num();
+        let first_rejected_seq_num = max_assignable_seq_num + 1;
+        let records: StoredAppendRecordBatch = vec![
+            first_record,
+            test_encrypted_record(
+                vec![4, 5, 6].into(),
+                None,
+                &EncryptionSpec::aes256_gcm([0x24; 32]),
+            ),
+        ]
+        .try_into()
+        .unwrap();
+
+        let result = sequenced_records(records, max_assignable_seq_num, 0, &config);
+
+        assert!(matches!(
+            result,
+            Err(AppendErrorInternal::MaxSeqNum(error))
+                if error.first_seq_num == max_assignable_seq_num
+                    && error.assigned_seq_num == first_rejected_seq_num
+                    && error.max_assignable_seq_num == max_assignable_seq_num
+        ));
+    }
+
+    #[test]
+    fn sequenced_records_allow_aes256gcm_command_records_past_random_nonce_limit() {
+        let config = OptionalTimestampingConfig::default();
+        let max_assignable_seq_num = test_encrypted_record(
+            vec![1, 2, 3].into(),
+            None,
+            &EncryptionSpec::aes256_gcm([0x24; 32]),
+        )
+        .parts()
+        .record
+        .max_assignable_seq_num();
 
         let records: StoredAppendRecordBatch =
             vec![test_command_record(CommandRecord::Trim(42), None)]
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 42, 0, &config, allowed_modes).unwrap();
+        let first_command_seq_num = max_assignable_seq_num + 1;
+        let result = sequenced_records(records, first_command_seq_num, 0, &config).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].position().seq_num, 42);
-    }
-
-    #[test]
-    fn sequenced_records_reject_disallowed_encrypted_envelope_records() {
-        let config = OptionalTimestampingConfig::default();
-        let allowed_modes = [EncryptionMode::Aes256Gcm].into();
-
-        let records: StoredAppendRecordBatch =
-            vec![test_encrypted_record(vec![1, 2, 3].into(), None)]
-                .try_into()
-                .unwrap();
-
-        let result = sequenced_records(records, 42, 0, &config, allowed_modes);
-
-        assert!(matches!(
-            result,
-            Err(AppendErrorInternal::EncryptionModeNotAllowed(
-                EncryptionModeNotAllowedError(EncryptionMode::Aegis256)
-            ))
-        ));
+        assert_eq!(result[0].position().seq_num, first_command_seq_num);
     }
 
     #[test]
@@ -1301,6 +1415,7 @@ mod tests {
             .expect("db");
         let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
         let (bgtask_trigger_tx, _) = broadcast::channel(16);
+        let (lease_state, _) = StreamerLeaseState::new();
         Streamer {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
@@ -1322,10 +1437,53 @@ mod tests {
             pending_appends: append::PendingAppends::new(),
             stable_pos: StreamPosition::MIN,
             follow_tx: broadcast::Sender::new(super::super::FOLLOWER_MAX_LAG),
-            active_followers: 0,
+            lease_state,
             durability_notifier: DurabilityNotifier::spawn(&db),
             bgtask_trigger_tx,
         }
+    }
+
+    #[test]
+    fn lease_state_closes_when_idle_and_rejects_new_leases() {
+        let (streamer_lease_state, client_lease_state) = StreamerLeaseState::new();
+
+        let lease = client_lease_state
+            .try_acquire()
+            .expect("first lease should succeed");
+        assert!(
+            !streamer_lease_state.close_if_idle(),
+            "an outstanding lease should keep the state open"
+        );
+
+        drop(lease);
+
+        assert!(
+            streamer_lease_state.close_if_idle(),
+            "an idle state should close once dormancy wins"
+        );
+        assert!(client_lease_state.is_closed());
+        assert!(matches!(
+            client_lease_state.try_acquire(),
+            Err(StreamerMissingInActionError)
+        ));
+    }
+
+    #[test]
+    fn streamer_lease_state_drop_blocks_new_leases_while_existing_guard_drops_cleanly() {
+        let (streamer_lease_state, client_lease_state) = StreamerLeaseState::new();
+
+        let lease = client_lease_state
+            .try_acquire()
+            .expect("first lease should succeed");
+        drop(streamer_lease_state);
+
+        assert!(matches!(
+            client_lease_state.try_acquire(),
+            Err(StreamerMissingInActionError)
+        ));
+
+        drop(lease);
+        assert!(client_lease_state.is_closed());
     }
 
     #[tokio::test]

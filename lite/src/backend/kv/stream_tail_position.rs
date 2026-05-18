@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
+use s2_common::record::StreamPosition;
 
 use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
 use crate::{backend::PersistedStreamTail, stream_id::StreamId};
@@ -9,7 +9,7 @@ const VALUE_LEN: usize = 8 + 8 + 4;
 
 pub fn ser_key(stream_id: StreamId) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
-    buf.put_u8(KeyType::StreamTailPosition.ordinal());
+    buf.put_u8(KeyType::StreamTailPosition as u8);
     buf.put_slice(stream_id.as_bytes());
     debug_assert_eq!(buf.len(), KEY_LEN, "serialized length mismatch");
     buf.freeze()
@@ -18,7 +18,7 @@ pub fn ser_key(stream_id: StreamId) -> Bytes {
 pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
     check_exact_size(&bytes, KEY_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::StreamTailPosition.ordinal() {
+    if ordinal != (KeyType::StreamTailPosition as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let mut stream_id_bytes = [0u8; StreamId::LEN];
@@ -40,7 +40,7 @@ pub fn deser_value(mut bytes: Bytes) -> Result<PersistedStreamTail, Deserializat
     let seq_num = bytes.get_u64();
     let timestamp = bytes.get_u64();
     Ok(PersistedStreamTail {
-        tail: s2_common::record::StreamPosition { seq_num, timestamp },
+        tail: StreamPosition { seq_num, timestamp },
         write_timestamp: TimestampSecs::from_secs(bytes.get_u32()),
     })
 }

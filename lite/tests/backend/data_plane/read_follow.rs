@@ -9,7 +9,7 @@ use s2_common::{
     record::MeteredSize,
     types::{
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadSessionOutput},
+        stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
     },
 };
 use s2_lite::backend::FOLLOWER_MAX_LAG;
@@ -19,13 +19,8 @@ use super::common::*;
 const VIRTUAL_TIME_STEP: Duration = Duration::from_millis(50);
 
 async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &EncryptionSpec) {
-    let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
-        test_suffix,
-        "stream",
-        all_encryption_modes_basin_config(),
-        all_encryption_modes_stream_config(),
-    )
-    .await;
+    let (backend, basin_name, stream_name) =
+        setup_backend_for_encryption_spec(test_suffix, "stream", encryption).await;
 
     append_payloads_with_encryption(
         &backend,
@@ -49,10 +44,15 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
         wait: Some(wait_duration),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session_with_encryption(
+        &backend,
+        &basin_name,
+        &stream_name,
+        start,
+        end,
+        encryption,
+    )
+    .await;
     let mut session = Box::pin(session);
 
     let backend_clone = backend.clone();
@@ -92,7 +92,7 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
     let closed_at = loop {
         match poll_session_with_deadline(&mut session, deadline, Some(probe_step)).await {
             SessionPoll::Output(output) => {
-                if matches!(output, StoredReadSessionOutput::Batch(_)) {
+                if matches!(output, ReadSessionOutput::Batch(_)) {
                     final_delivery_at = Some(tokio::time::Instant::now());
                 }
                 outputs.push(output);
@@ -107,14 +107,10 @@ async fn run_follow_mode_receives_new_data_case(test_suffix: &str, encryption: &
     let all_records = outputs
         .into_iter()
         .filter_map(|output| match output {
-            StoredReadSessionOutput::Batch(batch) => Some(batch),
-            StoredReadSessionOutput::Heartbeat(_) => None,
+            ReadSessionOutput::Batch(batch) => Some(batch),
+            ReadSessionOutput::Heartbeat(_) => None,
         })
-        .flat_map(|batch| {
-            decrypt_batch_for_stream(batch, &basin_name, &stream_name, encryption)
-                .records
-                .into_iter()
-        })
+        .flat_map(|batch| batch.records.into_iter())
         .collect::<Vec<_>>();
     let bodies = envelope_bodies(&all_records);
     assert_eq!(
@@ -155,10 +151,7 @@ async fn test_follow_mode_broadcast_lag_resets_wait_after_db_catchup() {
         wait: Some(wait_duration),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -178,10 +171,9 @@ async fn test_follow_mode_broadcast_lag_resets_wait_after_db_catchup() {
         .expect("session should deliver the lagged catchup batch")
         .expect("session should not error");
     let reset_at = tokio::time::Instant::now();
-    let StoredReadSessionOutput::Batch(batch) = follow else {
+    let ReadSessionOutput::Batch(batch) = follow else {
         panic!("expected catchup batch after lagged follow");
     };
-    let batch = decrypt_plain_batch(batch);
     assert_eq!(envelope_bodies(&batch.records), expected);
 
     let outputs = collect_outputs_until_closed_advanced(
@@ -217,10 +209,7 @@ async fn test_follow_mode_broadcast_lag_respects_count_limit() {
         wait: Some(Duration::from_secs(3)),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -256,27 +245,26 @@ async fn test_follow_mode_broadcast_lag_respects_bytes_limit() {
 
     append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
 
-    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    let per_record_bytes = stored_batch.records[0].metered_size();
+    let per_record_bytes =
+        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size();
     let message_count = FOLLOWER_MAX_LAG + 25;
     let bytes_limit = per_record_bytes * 3;
 
-    let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            ReadStart {
-                from: ReadFrom::TailOffset(0),
-                clamp: false,
-            },
-            ReadEnd {
-                limit: ReadLimit::Bytes(bytes_limit),
-                until: ReadUntil::Unbounded,
-                wait: Some(Duration::from_secs(3)),
-            },
-        )
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::TailOffset(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Bytes(bytes_limit),
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::from_secs(3)),
+        },
+    )
+    .await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -317,22 +305,21 @@ async fn test_follow_mode_broadcast_lag_respects_timestamp_until() {
     let message_count = FOLLOWER_MAX_LAG + 25;
     let cutoff = 4_000;
 
-    let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            ReadStart {
-                from: ReadFrom::SeqNum(0),
-                clamp: false,
-            },
-            ReadEnd {
-                limit: ReadLimit::Unbounded,
-                until: ReadUntil::Timestamp(cutoff),
-                wait: Some(Duration::from_secs(3)),
-            },
-        )
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Timestamp(cutoff),
+            wait: Some(Duration::from_secs(3)),
+        },
+    )
+    .await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -357,10 +344,9 @@ async fn test_follow_mode_broadcast_lag_respects_timestamp_until() {
         .await
         .expect("session should deliver the lagged catchup batch")
         .expect("session should not error");
-    let StoredReadSessionOutput::Batch(batch) = catchup else {
+    let ReadSessionOutput::Batch(batch) = catchup else {
         panic!("expected lagged catchup batch");
     };
-    let batch = decrypt_plain_batch(batch);
     assert_eq!(
         envelope_bodies(&batch.records),
         expected
@@ -405,10 +391,7 @@ async fn test_follow_mode_broadcast_lag_resumes_live_follow_after_catchup() {
         wait: Some(Duration::from_millis(300)),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -427,10 +410,9 @@ async fn test_follow_mode_broadcast_lag_resumes_live_follow_after_catchup() {
         .await
         .expect("session should deliver the lagged catchup batch")
         .expect("session should not error");
-    let StoredReadSessionOutput::Batch(batch) = catchup else {
+    let ReadSessionOutput::Batch(batch) = catchup else {
         panic!("expected catchup batch after lagged follow");
     };
-    let batch = decrypt_plain_batch(batch);
     assert_eq!(envelope_bodies(&batch.records), expected_catchup);
 
     let backend_clone = backend.clone();
@@ -497,10 +479,7 @@ async fn test_transition_from_catchup_to_follow() {
         wait: Some(Duration::from_secs(3)),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
 
     let backend_clone = backend.clone();
@@ -534,6 +513,70 @@ async fn test_transition_from_catchup_to_follow() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_follow_mode_survives_streamer_dormancy_after_catchup_batch() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "follow-dormancy-after-catchup",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"initial"]).await;
+
+    let session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: None,
+        },
+    )
+    .await;
+    let mut session = Box::pin(session);
+
+    let initial = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should yield the catchup batch")
+        .expect("session should not error");
+    let ReadSessionOutput::Batch(batch) = initial else {
+        panic!("expected initial catchup batch");
+    };
+    assert_eq!(envelope_bodies(&batch.records), vec![b"initial".to_vec()]);
+
+    tokio::task::yield_now().await;
+    advance_time(Duration::from_secs(61)).await;
+
+    let heartbeat = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should re-enter follow mode after dormancy")
+        .expect("session should not error after dormancy");
+    assert!(matches!(heartbeat, ReadSessionOutput::Heartbeat(_)));
+
+    append_payloads(&backend, &basin_name, &stream_name, &[b"follow-1"]).await;
+
+    let next = session
+        .as_mut()
+        .next()
+        .await
+        .expect("session should deliver live data after dormancy")
+        .expect("session should not error after dormancy");
+    let ReadSessionOutput::Batch(batch) = next else {
+        panic!("expected live batch after dormancy");
+    };
+    assert_eq!(envelope_bodies(&batch.records), vec![b"follow-1".to_vec()]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_follow_mode_with_count_limit() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "follow-count-limit",
@@ -554,10 +597,7 @@ async fn test_follow_mode_with_count_limit() {
         wait: Some(Duration::from_secs(3)),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
 
     let backend_clone = backend.clone();
@@ -614,10 +654,7 @@ async fn test_follow_mode_with_exact_count_limit() {
         wait: Some(Duration::from_secs(2)),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
 
     let backend_clone = backend.clone();
@@ -659,22 +696,21 @@ async fn test_collect_records_until_advanced_stops_at_target_count_with_multi_re
 
     append_payloads(&backend, &basin_name, &stream_name, &[b"seed"]).await;
 
-    let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            ReadStart {
-                from: ReadFrom::TailOffset(0),
-                clamp: false,
-            },
-            ReadEnd {
-                limit: ReadLimit::Unbounded,
-                until: ReadUntil::Unbounded,
-                wait: Some(Duration::from_secs(2)),
-            },
-        )
-        .await
-        .expect("Failed to create follow read session");
+    let session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::TailOffset(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::from_secs(2)),
+        },
+    )
+    .await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -716,25 +752,24 @@ async fn test_follow_mode_with_bytes_limit_truncates_live_batch() {
 
     append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
 
-    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    let per_record_bytes = stored_batch.records[0].metered_size();
+    let per_record_bytes =
+        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size();
 
-    let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            ReadStart {
-                from: ReadFrom::TailOffset(0),
-                clamp: false,
-            },
-            ReadEnd {
-                limit: ReadLimit::Bytes(per_record_bytes * 2),
-                until: ReadUntil::Unbounded,
-                wait: Some(Duration::from_secs(2)),
-            },
-        )
-        .await
-        .expect("Failed to create follow read session");
+    let session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::TailOffset(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Bytes(per_record_bytes * 2),
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::from_secs(2)),
+        },
+    )
+    .await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -753,8 +788,7 @@ async fn test_follow_mode_with_bytes_limit_truncates_live_batch() {
             match_seq_num: None,
             fencing_token: None,
         };
-        backend_clone
-            .append(basin_clone, stream_clone, input)
+        append(&backend_clone, basin_clone, stream_clone, input, None)
             .await
             .expect("live append should succeed");
     });
@@ -785,25 +819,24 @@ async fn test_follow_mode_with_bytes_limit_smaller_than_first_live_record_closes
 
     append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
 
-    let stored_batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
-    let per_record_bytes = stored_batch.records[0].metered_size();
+    let per_record_bytes =
+        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size();
 
-    let session = backend
-        .read(
-            basin_name.clone(),
-            stream_name.clone(),
-            ReadStart {
-                from: ReadFrom::TailOffset(0),
-                clamp: false,
-            },
-            ReadEnd {
-                limit: ReadLimit::Bytes(per_record_bytes - 1),
-                until: ReadUntil::Unbounded,
-                wait: Some(Duration::from_secs(2)),
-            },
-        )
-        .await
-        .expect("Failed to create follow read session");
+    let session = open_read_session(
+        &backend,
+        &basin_name,
+        &stream_name,
+        ReadStart {
+            from: ReadFrom::TailOffset(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Bytes(per_record_bytes - 1),
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::from_secs(2)),
+        },
+    )
+    .await;
     let mut session = Box::pin(session);
 
     expect_heartbeat_advanced(&mut session, Duration::from_secs(1), VIRTUAL_TIME_STEP).await;
@@ -829,7 +862,7 @@ async fn test_follow_mode_with_bytes_limit_smaller_than_first_live_record_closes
         outputs
             .outputs
             .iter()
-            .all(|output| matches!(output, StoredReadSessionOutput::Heartbeat(_))),
+            .all(|output| matches!(output, ReadSessionOutput::Heartbeat(_))),
         "live oversize record should close the session without yielding a batch"
     );
 }
@@ -861,10 +894,7 @@ async fn test_follow_mode_with_timestamp_until() {
         wait: Some(Duration::from_secs(2)),
     };
 
-    let session = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
 
     let backend_clone = backend.clone();

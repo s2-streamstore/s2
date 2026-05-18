@@ -3,7 +3,8 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionSpec, FencingToken, StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamNamePrefix,
+    StreamNameStartAfter,
 };
 
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, BasinScope, Interval, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StorageClass, StreamConfig, StreamMatcher,
     },
@@ -84,7 +85,6 @@ pub enum Command {
     /// Revoke an access token.
     RevokeAccessToken {
         /// ID of the access token to revoke.
-        #[arg(long)]
         id: AccessTokenId,
     },
 
@@ -161,16 +161,15 @@ pub enum Command {
     /// Benchmark a stream to measure throughput and latency.
     Bench(BenchArgs),
 
-    /// Apply a declarative spec file, creating or reconfiguring basins and streams.
+    /// Apply a declarative spec file, ensuring basins and streams.
     ///
     /// Reads a JSON file and ensures the declared basins and streams exist with the
-    /// specified configuration. Basins and streams that already exist
-    /// are reconfigured to match the spec. Only the fields present in the spec are
-    /// updated.
+    /// specified configuration. Defaults are applied before comparison; omitted fields are
+    /// defaulted, not preserved.
     ///
     /// Dry-run output legend:
     ///   `+` create
-    ///   `~` reconfigure
+    ///   `~` ensure
     ///   `=` unchanged
     ///
     /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
@@ -264,6 +263,10 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
+    /// Cloud provider and region for the basin.
+    #[arg(long)]
+    pub scope: Option<BasinScope>,
+
     #[command(flatten)]
     pub config: BasinConfig,
 }
@@ -272,6 +275,10 @@ pub struct CreateBasinArgs {
 pub struct ReconfigureBasinArgs {
     /// Name of the basin to reconfigure.
     pub basin: S2BasinUri,
+
+    /// Encryption algorithm to apply to newly created streams in this basin.
+    #[arg(long)]
+    pub stream_cipher: Option<EncryptionAlgorithm>,
 
     /// Create stream on append with basin defaults if it doesn't exist.
     #[arg(long)]
@@ -308,7 +315,6 @@ pub struct ListAccessTokensArgs {
 #[derive(Args, Debug)]
 pub struct IssueAccessTokenArgs {
     /// Access token ID.
-    #[arg(long)]
     pub id: AccessTokenId,
 
     /// Token validity duration (e.g., "30d", "1w", "24h"). Token expires after this duration from
@@ -466,30 +472,31 @@ pub struct AppendArgs {
     pub linger: humantime::Duration,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct EncryptionArgs {
-    /// Encryption spec. Use `plain` or `<alg>; <base64-key>`.
-    /// Alternatively, set `S2_ENCRYPTION`.
+pub struct EncryptionKeyArgs {
+    /// Base64-encoded encryption key material.
+    /// Alternatively, set `S2_ENCRYPTION_KEY`.
     #[arg(
-        long,
-        env = "S2_ENCRYPTION",
+        short = 'k',
+        long = "encryption-key",
+        env = "S2_ENCRYPTION_KEY",
         hide_env_values = true,
-        value_name = "SPEC",
-        group = "encryption_source"
+        value_name = "KEY",
+        group = "encryption_key_source"
     )]
-    pub encryption: Option<EncryptionSpec>,
+    pub key: Option<EncryptionKey>,
 
-    /// Read an encryption spec from file.
+    /// Read base64-encoded encryption key material from file.
     #[arg(
-        long,
-        conflicts_with = "encryption",
+        long = "encryption-key-file",
+        conflicts_with = "key",
         value_name = "FILE",
-        group = "encryption_source"
+        group = "encryption_key_source"
     )]
-    pub encryption_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -543,7 +550,7 @@ pub struct ReadArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug)]
@@ -570,12 +577,12 @@ pub struct TailArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug)]
 pub struct ApplyArgs {
-    /// Path to a JSON spec file defining basins and streams to create or reconfigure.
+    /// Path to a JSON spec file defining basins and streams to ensure.
     #[arg(
         short = 'f',
         long,
@@ -587,7 +594,7 @@ pub struct ApplyArgs {
     ///
     /// Dry-run output legend:
     ///   `+` create
-    ///   `~` reconfigure
+    ///   `~` ensure
     ///   `=` unchanged
     #[arg(long)]
     pub dry_run: bool,

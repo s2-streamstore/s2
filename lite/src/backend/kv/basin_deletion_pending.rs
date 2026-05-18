@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use s2_common::{
     caps::MIN_BASIN_NAME_LEN,
     types::{basin::BasinName, stream::StreamNameStartAfter},
@@ -13,7 +12,7 @@ pub fn ser_key(basin: &BasinName) -> Bytes {
     let basin_bytes = basin.as_bytes();
     let capacity = 1 + basin_bytes.len();
     let mut buf = BytesMut::with_capacity(capacity);
-    buf.put_u8(KeyType::BasinDeletionPending.ordinal());
+    buf.put_u8(KeyType::BasinDeletionPending as u8);
     buf.put_slice(basin_bytes);
     debug_assert_eq!(buf.len(), capacity, "serialized length mismatch");
     buf.freeze()
@@ -22,7 +21,7 @@ pub fn ser_key(basin: &BasinName) -> Bytes {
 pub fn deser_key(mut bytes: Bytes) -> Result<BasinName, DeserializationError> {
     check_min_size(&bytes, 1 + MIN_BASIN_NAME_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::BasinDeletionPending.ordinal() {
+    if ordinal != (KeyType::BasinDeletionPending as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let basin_str = std::str::from_utf8(&bytes).map_err(|e| invalid_value_err("basin", e))?;

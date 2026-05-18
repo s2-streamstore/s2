@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     caps,
-    encryption::EncryptionSpec,
+    encryption::{EncryptionAlgorithm, EncryptionSpec},
     read_extent::{ReadLimit, ReadUntil},
     record::{
         FencingToken, Metered, MeteredExt, MeteredSize, Record, RecordDecryptionError, SeqNum,
@@ -169,6 +169,7 @@ pub struct StreamInfo {
     pub name: StreamName,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
+    pub cipher: Option<EncryptionAlgorithm>,
 }
 
 #[derive(Debug, Clone)]
@@ -612,7 +613,12 @@ mod test {
             encrypt
         );
 
-        let decrypted = decrypt_stored_record(stored_record, &encryption, TEST_AAD).unwrap();
+        let decryption = if encrypt {
+            &encryption
+        } else {
+            &EncryptionSpec::Plain
+        };
+        let decrypted = decrypt_stored_record(stored_record, decryption, TEST_AAD).unwrap();
         let Record::Envelope(record) = decrypted.into_inner() else {
             panic!("expected envelope record");
         };

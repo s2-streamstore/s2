@@ -21,10 +21,8 @@ use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::caps::RECORD_BATCH_MAX;
 /// Encryption algorithm.
 pub use s2_common::encryption::EncryptionAlgorithm;
-/// Encryption mode, including plaintext.
-pub use s2_common::encryption::EncryptionMode;
-/// Encryption spec for stream operations.
-pub use s2_common::encryption::EncryptionSpec;
+/// Encryption key for stream operations.
+pub use s2_common::encryption::EncryptionKey;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.
@@ -44,6 +42,10 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
+/// Result of provisioning a resource.
+#[doc(hidden)]
+#[cfg(feature = "_hidden")]
+pub use s2_common::types::resources::ProvisionResult;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -610,7 +612,7 @@ pub struct TimestampingConfig {
     /// Whether client-specified timestamps are allowed to exceed the arrival time.
     ///
     /// Defaults to `false` (client timestamps are capped at the arrival time).
-    pub uncapped: bool,
+    pub uncapped: Option<bool>,
 }
 
 impl TimestampingConfig {
@@ -629,7 +631,10 @@ impl TimestampingConfig {
 
     /// Set whether client-specified timestamps are allowed to exceed the arrival time.
     pub fn with_uncapped(self, uncapped: bool) -> Self {
-        Self { uncapped, ..self }
+        Self {
+            uncapped: Some(uncapped),
+            ..self
+        }
     }
 }
 
@@ -637,7 +642,7 @@ impl From<api::config::TimestampingConfig> for TimestampingConfig {
     fn from(value: api::config::TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: value.uncapped.unwrap_or_default(),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -646,7 +651,7 @@ impl From<TimestampingConfig> for api::config::TimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: Some(value.uncapped),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -691,44 +696,6 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
     }
 }
 
-/// Encryption configuration for a stream.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct EncryptionConfig {
-    /// Allowed encryption modes for the stream.
-    ///
-    /// If empty, use defaults. If no default is configured, only plaintext is allowed.
-    pub allowed_modes: Vec<EncryptionMode>,
-}
-
-impl EncryptionConfig {
-    /// Create a new [`EncryptionConfig`] with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the allowed encryption modes.
-    pub fn with_allowed_modes(self, allowed_modes: Vec<EncryptionMode>) -> Self {
-        Self { allowed_modes }
-    }
-}
-
-impl From<api::config::EncryptionConfig> for EncryptionConfig {
-    fn from(value: api::config::EncryptionConfig) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-impl From<EncryptionConfig> for api::config::EncryptionConfig {
-    fn from(value: EncryptionConfig) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 /// Configuration for a stream.
@@ -749,10 +716,6 @@ pub struct StreamConfig {
     ///
     /// See [`DeleteOnEmptyConfig`] for defaults.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
-    /// Encryption configuration.
-    ///
-    /// See [`EncryptionConfig`] for defaults.
-    pub encryption: Option<EncryptionConfig>,
 }
 
 impl StreamConfig {
@@ -792,14 +755,6 @@ impl StreamConfig {
             ..self
         }
     }
-
-    /// Set the encryption configuration.
-    pub fn with_encryption(self, encryption: EncryptionConfig) -> Self {
-        Self {
-            encryption: Some(encryption),
-            ..self
-        }
-    }
 }
 
 impl From<api::config::StreamConfig> for StreamConfig {
@@ -809,7 +764,6 @@ impl From<api::config::StreamConfig> for StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption: value.encryption.map(Into::into),
         }
     }
 }
@@ -821,7 +775,6 @@ impl From<StreamConfig> for api::config::StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption: value.encryption.map(Into::into),
         }
     }
 }
@@ -834,6 +787,8 @@ pub struct BasinConfig {
     ///
     /// See [`StreamConfig`] for defaults.
     pub default_stream_config: Option<StreamConfig>,
+    /// Encryption algorithm to apply to newly created streams in the basin.
+    pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Whether to create stream on append if it doesn't exist using default stream configuration.
     ///
     /// Defaults to `false`.
@@ -854,6 +809,14 @@ impl BasinConfig {
     pub fn with_default_stream_config(self, config: StreamConfig) -> Self {
         Self {
             default_stream_config: Some(config),
+            ..self
+        }
+    }
+
+    /// Set the encryption algorithm to apply to newly created streams in the basin.
+    pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
+        Self {
+            stream_cipher: Some(stream_cipher),
             ..self
         }
     }
@@ -880,6 +843,7 @@ impl From<api::config::BasinConfig> for BasinConfig {
     fn from(value: api::config::BasinConfig) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
+            stream_cipher: value.stream_cipher.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -890,6 +854,7 @@ impl From<BasinConfig> for api::config::BasinConfig {
     fn from(value: BasinConfig) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
+            stream_cipher: value.stream_cipher.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -898,15 +863,22 @@ impl From<BasinConfig> for api::config::BasinConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Scope of a basin.
+#[non_exhaustive]
 pub enum BasinScope {
     /// AWS `us-east-1` region.
     AwsUsEast1,
+    /// AWS `us-west-2` region.
+    AwsUsWest2,
+    /// AWS `eu-north-1` region.
+    AwsEuNorth1,
 }
 
 impl From<api::basin::BasinScope> for BasinScope {
     fn from(value: api::basin::BasinScope) -> Self {
         match value {
             api::basin::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
+            api::basin::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
+            api::basin::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
         }
     }
 }
@@ -915,35 +887,8 @@ impl From<BasinScope> for api::basin::BasinScope {
     fn from(value: BasinScope) -> Self {
         match value {
             BasinScope::AwsUsEast1 => api::basin::BasinScope::AwsUsEast1,
-        }
-    }
-}
-
-/// Result of a create-or-reconfigure operation.
-///
-/// Indicates whether the resource was newly created or already existed and was
-/// reconfigured. Both variants hold the resource's current state.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateOrReconfigured<T> {
-    /// Resource was newly created.
-    Created(T),
-    /// Resource already existed and was reconfigured to match the spec.
-    Reconfigured(T),
-}
-
-#[cfg(feature = "_hidden")]
-impl<T> CreateOrReconfigured<T> {
-    /// Returns `true` if the resource was newly created.
-    pub fn is_created(&self) -> bool {
-        matches!(self, Self::Created(_))
-    }
-
-    /// Unwrap the inner value regardless of variant.
-    pub fn into_inner(self) -> T {
-        match self {
-            Self::Created(t) | Self::Reconfigured(t) => t,
+            BasinScope::AwsUsWest2 => api::basin::BasinScope::AwsUsWest2,
+            BasinScope::AwsEuNorth1 => api::basin::BasinScope::AwsEuNorth1,
         }
     }
 }
@@ -1008,16 +953,16 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-/// Input for [`create_or_reconfigure_basin`](crate::S2::create_or_reconfigure_basin) operation.
+/// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
 #[doc(hidden)]
 #[cfg(feature = "_hidden")]
-pub struct CreateOrReconfigureBasinInput {
+pub struct EnsureBasinInput {
     /// Basin name.
     pub name: BasinName,
-    /// Reconfiguration for the basin.
+    /// Desired configuration for the basin.
     ///
-    /// If `None`, the basin is created with default configuration or left unchanged if it exists.
-    pub config: Option<BasinReconfiguration>,
+    /// If `None`, the basin is ensured with the default configuration.
+    config: Option<api::config::BasinConfig>,
     /// Scope of the basin.
     ///
     /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
@@ -1025,8 +970,8 @@ pub struct CreateOrReconfigureBasinInput {
 }
 
 #[cfg(feature = "_hidden")]
-impl CreateOrReconfigureBasinInput {
-    /// Create a new [`CreateOrReconfigureBasinInput`] with the given basin name.
+impl EnsureBasinInput {
+    /// Create a new [`EnsureBasinInput`] with the given basin name.
     pub fn new(name: BasinName) -> Self {
         Self {
             name,
@@ -1035,10 +980,10 @@ impl CreateOrReconfigureBasinInput {
         }
     }
 
-    /// Set the reconfiguration for the basin.
-    pub fn with_config(self, config: BasinReconfiguration) -> Self {
+    /// Set the desired configuration for the basin.
+    pub fn with_config(self, config: impl Into<s2_api::v1::config::BasinConfig>) -> Self {
         Self {
-            config: Some(config),
+            config: Some(config.into()),
             ..self
         }
     }
@@ -1053,16 +998,12 @@ impl CreateOrReconfigureBasinInput {
 }
 
 #[cfg(feature = "_hidden")]
-impl From<CreateOrReconfigureBasinInput>
-    for (
-        BasinName,
-        Option<api::basin::CreateOrReconfigureBasinRequest>,
-    )
-{
-    fn from(value: CreateOrReconfigureBasinInput) -> Self {
-        let request = if value.config.is_some() || value.scope.is_some() {
-            Some(api::basin::CreateOrReconfigureBasinRequest {
-                config: value.config.map(Into::into),
+impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
+    fn from(value: EnsureBasinInput) -> Self {
+        let config = value.config;
+        let request = if config.is_some() || value.scope.is_some() {
+            Some(api::basin::EnsureBasinRequest {
+                config,
                 scope: value.scope.map(Into::into),
             })
         } else {
@@ -1306,40 +1247,6 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
     }
 }
 
-/// Encryption reconfiguration for a stream.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct EncryptionReconfiguration {
-    /// Override for the existing [`allowed_modes`](EncryptionConfig::allowed_modes).
-    ///
-    /// Specify an empty list to reset to defaults.
-    pub allowed_modes: Maybe<Vec<EncryptionMode>>,
-}
-
-impl EncryptionReconfiguration {
-    /// Create a new [`EncryptionReconfiguration`] with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the allowed encryption modes.
-    pub fn with_allowed_modes(self, allowed_modes: Vec<EncryptionMode>) -> Self {
-        Self {
-            allowed_modes: Maybe::Specified(allowed_modes),
-        }
-    }
-}
-
-impl From<EncryptionReconfiguration> for api::config::EncryptionReconfiguration {
-    fn from(value: EncryptionReconfiguration) -> Self {
-        Self {
-            allowed_modes: value
-                .allowed_modes
-                .map(|modes| modes.into_iter().map(Into::into).collect()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 /// Reconfiguration for [`StreamConfig`].
@@ -1352,8 +1259,6 @@ pub struct StreamReconfiguration {
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     /// Override for the existing [`delete_on_empty`](StreamConfig::delete_on_empty).
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
-    /// Override for the existing [`encryption`](StreamConfig::encryption).
-    pub encryption: Maybe<Option<EncryptionReconfiguration>>,
 }
 
 impl StreamReconfiguration {
@@ -1393,14 +1298,6 @@ impl StreamReconfiguration {
             ..self
         }
     }
-
-    /// Set the encryption reconfiguration.
-    pub fn with_encryption(self, encryption: EncryptionReconfiguration) -> Self {
-        Self {
-            encryption: Maybe::Specified(Some(encryption)),
-            ..self
-        }
-    }
 }
 
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
@@ -1410,7 +1307,6 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
-            encryption: value.encryption.map(|m| m.map(Into::into)),
         }
     }
 }
@@ -1421,6 +1317,8 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
 pub struct BasinReconfiguration {
     /// Override for the existing [`default_stream_config`](BasinConfig::default_stream_config).
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
+    /// Override for the existing [`stream_cipher`](BasinConfig::stream_cipher).
+    pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     /// Override for the existing
     /// [`create_stream_on_append`](BasinConfig::create_stream_on_append).
     pub create_stream_on_append: Maybe<bool>,
@@ -1439,6 +1337,14 @@ impl BasinReconfiguration {
     pub fn with_default_stream_config(self, config: StreamReconfiguration) -> Self {
         Self {
             default_stream_config: Maybe::Specified(Some(config)),
+            ..self
+        }
+    }
+
+    /// Set the override for the existing [`stream_cipher`](BasinConfig::stream_cipher).
+    pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
+        Self {
+            stream_cipher: Maybe::Specified(Some(stream_cipher)),
             ..self
         }
     }
@@ -1466,6 +1372,7 @@ impl From<BasinReconfiguration> for api::config::BasinReconfiguration {
     fn from(value: BasinReconfiguration) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(|m| m.map(Into::into)),
+            stream_cipher: value.stream_cipher.map(|m| m.map(Into::into)),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -2700,6 +2607,8 @@ pub struct StreamInfo {
     pub created_at: S2DateTime,
     /// Deletion time if the stream is being deleted.
     pub deleted_at: Option<S2DateTime>,
+    /// Encryption algorithm for this stream, if encryption is enabled.
+    pub cipher: Option<EncryptionAlgorithm>,
 }
 
 impl TryFrom<api::stream::StreamInfo> for StreamInfo {
@@ -2710,6 +2619,7 @@ impl TryFrom<api::stream::StreamInfo> for StreamInfo {
             name: value.name,
             created_at: value.created_at.try_into()?,
             deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
+            cipher: value.cipher.map(Into::into),
         })
     }
 }
@@ -2760,41 +2670,41 @@ impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-/// Input for [`create_or_reconfigure_stream`](crate::S2Basin::create_or_reconfigure_stream)
+/// Input for [`ensure_stream`](crate::S2Basin::ensure_stream)
 /// operation.
 #[doc(hidden)]
 #[cfg(feature = "_hidden")]
-pub struct CreateOrReconfigureStreamInput {
+pub struct EnsureStreamInput {
     /// Stream name.
     pub name: StreamName,
-    /// Reconfiguration for the stream.
+    /// Desired stream configuration before basin defaults are applied.
     ///
-    /// If `None`, the stream is created with default configuration or left unchanged if it exists.
-    pub config: Option<StreamReconfiguration>,
+    /// Missing fields are filled from the current basin default stream configuration and then
+    /// global defaults before comparing or writing. If `None`, the stream is ensured using those
+    /// defaults.
+    config: Option<api::config::StreamConfig>,
 }
 
 #[cfg(feature = "_hidden")]
-impl CreateOrReconfigureStreamInput {
-    /// Create a new [`CreateOrReconfigureStreamInput`] with the given stream name.
+impl EnsureStreamInput {
+    /// Create a new [`EnsureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
         Self { name, config: None }
     }
 
-    /// Set the reconfiguration for the stream.
-    pub fn with_config(self, config: StreamReconfiguration) -> Self {
+    /// Set the desired configuration for the stream.
+    pub fn with_config(self, config: impl Into<s2_api::v1::config::StreamConfig>) -> Self {
         Self {
-            config: Some(config),
+            config: Some(config.into()),
             ..self
         }
     }
 }
 
 #[cfg(feature = "_hidden")]
-impl From<CreateOrReconfigureStreamInput>
-    for (StreamName, Option<api::config::StreamReconfiguration>)
-{
-    fn from(value: CreateOrReconfigureStreamInput) -> Self {
-        (value.name, value.config.map(Into::into))
+impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
+    fn from(value: EnsureStreamInput) -> Self {
+        (value.name, value.config)
     }
 }
 
@@ -3587,17 +3497,9 @@ pub struct ReadBatch {
 }
 
 impl ReadBatch {
-    pub(crate) fn from_api(
-        batch: api::stream::proto::ReadBatch,
-        ignore_command_records: bool,
-    ) -> Self {
+    pub(crate) fn from_api(batch: api::stream::proto::ReadBatch) -> Self {
         Self {
-            records: batch
-                .records
-                .into_iter()
-                .map(Into::into)
-                .filter(|sr: &SequencedRecord| !ignore_command_records || !sr.is_command_record())
-                .collect(),
+            records: batch.records.into_iter().map(Into::into).collect(),
             tail: batch.tail.map(Into::into),
         }
     }

@@ -6,60 +6,61 @@ use std::{
 
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
+    encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
     types::{
         basin::BasinName,
-        stream::{AppendAck, StoredAppendInput, StreamName},
+        stream::{AppendAck, AppendInput, StreamName},
     },
 };
 use tokio::sync::oneshot;
 
-use super::Backend;
+use super::{Backend, StreamHandle};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
-    pub async fn append<I>(
+    pub async fn open_for_append(
         &self,
-        basin: BasinName,
-        stream: StreamName,
-        input: I,
-    ) -> Result<AppendAck, AppendError>
-    where
-        I: Into<StoredAppendInput>,
-    {
-        let client = self
-            .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
-                config.create_stream_on_append
-            })
-            .await?;
-        let ack = client.append_permit(input.into()).await?.submit().await?;
+        basin: &BasinName,
+        stream: &StreamName,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<StreamHandle, AppendError> {
+        self.stream_handle_with_auto_create::<AppendError>(
+            basin,
+            stream,
+            |config| config.create_stream_on_append,
+            |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
+        )
+        .await
+    }
+}
+
+impl StreamHandle {
+    pub async fn append(self, input: AppendInput) -> Result<AppendAck, AppendError> {
+        let input = input.encrypt(&self.encryption, self.client.stream_id().as_bytes());
+        let ack = self.client.append_permit(input).await?.submit().await?;
         Ok(ack)
     }
 
-    pub async fn append_session<I, S>(
-        self,
-        basin: BasinName,
-        stream: StreamName,
-        inputs: S,
-    ) -> Result<impl Stream<Item = Result<AppendAck, AppendError>>, AppendError>
+    pub fn append_session<S>(self, inputs: S) -> impl Stream<Item = Result<AppendAck, AppendError>>
     where
-        I: Into<StoredAppendInput>,
-        S: Stream<Item = I>,
+        S: Stream<Item = AppendInput>,
     {
-        let client = self
-            .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
-                config.create_stream_on_append
-            })
-            .await?;
+        let stream_id = self.client.stream_id();
+        let StreamHandle {
+            client, encryption, ..
+        } = self;
         let session = SessionHandle::new();
-        Ok(async_stream::stream! {
+        async_stream::stream! {
             tokio::pin!(inputs);
             let mut permit_opt = None;
             let mut append_futs = FuturesOrdered::new();
             loop {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
-                        permit_opt = Some(Box::pin(client.append_permit(input.into())));
+                        permit_opt = Some(Box::pin(client.append_permit(
+                            input.encrypt(&encryption, stream_id.as_bytes()),
+                        )));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {
                         permit_opt = None;
@@ -75,7 +76,7 @@ impl Backend {
                         match res {
                             Ok(ack) => {
                                 yield Ok(ack);
-                            },
+                            }
                             Err(e) => {
                                 yield Err(e.into());
                                 break;
@@ -87,7 +88,7 @@ impl Backend {
                     }
                 }
             }
-        })
+        }
     }
 }
 
@@ -227,12 +228,7 @@ impl Ticket {
         append_err: AppendErrorInternal,
         stable_pos: StreamPosition,
     ) -> Option<BlockedReplySender> {
-        let mut durability_dependency =
-            if let AppendErrorInternal::ConditionFailed(cond_fail) = &append_err {
-                cond_fail.durability_dependency()
-            } else {
-                ..0
-            };
+        let mut durability_dependency = append_err.durability_dependency();
         if let Some(mut session) = self.session {
             let session = session.deref_mut();
             assert!(!session.poisoned, "thanks to typestate");

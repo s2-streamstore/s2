@@ -6,12 +6,10 @@ use itertools::Itertools;
 use s2_common::types::resources::Page;
 use slatedb::{
     WriteBatch,
-    config::{DurabilityLevel, PutOptions, ScanOptions, WriteOptions},
+    config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
 
-#[cfg(test)]
-use crate::backend::PersistedStreamTail;
 use crate::{
     backend::{
         Backend,
@@ -54,16 +52,13 @@ impl Backend {
         &self,
         now: TimestampSecs,
     ) -> Result<Page<(StreamId, Vec<PendingDoeEntry>)>, StorageError> {
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
+            ..Default::default()
         };
         let mut it = self
             .db
-            .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &SCAN_OPTS)
+            .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &scan_opts)
             .await?;
         let mut pending: IndexMap<StreamId, Vec<PendingDoeEntry>> = IndexMap::new();
         let mut has_more = false;
@@ -120,10 +115,7 @@ impl Backend {
         for entry in pending {
             batch.delete(kv::stream_doe_deadline::ser_key(entry.deadline, stream_id));
         }
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        self.db.write_with_options(batch, &WRITE_OPTS).await?;
+        self.db.write(batch).await?;
         Ok(())
     }
 
@@ -148,15 +140,10 @@ impl Backend {
         };
         let deadline =
             TimestampSecs::after(doe_arm_delay(retention_age_or_zero(&meta.config), min_age));
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
         self.db
-            .put_with_options(
+            .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(min_age),
-                &PutOptions::default(),
-                &WRITE_OPTS,
             )
             .await?;
         Ok(())
@@ -186,7 +173,7 @@ mod tests {
 
     use super::{super::tests::test_backend, TimestampSecs};
     use crate::{
-        backend::{Backend, kv},
+        backend::{Backend, PersistedStreamTail, kv},
         stream_id::StreamId,
     };
 
@@ -202,6 +189,7 @@ mod tests {
     ) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
             config,
+            cipher: None,
             created_at,
             deleted_at: None,
             creation_idempotency_key: None,
@@ -256,18 +244,15 @@ mod tests {
     }
 
     async fn list_doe_entries(backend: &Backend) -> Vec<(TimestampSecs, StreamId, Duration)> {
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
+            ..Default::default()
         };
         let mut it = backend
             .db
             .scan_with_options(
                 kv::key_type_range(kv::KeyType::StreamDeleteOnEmptyDeadline),
-                &SCAN_OPTS,
+                &scan_opts,
             )
             .await
             .unwrap();
@@ -659,7 +644,10 @@ mod tests {
             .unwrap();
 
         let client = backend.streamer_client(&basin, &stream).await.unwrap();
-        let permit = client.append_permit(append_input(b"live")).await.unwrap();
+        let permit = client
+            .append_permit(append_input(b"live").into())
+            .await
+            .unwrap();
         let mut append_fut = std::pin::pin!(permit.submit());
         assert!(poll!(append_fut.as_mut()).is_pending());
 

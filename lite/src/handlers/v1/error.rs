@@ -15,9 +15,10 @@ use s2_common::{
 };
 
 use crate::backend::error::{
-    AppendConditionFailedError, AppendError, CheckTailError, CreateBasinError, CreateStreamError,
-    DeleteBasinError, DeleteStreamError, GetBasinConfigError, GetStreamConfigError,
-    ListBasinsError, ListStreamsError, ReadError, ReconfigureBasinError, ReconfigureStreamError,
+    AppendConditionFailedError, AppendError, CheckTailError, DeleteBasinError, DeleteStreamError,
+    GetBasinConfigError, GetStreamConfigError, ListBasinsError, ListStreamsError,
+    ProvisionBasinError, ProvisionStreamError, ReadError, ReconfigureBasinError,
+    ReconfigureStreamError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -37,11 +38,9 @@ pub enum ServiceError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
     #[error(transparent)]
-    RecordDecryption(#[from] RecordDecryptionError),
-    #[error(transparent)]
     ListBasins(#[from] ListBasinsError),
     #[error(transparent)]
-    CreateBasin(#[from] CreateBasinError),
+    ProvisionBasin(#[from] ProvisionBasinError),
     #[error(transparent)]
     GetBasinConfig(#[from] GetBasinConfigError),
     #[error(transparent)]
@@ -51,7 +50,7 @@ pub enum ServiceError {
     #[error(transparent)]
     ListStreams(#[from] ListStreamsError),
     #[error(transparent)]
-    CreateStream(#[from] CreateStreamError),
+    ProvisionStream(#[from] ProvisionStreamError),
     #[error(transparent)]
     GetStreamConfig(#[from] GetStreamConfigError),
     #[error(transparent)]
@@ -96,26 +95,15 @@ impl ServiceError {
                 }
             },
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
-            ServiceError::RecordDecryption(e) => match e {
-                RecordDecryptionError::ModeMismatch { .. }
-                | RecordDecryptionError::AuthenticationFailed => {
-                    standard(ErrorCode::Invalid, e.to_string())
-                }
-                RecordDecryptionError::MalformedEncryptedRecord
-                | RecordDecryptionError::MeteredSizeMismatch { .. }
-                | RecordDecryptionError::MalformedDecryptedRecord(_) => {
-                    standard(ErrorCode::Storage, e.to_string())
-                }
-            },
             ServiceError::ListBasins(e) => match e {
                 ListBasinsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
             },
-            ServiceError::CreateBasin(e) => match e {
-                CreateBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
-                CreateBasinError::BasinAlreadyExists(e) => {
+            ServiceError::ProvisionBasin(e) => match e {
+                ProvisionBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                ProvisionBasinError::BasinAlreadyExists(e) => {
                     standard(ErrorCode::ResourceAlreadyExists, e.to_string())
                 }
-                CreateBasinError::BasinDeletionPending(e) => {
+                ProvisionBasinError::BasinDeletionPending(e) => {
                     standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
             },
@@ -146,24 +134,24 @@ impl ServiceError {
             ServiceError::ListStreams(e) => match e {
                 ListStreamsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
             },
-            ServiceError::CreateStream(e) => match e {
-                CreateStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
-                CreateStreamError::TransactionConflict(e) => {
+            ServiceError::ProvisionStream(e) => match e {
+                ProvisionStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                ProvisionStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                CreateStreamError::BasinNotFound(e) => {
+                ProvisionStreamError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
-                CreateStreamError::BasinDeletionPending(e) => {
+                ProvisionStreamError::BasinDeletionPending(e) => {
                     standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
-                CreateStreamError::StreamAlreadyExists(e) => {
+                ProvisionStreamError::StreamAlreadyExists(e) => {
                     standard(ErrorCode::ResourceAlreadyExists, e.to_string())
                 }
-                CreateStreamError::StreamDeletionPending(e) => {
+                ProvisionStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
-                CreateStreamError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
+                ProvisionStreamError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::GetStreamConfig(e) => match e {
                 GetStreamConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -229,6 +217,9 @@ impl ServiceError {
             },
             ServiceError::Append(e) => match e {
                 AppendError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                AppendError::EncryptionSpecResolution(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
@@ -259,12 +250,24 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
-                AppendError::EncryptionModeNotAllowed(e) => {
-                    standard(ErrorCode::Invalid, e.to_string())
-                }
+                AppendError::MaxSeqNum(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                ReadError::EncryptionSpecResolution(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
+                ReadError::RecordDecryption(e) => match e {
+                    RecordDecryptionError::AuthenticationFailed => {
+                        standard(ErrorCode::DecryptionFailed, e.to_string())
+                    }
+                    RecordDecryptionError::AlgorithmMismatch { .. }
+                    | RecordDecryptionError::MalformedEncryptedRecord
+                    | RecordDecryptionError::MeteredSizeMismatch { .. }
+                    | RecordDecryptionError::MalformedDecryptedRecord(_) => {
+                        standard(ErrorCode::Storage, e.to_string())
+                    }
+                },
                 ReadError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }

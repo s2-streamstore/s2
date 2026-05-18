@@ -1,32 +1,30 @@
 use s2_common::{
     bash::Bash,
-    encryption::EncryptionMode,
     record::StreamPosition,
     types::{
-        ValidationError,
         basin::BasinName,
-        config::{DEFAULT_ALLOWED_ENCRYPTION_MODES, OptionalStreamConfig, StreamReconfiguration},
-        resources::{CreateMode, ListItemsRequestParts, Page, RequestToken},
+        config::{OptionalStreamConfig, StreamReconfiguration},
+        resources::{ListItemsRequestParts, Page, ProvisionMode, ProvisionResult, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
 use slatedb::{
     IsolationLevel,
-    config::{DurabilityLevel, ScanOptions, WriteOptions},
+    config::{DurabilityLevel, ScanOptions},
 };
 use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend, CreatedOrReconfigured, PersistedStreamTail,
+    Backend, PersistedStreamTail,
     store::db_txn_get,
     streamer::{DeleteOnEmptyEntry, doe_arm_delay, retention_age_or_zero},
 };
 use crate::{
     backend::{
         error::{
-            BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
-            GetStreamConfigError, ListStreamsError, ReconfigureStreamError, StorageError,
+            BasinDeletionPendingError, BasinNotFoundError, DeleteStreamError, GetStreamConfigError,
+            ListStreamsError, ProvisionStreamError, ReconfigureStreamError, StorageError,
             StreamAlreadyExistsError, StreamDeletionPendingError, StreamNotFoundError,
             StreamerError,
         },
@@ -52,14 +50,11 @@ impl Backend {
             return Ok(Page::new_empty());
         }
 
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
+            ..Default::default()
         };
-        let mut it = self.db.scan_with_options(key_range, &SCAN_OPTS).await?;
+        let mut it = self.db.scan_with_options(key_range, &scan_opts).await?;
 
         let mut streams = Vec::with_capacity(limit.as_usize());
         let mut has_more = false;
@@ -77,19 +72,19 @@ impl Backend {
                 name: stream,
                 created_at: meta.created_at,
                 deleted_at: meta.deleted_at,
+                cipher: meta.cipher,
             });
         }
         Ok(Page::new(streams, has_more))
     }
 
-    pub async fn create_stream(
+    pub async fn provision_stream(
         &self,
         basin: BasinName,
         stream: StreamName,
-        config: impl Into<StreamReconfiguration>,
-        mode: CreateMode,
-    ) -> Result<CreatedOrReconfigured<StreamInfo>, CreateStreamError> {
-        let config = config.into();
+        config: OptionalStreamConfig,
+        mode: ProvisionMode,
+    ) -> Result<ProvisionResult<StreamInfo>, ProvisionStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -108,136 +103,146 @@ impl Backend {
 
         let stream_meta_key = kv::stream_meta::ser_key(&basin, &stream);
 
-        let creation_idempotency_key = match &mode {
-            CreateMode::CreateOnly(Some(req_token)) => {
-                let resolved = OptionalStreamConfig::default().reconfigure(config.clone());
-                Some(creation_idempotency_key(req_token, &resolved))
+        let existing_meta =
+            db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?;
+        if let Some(existing_meta) = &existing_meta
+            && existing_meta.deleted_at.is_some()
+        {
+            return Err(ProvisionStreamError::StreamDeletionPending(
+                StreamDeletionPendingError { basin, stream },
+            ));
+        }
+
+        let basin_defaults = basin_meta.config.default_stream_config;
+        let (outcome, prior_doe_min_age) = match (existing_meta, mode) {
+            (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
+                let new_creation_idempotency_key = request_token
+                    .as_ref()
+                    .map(|req_token| creation_idempotency_key(req_token, &config));
+                return if new_creation_idempotency_key.is_some()
+                    && existing.creation_idempotency_key == new_creation_idempotency_key
+                {
+                    Ok(ProvisionResult::Noop(StreamInfo {
+                        name: stream,
+                        created_at: existing.created_at,
+                        deleted_at: None,
+                        cipher: existing.cipher,
+                    }))
+                } else {
+                    Err(StreamAlreadyExistsError { basin, stream }.into())
+                };
             }
-            _ => None,
+            (Some(existing), ProvisionMode::Ensure) => {
+                let prior_doe_min_age = existing
+                    .config
+                    .delete_on_empty
+                    .min_age
+                    .filter(|age| !age.is_zero());
+                let desired_config = config.merge(basin_defaults.clone());
+                let current_config = existing.config.clone().merge(basin_defaults);
+                let meta = kv::stream_meta::StreamMeta {
+                    config: desired_config.clone().into(),
+                    cipher: existing.cipher,
+                    created_at: existing.created_at,
+                    deleted_at: None,
+                    creation_idempotency_key: existing.creation_idempotency_key,
+                };
+                (
+                    if current_config == desired_config {
+                        ProvisionResult::Noop(meta)
+                    } else {
+                        ProvisionResult::Updated(meta)
+                    },
+                    prior_doe_min_age,
+                )
+            }
+            (None, ProvisionMode::CreateOnly { request_token }) => {
+                let new_creation_idempotency_key = request_token
+                    .as_ref()
+                    .map(|req_token| creation_idempotency_key(req_token, &config));
+                (
+                    ProvisionResult::Created(kv::stream_meta::StreamMeta {
+                        config: config.merge(basin_defaults).into(),
+                        cipher: basin_meta.config.stream_cipher,
+                        created_at: OffsetDateTime::now_utc(),
+                        deleted_at: None,
+                        creation_idempotency_key: new_creation_idempotency_key,
+                    }),
+                    None,
+                )
+            }
+            (None, ProvisionMode::Ensure) => (
+                ProvisionResult::Created(kv::stream_meta::StreamMeta {
+                    config: config.merge(basin_defaults).into(),
+                    cipher: basin_meta.config.stream_cipher,
+                    created_at: OffsetDateTime::now_utc(),
+                    deleted_at: None,
+                    creation_idempotency_key: None,
+                }),
+                None,
+            ),
         };
 
-        let mut existing_meta_opt = None;
-        let mut prior_doe_min_age = None;
+        if !matches!(&outcome, ProvisionResult::Noop(_)) {
+            let meta = outcome.inner();
 
-        if let Some(existing_meta) =
-            db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?
-        {
-            if existing_meta.deleted_at.is_some() {
-                return Err(CreateStreamError::StreamDeletionPending(
-                    StreamDeletionPendingError { basin, stream },
-                ));
+            txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;
+            let stream_id = StreamId::new(&basin, &stream);
+            if matches!(&outcome, ProvisionResult::Created(_)) {
+                txn.put(
+                    kv::stream_id_mapping::ser_key(stream_id),
+                    kv::stream_id_mapping::ser_value(&basin, &stream),
+                )?;
+                let created_secs = meta.created_at.unix_timestamp();
+                let created_secs = if created_secs <= 0 {
+                    0
+                } else if created_secs >= i64::from(u32::MAX) {
+                    u32::MAX
+                } else {
+                    created_secs as u32
+                };
+                txn.put(
+                    kv::stream_tail_position::ser_key(stream_id),
+                    kv::stream_tail_position::ser_value(PersistedStreamTail {
+                        tail: StreamPosition::MIN,
+                        write_timestamp: kv::timestamp::TimestampSecs::from_secs(created_secs),
+                    }),
+                )?;
             }
-            prior_doe_min_age = existing_meta
+            if let Some(min_age) = meta
                 .config
                 .delete_on_empty
                 .min_age
-                .filter(|age| !age.is_zero());
-            match mode {
-                CreateMode::CreateOnly(_) => {
-                    return if creation_idempotency_key.is_some()
-                        && existing_meta.creation_idempotency_key == creation_idempotency_key
-                    {
-                        Ok(CreatedOrReconfigured::Created(StreamInfo {
-                            name: stream,
-                            created_at: existing_meta.created_at,
-                            deleted_at: None,
-                        }))
-                    } else {
-                        Err(StreamAlreadyExistsError { basin, stream }.into())
-                    };
-                }
-                CreateMode::CreateOrReconfigure => {
-                    existing_meta_opt = Some(existing_meta);
-                }
+                .filter(|age| !age.is_zero())
+                && (matches!(&outcome, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
+            {
+                txn.put(
+                    kv::stream_doe_deadline::ser_key(
+                        kv::timestamp::TimestampSecs::after(doe_arm_delay(
+                            retention_age_or_zero(&meta.config),
+                            min_age,
+                        )),
+                        stream_id,
+                    ),
+                    kv::stream_doe_deadline::ser_value(min_age),
+                )?;
             }
+
+            txn.commit().await?;
         }
 
-        let is_reconfigure = existing_meta_opt.is_some();
-        let (resolved, created_at) = match existing_meta_opt {
-            Some(existing) => (existing.config.reconfigure(config), existing.created_at),
-            None => (
-                OptionalStreamConfig::default().reconfigure(config),
-                OffsetDateTime::now_utc(),
-            ),
-        };
-        let basin_defaults = &basin_meta.config.default_stream_config;
-
-        validate_encryption_modes_subset(
-            &resolved.encryption.allowed_modes,
-            basin_defaults.encryption.allowed_modes,
-        )?;
-
-        let resolved: OptionalStreamConfig = resolved.merge(basin_defaults.clone()).into();
-
-        let meta = kv::stream_meta::StreamMeta {
-            config: resolved.clone(),
-            created_at,
-            deleted_at: None,
-            creation_idempotency_key,
-        };
-
-        txn.put(&stream_meta_key, kv::stream_meta::ser_value(&meta))?;
-        let stream_id = StreamId::new(&basin, &stream);
-        if !is_reconfigure {
-            txn.put(
-                kv::stream_id_mapping::ser_key(stream_id),
-                kv::stream_id_mapping::ser_value(&basin, &stream),
-            )?;
-            let created_secs = created_at.unix_timestamp();
-            let created_secs = if created_secs <= 0 {
-                0
-            } else if created_secs >= i64::from(u32::MAX) {
-                u32::MAX
-            } else {
-                created_secs as u32
-            };
-            txn.put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: StreamPosition::MIN,
-                    write_timestamp: kv::timestamp::TimestampSecs::from_secs(created_secs),
-                }),
-            )?;
-        }
-        if let Some(min_age) = meta
-            .config
-            .delete_on_empty
-            .min_age
-            .filter(|age| !age.is_zero())
-            && (!is_reconfigure || prior_doe_min_age.is_none())
+        if let ProvisionResult::Updated(meta) = &outcome
+            && let Some(client) = self.streamer_client_if_active(&basin, &stream)
         {
-            txn.put(
-                kv::stream_doe_deadline::ser_key(
-                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                        retention_age_or_zero(&meta.config),
-                        min_age,
-                    )),
-                    stream_id,
-                ),
-                kv::stream_doe_deadline::ser_value(min_age),
-            )?;
+            client.advise_reconfig(meta.config.clone());
         }
 
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        txn.commit_with_options(&WRITE_OPTS).await?;
-
-        if is_reconfigure && let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(resolved);
-        }
-
-        let info = StreamInfo {
+        Ok(outcome.map(|meta| StreamInfo {
             name: stream,
-            created_at,
+            created_at: meta.created_at,
             deleted_at: None,
-        };
-
-        Ok(if is_reconfigure {
-            CreatedOrReconfigured::Reconfigured(info)
-        } else {
-            CreatedOrReconfigured::Created(info)
-        })
+            cipher: meta.cipher,
+        }))
     }
 
     pub(super) async fn stream_id_mapping(
@@ -299,32 +304,7 @@ impl Backend {
             .min_age
             .filter(|age| !age.is_zero());
 
-        let encryption_reconfigured =
-            matches!(reconfig.encryption, s2_common::maybe::Maybe::Specified(_));
         meta.config = meta.config.reconfigure(reconfig);
-
-        if encryption_reconfigured {
-            let basin_meta = db_txn_get(
-                &txn,
-                kv::basin_meta::ser_key(&basin),
-                kv::basin_meta::deser_value,
-            )
-            .await?
-            .ok_or_else(|| BasinNotFoundError {
-                basin: basin.clone(),
-            })?;
-            let basin_defaults = &basin_meta.config.default_stream_config;
-            validate_encryption_modes_subset(
-                &meta.config.encryption.allowed_modes,
-                basin_defaults.encryption.allowed_modes,
-            )?;
-            meta.config.encryption = meta
-                .config
-                .encryption
-                .clone()
-                .merge(basin_defaults.encryption.clone())
-                .into();
-        }
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
@@ -348,10 +328,7 @@ impl Backend {
             )?;
         }
 
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        txn.commit_with_options(&WRITE_OPTS).await?;
+        txn.commit().await?;
 
         if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
             client.advise_reconfig(meta.config.clone());
@@ -366,7 +343,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
-        match self.streamer_client(&basin, &stream).await {
+        match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => {
                 client.terminal_trim().await?;
             }
@@ -391,7 +368,7 @@ impl Backend {
         stream: StreamName,
         pending: Vec<DeleteOnEmptyEntry>,
     ) -> Result<(), DeleteStreamError> {
-        let should_mark_deleted = match self.streamer_client(&basin, &stream).await {
+        let should_mark_deleted = match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => {
                 client
                     .terminal_trim_if_delete_on_empty_eligible(pending)
@@ -431,30 +408,11 @@ impl Backend {
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
             txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
-            static WRITE_OPTS: WriteOptions = WriteOptions {
-                await_durable: true,
-            };
-            txn.commit_with_options(&WRITE_OPTS).await?;
+            txn.commit().await?;
         }
 
         Ok(())
     }
-}
-
-fn validate_encryption_modes_subset(
-    stream_modes: &Option<enumset::EnumSet<EncryptionMode>>,
-    basin_modes: Option<enumset::EnumSet<EncryptionMode>>,
-) -> Result<(), ValidationError> {
-    if let Some(stream_modes) = stream_modes {
-        let basin_modes = basin_modes.unwrap_or(DEFAULT_ALLOWED_ENCRYPTION_MODES);
-        if !stream_modes.is_subset(basin_modes) {
-            return Err(ValidationError(
-                "stream encryption_modes must be a subset of basin default encryption_modes"
-                    .to_owned(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn creation_idempotency_key(req_token: &RequestToken, config: &OptionalStreamConfig) -> Bash {

@@ -10,8 +10,7 @@ use http::{
 };
 use prost::{self, Message};
 #[cfg(feature = "_hidden")]
-use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
-use s2_common::encryption::S2_ENCRYPTION_HEADER;
+use s2_api::v1::basin::EnsureBasinRequest;
 use s2_api::v1::{
     access::{
         AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
@@ -29,6 +28,9 @@ use s2_api::v1::{
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
 };
+use s2_common::{
+    encryption::S2_ENCRYPTION_KEY_HEADER, types::resources::PROVISION_RESULT_HEADER,
+};
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
@@ -39,10 +41,12 @@ use crate::{
     frame_signal::FrameSignal,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
-        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression,
-        EncryptionSpec, RetryConfig, S2Config, S2Endpoints, StreamName,
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
+        RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
+#[cfg(feature = "_hidden")]
+use crate::types::ProvisionResult;
 
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
@@ -50,6 +54,24 @@ const ACCEPT_PROTO: &str = "application/protobuf";
 const S2_REQUEST_TOKEN: &str = "s2-request-token";
 const S2_BASIN: &str = "s2-basin";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
+
+#[cfg(feature = "_hidden")]
+fn provision_result_from_response<T>(
+    status: StatusCode,
+    headers: &HeaderMap,
+    value: T,
+) -> ProvisionResult<T> {
+    match headers
+        .get(&PROVISION_RESULT_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("created") => ProvisionResult::Created(value),
+        Some("noop") => ProvisionResult::Noop(value),
+        Some("updated") => ProvisionResult::Updated(value),
+        _ if status == StatusCode::CREATED => ProvisionResult::Created(value),
+        _ => ProvisionResult::Updated(value),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AccountClient {
@@ -145,19 +167,21 @@ impl AccountClient {
     }
 
     #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_basin(
+    pub async fn ensure_basin(
         &self,
         name: BasinName,
-        request: Option<CreateOrReconfigureBasinRequest>,
-    ) -> Result<(bool, BasinInfo), ApiError> {
+        request: Option<EnsureBasinRequest>,
+    ) -> Result<ProvisionResult<BasinInfo>, ApiError> {
         let url = self.base_url.join(&format!("v1/basins/{name}"))?;
         let request = match request {
             Some(body) => self.put(url).json(&body).build()?,
             None => self.put(url).build()?,
         };
         let response = self.request(request).send().await?;
-        let was_created = response.status() == StatusCode::CREATED;
-        Ok((was_created, response.json::<BasinInfo>()?))
+        let status = response.status();
+        let result = provision_result_from_response(status, response.headers(), ());
+        let info = response.json::<BasinInfo>()?;
+        Ok(result.map(|()| info))
     }
 
     pub async fn delete_basin(
@@ -299,11 +323,11 @@ impl BasinClient {
     }
 
     #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_stream(
+    pub async fn ensure_stream(
         &self,
         name: StreamName,
-        config: Option<StreamReconfiguration>,
-    ) -> Result<(bool, StreamInfo), ApiError> {
+        config: Option<StreamConfig>,
+    ) -> Result<ProvisionResult<StreamInfo>, ApiError> {
         let url = self
             .base_url
             .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
@@ -312,8 +336,10 @@ impl BasinClient {
             None => self.put(url).build()?,
         };
         let response = self.request(request).send().await?;
-        let was_created = response.status() == StatusCode::CREATED;
-        Ok((was_created, response.json::<StreamInfo>()?))
+        let status = response.status();
+        let result = provision_result_from_response(status, response.headers(), ());
+        let info = response.json::<StreamInfo>()?;
+        Ok(result.map(|()| info))
     }
 
     pub async fn delete_stream(
@@ -346,7 +372,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         input: AppendInput,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
         append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
         let url = self
@@ -384,7 +410,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
     ) -> Result<ReadBatch, ApiError> {
         let url = self
             .base_url
@@ -412,7 +438,7 @@ impl BasinClient {
         &self,
         name: &StreamName,
         inputs: I,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
         frame_signal: Option<FrameSignal>,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
@@ -473,6 +499,11 @@ impl BasinClient {
                     }
                 }
             }
+            if !buffer.is_empty() {
+                Err(ClientError::UnexpectedEof(
+                    format!("not all bytes were consumed from the buffer, {} remaining", buffer.len()),
+                ))?;
+            }
         }))
     }
 
@@ -481,7 +512,7 @@ impl BasinClient {
         name: &StreamName,
         start: ReadStart,
         end: ReadEnd,
-        encryption: Option<&EncryptionSpec>,
+        encryption: Option<&EncryptionKey>,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self
             .base_url
@@ -526,6 +557,11 @@ impl BasinClient {
                         Err(err) => Err(err)?,
                     }
                 }
+            }
+            if !buffer.is_empty() {
+                Err(ClientError::UnexpectedEof(
+                    format!("not all bytes were consumed from the buffer, {} remaining", buffer.len()),
+                ))?;
             }
         }))
     }
@@ -909,11 +945,12 @@ impl BaseClient {
     }
 }
 
-fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionSpec>) {
+fn set_encryption_header(request: &mut client::Request, encryption: Option<&EncryptionKey>) {
     if let Some(encryption) = encryption {
-        request
-            .headers_mut()
-            .insert(S2_ENCRYPTION_HEADER.clone(), encryption.to_header_value());
+        request.headers_mut().insert(
+            S2_ENCRYPTION_KEY_HEADER.clone(),
+            encryption.to_header_value(),
+        );
     }
 }
 
@@ -1197,7 +1234,9 @@ mod tests {
         // Server errors that do NOT guarantee no mutation.
         assert!(!server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal").has_no_side_effects());
         assert!(!server_error(StatusCode::BAD_GATEWAY, "other").has_no_side_effects());
-        assert!(!server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects());
+        assert!(
+            !server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects()
+        );
     }
 
     #[test]

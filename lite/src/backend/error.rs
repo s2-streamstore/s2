@@ -1,7 +1,8 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    record::{FencingToken, SeqNum, StreamPosition},
+    encryption::EncryptionSpecResolutionError,
+    record::{FencingToken, RecordDecryptionError, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
 
@@ -77,15 +78,19 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("encryption mode '{0}' is not allowed on this stream")]
-pub struct EncryptionModeNotAllowedError(pub s2_common::encryption::EncryptionMode);
+#[error("max assignable sequence number is {max_assignable_seq_num}; attempted {assigned_seq_num}")]
+pub struct MaxSeqNumError {
+    pub first_seq_num: SeqNum,
+    pub assigned_seq_num: SeqNum,
+    pub max_assignable_seq_num: SeqNum,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("transaction conflict occurred – this is usually retriable")]
 pub struct TransactionConflictError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub(super) enum StreamerError {
+pub enum StreamerError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -107,7 +112,17 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
+    MaxSeqNum(#[from] MaxSeqNumError),
+}
+
+impl AppendErrorInternal {
+    pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
+        match self {
+            Self::ConditionFailed(e) => e.durability_dependency(),
+            Self::MaxSeqNum(e) => e.durability_dependency(),
+            _ => ..0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -143,6 +158,8 @@ pub enum AppendError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
+    #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
@@ -161,7 +178,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
+    MaxSeqNum(#[from] MaxSeqNumError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -174,9 +191,7 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptionModeNotAllowed(e) => {
-                AppendError::EncryptionModeNotAllowed(e)
-            }
+            AppendErrorInternal::MaxSeqNum(e) => AppendError::MaxSeqNum(e),
         }
     }
 }
@@ -208,6 +223,12 @@ impl AppendConditionFailedError {
     }
 }
 
+impl MaxSeqNumError {
+    pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
+        ..self.first_seq_num
+    }
+}
+
 impl From<StreamerError> for AppendError {
     fn from(e: StreamerError) -> Self {
         match e {
@@ -222,6 +243,10 @@ impl From<StreamerError> for AppendError {
 pub enum ReadError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
+    #[error(transparent)]
+    RecordDecryption(#[from] RecordDecryptionError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
@@ -279,7 +304,7 @@ impl From<kv::DeserializationError> for ListStreamsError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum CreateStreamError {
+pub enum ProvisionStreamError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -296,7 +321,7 @@ pub enum CreateStreamError {
     Validation(#[from] s2_common::types::ValidationError),
 }
 
-impl From<slatedb::Error> for CreateStreamError {
+impl From<slatedb::Error> for ProvisionStreamError {
     fn from(err: slatedb::Error) -> Self {
         if err.kind() == slatedb::ErrorKind::Transaction {
             Self::TransactionConflict(TransactionConflictError)
@@ -306,7 +331,7 @@ impl From<slatedb::Error> for CreateStreamError {
     }
 }
 
-impl From<GetBasinConfigError> for CreateStreamError {
+impl From<GetBasinConfigError> for ProvisionStreamError {
     fn from(err: GetBasinConfigError) -> Self {
         match err {
             GetBasinConfigError::Storage(e) => Self::Storage(e),
@@ -353,8 +378,8 @@ impl From<AppendErrorInternal> for DeleteStreamError {
             AppendErrorInternal::RequestDroppedError(e) => Self::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
             AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-            AppendErrorInternal::EncryptionModeNotAllowed(_) => {
-                unreachable!("plaintext trim command used")
+            AppendErrorInternal::MaxSeqNum(_) => {
+                unreachable!("terminal append is plaintext command record")
             }
         }
     }
@@ -395,7 +420,7 @@ impl From<kv::DeserializationError> for ListBasinsError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum CreateBasinError {
+pub enum ProvisionBasinError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -404,7 +429,7 @@ pub enum CreateBasinError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
 }
 
-impl From<slatedb::Error> for CreateBasinError {
+impl From<slatedb::Error> for ProvisionBasinError {
     fn from(err: slatedb::Error) -> Self {
         Self::Storage(err.into())
     }

@@ -181,15 +181,15 @@ SL8_FLUSH_INTERVAL=10ms
 - [CLI](cli/) ✅ v0.26+
 - [TypeScript SDK](https://github.com/s2-streamstore/s2-sdk-typescript) ✅ v0.22+
 - [Go SDK](https://github.com/s2-streamstore/s2-sdk-go) ✅ v0.11+
-- [Rust SDK](https://github.com/s2-streamstore/s2-sdk-rust) ✅ v0.22+
-- [Python](https://github.com/s2-streamstore/s2-sdk-python) 🚧 _being migrated to v1 API_
+- [Rust SDK](sdk/) ✅ v0.22+
+- [Python SDK](https://github.com/s2-streamstore/s2-sdk-python) ✅ v0.1+
 
 ### API Coverage
 
 Complete [specs](https://github.com/s2-streamstore/s2-specs/tree/main/s2/v1) are available:
 - [OpenAPI](https://s2.dev/docs/api) for the REST-ful core
 - [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions
-- [S2S](https://s2.dev/docs/api/records/overview#s2s-spec), which is the streaming session protocol
+- [S2S](https://s2.dev/docs/api/protocol#sessions), which is the streaming session protocol
 
 > [!IMPORTANT]
 > Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. The SDKs take care of this automatically.

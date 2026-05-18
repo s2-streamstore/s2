@@ -214,6 +214,14 @@ jobs:
             "test_cmd": "S2_LITE=1 bun run vitest --run --exclude '**/account-basin*' --exclude '**/accessTokens*' --exclude '**/metrics*'"
           },
           {
+            "name": "python",
+            "repo": "s2-streamstore/s2-sdk-python",
+            "ref": "main",
+            "lang": "python",
+            "uv-version": "0.11.6",
+            "test_cmd": "uv run pytest tests/ -v -s -m '(account or basin or stream) and not access_tokens'"
+          },
+          {
             "name": "rust",
             "repo": "${{ github.repository }}",
             "ref": "${{ github.sha }}",

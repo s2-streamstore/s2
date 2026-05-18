@@ -1,6 +1,6 @@
 [package]
 name = "s2-common"
-version = "0.30.0"
+version = "0.36.0"
 description = "Common stuff for client and servers for S2, the durable streams API"
 edition.workspace = true
 license.workspace = true
@@ -23,7 +23,6 @@ blake3 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
-enum-ordinalize = { workspace = true }
 enumset = { workspace = true }
 http = { workspace = true }
 rand = { workspace = true }

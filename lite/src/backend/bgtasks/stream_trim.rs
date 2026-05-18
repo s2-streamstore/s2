@@ -1,19 +1,13 @@
 use std::ops::RangeTo;
 
-use enum_ordinalize::Ordinalize;
 use futures::{StreamExt, stream};
-use s2_common::{
-    record::{NonZeroSeqNum, SeqNum, StreamPosition, Timestamp},
-    types::resources::Page,
-};
+use s2_common::{record::NonZeroSeqNum, types::resources::Page};
 use slatedb::{
     WriteBatch,
-    config::{DurabilityLevel, ScanOptions, WriteOptions},
+    config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
 
-#[cfg(test)]
-use crate::backend::PersistedStreamTail;
 use crate::{
     backend::{Backend, error::StorageError, kv, store::db_txn_get},
     stream_id::StreamId,
@@ -44,16 +38,13 @@ impl Backend {
     async fn list_stream_trim_pending(
         &self,
     ) -> Result<Page<(StreamId, RangeTo<NonZeroSeqNum>)>, StorageError> {
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
+            ..Default::default()
         };
         let mut it = self
             .db
-            .scan_with_options(kv::key_type_range(kv::KeyType::StreamTrimPoint), &SCAN_OPTS)
+            .scan_with_options(kv::key_type_range(kv::KeyType::StreamTrimPoint), &scan_opts)
             .await?;
         let mut pending = Vec::new();
         while let Some(kv) = it.next().await? {
@@ -86,32 +77,18 @@ impl Backend {
         stream_id: StreamId,
         trim_point: RangeTo<NonZeroSeqNum>,
     ) -> Result<bool, StorageError> {
-        let start_key = kv::stream_record_timestamp::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: SeqNum::MIN,
-                timestamp: Timestamp::MIN,
-            },
-        );
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
+            ..Default::default()
         };
-        let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
+        let mut it = self.db.scan_prefix_with_options(prefix, &scan_opts).await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
         let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
-            if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp.ordinal()) {
-                break;
-            }
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
-            if deser_stream_id != stream_id {
-                break;
-            }
+            debug_assert_eq!(deser_stream_id, stream_id);
             if pos.seq_num >= trim_point.end.get() {
                 has_remaining_records = true;
                 break;
@@ -120,19 +97,13 @@ impl Backend {
             batch.delete(kv::stream_record_data::ser_key(stream_id, pos));
             batch_size += 1;
             if batch_size >= DELETE_BATCH_SIZE {
-                static WRITE_OPTS: WriteOptions = WriteOptions {
-                    await_durable: true,
-                };
-                self.db.write_with_options(batch, &WRITE_OPTS).await?;
+                self.db.write(batch).await?;
                 batch = WriteBatch::new();
                 batch_size = 0;
             }
         }
         if batch_size > 0 {
-            static WRITE_OPTS: WriteOptions = WriteOptions {
-                await_durable: true,
-            };
-            self.db.write_with_options(batch, &WRITE_OPTS).await?;
+            self.db.write(batch).await?;
         }
         Ok(has_remaining_records)
     }
@@ -173,10 +144,7 @@ impl Backend {
             txn.delete(kv::stream_tail_position::ser_key(stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(stream_id))?;
         }
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        txn.commit_with_options(&WRITE_OPTS).await?;
+        txn.commit().await?;
         Ok(())
     }
 }
@@ -192,11 +160,14 @@ mod tests {
         },
         types::{basin::BasinName, config::OptionalStreamConfig, stream::StreamName},
     };
-    use slatedb::{WriteBatch, config::WriteOptions};
+    use slatedb::WriteBatch;
     use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
-    use crate::{backend::kv, stream_id::StreamId};
+    use crate::{
+        backend::{PersistedStreamTail, kv},
+        stream_id::StreamId,
+    };
 
     fn test_record() -> Metered<StoredRecord> {
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"trim-test")).unwrap();
@@ -289,6 +260,7 @@ mod tests {
 
         let meta = kv::stream_meta::StreamMeta {
             config: OptionalStreamConfig::default(),
+            cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
             creation_idempotency_key: None,
@@ -463,14 +435,7 @@ mod tests {
                 kv::stream_trim_point::ser_value(trim_point(1)),
             );
         }
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        backend
-            .db
-            .write_with_options(batch, &WRITE_OPTS)
-            .await
-            .unwrap();
+        backend.db.write(batch).await.unwrap();
 
         let has_more = backend.clone().tick_stream_trim().await.unwrap();
         assert!(has_more);
@@ -680,14 +645,7 @@ mod tests {
             kv::stream_trim_point::ser_key(stream_id),
             kv::stream_trim_point::ser_value(trim_point(total)),
         );
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        backend
-            .db
-            .write_with_options(batch, &WRITE_OPTS)
-            .await
-            .unwrap();
+        backend.db.write(batch).await.unwrap();
 
         backend.clone().tick_stream_trim().await.unwrap();
 

@@ -29,9 +29,7 @@ async fn test_operations_on_nonexistent_basin() {
         wait: None,
     };
 
-    let read_result = backend
-        .read(basin_name.clone(), stream_name.clone(), start, end)
-        .await;
+    let read_result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     assert!(matches!(read_result, Err(ReadError::BasinNotFound(_))));
 
     let input = AppendInput {
@@ -39,12 +37,17 @@ async fn test_operations_on_nonexistent_basin() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let append_result = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await;
+    let append_result = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input,
+        None,
+    )
+    .await;
     assert!(matches!(append_result, Err(AppendError::BasinNotFound(_))));
 
-    let check_tail_result = backend.check_tail(basin_name, stream_name).await;
+    let check_tail_result = check_tail(&backend, basin_name, stream_name).await;
     assert!(matches!(
         check_tail_result,
         Err(CheckTailError::BasinNotFound(_))
@@ -75,7 +78,7 @@ async fn test_concurrent_appends_to_same_stream() {
                 match_seq_num: None,
                 fencing_token: None,
             };
-            backend.append(basin_name, stream_name, input).await
+            append(&backend, basin_name, stream_name, input, None).await
         });
         handles.push(handle);
     }
@@ -87,8 +90,7 @@ async fn test_concurrent_appends_to_same_stream() {
             .expect("Concurrent append should succeed");
     }
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 20);
@@ -103,10 +105,7 @@ async fn test_concurrent_appends_to_same_stream() {
         wait: Some(Duration::ZERO),
     };
 
-    let session = backend
-        .read(basin_name, stream_name, start, end)
-        .await
-        .expect("Failed to create read session");
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     let mut session = Box::pin(session);
     let records = collect_records(&mut session).await;
     let mut actual_bodies = envelope_bodies(&records);
@@ -154,7 +153,6 @@ async fn test_concurrent_reconfigure_during_append() {
         retention_policy: s2_common::maybe::Maybe::from(Some(RetentionPolicy::Infinite())),
         timestamping: s2_common::maybe::Maybe::default(),
         delete_on_empty: s2_common::maybe::Maybe::default(),
-        encryption: s2_common::maybe::Maybe::default(),
     };
 
     let updated_config = backend
@@ -165,8 +163,7 @@ async fn test_concurrent_reconfigure_during_append() {
 
     append_handle.await.unwrap();
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
     assert_eq!(tail.seq_num, 10);
@@ -215,7 +212,8 @@ async fn test_concurrent_reads_same_stream() {
                 until: ReadUntil::Unbounded,
                 wait: Some(Duration::ZERO),
             };
-            let session = backend.read(basin_name, stream_name, start, end).await?;
+            let session =
+                try_open_read_session(&backend, &basin_name, &stream_name, start, end).await?;
             let mut session = Box::pin(session);
             let records = collect_records(&mut session).await;
             Ok::<Vec<Vec<u8>>, ReadError>(envelope_bodies(&records))

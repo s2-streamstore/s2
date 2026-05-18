@@ -8,7 +8,7 @@ use std::{
 use axum_server::tls_rustls::RustlsConfig;
 use bytesize::ByteSize;
 use http::header::AUTHORIZATION;
-use s2_common::encryption::S2_ENCRYPTION_HEADER;
+use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
 use slatedb::object_store;
 use tokio::time::Instant;
 use tower_http::{
@@ -74,8 +74,9 @@ pub struct LiteArgs {
 
     /// Path to a JSON file defining basins and streams to create at startup.
     ///
-    /// Uses create-or-reconfigure semantics, so it is safe to run on repeated
-    /// restarts. Can also be set via S2LITE_INIT_FILE environment variable.
+    /// Creates missing resources and updates existing configs to match the file,
+    /// so it is safe to run on repeated restarts. Can also be set via
+    /// S2LITE_INIT_FILE environment variable.
     #[arg(long, env = "S2LITE_INIT_FILE")]
     pub init_file: Option<PathBuf>,
 
@@ -100,19 +101,69 @@ impl StoreType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerProtocol {
+    Http,
+    Https { self_signed: bool },
+}
+
+impl ServerProtocol {
+    fn from_args(args: &LiteArgs) -> Self {
+        if args.tls.tls_self {
+            Self::Https { self_signed: true }
+        } else if args.tls.tls_cert.is_some() {
+            Self::Https { self_signed: false }
+        } else {
+            Self::Http
+        }
+    }
+
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https { .. } => "https",
+        }
+    }
+
+    fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https { .. } => 443,
+        }
+    }
+
+    fn requires_ssl_no_verify(self) -> bool {
+        matches!(self, Self::Https { self_signed: true })
+    }
+}
+
+fn cli_endpoint(protocol: ServerProtocol, port: u16) -> String {
+    format!("{}://localhost:{port}", protocol.scheme())
+}
+
+fn cli_env_hint(protocol: ServerProtocol, port: u16) -> String {
+    let endpoint = cli_endpoint(protocol, port);
+    let mut lines = vec![
+        "copy/paste into a new terminal to point the S2 CLI at this server:".to_string(),
+        format!("export S2_ACCOUNT_ENDPOINT={endpoint}"),
+        format!("export S2_BASIN_ENDPOINT={endpoint}"),
+        "export S2_ACCESS_TOKEN=ignored".to_string(),
+    ];
+
+    if protocol.requires_ssl_no_verify() {
+        lines.push("export S2_SSL_NO_VERIFY=1".to_string());
+    }
+
+    lines.join("\n")
+}
+
 pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     info!(?args);
 
-    let addr = {
-        let port = args.port.unwrap_or_else(|| {
-            if args.tls.tls_self || args.tls.tls_cert.is_some() {
-                443
-            } else {
-                80
-            }
-        });
-        format!("0.0.0.0:{port}")
-    };
+    let protocol = ServerProtocol::from_args(&args);
+    let port = args.port.unwrap_or_else(|| protocol.default_port());
+    let addr = format!("0.0.0.0:{port}");
+    let cli_hint = cli_env_hint(protocol, port);
 
     let store_type = if let Some(bucket) = args.bucket {
         StoreType::S3Bucket(bucket)
@@ -165,7 +216,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         )
         .layer(SetSensitiveRequestHeadersLayer::new([
             AUTHORIZATION,
-            S2_ENCRYPTION_HEADER.clone(),
+            S2_ENCRYPTION_KEY_HEADER.clone(),
         ]));
 
     if !args.no_cors {
@@ -186,6 +237,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
                 "starting https server with provided certificate"
             );
             let rustls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
+            info!("{}", cli_hint);
             axum_server::bind_rustls(addr.parse()?, rustls_config)
                 .handle(server_handle)
                 .serve(app.into_make_service())
@@ -206,6 +258,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
                 signing_key.serialize_pem().into_bytes(),
             )
             .await?;
+            info!("{}", cli_hint);
             axum_server::bind_rustls(addr.parse()?, rustls_config)
                 .handle(server_handle)
                 .serve(app.into_make_service())
@@ -213,6 +266,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         }
         (false, None, None) => {
             info!(addr, "starting plain http server");
+            info!("{}", cli_hint);
             axum_server::bind(addr.parse()?)
                 .handle(server_handle)
                 .serve(app.into_make_service())
@@ -382,5 +436,49 @@ impl object_store::CredentialProvider for S3CredentialProvider {
             expiry: creds.expiry(),
         });
         Ok(credential)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServerProtocol, cli_endpoint, cli_env_hint};
+
+    #[test]
+    fn cli_endpoint_uses_localhost_with_explicit_port() {
+        assert_eq!(
+            cli_endpoint(ServerProtocol::Http, 80),
+            "http://localhost:80"
+        );
+        assert_eq!(
+            cli_endpoint(ServerProtocol::Https { self_signed: false }, 443),
+            "https://localhost:443"
+        );
+    }
+
+    #[test]
+    fn cli_env_hint_includes_exports_for_http() {
+        assert_eq!(
+            cli_env_hint(ServerProtocol::Http, 8080),
+            concat!(
+                "copy/paste into a new terminal to point the S2 CLI at this server:\n",
+                "export S2_ACCOUNT_ENDPOINT=http://localhost:8080\n",
+                "export S2_BASIN_ENDPOINT=http://localhost:8080\n",
+                "export S2_ACCESS_TOKEN=ignored",
+            )
+        );
+    }
+
+    #[test]
+    fn cli_env_hint_includes_ssl_no_verify_for_self_signed_tls() {
+        assert_eq!(
+            cli_env_hint(ServerProtocol::Https { self_signed: true }, 8443),
+            concat!(
+                "copy/paste into a new terminal to point the S2 CLI at this server:\n",
+                "export S2_ACCOUNT_ENDPOINT=https://localhost:8443\n",
+                "export S2_BASIN_ENDPOINT=https://localhost:8443\n",
+                "export S2_ACCESS_TOKEN=ignored\n",
+                "export S2_SSL_NO_VERIFY=1",
+            )
+        );
     }
 }

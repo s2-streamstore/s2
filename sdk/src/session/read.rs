@@ -9,7 +9,7 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
-    types::{EncryptionSpec, MeteredBytes, ReadBatch, S2Error, StreamName},
+    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +43,7 @@ pub type Streaming<R> = Pin<Box<dyn Send + futures::Stream<Item = Result<R, Read
 pub async fn read_session(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<EncryptionSpec>,
+    encryption: Option<EncryptionKey>,
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
@@ -60,7 +60,6 @@ pub async fn read_session(
             encryption.clone(),
             start.clone(),
             end.clone(),
-            ignore_command_records,
         )
         .await
         {
@@ -89,7 +88,6 @@ pub async fn read_session(
                     encryption.clone(),
                     start.clone(),
                     end.clone(),
-                    ignore_command_records,
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
@@ -108,7 +106,7 @@ pub async fn read_session(
                 .next()
                 .await
             {
-                Some(Ok(batch)) => {
+                Some(Ok(mut batch)) => {
                     if retry_backoff.used() > 0 {
                         retry_backoff.reset();
                     }
@@ -134,7 +132,13 @@ pub async fn read_session(
                         )
                     }
 
-                    yield Ok(batch);
+                    if ignore_command_records {
+                        batch.records.retain(|r| !r.is_command_record());
+                    }
+
+                    if !batch.records.is_empty() {
+                        yield Ok(batch);
+                    }
                 }
                 Some(Err(err)) => {
                     batches = None;
@@ -153,10 +157,9 @@ pub async fn read_session(
 async fn session_inner(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<EncryptionSpec>,
+    encryption: Option<EncryptionKey>,
     start: ReadStart,
     end: ReadEnd,
-    ignore_command_records: bool,
 ) -> Result<Streaming<ReadBatch>, ReadSessionError> {
     let mut batches = client
         .read_session(&name, start, end, encryption.as_ref())
@@ -165,10 +168,7 @@ async fn session_inner(
         loop {
             match timeout(Duration::from_secs(20), batches.next()).await {
                 Ok(Some(batch)) => {
-                    let batch = ReadBatch::from_api(batch?, ignore_command_records);
-                    if !batch.records.is_empty() {
-                        yield batch;
-                    }
+                    yield ReadBatch::from_api(batch?);
                 }
                 Ok(None) => break,
                 Err(_) => Err(ReadSessionError::HeartbeatTimeout)?,

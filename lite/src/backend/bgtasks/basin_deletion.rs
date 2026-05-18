@@ -6,7 +6,7 @@ use s2_common::types::{
 };
 use slatedb::{
     WriteBatch,
-    config::{DurabilityLevel, ScanOptions, WriteOptions},
+    config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
 
@@ -41,18 +41,15 @@ impl Backend {
     async fn list_basin_deletion_pending(
         &self,
     ) -> Result<Page<(BasinName, StreamNameStartAfter)>, StorageError> {
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
+            ..Default::default()
         };
         let mut it = self
             .db
             .scan_with_options(
                 kv::key_type_range(kv::KeyType::BasinDeletionPending),
-                &SCAN_OPTS,
+                &scan_opts,
             )
             .await?;
         let mut pending = Vec::new();
@@ -117,10 +114,7 @@ impl Backend {
             kv::basin_deletion_pending::ser_key(basin),
             kv::basin_deletion_pending::ser_value(cursor),
         );
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        self.db.write_with_options(batch, &WRITE_OPTS).await?;
+        self.db.write(batch).await?;
         Ok(())
     }
 
@@ -129,10 +123,7 @@ impl Backend {
         let mut batch = WriteBatch::new();
         batch.delete(kv::basin_meta::ser_key(basin));
         batch.delete(kv::basin_deletion_pending::ser_key(basin));
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        self.db.write_with_options(batch, &WRITE_OPTS).await?;
+        self.db.write(batch).await?;
         Ok(())
     }
 }
@@ -164,6 +155,7 @@ mod tests {
     fn stream_meta(deleted_at: Option<OffsetDateTime>) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
             config: Default::default(),
+            cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at,
             creation_idempotency_key: None,
@@ -207,14 +199,7 @@ mod tests {
                 kv::stream_meta::ser_value(&stream_meta(Some(deleted_at))),
             );
         }
-        let write_opts = slatedb::config::WriteOptions {
-            await_durable: true,
-        };
-        backend
-            .db
-            .write_with_options(batch, &write_opts)
-            .await
-            .unwrap();
+        backend.db.write(batch).await.unwrap();
     }
 
     #[tokio::test]

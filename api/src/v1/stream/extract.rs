@@ -5,7 +5,7 @@ use axum::{
 use futures::StreamExt as _;
 use http::{StatusCode, request::Parts};
 use s2_common::{
-    encryption::EncryptionSpec,
+    encryption::EncryptionKey,
     http::{ParseableHeader, extract::HeaderRejection},
     types,
 };
@@ -54,7 +54,7 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(req.headers());
-        let encryption = parse_header_opt::<EncryptionSpec>(req.headers())?.unwrap_or_default();
+        let encryption_key = parse_header_opt::<EncryptionKey>(req.headers())?;
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
@@ -88,7 +88,7 @@ where
             });
 
             return Ok(Self::S2s {
-                encryption,
+                encryption_key,
                 inputs: Box::pin(inputs),
                 response_compression,
             });
@@ -117,7 +117,7 @@ where
         };
 
         Ok(Self::Unary {
-            encryption,
+            encryption_key,
             input,
             response_mime,
         })
@@ -132,13 +132,13 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(&parts.headers);
-        let encryption = parse_header_opt::<EncryptionSpec>(&parts.headers)?.unwrap_or_default();
+        let encryption_key = parse_header_opt::<EncryptionKey>(&parts.headers)?;
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
                 s2s::CompressionAlgorithm::from_accept_encoding(&parts.headers);
             return Ok(Self::S2s {
-                encryption,
+                encryption_key,
                 response_compression,
             });
         }
@@ -150,7 +150,7 @@ where
         if accept.as_ref().is_some_and(crate::mime::is_event_stream) {
             let last_event_id = parse_header_opt::<LastEventId>(&parts.headers)?;
             return Ok(Self::EventStream {
-                encryption,
+                encryption_key,
                 format,
                 last_event_id,
             });
@@ -162,7 +162,7 @@ where
             .unwrap_or(JsonOrProto::Json);
 
         Ok(Self::Unary {
-            encryption,
+            encryption_key,
             format,
             response_mime,
         })

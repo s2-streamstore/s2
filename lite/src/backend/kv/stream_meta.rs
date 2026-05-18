@@ -1,10 +1,10 @@
 use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enum_ordinalize::Ordinalize;
 use s2_common::{
     bash::Bash,
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
+    encryption::EncryptionAlgorithm,
     types::{
         basin::BasinName,
         config::OptionalStreamConfig,
@@ -24,6 +24,7 @@ const FIELD_SEPARATOR: u8 = b'\0';
 #[derive(Debug, Clone)]
 pub struct StreamMeta {
     pub config: OptionalStreamConfig,
+    pub cipher: Option<EncryptionAlgorithm>,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
     pub creation_idempotency_key: Option<Bash>,
@@ -32,6 +33,7 @@ pub struct StreamMeta {
 #[derive(Debug, Serialize, Deserialize)]
 struct StreamMetaSerde {
     config: Option<s2_api::v1::config::StreamConfig>,
+    cipher: Option<EncryptionAlgorithm>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -43,6 +45,7 @@ impl From<StreamMeta> for StreamMetaSerde {
     fn from(meta: StreamMeta) -> Self {
         Self {
             config: s2_api::v1::config::StreamConfig::to_opt(meta.config),
+            cipher: meta.cipher,
             created_at: meta.created_at,
             deleted_at: meta.deleted_at,
             creation_idempotency_key: meta.creation_idempotency_key,
@@ -61,6 +64,7 @@ impl TryFrom<StreamMetaSerde> for StreamMeta {
 
         Ok(Self {
             config,
+            cipher: serde.cipher,
             created_at: serde.created_at,
             deleted_at: serde.deleted_at,
             creation_idempotency_key: serde.creation_idempotency_key,
@@ -107,7 +111,7 @@ pub fn ser_key(basin: &BasinName, stream: &StreamName) -> Bytes {
 fn ser_key_internal(basin_bytes: &[u8], stream_bytes: &[u8]) -> BytesMut {
     let capacity = 1 + basin_bytes.len() + 1 + stream_bytes.len();
     let mut buf = BytesMut::with_capacity(capacity);
-    buf.put_u8(KeyType::StreamMeta.ordinal());
+    buf.put_u8(KeyType::StreamMeta as u8);
     buf.put_slice(basin_bytes);
     buf.put_u8(FIELD_SEPARATOR);
     buf.put_slice(stream_bytes);
@@ -118,7 +122,7 @@ fn ser_key_internal(basin_bytes: &[u8], stream_bytes: &[u8]) -> BytesMut {
 pub fn deser_key(mut bytes: Bytes) -> Result<(BasinName, StreamName), DeserializationError> {
     check_min_size(&bytes, 1 + MIN_BASIN_NAME_LEN + 1 + MIN_STREAM_NAME_LEN)?;
     let ordinal = bytes.get_u8();
-    if ordinal != KeyType::StreamMeta.ordinal() {
+    if ordinal != (KeyType::StreamMeta as u8) {
         return Err(DeserializationError::InvalidOrdinal(ordinal));
     }
     let sep_pos = bytes
@@ -147,15 +151,16 @@ pub fn deser_value(bytes: Bytes) -> Result<StreamMeta, DeserializationError> {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, time::Duration};
 
     use bytes::Bytes;
     use proptest::prelude::*;
     use s2_common::{
         bash::Bash,
+        encryption::EncryptionAlgorithm,
         types::{
             basin::BasinName,
-            config::{OptionalStreamConfig, StorageClass},
+            config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass},
             stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
         },
     };
@@ -167,6 +172,9 @@ mod tests {
     fn value_roundtrip_stream_meta() {
         let config = OptionalStreamConfig {
             storage_class: Some(StorageClass::Express),
+            delete_on_empty: OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
             ..Default::default()
         };
         let created_at = OffsetDateTime::from_unix_timestamp(1234567890)
@@ -181,6 +189,7 @@ mod tests {
         );
         let stream_meta = super::StreamMeta {
             config: config.clone(),
+            cipher: Some(EncryptionAlgorithm::Aegis256),
             created_at,
             deleted_at,
             creation_idempotency_key: Some(Bash::length_prefixed(&[
@@ -197,6 +206,11 @@ mod tests {
             stream_meta.config.storage_class,
             decoded.config.storage_class
         );
+        assert_eq!(
+            stream_meta.config.delete_on_empty.min_age,
+            decoded.config.delete_on_empty.min_age
+        );
+        assert_eq!(stream_meta.cipher, decoded.cipher);
         assert_eq!(stream_meta.created_at, decoded.created_at);
         assert_eq!(stream_meta.deleted_at, decoded.deleted_at);
     }
@@ -205,6 +219,7 @@ mod tests {
     fn stream_meta_deser_defaults_config_missing() {
         let serde_value = super::StreamMetaSerde {
             config: None,
+            cipher: Some(EncryptionAlgorithm::Aes256Gcm),
             created_at: OffsetDateTime::from_unix_timestamp(2_345_678).unwrap(),
             deleted_at: None,
             creation_idempotency_key: Some(Bash::length_prefixed(&[
@@ -236,6 +251,7 @@ mod tests {
         );
         assert_eq!(decoded.created_at, serde_value.created_at);
         assert_eq!(decoded.deleted_at, serde_value.deleted_at);
+        assert_eq!(decoded.cipher, serde_value.cipher);
     }
 
     fn stream_name_prefix_strategy() -> impl Strategy<Value = StreamNamePrefix> {

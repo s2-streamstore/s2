@@ -140,6 +140,15 @@ impl From<types::config::TimestampingConfig> for TimestampingConfig {
     }
 }
 
+impl From<types::config::OptionalTimestampingConfig> for TimestampingConfig {
+    fn from(value: types::config::OptionalTimestampingConfig) -> Self {
+        Self {
+            mode: value.mode.map(Into::into),
+            uncapped: value.uncapped,
+        }
+    }
+}
+
 impl From<TimestampingConfig> for types::config::OptionalTimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
@@ -193,14 +202,9 @@ pub struct DeleteOnEmptyConfig {
 
 impl DeleteOnEmptyConfig {
     pub fn to_opt(config: types::config::OptionalDeleteOnEmptyConfig) -> Option<Self> {
-        let min_age = config.min_age.unwrap_or_default();
-        if min_age > Duration::ZERO {
-            Some(DeleteOnEmptyConfig {
-                min_age_secs: min_age.as_secs(),
-            })
-        } else {
-            None
-        }
+        config.min_age.map(|min_age| DeleteOnEmptyConfig {
+            min_age_secs: min_age.as_secs(),
+        })
     }
 }
 
@@ -208,6 +212,14 @@ impl From<types::config::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     fn from(value: types::config::DeleteOnEmptyConfig) -> Self {
         Self {
             min_age_secs: value.min_age.as_secs(),
+        }
+    }
+}
+
+impl From<types::config::OptionalDeleteOnEmptyConfig> for DeleteOnEmptyConfig {
+    fn from(value: types::config::OptionalDeleteOnEmptyConfig) -> Self {
+        Self {
+            min_age_secs: value.min_age.unwrap_or_default().as_secs(),
         }
     }
 }
@@ -257,118 +269,29 @@ impl From<types::config::DeleteOnEmptyReconfiguration> for DeleteOnEmptyReconfig
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum EncryptionMode {
-    /// Plaintext (no encryption).
-    Plain,
+pub enum EncryptionAlgorithm {
     /// AEGIS-256 authenticated encryption.
+    #[serde(rename = "aegis-256")]
     Aegis256,
     /// AES-256-GCM authenticated encryption.
+    #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
 }
 
-impl From<EncryptionMode> for encryption::EncryptionMode {
-    fn from(value: EncryptionMode) -> Self {
+impl From<EncryptionAlgorithm> for encryption::EncryptionAlgorithm {
+    fn from(value: EncryptionAlgorithm) -> Self {
         match value {
-            EncryptionMode::Plain => Self::Plain,
-            EncryptionMode::Aegis256 => Self::Aegis256,
-            EncryptionMode::Aes256Gcm => Self::Aes256Gcm,
+            EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
 
-impl From<encryption::EncryptionMode> for EncryptionMode {
-    fn from(value: encryption::EncryptionMode) -> Self {
+impl From<encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
+    fn from(value: encryption::EncryptionAlgorithm) -> Self {
         match value {
-            encryption::EncryptionMode::Plain => Self::Plain,
-            encryption::EncryptionMode::Aegis256 => Self::Aegis256,
-            encryption::EncryptionMode::Aes256Gcm => Self::Aes256Gcm,
-        }
-    }
-}
-
-#[rustfmt::skip]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct EncryptionConfig {
-    /// Allowed encryption modes for the stream.
-    /// If empty, use defaults. If no default is configured, only plaintext is allowed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_modes: Vec<EncryptionMode>,
-}
-
-impl EncryptionConfig {
-    pub fn to_opt(config: types::config::OptionalEncryptionConfig) -> Option<Self> {
-        let config = EncryptionConfig {
-            allowed_modes: config
-                .allowed_modes
-                .map(|modes| modes.into_iter().map(Into::into).collect())
-                .unwrap_or_default(),
-        };
-        if config == Self::default() {
-            None
-        } else {
-            Some(config)
-        }
-    }
-}
-
-impl From<types::config::EncryptionConfig> for EncryptionConfig {
-    fn from(value: types::config::EncryptionConfig) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-impl From<EncryptionConfig> for types::config::OptionalEncryptionConfig {
-    fn from(value: EncryptionConfig) -> Self {
-        Self {
-            allowed_modes: if value.allowed_modes.is_empty() {
-                None
-            } else {
-                Some(
-                    value
-                        .allowed_modes
-                        .into_iter()
-                        .map(encryption::EncryptionMode::from)
-                        .collect(),
-                )
-            },
-        }
-    }
-}
-
-#[rustfmt::skip]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct EncryptionReconfiguration {
-    /// Allowed encryption modes for the stream.
-    /// Specify an empty list to reset to defaults.
-    #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
-    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Vec<EncryptionMode>>))]
-    pub allowed_modes: Maybe<Vec<EncryptionMode>>,
-}
-
-impl From<EncryptionReconfiguration> for types::config::EncryptionReconfiguration {
-    fn from(value: EncryptionReconfiguration) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes.map(|modes| {
-                modes
-                    .into_iter()
-                    .map(encryption::EncryptionMode::from)
-                    .collect()
-            }),
-        }
-    }
-}
-
-impl From<types::config::EncryptionReconfiguration> for EncryptionReconfiguration {
-    fn from(value: types::config::EncryptionReconfiguration) -> Self {
-        Self {
-            allowed_modes: value
-                .allowed_modes
-                .map(|modes| modes.into_iter().map(Into::into).collect()),
+            encryption::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            encryption::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
@@ -387,9 +310,6 @@ pub struct StreamConfig {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
-    /// Encryption configuration.
-    #[serde(default)]
-    pub encryption: Option<EncryptionConfig>,
 }
 
 impl StreamConfig {
@@ -399,7 +319,6 @@ impl StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = config;
 
         let config = StreamConfig {
@@ -407,7 +326,6 @@ impl StreamConfig {
             retention_policy: retention_policy.map(Into::into),
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
-            encryption: EncryptionConfig::to_opt(encryption),
         };
         if config == Self::default() {
             None
@@ -424,7 +342,6 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = value;
 
         Self {
@@ -432,7 +349,28 @@ impl From<types::config::StreamConfig> for StreamConfig {
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
-            encryption: Some(encryption.into()),
+        }
+    }
+}
+
+impl From<types::config::OptionalStreamConfig> for StreamConfig {
+    fn from(value: types::config::OptionalStreamConfig) -> Self {
+        let types::config::OptionalStreamConfig {
+            storage_class,
+            retention_policy,
+            timestamping,
+            delete_on_empty,
+        } = value;
+
+        let timestamping = (timestamping.mode.is_some() || timestamping.uncapped.is_some())
+            .then(|| timestamping.into());
+        let delete_on_empty = delete_on_empty.min_age.map(|_| delete_on_empty.into());
+
+        Self {
+            storage_class: storage_class.map(Into::into),
+            retention_policy: retention_policy.map(Into::into),
+            timestamping,
+            delete_on_empty,
         }
     }
 }
@@ -446,7 +384,6 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = value;
 
         let retention_policy = match retention_policy {
@@ -459,7 +396,6 @@ impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
             retention_policy,
             timestamping: timestamping.map(Into::into).unwrap_or_default(),
             delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
-            encryption: encryption.map(Into::into).unwrap_or_default(),
         })
     }
 }
@@ -485,10 +421,6 @@ pub struct StreamReconfiguration {
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<DeleteOnEmptyReconfiguration>))]
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
-    /// Encryption configuration.
-    #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
-    #[cfg_attr(feature = "utoipa", schema(value_type = Option<EncryptionReconfiguration>))]
-    pub encryption: Maybe<Option<EncryptionReconfiguration>>,
 }
 
 impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
@@ -500,7 +432,6 @@ impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = value;
 
         Ok(Self {
@@ -508,7 +439,6 @@ impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
             retention_policy: retention_policy.try_map_opt(TryInto::try_into)?,
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
-            encryption: encryption.map_opt(Into::into),
         })
     }
 }
@@ -520,7 +450,6 @@ impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
             retention_policy,
             timestamping,
             delete_on_empty,
-            encryption,
         } = value;
 
         Self {
@@ -528,7 +457,6 @@ impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
             retention_policy: retention_policy.map_opt(Into::into),
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
-            encryption: encryption.map_opt(Into::into),
         }
     }
 }
@@ -539,6 +467,8 @@ impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
 pub struct BasinConfig {
     /// Default stream configuration.
     pub default_stream_config: Option<StreamConfig>,
+    /// Encryption algorithm to apply to newly created streams in the basin.
+    pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(default = false))]
@@ -555,6 +485,7 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
     fn try_from(value: BasinConfig) -> Result<Self, Self::Error> {
         let BasinConfig {
             default_stream_config,
+            stream_cipher,
             create_stream_on_append,
             create_stream_on_read,
         } = value;
@@ -564,6 +495,7 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
                 Some(config) => config.try_into()?,
                 None => Default::default(),
             },
+            stream_cipher: stream_cipher.map(Into::into),
             create_stream_on_append,
             create_stream_on_read,
         })
@@ -574,12 +506,14 @@ impl From<types::config::BasinConfig> for BasinConfig {
     fn from(value: types::config::BasinConfig) -> Self {
         let types::config::BasinConfig {
             default_stream_config,
+            stream_cipher,
             create_stream_on_append,
             create_stream_on_read,
         } = value;
 
         Self {
             default_stream_config: StreamConfig::to_opt(default_stream_config),
+            stream_cipher: stream_cipher.map(Into::into),
             create_stream_on_append,
             create_stream_on_read,
         }
@@ -594,6 +528,10 @@ pub struct BasinReconfiguration {
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<StreamReconfiguration>))]
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
+    /// Encryption algorithm to apply to newly created streams in the basin.
+    #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<EncryptionAlgorithm>))]
+    pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     /// Create a stream on append.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<bool>))]
@@ -610,12 +548,14 @@ impl TryFrom<BasinReconfiguration> for types::config::BasinReconfiguration {
     fn try_from(value: BasinReconfiguration) -> Result<Self, Self::Error> {
         let BasinReconfiguration {
             default_stream_config,
+            stream_cipher,
             create_stream_on_append,
             create_stream_on_read,
         } = value;
 
         Ok(Self {
             default_stream_config: default_stream_config.try_map_opt(TryInto::try_into)?,
+            stream_cipher: stream_cipher.map_opt(Into::into),
             create_stream_on_append: create_stream_on_append.map(Into::into),
             create_stream_on_read: create_stream_on_read.map(Into::into),
         })
@@ -626,12 +566,14 @@ impl From<types::config::BasinReconfiguration> for BasinReconfiguration {
     fn from(value: types::config::BasinReconfiguration) -> Self {
         let types::config::BasinReconfiguration {
             default_stream_config,
+            stream_cipher,
             create_stream_on_append,
             create_stream_on_read,
         } = value;
 
         Self {
             default_stream_config: default_stream_config.map_opt(Into::into),
+            stream_cipher: stream_cipher.map_opt(Into::into),
             create_stream_on_append: create_stream_on_append.map(Into::into),
             create_stream_on_read: create_stream_on_read.map(Into::into),
         }
@@ -675,51 +617,11 @@ mod tests {
         any::<u64>().prop_map(|min_age_secs| DeleteOnEmptyConfig { min_age_secs })
     }
 
-    fn gen_encryption_mode() -> impl Strategy<Value = EncryptionMode> {
+    fn gen_encryption_algorithm() -> impl Strategy<Value = EncryptionAlgorithm> {
         prop_oneof![
-            Just(EncryptionMode::Plain),
-            Just(EncryptionMode::Aegis256),
-            Just(EncryptionMode::Aes256Gcm),
+            Just(EncryptionAlgorithm::Aegis256),
+            Just(EncryptionAlgorithm::Aes256Gcm),
         ]
-    }
-
-    fn gen_encryption_config() -> impl Strategy<Value = EncryptionConfig> {
-        (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(|(plain, aegis, aes)| {
-            let allowed_modes = [
-                (plain, EncryptionMode::Plain),
-                (aegis, EncryptionMode::Aegis256),
-                (aes, EncryptionMode::Aes256Gcm),
-            ]
-            .into_iter()
-            .filter_map(|(include, mode)| include.then_some(mode))
-            .collect();
-            EncryptionConfig { allowed_modes }
-        })
-    }
-
-    fn gen_encryption_reconfiguration() -> impl Strategy<Value = EncryptionReconfiguration> {
-        prop_oneof![
-            Just(Maybe::Unspecified),
-            proptest::collection::vec(gen_encryption_mode(), 0..=3).prop_map(Maybe::Specified),
-        ]
-        .prop_map(|allowed_modes| EncryptionReconfiguration { allowed_modes })
-    }
-
-    fn gen_internal_encryption_modes()
-    -> impl Strategy<Value = enumset::EnumSet<encryption::EncryptionMode>> {
-        (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(|(plain, aegis, aes)| {
-            let mut allowed_modes = enumset::EnumSet::new();
-            if plain {
-                allowed_modes.insert(encryption::EncryptionMode::Plain);
-            }
-            if aegis {
-                allowed_modes.insert(encryption::EncryptionMode::Aegis256);
-            }
-            if aes {
-                allowed_modes.insert(encryption::EncryptionMode::Aes256Gcm);
-            }
-            allowed_modes
-        })
     }
 
     fn gen_stream_config() -> impl Strategy<Value = StreamConfig> {
@@ -728,17 +630,13 @@ mod tests {
             proptest::option::of(gen_retention_policy()),
             proptest::option::of(gen_timestamping_config()),
             proptest::option::of(gen_delete_on_empty_config()),
-            proptest::option::of(gen_encryption_config()),
         )
             .prop_map(
-                |(storage_class, retention_policy, timestamping, delete_on_empty, encryption)| {
-                    StreamConfig {
-                        storage_class,
-                        retention_policy,
-                        timestamping,
-                        delete_on_empty,
-                        encryption,
-                    }
+                |(storage_class, retention_policy, timestamping, delete_on_empty)| StreamConfig {
+                    storage_class,
+                    retention_policy,
+                    timestamping,
+                    delete_on_empty,
                 },
             )
     }
@@ -746,13 +644,20 @@ mod tests {
     fn gen_basin_config() -> impl Strategy<Value = BasinConfig> {
         (
             proptest::option::of(gen_stream_config()),
+            proptest::option::of(gen_encryption_algorithm()),
             any::<bool>(),
             any::<bool>(),
         )
             .prop_map(
-                |(default_stream_config, create_stream_on_append, create_stream_on_read)| {
+                |(
+                    default_stream_config,
+                    stream_cipher,
+                    create_stream_on_append,
+                    create_stream_on_read,
+                )| {
                     BasinConfig {
                         default_stream_config,
+                        stream_cipher,
                         create_stream_on_append,
                         create_stream_on_read,
                     }
@@ -776,16 +681,14 @@ mod tests {
             gen_maybe(gen_retention_policy()),
             gen_maybe(gen_timestamping_reconfiguration()),
             gen_maybe(gen_delete_on_empty_reconfiguration()),
-            gen_maybe(gen_encryption_reconfiguration()),
         )
             .prop_map(
-                |(storage_class, retention_policy, timestamping, delete_on_empty, encryption)| {
+                |(storage_class, retention_policy, timestamping, delete_on_empty)| {
                     StreamReconfiguration {
                         storage_class,
                         retention_policy,
                         timestamping,
                         delete_on_empty,
-                        encryption,
                     }
                 },
             )
@@ -805,6 +708,7 @@ mod tests {
     fn gen_basin_reconfiguration() -> impl Strategy<Value = BasinReconfiguration> {
         (
             gen_maybe(gen_stream_reconfiguration()),
+            gen_maybe(gen_encryption_algorithm()),
             prop_oneof![
                 Just(Maybe::Unspecified),
                 any::<bool>().prop_map(Maybe::Specified),
@@ -815,12 +719,16 @@ mod tests {
             ],
         )
             .prop_map(
-                |(default_stream_config, create_stream_on_append, create_stream_on_read)| {
-                    BasinReconfiguration {
-                        default_stream_config,
-                        create_stream_on_append,
-                        create_stream_on_read,
-                    }
+                |(
+                    default_stream_config,
+                    stream_cipher,
+                    create_stream_on_append,
+                    create_stream_on_read,
+                )| BasinReconfiguration {
+                    default_stream_config,
+                    stream_cipher,
+                    create_stream_on_append,
+                    create_stream_on_read,
                 },
             )
     }
@@ -833,9 +741,8 @@ mod tests {
             proptest::option::of(gen_timestamping_mode()),
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<u64>()),
-            proptest::option::of(gen_internal_encryption_modes()),
         )
-            .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe, encryption)| {
+            .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe)| {
                 types::config::OptionalStreamConfig {
                     storage_class: sc.map(Into::into),
                     retention_policy: rp.map(|rp| match rp {
@@ -850,9 +757,6 @@ mod tests {
                     },
                     delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
                         min_age: doe.map(Duration::from_secs),
-                    },
-                    encryption: types::config::OptionalEncryptionConfig {
-                        allowed_modes: encryption,
                     },
                 }
             })
@@ -928,14 +832,6 @@ mod tests {
                 merged.delete_on_empty.min_age,
                 stream.delete_on_empty.min_age.or(basin.delete_on_empty.min_age).unwrap_or_default()
             );
-            prop_assert_eq!(
-                merged.encryption.allowed_modes,
-                stream
-                    .encryption
-                    .allowed_modes
-                    .or(basin.encryption.allowed_modes)
-                    .unwrap_or(types::config::DEFAULT_ALLOWED_ENCRYPTION_MODES)
-            );
         }
 
         #[test]
@@ -948,7 +844,6 @@ mod tests {
             prop_assert_eq!(result.timestamping.mode, base.timestamping.mode);
             prop_assert_eq!(result.timestamping.uncapped, base.timestamping.uncapped);
             prop_assert_eq!(result.delete_on_empty.min_age, base.delete_on_empty.min_age);
-            prop_assert_eq!(result.encryption.allowed_modes, base.encryption.allowed_modes);
         }
 
         #[test]
@@ -958,7 +853,6 @@ mod tests {
                 retention_policy: Maybe::Specified(None),
                 timestamping: Maybe::Specified(None),
                 delete_on_empty: Maybe::Specified(None),
-                encryption: Maybe::Specified(None),
             };
             let result = base.reconfigure(reconfig);
 
@@ -967,7 +861,6 @@ mod tests {
             prop_assert!(result.timestamping.mode.is_none());
             prop_assert!(result.timestamping.uncapped.is_none());
             prop_assert!(result.delete_on_empty.min_age.is_none());
-            prop_assert!(result.encryption.allowed_modes.is_none());
         }
 
         #[test]
@@ -1042,6 +935,7 @@ mod tests {
         #[test]
         fn reconfigure_basin_unspecified_preserves(
             base_sc in proptest::option::of(gen_storage_class()),
+            base_algorithm in proptest::option::of(gen_encryption_algorithm()),
             base_on_append in any::<bool>(),
             base_on_read in any::<bool>(),
         ) {
@@ -1050,6 +944,7 @@ mod tests {
                     storage_class: base_sc.map(Into::into),
                     ..Default::default()
                 },
+                stream_cipher: base_algorithm.map(Into::into),
                 create_stream_on_append: base_on_append,
                 create_stream_on_read: base_on_read,
             };
@@ -1058,6 +953,7 @@ mod tests {
             let result = base.clone().reconfigure(reconfig);
 
             prop_assert_eq!(result.default_stream_config.storage_class, base.default_stream_config.storage_class);
+            prop_assert_eq!(result.stream_cipher, base.stream_cipher);
             prop_assert_eq!(result.create_stream_on_append, base.create_stream_on_append);
             prop_assert_eq!(result.create_stream_on_read, base.create_stream_on_read);
         }
@@ -1067,6 +963,7 @@ mod tests {
             base_on_append in any::<bool>(),
             new_on_append in any::<bool>(),
             new_sc in gen_storage_class(),
+            new_algorithm in gen_encryption_algorithm(),
         ) {
             let base = types::config::BasinConfig {
                 create_stream_on_append: base_on_append,
@@ -1078,12 +975,14 @@ mod tests {
                     storage_class: Maybe::Specified(Some(new_sc.into())),
                     ..Default::default()
                 })),
+                stream_cipher: Maybe::Specified(Some(new_algorithm.into())),
                 create_stream_on_append: Maybe::Specified(new_on_append),
                 ..Default::default()
             };
             let result = base.reconfigure(reconfig);
 
             prop_assert_eq!(result.default_stream_config.storage_class, Some(new_sc.into()));
+            prop_assert_eq!(result.stream_cipher, Some(new_algorithm.into()));
             prop_assert_eq!(result.create_stream_on_append, new_on_append);
         }
 
@@ -1122,18 +1021,66 @@ mod tests {
         // default stream config -> None
         assert!(StreamConfig::to_opt(types::config::OptionalStreamConfig::default()).is_none());
 
-        // delete_on_empty: None or Some(ZERO) -> None
+        // delete_on_empty: None -> None
         let doe_none = types::config::OptionalDeleteOnEmptyConfig { min_age: None };
-        let doe_zero = types::config::OptionalDeleteOnEmptyConfig {
-            min_age: Some(Duration::ZERO),
-        };
         assert!(DeleteOnEmptyConfig::to_opt(doe_none).is_none());
-        assert!(DeleteOnEmptyConfig::to_opt(doe_zero).is_none());
 
         // default timestamping -> None
         assert!(
             TimestampingConfig::to_opt(types::config::OptionalTimestampingConfig::default())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn optional_stream_config_into_api_preserves_explicit_zero_delete_on_empty() {
+        let api: StreamConfig = types::config::OptionalStreamConfig {
+            delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
+            ..Default::default()
+        }
+        .into();
+
+        assert_eq!(
+            api.delete_on_empty,
+            Some(DeleteOnEmptyConfig { min_age_secs: 0 })
+        );
+    }
+
+    #[test]
+    fn optional_stream_config_to_opt_preserves_explicit_zero_delete_on_empty() {
+        let api = StreamConfig::to_opt(types::config::OptionalStreamConfig {
+            delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            api.delete_on_empty,
+            Some(DeleteOnEmptyConfig { min_age_secs: 0 })
+        );
+    }
+
+    #[test]
+    fn optional_stream_config_into_api_preserves_nested_timestamping_omission() {
+        let api: StreamConfig = types::config::OptionalStreamConfig {
+            timestamping: types::config::OptionalTimestampingConfig {
+                mode: Some(types::config::TimestampingMode::Arrival),
+                uncapped: None,
+            },
+            ..Default::default()
+        }
+        .into();
+
+        assert_eq!(
+            api.timestamping,
+            Some(TimestampingConfig {
+                mode: Some(TimestampingMode::Arrival),
+                uncapped: None
+            })
         );
     }
 
@@ -1162,10 +1109,6 @@ mod tests {
         assert!(
             internal.delete_on_empty.min_age.is_none(),
             "delete_on_empty.min_age should be None"
-        );
-        assert!(
-            internal.encryption.allowed_modes.is_none(),
-            "encryption.allowed_modes should be None"
         );
     }
 }

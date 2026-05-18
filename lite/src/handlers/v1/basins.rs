@@ -9,7 +9,7 @@ use s2_common::{
     types::{
         basin::{BasinName, ListBasinsRequest},
         config::{BasinConfig, BasinReconfiguration},
-        resources::{CreateMode, Page, RequestToken},
+        resources::{PROVISION_RESULT_HEADER, Page, ProvisionMode, ProvisionResult, RequestToken},
     },
 };
 
@@ -21,10 +21,7 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::basins::LIST, get(list_basins))
         .route(super::paths::basins::CREATE, post(create_basin))
         .route(super::paths::basins::GET_CONFIG, get(get_basin_config))
-        .route(
-            super::paths::basins::CREATE_OR_RECONFIGURE,
-            put(create_or_reconfigure_basin),
-        )
+        .route(super::paths::basins::ENSURE, put(ensure_basin))
         .route(super::paths::basins::DELETE, delete(delete_basin))
         .route(super::paths::basins::RECONFIGURE, patch(reconfigure_basin))
 }
@@ -91,16 +88,37 @@ pub async fn create_basin(
         request_token: HeaderOpt(request_token),
         request,
     }: CreateArgs,
-) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
+) -> Result<
+    (
+        StatusCode,
+        [(http::HeaderName, &'static str); 1],
+        Json<v1t::basin::BasinInfo>,
+    ),
+    ServiceError,
+> {
     let config: BasinConfig = request
         .config
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(request.basin, config, CreateMode::CreateOnly(request_token))
-        .await?;
-    Ok((StatusCode::CREATED, Json(info.into_inner().into())))
+        .provision_basin(
+            request.basin,
+            config,
+            ProvisionMode::CreateOnly { request_token },
+        )
+        .await?
+        .map(Into::into);
+    let (outcome, info) = match info {
+        ProvisionResult::Created(info) => ("created", info),
+        ProvisionResult::Noop(info) => ("noop", info),
+        ProvisionResult::Updated(_) => unreachable!("CreateOnly mode never produces Updated"),
+    };
+    Ok((
+        StatusCode::CREATED,
+        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        Json(info),
+    ))
 }
 
 #[derive(FromRequest)]
@@ -134,18 +152,18 @@ pub async fn get_basin_config(
 
 #[derive(FromRequest)]
 #[from_request(rejection(ServiceError))]
-pub struct CreateOrReconfigureArgs {
+pub struct EnsureArgs {
     #[from_request(via(Path))]
     basin: BasinName,
-    request: JsonOpt<v1t::basin::CreateOrReconfigureBasinRequest>,
+    request: JsonOpt<v1t::basin::EnsureBasinRequest>,
 }
 
-/// Create or reconfigure a basin.
+/// Ensure a basin.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
-    path = super::paths::basins::CREATE_OR_RECONFIGURE,
+    path = super::paths::basins::ENSURE,
     tag = super::paths::basins::TAG,
-    request_body = Option<v1t::basin::CreateOrReconfigureBasinRequest>,
+    request_body = Option<v1t::basin::EnsureBasinRequest>,
     params(v1t::BasinNamePathSegment),
     responses(
         (status = StatusCode::OK, body = v1t::basin::BasinInfo),
@@ -154,27 +172,39 @@ pub struct CreateOrReconfigureArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
 ))]
-pub async fn create_or_reconfigure_basin(
+pub async fn ensure_basin(
     State(backend): State<Backend>,
-    CreateOrReconfigureArgs {
+    EnsureArgs {
         basin,
         request: JsonOpt(request),
-    }: CreateOrReconfigureArgs,
-) -> Result<(StatusCode, Json<v1t::basin::BasinInfo>), ServiceError> {
-    let config: BasinReconfiguration = request
+    }: EnsureArgs,
+) -> Result<
+    (
+        StatusCode,
+        [(http::HeaderName, &'static str); 1],
+        Json<v1t::basin::BasinInfo>,
+    ),
+    ServiceError,
+> {
+    let config: BasinConfig = request
         .and_then(|req| req.config)
         .map(TryInto::try_into)
         .transpose()?
         .unwrap_or_default();
     let info = backend
-        .create_basin(basin, config, CreateMode::CreateOrReconfigure)
-        .await?;
-    let status = if info.is_created() {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
+        .provision_basin(basin, config, ProvisionMode::Ensure)
+        .await?
+        .map(Into::into);
+    let (status, outcome, info) = match info {
+        ProvisionResult::Created(info) => (StatusCode::CREATED, "created", info),
+        ProvisionResult::Updated(info) => (StatusCode::OK, "updated", info),
+        ProvisionResult::Noop(info) => (StatusCode::OK, "noop", info),
     };
-    Ok((status, Json(info.into_inner().into())))
+    Ok((
+        status,
+        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        Json(info),
+    ))
 }
 
 #[derive(FromRequest)]

@@ -1,4 +1,4 @@
-use s2_common::record::StreamPosition;
+use s2_common::{encryption::EncryptionSpec, record::StreamPosition};
 
 use self::kv::timestamp::TimestampSecs;
 
@@ -20,6 +20,12 @@ pub use core::Backend;
 
 pub use crate::stream_id::StreamId;
 
+pub struct StreamHandle {
+    db: slatedb::Db,
+    client: streamer::GuardedStreamerClient,
+    encryption: EncryptionSpec,
+}
+
 pub const FOLLOWER_MAX_LAG: usize = 25;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,24 +39,6 @@ impl Default for PersistedStreamTail {
         Self {
             tail: StreamPosition::MIN,
             write_timestamp: TimestampSecs::from_secs(0),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreatedOrReconfigured<T> {
-    Created(T),
-    Reconfigured(T),
-}
-
-impl<T> CreatedOrReconfigured<T> {
-    pub fn is_created(&self) -> bool {
-        matches!(self, Self::Created(_))
-    }
-
-    pub fn into_inner(self) -> T {
-        match self {
-            Self::Created(v) | Self::Reconfigured(v) => v,
         }
     }
 }

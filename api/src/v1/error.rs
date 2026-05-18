@@ -29,6 +29,7 @@ pub enum ErrorCode {
     BasinDeletionPending,
     BasinNotFound,
     ClientHangup,
+    DecryptionFailed,
     HotServer,
     Invalid,
     Other,
@@ -49,7 +50,8 @@ impl ErrorCode {
     pub fn status(self) -> http::StatusCode {
         match self {
             Self::Authn => http::StatusCode::UNAUTHORIZED,
-            Self::BadFrame
+            Self::DecryptionFailed
+            | Self::BadFrame
             | Self::BadHeader
             | Self::BadJson
             | Self::BadPath

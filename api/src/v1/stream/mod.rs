@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use itertools::Itertools as _;
 use s2_common::{
-    encryption::EncryptionSpec,
+    encryption::EncryptionKey,
     record,
     types::{
         self,
@@ -21,7 +21,7 @@ use s2_common::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::config::StreamConfig;
+use super::config::{EncryptionAlgorithm, StreamConfig};
 use crate::{data::Format, mime::JsonOrProto};
 
 #[rustfmt::skip]
@@ -36,6 +36,8 @@ pub struct StreamInfo {
     /// Deletion time in RFC 3339 format, if the stream is being deleted.
     #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
+    /// Encryption algorithm for this stream, if encryption is enabled.
+    pub cipher: Option<EncryptionAlgorithm>,
 }
 
 impl From<types::stream::StreamInfo> for StreamInfo {
@@ -44,6 +46,7 @@ impl From<types::stream::StreamInfo> for StreamInfo {
             name: value.name,
             created_at: value.created_at,
             deleted_at: value.deleted_at,
+            cipher: value.cipher.map(Into::into),
         }
     }
 }
@@ -212,19 +215,19 @@ impl From<ReadEnd> for types::stream::ReadEnd {
 pub enum ReadRequest {
     /// Unary
     Unary {
-        encryption: EncryptionSpec,
+        encryption_key: Option<EncryptionKey>,
         format: Format,
         response_mime: JsonOrProto,
     },
     /// Server-Sent Events streaming response
     EventStream {
-        encryption: EncryptionSpec,
+        encryption_key: Option<EncryptionKey>,
         format: Format,
         last_event_id: Option<sse::LastEventId>,
     },
     /// S2S streaming response
     S2s {
-        encryption: EncryptionSpec,
+        encryption_key: Option<EncryptionKey>,
         response_compression: s2s::CompressionAlgorithm,
     },
 }
@@ -232,13 +235,13 @@ pub enum ReadRequest {
 pub enum AppendRequest {
     /// Unary
     Unary {
-        encryption: EncryptionSpec,
+        encryption_key: Option<EncryptionKey>,
         input: types::stream::AppendInput,
         response_mime: JsonOrProto,
     },
     /// S2S bi-directional streaming
     S2s {
-        encryption: EncryptionSpec,
+        encryption_key: Option<EncryptionKey>,
         inputs: BoxStream<'static, Result<types::stream::AppendInput, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,
     },
@@ -248,22 +251,22 @@ impl std::fmt::Debug for AppendRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppendRequest::Unary {
-                encryption,
+                encryption_key,
                 input,
                 response_mime: response,
             } => f
                 .debug_struct("AppendRequest::Unary")
-                .field("encryption", encryption)
+                .field("encryption_key", encryption_key)
                 .field("input", input)
                 .field("response", response)
                 .finish(),
             AppendRequest::S2s {
-                encryption,
+                encryption_key,
                 response_compression,
                 ..
             } => f
                 .debug_struct("AppendRequest::S2s")
-                .field("encryption", encryption)
+                .field("encryption_key", encryption_key)
                 .field("response_compression", response_compression)
                 .finish(),
         }

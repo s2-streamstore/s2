@@ -52,6 +52,18 @@
             }
           ]
         },
+        "stream_cipher": {
+          "description": "Encryption algorithm to apply to newly created streams in the basin.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EncryptionAlgorithmSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "create_stream_on_append": {
           "description": "Create stream on append if it doesn't exist, using the default stream configuration.",
           "type": [
@@ -118,18 +130,6 @@
               "type": "null"
             }
           ]
-        },
-        "encryption": {
-          "description": "Encryption configuration.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EncryptionConfigSpec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       },
       "additionalProperties": false
@@ -211,25 +211,10 @@
         "2h 30m"
       ]
     },
-    "EncryptionConfigSpec": {
-      "type": "object",
-      "properties": {
-        "allowed_modes": {
-          "description": "Allowed encryption modes.\nIf empty, use defaults. If no default is configured, only plaintext is allowed.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/EncryptionModeSpec"
-          },
-          "default": []
-        }
-      },
-      "additionalProperties": false
-    },
-    "EncryptionModeSpec": {
-      "description": "Allowed encryption mode.",
+    "EncryptionAlgorithmSpec": {
+      "description": "Encryption algorithm to apply to newly created streams in the basin.",
       "type": "string",
       "enum": [
-        "plain",
         "aegis-256",
         "aes-256-gcm"
       ]

@@ -2,7 +2,7 @@ use std::{fmt, str::Utf8Error};
 
 use bytes::{BufMut, Bytes};
 use compact_str::CompactString;
-use enum_ordinalize::Ordinalize;
+use strum::FromRepr;
 
 use super::{
     Encodable, FencingTokenTooLongError, MeteredSize, RecordDecodeError, fencing::FencingToken,
@@ -12,7 +12,7 @@ use crate::{deep_size::DeepSize, record::SeqNum};
 pub const COMMAND_ID_FENCE: &[u8] = b"fence";
 pub const COMMAND_ID_TRIM: &[u8] = b"trim";
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Ordinalize)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, FromRepr)]
 #[repr(u8)]
 pub enum CommandOp {
     Fence,
@@ -111,7 +111,7 @@ impl TryFrom<&[u8]> for CommandRecord {
         if record.is_empty() {
             return Err(RecordDecodeError::Truncated("CommandOrdinal"));
         }
-        let op = CommandOp::from_ordinal(record[0])
+        let op = CommandOp::from_repr(record[0])
             .ok_or(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))?;
         Self::try_from_parts(op, &record[1..]).map_err(Into::into)
     }
@@ -126,7 +126,7 @@ impl Encodable for CommandRecord {
     }
 
     fn encode_into(&self, buf: &mut impl BufMut) {
-        buf.put_u8(self.op().ordinal());
+        buf.put_u8(self.op() as u8);
         match self {
             CommandRecord::Fence(token) => {
                 buf.put_slice(token.as_bytes());
@@ -167,7 +167,6 @@ impl From<CommandPayloadError> for RecordDecodeError {
 #[cfg(test)]
 mod tests {
     use compact_str::ToCompactString;
-    use enum_ordinalize::Ordinalize;
     use proptest::prelude::*;
     use rstest::rstest;
 
@@ -182,9 +181,9 @@ mod tests {
 
     #[test]
     fn command_op_names() {
-        for cmd in CommandOp::VARIANTS {
+        for cmd in [CommandOp::Fence, CommandOp::Trim] {
             let name = cmd.to_id();
-            assert_eq!(CommandOp::from_id(name), Some(*cmd));
+            assert_eq!(CommandOp::from_id(name), Some(cmd));
         }
         assert_eq!(CommandOp::from_id(b""), None);
         assert_eq!(CommandOp::from_id(b"invalid"), None);
@@ -272,7 +271,7 @@ mod tests {
             Err(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))
         );
         assert_eq!(
-            try_convert(&[CommandOp::Fence.ordinal(), 0xff, 0xff]),
+            try_convert(&[CommandOp::Fence as u8, 0xff, 0xff]),
             Err(RecordDecodeError::InvalidValue(
                 "CommandPayload",
                 "fencing token not valid utf8"
@@ -280,7 +279,7 @@ mod tests {
         );
         assert_eq!(
             try_convert(&[
-                CommandOp::Fence.ordinal(),
+                CommandOp::Fence as u8,
                 b'0',
                 b'1',
                 b'2',
@@ -325,7 +324,7 @@ mod tests {
             Err(CommandPayloadError::FencingTokenTooLong(FencingTokenTooLongError(40)).into())
         );
         assert_eq!(
-            try_convert(&[CommandOp::Trim.ordinal(), 0xff]),
+            try_convert(&[CommandOp::Trim as u8, 0xff]),
             Err(CommandPayloadError::TrimPointSize(1).into())
         );
     }

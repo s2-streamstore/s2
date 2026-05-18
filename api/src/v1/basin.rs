@@ -5,7 +5,7 @@ use s2_common::types::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::config::{BasinConfig, BasinReconfiguration};
+use super::config::BasinConfig;
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,12 +127,20 @@ pub enum BasinScope {
     /// AWS `us-east-1` region.
     #[serde(rename = "aws:us-east-1")]
     AwsUsEast1,
+    /// AWS `us-west-2` region.
+    #[serde(rename = "aws:us-west-2")]
+    AwsUsWest2,
+    /// AWS `eu-north-1` region.
+    #[serde(rename = "aws:eu-north-1")]
+    AwsEuNorth1,
 }
 
 impl From<BasinScope> for types::basin::BasinScope {
     fn from(value: BasinScope) -> Self {
         match value {
             BasinScope::AwsUsEast1 => Self::AwsUsEast1,
+            BasinScope::AwsUsWest2 => Self::AwsUsWest2,
+            BasinScope::AwsEuNorth1 => Self::AwsEuNorth1,
         }
     }
 }
@@ -141,6 +149,8 @@ impl From<types::basin::BasinScope> for BasinScope {
     fn from(value: types::basin::BasinScope) -> Self {
         match value {
             types::basin::BasinScope::AwsUsEast1 => Self::AwsUsEast1,
+            types::basin::BasinScope::AwsUsWest2 => Self::AwsUsWest2,
+            types::basin::BasinScope::AwsEuNorth1 => Self::AwsEuNorth1,
         }
     }
 }
@@ -159,11 +169,12 @@ pub enum BasinState {
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct CreateOrReconfigureBasinRequest {
-    /// Basin reconfiguration.
-    pub config: Option<BasinReconfiguration>,
+pub struct EnsureBasinRequest {
+    /// Basin configuration.
+    pub config: Option<BasinConfig>,
     /// Basin scope.
-    /// This cannot be reconfigured.
+    /// If omitted when creating, defaults to `aws:us-east-1`.
+    /// This cannot be changed.
     pub scope: Option<BasinScope>,
 }
 
@@ -178,5 +189,6 @@ pub struct CreateBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin scope.
+    /// If omitted, defaults to `aws:us-east-1`.
     pub scope: Option<BasinScope>,
 }
