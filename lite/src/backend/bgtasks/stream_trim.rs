@@ -89,7 +89,7 @@ impl Backend {
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
         let mut has_remaining_records = false;
-        let mut tail_pending: Option<StreamPosition> = None;
+        let mut last_pos = None;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, stream_id);
@@ -104,15 +104,13 @@ impl Backend {
             batch.delete(kv.key);
             batch.delete(kv::stream_record_data::ser_key(stream_id, pos));
             batch_size += 1;
-            let tail_pos = StreamPosition {
-                seq_num: pos.seq_num + 1,
-                timestamp: pos.timestamp,
-            };
-            if let Some(previous_tail) = tail_pending.replace(tail_pos) {
-                debug_assert_eq!(previous_tail.seq_num, pos.seq_num);
-            }
+            last_pos = Some(pos);
         }
-        if !has_remaining_records && let Some(tail_pos) = tail_pending {
+        if !has_remaining_records && let Some(last_pos) = last_pos {
+            let tail_pos = StreamPosition {
+                seq_num: last_pos.seq_num + 1,
+                timestamp: last_pos.timestamp,
+            };
             batch.put(
                 kv::stream_tail_position::ser_key(stream_id),
                 kv::stream_tail_position::ser_value(tail_pos, kv::timestamp::TimestampSecs::now()),
