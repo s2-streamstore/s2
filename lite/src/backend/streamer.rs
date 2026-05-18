@@ -903,10 +903,11 @@ async fn db_submit_append(
             kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
-    static WRITE_OPTS: WriteOptions = WriteOptions {
+    let write_opts = WriteOptions {
         await_durable: false,
+        ..Default::default()
     };
-    let write_handle = db.write_with_options(wb, &WRITE_OPTS).await?;
+    let write_handle = db.write_with_options(wb, &write_opts).await?;
     Ok(InFlightAppend {
         db_seq: write_handle.seqnum(),
         records,

@@ -304,7 +304,7 @@ impl From<kv::DeserializationError> for ListStreamsError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum CreateStreamError {
+pub enum ProvisionStreamError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -321,7 +321,7 @@ pub enum CreateStreamError {
     Validation(#[from] s2_common::types::ValidationError),
 }
 
-impl From<slatedb::Error> for CreateStreamError {
+impl From<slatedb::Error> for ProvisionStreamError {
     fn from(err: slatedb::Error) -> Self {
         if err.kind() == slatedb::ErrorKind::Transaction {
             Self::TransactionConflict(TransactionConflictError)
@@ -331,7 +331,7 @@ impl From<slatedb::Error> for CreateStreamError {
     }
 }
 
-impl From<GetBasinConfigError> for CreateStreamError {
+impl From<GetBasinConfigError> for ProvisionStreamError {
     fn from(err: GetBasinConfigError) -> Self {
         match err {
             GetBasinConfigError::Storage(e) => Self::Storage(e),
@@ -403,7 +403,7 @@ impl From<kv::DeserializationError> for ListBasinsError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum CreateBasinError {
+pub enum ProvisionBasinError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -412,7 +412,7 @@ pub enum CreateBasinError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
 }
 
-impl From<slatedb::Error> for CreateBasinError {
+impl From<slatedb::Error> for ProvisionBasinError {
     fn from(err: slatedb::Error) -> Self {
         Self::Storage(err.into())
     }

@@ -206,6 +206,10 @@ pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAft
 pub enum BasinScope {
     #[strum(serialize = "aws:us-east-1")]
     AwsUsEast1,
+    #[strum(serialize = "aws:us-west-2")]
+    AwsUsWest2,
+    #[strum(serialize = "aws:eu-north-1")]
+    AwsEuNorth1,
 }
 
 #[derive(Debug, Clone)]

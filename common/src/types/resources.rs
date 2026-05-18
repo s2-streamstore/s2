@@ -115,21 +115,81 @@ where
     }
 }
 
+/// Mode for provisioning a resource.
+///
+/// Provisioning either creates a new resource with create-only semantics, or ensures that
+/// a resource exists with the requested config.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateMode {
-    /// Create a new resource.
+pub enum ProvisionMode {
+    /// Create a new resource only.
     ///
-    /// HTTP POST semantics – idempotent if a request token is provided and the resource was
-    /// previously created using the same token.
-    CreateOnly(Option<RequestToken>),
-    /// Create a new resource or reconfigure if the resource already exists.
+    /// HTTP POST semantics: idempotent if a request token is provided and the resource was
+    /// previously created using the same token and config.
+    CreateOnly {
+        /// Optional request token used to make create retries idempotent.
+        request_token: Option<RequestToken>,
+    },
+    /// Ensure a resource exists with the requested config.
     ///
-    /// HTTP PUT semantics – always idempotent.
-    CreateOrReconfigure,
+    /// HTTP PUT semantics: always idempotent. Defaults are applied before validation. When the
+    /// resource already exists, its stored config is set to the effective requested config unless
+    /// it already matches.
+    Ensure,
+}
+
+/// Result of provisioning a resource.
+///
+/// Indicates whether provisioning created, updated, or skipped writing a resource.
+/// All variants hold the resource's current state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvisionResult<T> {
+    /// Resource was newly created.
+    Created(T),
+    /// Resource already existed and now matches the requested config.
+    Updated(T),
+    /// Resource already existed and no write was performed.
+    Noop(T),
+}
+
+impl<T> ProvisionResult<T> {
+    /// Borrow the inner value regardless of variant.
+    pub fn inner(&self) -> &T {
+        match self {
+            Self::Created(t) | Self::Updated(t) | Self::Noop(t) => t,
+        }
+    }
+
+    /// Unwrap the inner value regardless of variant.
+    pub fn into_inner(self) -> T {
+        match self {
+            Self::Created(t) | Self::Updated(t) | Self::Noop(t) => t,
+        }
+    }
+
+    /// Map the inner value while preserving the provisioning outcome.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> ProvisionResult<U> {
+        match self {
+            Self::Created(t) => ProvisionResult::Created(f(t)),
+            Self::Updated(t) => ProvisionResult::Updated(f(t)),
+            Self::Noop(t) => ProvisionResult::Noop(f(t)),
+        }
+    }
+
+    /// Fallibly map the inner value while preserving the provisioning outcome.
+    pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<ProvisionResult<U>, E> {
+        match self {
+            Self::Created(t) => Ok(ProvisionResult::Created(f(t)?)),
+            Self::Updated(t) => Ok(ProvisionResult::Updated(f(t)?)),
+            Self::Noop(t) => Ok(ProvisionResult::Noop(f(t)?)),
+        }
+    }
 }
 
 pub static REQUEST_TOKEN_HEADER: http::HeaderName =
     http::HeaderName::from_static("s2-request-token");
+
+pub static PROVISION_RESULT_HEADER: http::HeaderName =
+    http::HeaderName::from_static("s2-provision-result");
 
 pub const MAX_REQUEST_TOKEN_LENGTH: usize = 36;
 

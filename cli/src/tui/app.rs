@@ -824,6 +824,26 @@ fn timestamping_mode_prev(tm: &Option<TimestampingMode>) -> Option<TimestampingM
 pub enum BasinScopeOption {
     #[default]
     AwsUsEast1,
+    AwsUsWest2,
+    AwsEuNorth1,
+}
+
+impl BasinScopeOption {
+    pub fn next(self) -> Self {
+        match self {
+            Self::AwsUsEast1 => Self::AwsUsWest2,
+            Self::AwsUsWest2 => Self::AwsEuNorth1,
+            Self::AwsEuNorth1 => Self::AwsUsEast1,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::AwsUsEast1 => Self::AwsEuNorth1,
+            Self::AwsUsWest2 => Self::AwsUsEast1,
+            Self::AwsEuNorth1 => Self::AwsUsWest2,
+        }
+    }
 }
 
 /// Expiry options for access tokens
@@ -1700,7 +1720,7 @@ impl App {
                                 *retention_policy = RetentionPolicyOption::Infinite;
                             }
                             *timestamping_mode = info.timestamping_mode;
-                            *timestamping_uncapped = Some(info.timestamping_uncapped);
+                            *timestamping_uncapped = info.timestamping_uncapped;
                         }
                         Err(e) => {
                             self.input_mode = InputMode::Normal;
@@ -1737,7 +1757,7 @@ impl App {
                                 *retention_policy = RetentionPolicyOption::Infinite;
                             }
                             *timestamping_mode = info.timestamping_mode;
-                            *timestamping_uncapped = Some(info.timestamping_uncapped);
+                            *timestamping_uncapped = info.timestamping_uncapped;
 
                             if let Some(min_age_secs) = info.delete_on_empty_min_age_secs {
                                 *delete_on_empty_enabled = true;
@@ -2435,6 +2455,7 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Left | KeyCode::Char('h') => match *selected {
+                            1 => *scope = scope.prev(),
                             2 => *storage_class = storage_class_prev(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_prev(timestamping_mode),
@@ -2442,6 +2463,7 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Right | KeyCode::Char('l') => match *selected {
+                            1 => *scope = scope.next(),
                             2 => *storage_class = storage_class_next(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_next(timestamping_mode),
@@ -4306,6 +4328,8 @@ impl App {
             };
             let sdk_scope = match scope {
                 BasinScopeOption::AwsUsEast1 => s2_sdk::types::BasinScope::AwsUsEast1,
+                BasinScopeOption::AwsUsWest2 => s2_sdk::types::BasinScope::AwsUsWest2,
+                BasinScopeOption::AwsEuNorth1 => s2_sdk::types::BasinScope::AwsEuNorth1,
             };
             let input = s2_sdk::types::CreateBasinInput::new(basin_name)
                 .with_config(config.into())
@@ -4857,11 +4881,10 @@ impl App {
                         let ts_uncapped = default_config
                             .timestamping
                             .as_ref()
-                            .map(|t| t.uncapped)
-                            .unwrap_or(false);
+                            .and_then(|t| t.uncapped);
                         (sc, age, ts_mode, ts_uncapped)
                     } else {
-                        (None, None, None, false)
+                        (None, None, None, None)
                     };
 
                     let info = BasinConfigInfo {
@@ -4901,11 +4924,8 @@ impl App {
                         .timestamping
                         .as_ref()
                         .and_then(|t| t.mode.map(TimestampingMode::from));
-                    let timestamping_uncapped = config
-                        .timestamping
-                        .as_ref()
-                        .map(|t| t.uncapped)
-                        .unwrap_or(false);
+                    let timestamping_uncapped =
+                        config.timestamping.as_ref().and_then(|t| t.uncapped);
                     let delete_on_empty_min_age_secs =
                         config.delete_on_empty.map(|d| d.min_age_secs);
 

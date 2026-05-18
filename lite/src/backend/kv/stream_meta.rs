@@ -151,7 +151,7 @@ pub fn deser_value(bytes: Bytes) -> Result<StreamMeta, DeserializationError> {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, time::Duration};
 
     use bytes::Bytes;
     use proptest::prelude::*;
@@ -160,7 +160,7 @@ mod tests {
         encryption::EncryptionAlgorithm,
         types::{
             basin::BasinName,
-            config::{OptionalStreamConfig, StorageClass},
+            config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass},
             stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
         },
     };
@@ -172,6 +172,9 @@ mod tests {
     fn value_roundtrip_stream_meta() {
         let config = OptionalStreamConfig {
             storage_class: Some(StorageClass::Express),
+            delete_on_empty: OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
             ..Default::default()
         };
         let created_at = OffsetDateTime::from_unix_timestamp(1234567890)
@@ -202,6 +205,10 @@ mod tests {
         assert_eq!(
             stream_meta.config.storage_class,
             decoded.config.storage_class
+        );
+        assert_eq!(
+            stream_meta.config.delete_on_empty.min_age,
+            decoded.config.delete_on_empty.min_age
         );
         assert_eq!(stream_meta.cipher, decoded.cipher);
         assert_eq!(stream_meta.created_at, decoded.created_at);

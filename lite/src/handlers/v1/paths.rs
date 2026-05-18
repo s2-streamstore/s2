@@ -4,7 +4,7 @@ pub mod basins {
 
     pub const LIST: &str = "/basins";
     pub const CREATE: &str = "/basins";
-    pub const CREATE_OR_RECONFIGURE: &str = "/basins/{basin}";
+    pub const ENSURE: &str = "/basins/{basin}";
     pub const DELETE: &str = "/basins/{basin}";
     pub const GET_CONFIG: &str = "/basins/{basin}";
     pub const RECONFIGURE: &str = "/basins/{basin}";
@@ -35,7 +35,7 @@ pub mod streams {
 
     pub const LIST: &str = "/streams";
     pub const CREATE: &str = "/streams";
-    pub const CREATE_OR_RECONFIGURE: &str = "/streams/{stream}";
+    pub const ENSURE: &str = "/streams/{stream}";
     pub const DELETE: &str = "/streams/{stream}";
     pub const GET_CONFIG: &str = "/streams/{stream}";
     pub const RECONFIGURE: &str = "/streams/{stream}";

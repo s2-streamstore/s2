@@ -94,7 +94,10 @@ pub async fn list_basins(
 }
 
 pub async fn create_basin(s2: &S2, args: CreateBasinArgs) -> Result<BasinInfo, CliError> {
-    let input = CreateBasinInput::new(args.basin.into()).with_config(args.config.into());
+    let mut input = CreateBasinInput::new(args.basin.into()).with_config(args.config.into());
+    if let Some(scope) = args.scope {
+        input = input.with_scope(scope.into());
+    }
     s2.create_basin(input)
         .await
         .map_err(|e| CliError::op(OpKind::CreateBasin, e))

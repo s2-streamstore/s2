@@ -42,6 +42,10 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
+/// Result of provisioning a resource.
+#[doc(hidden)]
+#[cfg(feature = "_hidden")]
+pub use s2_common::types::resources::ProvisionResult;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -608,7 +612,7 @@ pub struct TimestampingConfig {
     /// Whether client-specified timestamps are allowed to exceed the arrival time.
     ///
     /// Defaults to `false` (client timestamps are capped at the arrival time).
-    pub uncapped: bool,
+    pub uncapped: Option<bool>,
 }
 
 impl TimestampingConfig {
@@ -627,7 +631,10 @@ impl TimestampingConfig {
 
     /// Set whether client-specified timestamps are allowed to exceed the arrival time.
     pub fn with_uncapped(self, uncapped: bool) -> Self {
-        Self { uncapped, ..self }
+        Self {
+            uncapped: Some(uncapped),
+            ..self
+        }
     }
 }
 
@@ -635,7 +642,7 @@ impl From<api::config::TimestampingConfig> for TimestampingConfig {
     fn from(value: api::config::TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: value.uncapped.unwrap_or_default(),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -644,7 +651,7 @@ impl From<TimestampingConfig> for api::config::TimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: Some(value.uncapped),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -856,15 +863,22 @@ impl From<BasinConfig> for api::config::BasinConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Scope of a basin.
+#[non_exhaustive]
 pub enum BasinScope {
     /// AWS `us-east-1` region.
     AwsUsEast1,
+    /// AWS `us-west-2` region.
+    AwsUsWest2,
+    /// AWS `eu-north-1` region.
+    AwsEuNorth1,
 }
 
 impl From<api::basin::BasinScope> for BasinScope {
     fn from(value: api::basin::BasinScope) -> Self {
         match value {
             api::basin::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
+            api::basin::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
+            api::basin::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
         }
     }
 }
@@ -873,35 +887,8 @@ impl From<BasinScope> for api::basin::BasinScope {
     fn from(value: BasinScope) -> Self {
         match value {
             BasinScope::AwsUsEast1 => api::basin::BasinScope::AwsUsEast1,
-        }
-    }
-}
-
-/// Result of a create-or-reconfigure operation.
-///
-/// Indicates whether the resource was newly created or already existed and was
-/// reconfigured. Both variants hold the resource's current state.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateOrReconfigured<T> {
-    /// Resource was newly created.
-    Created(T),
-    /// Resource already existed and was reconfigured to match the spec.
-    Reconfigured(T),
-}
-
-#[cfg(feature = "_hidden")]
-impl<T> CreateOrReconfigured<T> {
-    /// Returns `true` if the resource was newly created.
-    pub fn is_created(&self) -> bool {
-        matches!(self, Self::Created(_))
-    }
-
-    /// Unwrap the inner value regardless of variant.
-    pub fn into_inner(self) -> T {
-        match self {
-            Self::Created(t) | Self::Reconfigured(t) => t,
+            BasinScope::AwsUsWest2 => api::basin::BasinScope::AwsUsWest2,
+            BasinScope::AwsEuNorth1 => api::basin::BasinScope::AwsEuNorth1,
         }
     }
 }
@@ -966,16 +953,16 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-/// Input for [`create_or_reconfigure_basin`](crate::S2::create_or_reconfigure_basin) operation.
+/// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
 #[doc(hidden)]
 #[cfg(feature = "_hidden")]
-pub struct CreateOrReconfigureBasinInput {
+pub struct EnsureBasinInput {
     /// Basin name.
     pub name: BasinName,
-    /// Reconfiguration for the basin.
+    /// Desired configuration for the basin.
     ///
-    /// If `None`, the basin is created with default configuration or left unchanged if it exists.
-    pub config: Option<BasinReconfiguration>,
+    /// If `None`, the basin is ensured with the default configuration.
+    config: Option<api::config::BasinConfig>,
     /// Scope of the basin.
     ///
     /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
@@ -983,8 +970,8 @@ pub struct CreateOrReconfigureBasinInput {
 }
 
 #[cfg(feature = "_hidden")]
-impl CreateOrReconfigureBasinInput {
-    /// Create a new [`CreateOrReconfigureBasinInput`] with the given basin name.
+impl EnsureBasinInput {
+    /// Create a new [`EnsureBasinInput`] with the given basin name.
     pub fn new(name: BasinName) -> Self {
         Self {
             name,
@@ -993,10 +980,10 @@ impl CreateOrReconfigureBasinInput {
         }
     }
 
-    /// Set the reconfiguration for the basin.
-    pub fn with_config(self, config: BasinReconfiguration) -> Self {
+    /// Set the desired configuration for the basin.
+    pub fn with_config(self, config: impl Into<s2_api::v1::config::BasinConfig>) -> Self {
         Self {
-            config: Some(config),
+            config: Some(config.into()),
             ..self
         }
     }
@@ -1011,16 +998,12 @@ impl CreateOrReconfigureBasinInput {
 }
 
 #[cfg(feature = "_hidden")]
-impl From<CreateOrReconfigureBasinInput>
-    for (
-        BasinName,
-        Option<api::basin::CreateOrReconfigureBasinRequest>,
-    )
-{
-    fn from(value: CreateOrReconfigureBasinInput) -> Self {
-        let request = if value.config.is_some() || value.scope.is_some() {
-            Some(api::basin::CreateOrReconfigureBasinRequest {
-                config: value.config.map(Into::into),
+impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
+    fn from(value: EnsureBasinInput) -> Self {
+        let config = value.config;
+        let request = if config.is_some() || value.scope.is_some() {
+            Some(api::basin::EnsureBasinRequest {
+                config,
                 scope: value.scope.map(Into::into),
             })
         } else {
@@ -2687,41 +2670,41 @@ impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-/// Input for [`create_or_reconfigure_stream`](crate::S2Basin::create_or_reconfigure_stream)
+/// Input for [`ensure_stream`](crate::S2Basin::ensure_stream)
 /// operation.
 #[doc(hidden)]
 #[cfg(feature = "_hidden")]
-pub struct CreateOrReconfigureStreamInput {
+pub struct EnsureStreamInput {
     /// Stream name.
     pub name: StreamName,
-    /// Reconfiguration for the stream.
+    /// Desired stream configuration before basin defaults are applied.
     ///
-    /// If `None`, the stream is created with default configuration or left unchanged if it exists.
-    pub config: Option<StreamReconfiguration>,
+    /// Missing fields are filled from the current basin default stream configuration and then
+    /// global defaults before comparing or writing. If `None`, the stream is ensured using those
+    /// defaults.
+    config: Option<api::config::StreamConfig>,
 }
 
 #[cfg(feature = "_hidden")]
-impl CreateOrReconfigureStreamInput {
-    /// Create a new [`CreateOrReconfigureStreamInput`] with the given stream name.
+impl EnsureStreamInput {
+    /// Create a new [`EnsureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
         Self { name, config: None }
     }
 
-    /// Set the reconfiguration for the stream.
-    pub fn with_config(self, config: StreamReconfiguration) -> Self {
+    /// Set the desired configuration for the stream.
+    pub fn with_config(self, config: impl Into<s2_api::v1::config::StreamConfig>) -> Self {
         Self {
-            config: Some(config),
+            config: Some(config.into()),
             ..self
         }
     }
 }
 
 #[cfg(feature = "_hidden")]
-impl From<CreateOrReconfigureStreamInput>
-    for (StreamName, Option<api::config::StreamReconfiguration>)
-{
-    fn from(value: CreateOrReconfigureStreamInput) -> Self {
-        (value.name, value.config.map(Into::into))
+impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
+    fn from(value: EnsureStreamInput) -> Self {
+        (value.name, value.config)
     }
 }
 

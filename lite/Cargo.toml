@@ -1,6 +1,6 @@
 [package]
 name = "s2-lite"
-version = "0.30.5"
+version = "0.33.0"
 description = "Lightweight server implementation of S2, the durable streams API, backed by object storage"
 edition.workspace = true
 license.workspace = true
@@ -51,7 +51,7 @@ s2-common = { workspace = true, features = ["clap"] }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-slatedb = { workspace = true }
+slatedb = { workspace = true, features = ["lz4", "zstd"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
@@ -60,7 +60,7 @@ tokio-util = { workspace = true }
 tower-http = { workspace = true, features = ["cors", "trace", "sensitive-headers", "compression-zstd", "compression-gzip", "decompression-zstd", "decompression-gzip"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-utoipa = { version = "5.4", optional = true, features = ["time"] }
+utoipa = { workspace = true, optional = true, features = ["time"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
