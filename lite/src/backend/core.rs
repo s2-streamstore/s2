@@ -16,10 +16,7 @@ use s2_common::{
         stream::StreamName,
     },
 };
-use slatedb::{
-    IterationOrder,
-    config::{DurabilityLevel, ScanOptions},
-};
+use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
@@ -160,15 +157,11 @@ impl Backend {
                 timestamp: 0,
             },
         );
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-            order: IterationOrder::Ascending,
+            ..Default::default()
         };
-        let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
+        let mut it = self.db.scan_with_options(start_key.., &scan_opts).await?;
         let Some(kv) = it.next().await? else {
             return Ok(());
         };
@@ -375,7 +368,7 @@ mod tests {
             resources::ProvisionMode,
         },
     };
-    use slatedb::{WriteBatch, config::WriteOptions, object_store};
+    use slatedb::{WriteBatch, object_store};
     use time::OffsetDateTime;
 
     use super::*;
@@ -435,14 +428,7 @@ mod tests {
             kv::stream_record_data::ser_key(stream_id, record_pos),
             kv::stream_record_data::ser_value(metered_record.as_ref()),
         );
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        backend
-            .db
-            .write_with_options(wb, &WRITE_OPTS)
-            .await
-            .unwrap();
+        backend.db.write(wb).await.unwrap();
 
         backend
             .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())

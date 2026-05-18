@@ -8,8 +8,8 @@ use s2_common::{
     types::resources::Page,
 };
 use slatedb::{
-    IterationOrder, WriteBatch,
-    config::{DurabilityLevel, PutOptions, ScanOptions, WriteOptions},
+    WriteBatch,
+    config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
 
@@ -55,17 +55,13 @@ impl Backend {
         &self,
         now: TimestampSecs,
     ) -> Result<Page<(StreamId, Vec<PendingDoeEntry>)>, StorageError> {
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-            order: IterationOrder::Ascending,
+            ..Default::default()
         };
         let mut it = self
             .db
-            .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &SCAN_OPTS)
+            .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &scan_opts)
             .await?;
         let mut pending: IndexMap<StreamId, Vec<PendingDoeEntry>> = IndexMap::new();
         let mut has_more = false;
@@ -140,10 +136,7 @@ impl Backend {
         for entry in pending {
             batch.delete(kv::stream_doe_deadline::ser_key(entry.deadline, stream_id));
         }
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        self.db.write_with_options(batch, &WRITE_OPTS).await?;
+        self.db.write(batch).await?;
         Ok(())
     }
 
@@ -157,15 +150,7 @@ impl Backend {
             },
         );
         // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
-        static SCAN_OPTS: ScanOptions = ScanOptions {
-            durability_filter: DurabilityLevel::Memory,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-            order: IterationOrder::Ascending,
-        };
-        let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
+        let mut it = self.db.scan(start_key..).await?;
         let Some(kv) = it.next().await? else {
             return Ok(false);
         };
@@ -197,15 +182,10 @@ impl Backend {
         };
         let deadline =
             TimestampSecs::after(doe_arm_delay(retention_age_or_zero(&meta.config), min_age));
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
         self.db
-            .put_with_options(
+            .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(min_age),
-                &PutOptions::default(),
-                &WRITE_OPTS,
             )
             .await?;
         Ok(())
@@ -228,10 +208,7 @@ mod tests {
             stream::StreamName,
         },
     };
-    use slatedb::{
-        IterationOrder,
-        config::{DurabilityLevel, ScanOptions},
-    };
+    use slatedb::config::{DurabilityLevel, ScanOptions};
     use time::OffsetDateTime;
 
     use super::{super::tests::test_backend, TimestampSecs};
@@ -290,19 +267,15 @@ mod tests {
     }
 
     async fn list_doe_entries(backend: &Backend) -> Vec<(TimestampSecs, StreamId, Duration)> {
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-            order: IterationOrder::Ascending,
+            ..Default::default()
         };
         let mut it = backend
             .db
             .scan_with_options(
                 kv::key_type_range(kv::KeyType::StreamDeleteOnEmptyDeadline),
-                &SCAN_OPTS,
+                &scan_opts,
             )
             .await
             .unwrap();
