@@ -66,14 +66,12 @@ impl Backend {
         stream_id: StreamId,
         trim_point: RangeTo<NonZeroSeqNum>,
     ) -> Result<(), StorageError> {
-        let has_remaining_records = self.delete_records(stream_id, trim_point).await?;
-        if trim_point.end < NonZeroSeqNum::MAX && !has_remaining_records {
+        let empty_tail_pos = self.delete_records(stream_id, trim_point).await?;
+        if trim_point.end < NonZeroSeqNum::MAX
+            && let Some(tail_pos) = empty_tail_pos
+        {
             // Stream became empty due to trim — write a tail position marker so
             // derive_tail_position() and DOE eligibility checks work correctly.
-            let tail_pos = StreamPosition {
-                seq_num: trim_point.end.get(),
-                timestamp: 0,
-            };
             let write_ts = kv::timestamp::TimestampSecs::now();
             let mut wb = WriteBatch::new();
             wb.put(
@@ -96,7 +94,7 @@ impl Backend {
         &self,
         stream_id: StreamId,
         trim_point: RangeTo<NonZeroSeqNum>,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Option<StreamPosition>, StorageError> {
         let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
@@ -106,6 +104,7 @@ impl Backend {
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
         let mut has_remaining_records = false;
+        let mut empty_tail_pos: Option<StreamPosition> = None;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, stream_id);
@@ -115,6 +114,16 @@ impl Backend {
             }
             batch.delete(kv.key);
             batch.delete(kv::stream_record_data::ser_key(stream_id, pos));
+            let tail_pos = StreamPosition {
+                seq_num: pos.seq_num + 1,
+                timestamp: pos.timestamp,
+            };
+            if match empty_tail_pos {
+                Some(current) => tail_pos.seq_num > current.seq_num,
+                None => true,
+            } {
+                empty_tail_pos = Some(tail_pos);
+            }
             batch_size += 1;
             if batch_size >= DELETE_BATCH_SIZE {
                 self.db.write(batch).await?;
@@ -125,7 +134,11 @@ impl Backend {
         if batch_size > 0 {
             self.db.write(batch).await?;
         }
-        Ok(has_remaining_records)
+        if has_remaining_records {
+            Ok(None)
+        } else {
+            Ok(empty_tail_pos)
+        }
     }
 
     #[instrument(ret, err, skip(self))]
@@ -265,6 +278,12 @@ mod tests {
             .await
             .unwrap();
         assert!(trim_point.is_none());
+        let tail_bytes = backend
+            .db
+            .get(kv::stream_tail_position::ser_key(stream_id))
+            .await
+            .unwrap();
+        assert!(tail_bytes.is_none());
     }
 
     #[tokio::test]
@@ -529,6 +548,20 @@ mod tests {
             .await
             .unwrap();
         assert!(trim_point.is_none());
+        let tail_bytes = backend
+            .db
+            .get(kv::stream_tail_position::ser_key(stream_id))
+            .await
+            .unwrap()
+            .expect("empty stream tail marker should be written");
+        let (tail_pos, _) = kv::stream_tail_position::deser_value(tail_bytes).unwrap();
+        assert_eq!(
+            tail_pos,
+            StreamPosition {
+                seq_num: 1,
+                timestamp: 5000,
+            }
+        );
     }
 
     #[tokio::test]
@@ -692,6 +725,20 @@ mod tests {
             .await
             .unwrap();
         assert!(trim_point.is_none());
+        let tail_bytes = backend
+            .db
+            .get(kv::stream_tail_position::ser_key(stream_id))
+            .await
+            .unwrap()
+            .expect("empty stream tail marker should be written");
+        let (tail_pos, _) = kv::stream_tail_position::deser_value(tail_bytes).unwrap();
+        assert_eq!(
+            tail_pos,
+            StreamPosition {
+                seq_num: total,
+                timestamp: 4000 + total - 1,
+            }
+        );
     }
 
     #[tokio::test]
