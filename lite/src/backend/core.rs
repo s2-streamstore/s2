@@ -141,7 +141,7 @@ impl Backend {
         }))
     }
 
-    /// Derive the stream tail position by reverse-scanning `StreamRecordData` keys.
+    /// Derive the stream tail position by reverse-scanning lightweight timestamp index keys.
     /// If no records exist, falls back to the explicit `StreamTailPosition` marker key.
     ///
     /// Returns `(tail_position, Option<write_timestamp_secs>)`.
@@ -151,9 +151,8 @@ impl Backend {
         &self,
         stream_id: StreamId,
     ) -> Result<(StreamPosition, Option<kv::timestamp::TimestampSecs>), StorageError> {
-        // Scan StreamRecordData keys for this stream in reverse order.
-        let lower_bound = kv::stream_record_data::ser_key(stream_id, StreamPosition::MIN);
-        let upper_bound = kv::stream_record_data::ser_key(
+        let lower_bound = kv::stream_record_timestamp::ser_key(stream_id, StreamPosition::MIN);
+        let upper_bound = kv::stream_record_timestamp::ser_key(
             stream_id,
             StreamPosition {
                 seq_num: SeqNum::MAX,
@@ -170,9 +169,10 @@ impl Backend {
             .scan_with_options(lower_bound..upper_bound, &scan_opts)
             .await?;
         if let Some(kv_entry) = it.next().await? {
-            if kv_entry.key.first().copied() == Some(kv::KeyType::StreamRecordData as u8) {
-                let (deser_stream_id, pos) = kv::stream_record_data::deser_key(kv_entry.key)?;
+            if kv_entry.key.first().copied() == Some(kv::KeyType::StreamRecordTimestamp as u8) {
+                let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv_entry.key)?;
                 if deser_stream_id == stream_id {
+                    kv::stream_record_timestamp::deser_value(kv_entry.value)?;
                     // Found the last record — tail is one past it.
                     let tail = StreamPosition {
                         seq_num: pos.seq_num + 1,
@@ -450,6 +450,10 @@ mod tests {
         wb.put(
             kv::stream_record_data::ser_key(stream_id, record_pos),
             kv::stream_record_data::ser_value(metered_record.as_ref()),
+        );
+        wb.put(
+            kv::stream_record_timestamp::ser_key(stream_id, record_pos),
+            kv::stream_record_timestamp::ser_value(),
         );
         backend.db.write(wb).await.unwrap();
 
