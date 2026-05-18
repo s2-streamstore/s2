@@ -628,7 +628,7 @@ pub enum InputMode {
     /// Creating a new basin
     CreateBasin {
         name: String,
-        scope: BasinScopeOption,
+        location: String,
         create_stream_on_append: bool,
         create_stream_on_read: bool,
         storage_class: Option<StorageClass>,
@@ -817,33 +817,6 @@ fn timestamping_mode_prev(tm: &Option<TimestampingMode>) -> Option<TimestampingM
         Some(TimestampingMode::ClientPrefer) => None,
         Some(TimestampingMode::ClientRequire) => Some(TimestampingMode::ClientPrefer),
         Some(TimestampingMode::Arrival) => Some(TimestampingMode::ClientRequire),
-    }
-}
-
-/// Basin scope option for UI (cloud provider/region)
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum BasinScopeOption {
-    #[default]
-    AwsUsEast1,
-    AwsUsWest2,
-    AwsEuNorth1,
-}
-
-impl BasinScopeOption {
-    pub fn next(self) -> Self {
-        match self {
-            Self::AwsUsEast1 => Self::AwsUsWest2,
-            Self::AwsUsWest2 => Self::AwsEuNorth1,
-            Self::AwsEuNorth1 => Self::AwsUsEast1,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            Self::AwsUsEast1 => Self::AwsEuNorth1,
-            Self::AwsUsWest2 => Self::AwsUsEast1,
-            Self::AwsEuNorth1 => Self::AwsUsWest2,
-        }
     }
 }
 
@@ -2321,7 +2294,7 @@ impl App {
 
             InputMode::CreateBasin {
                 name,
-                scope,
+                location,
                 create_stream_on_append,
                 create_stream_on_read,
                 storage_class,
@@ -2340,6 +2313,7 @@ impl App {
                 if *editing {
                     let field: Option<&mut String> = match *selected {
                         0 => Some(name),
+                        1 => Some(location),
                         4 => Some(retention_age_input),
                         8 => Some(delete_on_empty_min_age),
                         _ => None,
@@ -2381,6 +2355,9 @@ impl App {
                                 if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
                                     cursor_insert(name, cursor, c);
                                 }
+                            } else if *selected == 1 && c.is_ascii_graphic() {
+                                location.insert(*cursor, c);
+                                *cursor += 1;
                             } else if *selected == 4 && c.is_ascii_alphanumeric() {
                                 cursor_insert(retention_age_input, cursor, c);
                             } else if *selected == 8 && c.is_ascii_alphanumeric() {
@@ -2421,6 +2398,10 @@ impl App {
                                 cursor_move_end(name, cursor);
                                 *editing = true;
                             }
+                            1 => {
+                                *cursor = location.len();
+                                *editing = true;
+                            }
                             4 if *retention_policy == RetentionPolicyOption::Age => {
                                 cursor_move_end(retention_age_input, cursor);
                                 *editing = true;
@@ -2431,7 +2412,7 @@ impl App {
                             }
                             11 if name.len() >= 8 => {
                                 let basin_name = name.clone();
-                                let basin_scope = *scope;
+                                let basin_location = location.clone();
                                 let csoa = *create_stream_on_append;
                                 let csor = *create_stream_on_read;
                                 let sc = storage_class.clone();
@@ -2446,7 +2427,7 @@ impl App {
                                     build_basin_config(csoa, csor, sc, rp, rai, tm, tu, doe, doema);
                                 self.create_basin_with_config(
                                     basin_name,
-                                    basin_scope,
+                                    basin_location,
                                     config,
                                     tx.clone(),
                                 );
@@ -2460,7 +2441,6 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Left | KeyCode::Char('h') => match *selected {
-                            1 => *scope = scope.prev(),
                             2 => *storage_class = storage_class_prev(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_prev(timestamping_mode),
@@ -2468,7 +2448,6 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Right | KeyCode::Char('l') => match *selected {
-                            1 => *scope = scope.next(),
                             2 => *storage_class = storage_class_next(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_next(timestamping_mode),
@@ -3568,7 +3547,7 @@ impl App {
             KeyCode::Char('c') => {
                 self.input_mode = InputMode::CreateBasin {
                     name: String::new(),
-                    scope: BasinScopeOption::AwsUsEast1,
+                    location: String::new(),
                     create_stream_on_append: false,
                     create_stream_on_read: false,
                     storage_class: None,
@@ -4232,7 +4211,7 @@ impl App {
     fn create_basin_with_config(
         &mut self,
         name: String,
-        scope: BasinScopeOption,
+        location: String,
         config: BasinConfig,
         tx: mpsc::UnboundedSender<Event>,
     ) {
@@ -4249,14 +4228,19 @@ impl App {
                     return;
                 }
             };
-            let sdk_scope = match scope {
-                BasinScopeOption::AwsUsEast1 => s2_sdk::types::BasinScope::AwsUsEast1,
-                BasinScopeOption::AwsUsWest2 => s2_sdk::types::BasinScope::AwsUsWest2,
-                BasinScopeOption::AwsEuNorth1 => s2_sdk::types::BasinScope::AwsEuNorth1,
-            };
-            let input = s2_sdk::types::CreateBasinInput::new(basin_name)
-                .with_config(config.into())
-                .with_scope(sdk_scope);
+            let mut input =
+                s2_sdk::types::CreateBasinInput::new(basin_name).with_config(config.into());
+            if !location.is_empty() {
+                input = match input.with_location(location) {
+                    Ok(input) => input,
+                    Err(e) => {
+                        let _ = tx.send(Event::BasinCreated(Err(CliError::RecordWrite(format!(
+                            "Invalid basin location: {e}"
+                        )))));
+                        return;
+                    }
+                };
+            }
 
             match s2
                 .create_basin(input)
@@ -6060,8 +6044,12 @@ impl App {
             if account_read {
                 operations.push(Operation::ListBasins);
                 operations.push(Operation::GetAccountMetrics);
+                operations.push(Operation::ListLocations);
+                operations.push(Operation::GetDefaultLocation);
             }
-            // (No account-write ops at account level)
+            if account_write {
+                operations.push(Operation::SetDefaultLocation);
+            }
 
             // Basin level operations
             if basin_read {

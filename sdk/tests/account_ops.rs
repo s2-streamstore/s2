@@ -27,10 +27,10 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         page.values.as_slice(),
         [BasinInfo {
             name,
-            scope,
+            location,
             deleted_at: None,
             ..
-        }] if name == &basin_info.name && scope == &basin_info.scope
+        }] if name == &basin_info.name && location == &basin_info.location
     );
     assert!(!page.has_more);
 
@@ -46,13 +46,13 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         [
             BasinInfo {
                 name,
-                scope,
+                location,
                 deleted_at: Some(_),
                 ..
             },
         ] => {
             assert_eq!(name, &basin_info.name);
-            assert_eq!(scope, &basin_info.scope);
+            assert_eq!(location, &basin_info.location);
         }
         values => panic!("unexpected basin listing after delete: {values:?}"),
     }

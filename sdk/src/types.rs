@@ -42,6 +42,13 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
+/// Location name.
+///
+/// **Note:** It must be between 1 and 64 characters in length and can only comprise ASCII
+/// letters, numbers, colons, hyphens, and periods.
+pub use s2_common::types::location::LocationName;
+/// See [`ListLocationsInput::prefix`].
+pub use s2_common::types::location::LocationNamePrefix;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -859,38 +866,6 @@ impl From<BasinConfig> for api::config::BasinConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Scope of a basin.
-#[non_exhaustive]
-pub enum BasinScope {
-    /// AWS `us-east-1` region.
-    AwsUsEast1,
-    /// AWS `us-west-2` region.
-    AwsUsWest2,
-    /// AWS `eu-north-1` region.
-    AwsEuNorth1,
-}
-
-impl From<api::basin::BasinScope> for BasinScope {
-    fn from(value: api::basin::BasinScope) -> Self {
-        match value {
-            api::basin::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
-            api::basin::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
-            api::basin::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
-        }
-    }
-}
-
-impl From<BasinScope> for api::basin::BasinScope {
-    fn from(value: BasinScope) -> Self {
-        match value {
-            BasinScope::AwsUsEast1 => api::basin::BasinScope::AwsUsEast1,
-            BasinScope::AwsUsWest2 => api::basin::BasinScope::AwsUsWest2,
-            BasinScope::AwsEuNorth1 => api::basin::BasinScope::AwsEuNorth1,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Input for [`create_basin`](crate::S2::create_basin) operation.
@@ -901,10 +876,10 @@ pub struct CreateBasinInput {
     ///
     /// See [`BasinConfig`] for defaults.
     pub config: Option<BasinConfig>,
-    /// Scope of the basin.
+    /// Location of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once created.
-    pub scope: Option<BasinScope>,
+    /// If omitted when creating, uses the default location for the service.
+    pub location: Option<LocationName>,
     idempotency_token: String,
 }
 
@@ -914,7 +889,7 @@ impl CreateBasinInput {
         Self {
             name,
             config: None,
-            scope: None,
+            location: None,
             idempotency_token: idempotency_token(),
         }
     }
@@ -927,12 +902,19 @@ impl CreateBasinInput {
         }
     }
 
-    /// Set the scope of the basin.
-    pub fn with_scope(self, scope: BasinScope) -> Self {
-        Self {
-            scope: Some(scope),
+    /// Set the location of the basin.
+    pub fn with_location<S>(self, location: S) -> Result<Self, ValidationError>
+    where
+        S: TryInto<LocationName>,
+        S::Error: fmt::Display,
+    {
+        let location = location
+            .try_into()
+            .map_err(|e| ValidationError(e.to_string()))?;
+        Ok(Self {
+            location: Some(location),
             ..self
-        }
+        })
     }
 }
 
@@ -942,7 +924,7 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
             api::basin::CreateBasinRequest {
                 basin: value.name,
                 config: value.config.map(Into::into),
-                scope: value.scope.map(Into::into),
+                location: value.location,
             },
             value.idempotency_token,
         )
@@ -959,10 +941,10 @@ pub struct EnsureBasinInput {
     ///
     /// See [`BasinConfig`] for defaults.
     pub config: Option<BasinConfig>,
-    /// Scope of the basin.
+    /// Location of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once created.
-    pub scope: Option<BasinScope>,
+    /// If omitted when creating, uses the default location for the service. Cannot be changed once set.
+    pub location: Option<LocationName>,
 }
 
 impl EnsureBasinInput {
@@ -971,7 +953,7 @@ impl EnsureBasinInput {
         Self {
             name,
             config: None,
-            scope: None,
+            location: None,
         }
     }
 
@@ -983,22 +965,29 @@ impl EnsureBasinInput {
         }
     }
 
-    /// Set the scope of the basin.
-    pub fn with_scope(self, scope: BasinScope) -> Self {
-        Self {
-            scope: Some(scope),
+    /// Set the location of the basin.
+    pub fn with_location<S>(self, location: S) -> Result<Self, ValidationError>
+    where
+        S: TryInto<LocationName>,
+        S::Error: fmt::Display,
+    {
+        let location = location
+            .try_into()
+            .map_err(|e| ValidationError(e.to_string()))?;
+        Ok(Self {
+            location: Some(location),
             ..self
-        }
+        })
     }
 }
 
 impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
     fn from(value: EnsureBasinInput) -> Self {
         let config = value.config;
-        let request = if config.is_some() || value.scope.is_some() {
+        let request = if config.is_some() || value.location.is_some() {
             Some(api::basin::EnsureBasinRequest {
                 config: config.map(Into::into),
-                scope: value.scope.map(Into::into),
+                location: value.location,
             })
         } else {
             None
@@ -1142,8 +1131,8 @@ impl ListAllBasinsInput {
 pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
-    /// Scope of the basin.
-    pub scope: Option<BasinScope>,
+    /// Location of the basin.
+    pub location: Option<LocationName>,
     /// Creation time.
     pub created_at: S2DateTime,
     /// Deletion time if the basin is being deleted.
@@ -1156,7 +1145,7 @@ impl TryFrom<api::basin::BasinInfo> for BasinInfo {
     fn try_from(value: api::basin::BasinInfo) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name,
-            scope: value.scope.map(Into::into),
+            location: value.location,
             created_at: value.created_at.try_into()?,
             deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
         })
@@ -1507,6 +1496,55 @@ impl ListAllAccessTokensInput {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+/// Input for [`list_locations`](crate::S2::list_locations) operation.
+pub struct ListLocationsInput {
+    /// Filter locations whose names begin with this value.
+    ///
+    /// Defaults to `""`.
+    pub prefix: LocationNamePrefix,
+}
+
+impl ListLocationsInput {
+    /// Create a new [`ListLocationsInput`] with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the prefix used to filter locations whose names begin with this value.
+    pub fn with_prefix(self, prefix: LocationNamePrefix) -> Self {
+        Self { prefix, ..self }
+    }
+}
+
+impl From<ListLocationsInput> for api::location::ListLocationsRequest {
+    fn from(value: ListLocationsInput) -> Self {
+        Self {
+            prefix: Some(value.prefix),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+/// Location information.
+pub struct LocationInfo {
+    /// Location name.
+    pub name: LocationName,
+    /// Location represents a private placement, limited by account.
+    pub is_private: bool,
+}
+
+impl From<api::location::LocationInfo> for LocationInfo {
+    fn from(value: api::location::LocationInfo) -> Self {
+        Self {
+            name: value.name,
+            is_private: value.is_private,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Access token information.
@@ -1767,6 +1805,12 @@ pub enum Operation {
     GetBasinMetrics,
     /// Get stream metrics.
     GetStreamMetrics,
+    /// List locations.
+    ListLocations,
+    /// Get the default location.
+    GetDefaultLocation,
+    /// Set the default location.
+    SetDefaultLocation,
     /// List streams.
     ListStreams,
     /// Create a stream.
@@ -1813,6 +1857,9 @@ impl From<Operation> for api::access::Operation {
             Operation::GetAccountMetrics => api::access::Operation::AccountMetrics,
             Operation::GetBasinMetrics => api::access::Operation::BasinMetrics,
             Operation::GetStreamMetrics => api::access::Operation::StreamMetrics,
+            Operation::ListLocations => api::access::Operation::ListLocations,
+            Operation::GetDefaultLocation => api::access::Operation::GetDefaultLocation,
+            Operation::SetDefaultLocation => api::access::Operation::SetDefaultLocation,
         }
     }
 }
@@ -1841,6 +1888,9 @@ impl From<api::access::Operation> for Operation {
             api::access::Operation::AccountMetrics => Operation::GetAccountMetrics,
             api::access::Operation::BasinMetrics => Operation::GetBasinMetrics,
             api::access::Operation::StreamMetrics => Operation::GetStreamMetrics,
+            api::access::Operation::ListLocations => Operation::ListLocations,
+            api::access::Operation::GetDefaultLocation => Operation::GetDefaultLocation,
+            api::access::Operation::SetDefaultLocation => Operation::SetDefaultLocation,
         }
     }
 }

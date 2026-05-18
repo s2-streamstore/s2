@@ -6,7 +6,7 @@ use crate::{
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
-        RetryConfig, S2Config, S2Endpoints, StreamName,
+        RetryConfig, S2Config, S2Endpoints, LocationName, StreamName,
     },
 };
 use async_stream::try_stream;
@@ -30,6 +30,7 @@ use s2_api::v1::{
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
     },
+    location::{ListLocationsRequest, LocationInfo},
     stream::{
         AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
         ReadEnd, ReadStart, StreamInfo, TailResponse,
@@ -38,14 +39,13 @@ use s2_api::v1::{
     },
 };
 use s2_common::{
-    encryption::S2_ENCRYPTION_KEY_HEADER, types::resources::PROVISION_RESULT_HEADER,
-    types::resources::ProvisionResult,
+    encryption::S2_ENCRYPTION_KEY_HEADER,
+    types::resources::{PROVISION_RESULT_HEADER, ProvisionResult},
 };
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 use url::Url;
-
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
 const ACCEPT_PROTO: &str = "application/protobuf";
@@ -101,6 +101,33 @@ impl AccountClient {
         let request = self.delete(url).build()?;
         let _response = self.request(request).send().await?;
         Ok(())
+    }
+
+    pub async fn list_locations(
+        &self,
+        request: ListLocationsRequest,
+    ) -> Result<Vec<LocationInfo>, ApiError> {
+        let url = self.base_url.join("v1/locations")?;
+        let request = self.get(url).query(&request).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<Vec<LocationInfo>>()?)
+    }
+
+    pub async fn get_default_location(&self) -> Result<LocationInfo, ApiError> {
+        let url = self.base_url.join("v1/locations/default")?;
+        let request = self.get(url).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<LocationInfo>()?)
+    }
+
+    pub async fn set_default_location(
+        &self,
+        location: LocationName,
+    ) -> Result<LocationInfo, ApiError> {
+        let url = self.base_url.join("v1/locations/default")?;
+        let request = self.put(url).json(&location).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<LocationInfo>()?)
     }
 
     pub async fn list_basins(

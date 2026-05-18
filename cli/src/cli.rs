@@ -3,8 +3,8 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamNamePrefix,
-    StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, LocationNamePrefix,
+    StreamNamePrefix, StreamNameStartAfter,
 };
 
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, BasinScope, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, LocationName, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StorageClass, StreamConfig, StreamMatcher,
     },
@@ -86,6 +86,18 @@ pub enum Command {
     RevokeAccessToken {
         /// ID of the access token to revoke.
         id: AccessTokenId,
+    },
+
+    /// List locations.
+    ListLocations(ListLocationsArgs),
+
+    /// Get the default location.
+    GetDefaultLocation,
+
+    /// Set the default location.
+    SetDefaultLocation {
+        /// Location name to make the default.
+        location: LocationName,
     },
 
     /// Get account metrics.
@@ -263,9 +275,9 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
-    /// Cloud provider and region for the basin.
+    /// Basin location.
     #[arg(long)]
-    pub scope: Option<BasinScope>,
+    pub location: Option<LocationName>,
 
     #[command(flatten)]
     pub config: BasinConfig,
@@ -310,6 +322,13 @@ pub struct ListAccessTokensArgs {
     /// Returns only a single page of access tokens instead of auto-paginating.
     #[arg(long, default_value_t = false)]
     pub no_auto_paginate: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ListLocationsArgs {
+    /// List locations that begin with this prefix.
+    #[arg(short = 'p', long)]
+    pub prefix: Option<LocationNamePrefix>,
 }
 
 #[derive(Args, Debug)]

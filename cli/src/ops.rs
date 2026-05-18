@@ -12,10 +12,10 @@ use s2_sdk::{
         DeleteStreamInput, EncryptionKey, FencingToken, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListStreamsInput, MeteredBytes, Metric, ReadBatch, ReadFrom, ReadInput, ReadLimits,
-        ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime,
-        SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition, StreamReconfiguration,
-        Streaming, TimeRange, TimeRangeAndInterval,
+        ListLocationsInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric,
+        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput,
+        ReconfigureStreamInput, S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet,
+        StreamPosition, StreamReconfiguration, Streaming, TimeRange, TimeRangeAndInterval,
     },
 };
 
@@ -35,8 +35,8 @@ use crate::{
     cli::{
         CreateBasinArgs, CreateStreamArgs, FenceArgs, GetAccountMetricsArgs, GetBasinMetricsArgs,
         GetStreamMetricsArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
-        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs,
-        TimeRangeArgs, TrimArgs,
+        ListLocationsArgs, ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs,
+        TailArgs, TimeRangeArgs, TrimArgs,
     },
     error::{CliError, OpKind},
     types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
@@ -95,8 +95,10 @@ pub async fn list_basins(
 
 pub async fn create_basin(s2: &S2, args: CreateBasinArgs) -> Result<BasinInfo, CliError> {
     let mut input = CreateBasinInput::new(args.basin.into()).with_config(args.config.into());
-    if let Some(scope) = args.scope {
-        input = input.with_scope(scope.into());
+    if let Some(location) = args.location {
+        input = input
+            .with_location(location)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("{e}")))?;
     }
     s2.create_basin(input)
         .await
@@ -239,6 +241,38 @@ pub async fn revoke_access_token(s2: &S2, id: AccessTokenId) -> Result<(), CliEr
     s2.revoke_access_token(id)
         .await
         .map_err(|e| CliError::op(OpKind::RevokeAccessToken, e))
+}
+
+/// List locations.
+pub async fn list_locations(
+    s2: &S2,
+    args: ListLocationsArgs,
+) -> Result<Vec<LocationInfo>, CliError> {
+    let ListLocationsArgs { prefix } = args;
+
+    let mut input = ListLocationsInput::new();
+    if let Some(p) = prefix {
+        input = input.with_prefix(p);
+    }
+
+    s2.list_locations(input)
+        .await
+        .map_err(|e| CliError::op(OpKind::ListLocations, e))
+}
+
+pub async fn get_default_location(s2: &S2) -> Result<LocationInfo, CliError> {
+    s2.get_default_location()
+        .await
+        .map_err(|e| CliError::op(OpKind::GetDefaultLocation, e))
+}
+
+pub async fn set_default_location(
+    s2: &S2,
+    location: LocationName,
+) -> Result<LocationInfo, CliError> {
+    s2.set_default_location(location)
+        .await
+        .map_err(|e| CliError::op(OpKind::SetDefaultLocation, e))
 }
 
 pub async fn get_account_metrics(
