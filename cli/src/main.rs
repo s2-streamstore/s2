@@ -642,11 +642,12 @@ fn print_listing_uri(uri: String, is_deleting: bool) {
 
 fn print_basin_listing(name: String, scope: Option<&str>, is_deleting: bool) {
     let name = format_listing_uri(name, is_deleting);
-    let scope = format_listing_scope(&format!("({})", scope.unwrap_or("-")), is_deleting);
-    if is_deleting {
-        println!("{} {} {}", name, scope, deletion_marker());
-    } else {
-        println!("{} {}", name, scope);
+    let scope = scope.map(|scope| format_listing_scope(&format!("({scope})"), is_deleting));
+    match (scope, is_deleting) {
+        (Some(scope), true) => println!("{} {} {}", name, scope, deletion_marker()),
+        (Some(scope), false) => println!("{} {}", name, scope),
+        (None, true) => println!("{} {}", name, deletion_marker()),
+        (None, false) => println!("{name}"),
     }
 }
 
