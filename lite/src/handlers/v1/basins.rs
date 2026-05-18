@@ -135,6 +135,7 @@ pub struct GetConfigArgs {
     tag = super::paths::basins::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::config::BasinConfig),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
@@ -168,6 +169,7 @@ pub struct EnsureArgs {
     responses(
         (status = StatusCode::OK, body = v1t::basin::BasinInfo),
         (status = StatusCode::CREATED, body = v1t::basin::BasinInfo),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
@@ -221,6 +223,7 @@ pub struct DeleteArgs {
     tag = super::paths::basins::TAG,
     responses(
         (status = StatusCode::ACCEPTED),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),

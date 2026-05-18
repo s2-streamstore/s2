@@ -355,6 +355,8 @@ pub enum DeleteStreamError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    TransactionConflict(#[from] TransactionConflictError),
+    #[error(transparent)]
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
     RequestDroppedError(#[from] RequestDroppedError),
@@ -364,7 +366,11 @@ pub enum DeleteStreamError {
 
 impl From<slatedb::Error> for DeleteStreamError {
     fn from(err: slatedb::Error) -> Self {
-        Self::Storage(err.into())
+        if err.kind() == slatedb::ErrorKind::Transaction {
+            Self::TransactionConflict(TransactionConflictError)
+        } else {
+            Self::Storage(err.into())
+        }
     }
 }
 
@@ -407,6 +413,8 @@ pub enum ProvisionBasinError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    TransactionConflict(#[from] TransactionConflictError),
+    #[error(transparent)]
     BasinAlreadyExists(#[from] BasinAlreadyExistsError),
     #[error(transparent)]
     BasinDeletionPending(#[from] BasinDeletionPendingError),
@@ -414,7 +422,11 @@ pub enum ProvisionBasinError {
 
 impl From<slatedb::Error> for ProvisionBasinError {
     fn from(err: slatedb::Error) -> Self {
-        Self::Storage(err.into())
+        if err.kind() == slatedb::ErrorKind::Transaction {
+            Self::TransactionConflict(TransactionConflictError)
+        } else {
+            Self::Storage(err.into())
+        }
     }
 }
 
@@ -481,11 +493,17 @@ pub enum DeleteBasinError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    TransactionConflict(#[from] TransactionConflictError),
+    #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
 }
 
 impl From<slatedb::Error> for DeleteBasinError {
     fn from(err: slatedb::Error) -> Self {
-        Self::Storage(err.into())
+        if err.kind() == slatedb::ErrorKind::Transaction {
+            Self::TransactionConflict(TransactionConflictError)
+        } else {
+            Self::Storage(err.into())
+        }
     }
 }

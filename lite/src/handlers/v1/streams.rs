@@ -269,6 +269,7 @@ pub struct DeleteArgs {
     tag = super::paths::streams::TAG,
     responses(
         (status = StatusCode::ACCEPTED),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
