@@ -113,7 +113,11 @@ impl Backend {
             };
             batch.put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(tail_pos, kv::timestamp::TimestampSecs::now()),
+                kv::stream_tail_position::ser_value(
+                    tail_pos,
+                    /* FIXME: this will delay DOE, should use last_record create_ts */
+                    kv::timestamp::TimestampSecs::now(),
+                ),
             );
         }
         if !batch.is_empty() {
