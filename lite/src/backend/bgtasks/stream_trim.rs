@@ -2,7 +2,7 @@ use std::ops::RangeTo;
 
 use futures::{StreamExt, stream};
 use s2_common::{
-    record::{NonZeroSeqNum, SeqNum, StreamPosition, Timestamp},
+    record::{NonZeroSeqNum, StreamPosition},
     types::resources::Page,
 };
 use slatedb::{
@@ -97,29 +97,18 @@ impl Backend {
         stream_id: StreamId,
         trim_point: RangeTo<NonZeroSeqNum>,
     ) -> Result<bool, StorageError> {
-        let start_key = kv::stream_record_timestamp::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: SeqNum::MIN,
-                timestamp: Timestamp::MIN,
-            },
-        );
+        let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
         };
-        let mut it = self.db.scan_with_options(start_key.., &scan_opts).await?;
+        let mut it = self.db.scan_prefix_with_options(prefix, &scan_opts).await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
         let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
-            if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp as u8) {
-                break;
-            }
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
-            if deser_stream_id != stream_id {
-                break;
-            }
+            debug_assert_eq!(deser_stream_id, stream_id);
             if pos.seq_num >= trim_point.end.get() {
                 has_remaining_records = true;
                 break;
