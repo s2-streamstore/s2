@@ -2473,7 +2473,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
         } else {
             ("Active", BADGE_ACTIVE)
         };
-        let scope = basin.scope.as_ref().map(String::as_str).unwrap_or("—");
+        let scope = basin.scope.as_deref().unwrap_or("—");
 
         let prefix = if is_selected { "▸ " } else { "  " };
         let name_style = if is_selected {
