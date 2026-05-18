@@ -375,16 +375,14 @@ async fn derive_tail_position(
 mod tests {
     use std::str::FromStr as _;
 
-    use bytes::Bytes;
     use s2_common::{
-        record::{Metered, Record, StoredRecord, StreamPosition},
+        record::StreamPosition,
         types::{
             config::{BasinConfig, OptionalStreamConfig},
             resources::ProvisionMode,
         },
     };
     use slatedb::{WriteBatch, object_store};
-    use time::OffsetDateTime;
 
     use super::*;
 
@@ -399,61 +397,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_streamer_derives_tail_from_records_not_marker() {
+    async fn derive_tail_position_uses_timestamp_index_before_tail_marker() {
         let backend = new_test_backend().await;
 
         let basin = BasinName::from_str("testbasin1").unwrap();
         let stream = StreamName::from_str("stream1").unwrap();
         let stream_id = StreamId::new(&basin, &stream);
 
-        let meta = kv::stream_meta::StreamMeta {
-            config: OptionalStreamConfig::default(),
-            cipher: None,
-            created_at: OffsetDateTime::now_utc(),
-            deleted_at: None,
-            creation_idempotency_key: None,
-        };
-
-        // Write a stale tail position marker at seq_num=1.
-        let stale_tail_pos = StreamPosition {
-            seq_num: 1,
-            timestamp: 123,
-        };
-        // Write a record at seq_num=1 (past the marker).
-        let record_pos = StreamPosition {
-            seq_num: stale_tail_pos.seq_num,
-            timestamp: stale_tail_pos.timestamp,
-        };
-
-        let record = Record::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap();
-        let metered_record: Metered<StoredRecord> = StoredRecord::from(record).into();
-
         let mut wb = WriteBatch::new();
-        wb.put(
-            kv::stream_meta::ser_key(&basin, &stream),
-            kv::stream_meta::ser_value(&meta),
-        );
         wb.put(
             kv::stream_tail_position::ser_key(stream_id),
             kv::stream_tail_position::ser_value(
-                stale_tail_pos,
+                StreamPosition {
+                    seq_num: 1,
+                    timestamp: 123,
+                },
                 kv::timestamp::TimestampSecs::from_secs(1),
             ),
         );
-        wb.put(
-            kv::stream_record_data::ser_key(stream_id, record_pos),
-            kv::stream_record_data::ser_value(metered_record.as_ref()),
+        for pos in [
+            StreamPosition {
+                seq_num: 2,
+                timestamp: 456,
+            },
+            StreamPosition {
+                seq_num: 3,
+                timestamp: 456,
+            },
+        ] {
+            wb.put(
+                kv::stream_record_timestamp::ser_key(stream_id, pos),
+                kv::stream_record_timestamp::ser_value(),
+            );
+        }
+        backend.db.write(wb).await.unwrap();
+
+        let tail_pos = derive_tail_position(&backend.db, stream_id).await.unwrap();
+        assert_eq!(
+            tail_pos,
+            StreamPosition {
+                seq_num: 4,
+                timestamp: 456,
+            }
         );
+    }
+
+    #[tokio::test]
+    async fn derive_tail_position_falls_back_to_tail_marker_without_records() {
+        let backend = new_test_backend().await;
+
+        let basin = BasinName::from_str("testbasin-marker").unwrap();
+        let stream = StreamName::from_str("stream-marker").unwrap();
+        let stream_id = StreamId::new(&basin, &stream);
+        let marker_pos = StreamPosition {
+            seq_num: 7,
+            timestamp: 789,
+        };
+
+        let mut wb = WriteBatch::new();
         wb.put(
-            kv::stream_record_timestamp::ser_key(stream_id, record_pos),
-            kv::stream_record_timestamp::ser_value(),
+            kv::stream_tail_position::ser_key(stream_id),
+            kv::stream_tail_position::ser_value(
+                marker_pos,
+                kv::timestamp::TimestampSecs::from_secs(1),
+            ),
         );
         backend.db.write(wb).await.unwrap();
 
-        // derive_tail_position should find the record and derive tail as seq_num=2.
         let tail_pos = derive_tail_position(&backend.db, stream_id).await.unwrap();
-        assert_eq!(tail_pos.seq_num, 2);
-        assert_eq!(tail_pos.timestamp, 123);
+        assert_eq!(tail_pos, marker_pos);
+    }
+
+    #[tokio::test]
+    async fn derive_tail_position_defaults_to_min_without_records_or_marker() {
+        let backend = new_test_backend().await;
+
+        let basin = BasinName::from_str("testbasin-empty").unwrap();
+        let stream = StreamName::from_str("stream-empty").unwrap();
+        let stream_id = StreamId::new(&basin, &stream);
+
+        let tail_pos = derive_tail_position(&backend.db, stream_id).await.unwrap();
+        assert_eq!(tail_pos, StreamPosition::MIN);
     }
 
     #[tokio::test]
