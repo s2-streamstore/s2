@@ -89,7 +89,7 @@ impl Backend {
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
         let mut found_record_to_keep = false;
-        let mut last_deleted_tail: Option<StreamPosition> = None;
+        let mut tail_after_last_deleted_record: Option<StreamPosition> = None;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, stream_id);
@@ -111,11 +111,11 @@ impl Backend {
                 seq_num: pos.seq_num + 1,
                 timestamp: pos.timestamp,
             };
-            if let Some(previous_tail) = last_deleted_tail.replace(tail_pos) {
+            if let Some(previous_tail) = tail_after_last_deleted_record.replace(tail_pos) {
                 debug_assert_eq!(previous_tail.seq_num, pos.seq_num);
             }
         }
-        let Some(tail_pos) = last_deleted_tail else {
+        let Some(tail_pos) = tail_after_last_deleted_record else {
             return Ok(false);
         };
         let stream_became_empty = !found_record_to_keep;
