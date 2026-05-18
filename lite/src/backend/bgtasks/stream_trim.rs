@@ -7,7 +7,7 @@ use s2_common::{
 };
 use slatedb::{
     WriteBatch,
-    config::{DurabilityLevel, ScanOptions, WriteOptions},
+    config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
 
@@ -66,8 +66,8 @@ impl Backend {
         stream_id: StreamId,
         trim_point: RangeTo<NonZeroSeqNum>,
     ) -> Result<(), StorageError> {
-        let stream_became_empty = self.delete_records(stream_id, trim_point).await?;
-        if trim_point.end < NonZeroSeqNum::MAX && stream_became_empty {
+        let has_remaining_records = self.delete_records(stream_id, trim_point).await?;
+        if trim_point.end < NonZeroSeqNum::MAX && !has_remaining_records {
             self.arm_doe_maybe(stream_id).await?;
         }
         self.finalize_trim(stream_id, trim_point).await?;
@@ -88,20 +88,17 @@ impl Backend {
         let mut it = self.db.scan_prefix_with_options(prefix, &scan_opts).await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
-        let mut found_record_to_keep = false;
-        let mut tail_after_last_deleted_record: Option<StreamPosition> = None;
+        let mut has_remaining_records = false;
+        let mut tail_pending: Option<StreamPosition> = None;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, stream_id);
             if pos.seq_num >= trim_point.end.get() {
-                found_record_to_keep = true;
+                has_remaining_records = true;
                 break;
             }
-            // Flush before adding the next deletion so the current batch can
-            // become the final batch with the empty-tail marker below.
             if batch_size >= DELETE_BATCH_SIZE {
-                self.db.write(batch).await?;
-                batch = WriteBatch::new();
+                self.db.write(std::mem::take(&mut batch)).await?;
                 batch_size = 0;
             }
             batch.delete(kv.key);
@@ -111,28 +108,20 @@ impl Backend {
                 seq_num: pos.seq_num + 1,
                 timestamp: pos.timestamp,
             };
-            if let Some(previous_tail) = tail_after_last_deleted_record.replace(tail_pos) {
+            if let Some(previous_tail) = tail_pending.replace(tail_pos) {
                 debug_assert_eq!(previous_tail.seq_num, pos.seq_num);
             }
         }
-        let Some(tail_pos) = tail_after_last_deleted_record else {
-            return Ok(false);
-        };
-        let stream_became_empty = !found_record_to_keep;
-        if stream_became_empty {
+        if !has_remaining_records && let Some(tail_pos) = tail_pending {
             batch.put(
                 kv::stream_tail_position::ser_key(stream_id),
                 kv::stream_tail_position::ser_value(tail_pos, kv::timestamp::TimestampSecs::now()),
             );
-            let write_opts = WriteOptions {
-                await_durable: true,
-                ..Default::default()
-            };
-            self.db.write_with_options(batch, &write_opts).await?;
-        } else if batch_size > 0 {
+        }
+        if !batch.is_empty() {
             self.db.write(batch).await?;
         }
-        Ok(stream_became_empty)
+        Ok(has_remaining_records)
     }
 
     #[instrument(ret, err, skip(self))]
@@ -203,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_records_writes_tail_marker_before_reporting_stream_became_empty() {
+    async fn delete_records_writes_tail_marker_before_reporting_no_remaining_records() {
         let backend = test_backend().await;
         let stream_id: StreamId = [6u8; StreamId::LEN].into();
         let metered = test_record();
@@ -229,11 +218,11 @@ mod tests {
             .await
             .unwrap();
 
-        let stream_became_empty = backend
+        let has_remaining_records = backend
             .delete_records(stream_id, trim_point(1))
             .await
             .unwrap();
-        assert!(stream_became_empty);
+        assert!(!has_remaining_records);
 
         let data = backend
             .db
