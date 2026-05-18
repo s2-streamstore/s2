@@ -226,7 +226,11 @@ async fn run() -> Result<(), CliError> {
 
                 let (basins, _) = ops::list_basins(&s2, list_basins_args).await?;
                 for basin_info in basins {
-                    print_listing_uri(basin_info.name.to_string(), basin_info.deleted_at.is_some());
+                    print_basin_listing(
+                        basin_info.name.to_string(),
+                        basin_info.scope.as_deref(),
+                        basin_info.deleted_at.is_some(),
+                    );
                 }
             }
         }
@@ -234,7 +238,11 @@ async fn run() -> Result<(), CliError> {
         Command::ListBasins(args) => {
             let (basins, _) = ops::list_basins(&s2, args).await?;
             for basin_info in basins {
-                print_listing_uri(basin_info.name.to_string(), basin_info.deleted_at.is_some());
+                print_basin_listing(
+                    basin_info.name.to_string(),
+                    basin_info.scope.as_deref(),
+                    basin_info.deleted_at.is_some(),
+                );
             }
         }
 
@@ -632,6 +640,16 @@ fn print_listing_uri(uri: String, is_deleting: bool) {
     }
 }
 
+fn print_basin_listing(name: String, scope: Option<&str>, is_deleting: bool) {
+    let name = format_listing_uri(name, is_deleting);
+    let scope = format_listing_scope(&format!("({})", scope.unwrap_or("-")), is_deleting);
+    if is_deleting {
+        println!("{} {} {}", name, scope, deletion_marker());
+    } else {
+        println!("{} {}", name, scope);
+    }
+}
+
 fn print_listing_with_created_at(uri: String, created_at: String, is_deleting: bool) {
     let uri = format_listing_uri(uri, is_deleting);
     let created_at = if is_deleting {
@@ -649,6 +667,14 @@ fn print_listing_with_created_at(uri: String, created_at: String, is_deleting: b
 
 fn format_listing_uri(uri: String, is_deleting: bool) -> colored::ColoredString {
     if is_deleting { uri.red() } else { uri.normal() }
+}
+
+fn format_listing_scope(scope: &str, is_deleting: bool) -> colored::ColoredString {
+    if is_deleting {
+        scope.red()
+    } else {
+        scope.yellow()
+    }
 }
 
 fn deletion_marker() -> colored::ColoredString {
