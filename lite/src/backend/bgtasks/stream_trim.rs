@@ -88,13 +88,13 @@ impl Backend {
         let mut it = self.db.scan_prefix_with_options(prefix, &scan_opts).await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
-        let mut has_remaining_records = false;
+        let mut found_record_to_keep = false;
         let mut last_deleted_tail: Option<StreamPosition> = None;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, stream_id);
             if pos.seq_num >= trim_point.end.get() {
-                has_remaining_records = true;
+                found_record_to_keep = true;
                 break;
             }
             // Flush before adding the next deletion so the current batch can
@@ -118,12 +118,11 @@ impl Backend {
                 last_deleted_tail = Some(tail_pos);
             }
         }
-        if has_remaining_records {
-            if batch_size > 0 {
-                self.db.write(batch).await?;
-            }
-            Ok(false)
-        } else if let Some(tail_pos) = last_deleted_tail {
+        let Some(tail_pos) = last_deleted_tail else {
+            return Ok(false);
+        };
+        let stream_became_empty = !found_record_to_keep;
+        if stream_became_empty {
             batch.put(
                 kv::stream_tail_position::ser_key(stream_id),
                 kv::stream_tail_position::ser_value(tail_pos, kv::timestamp::TimestampSecs::now()),
@@ -133,10 +132,10 @@ impl Backend {
                 ..Default::default()
             };
             self.db.write_with_options(batch, &write_opts).await?;
-            Ok(true)
-        } else {
-            Ok(false)
+        } else if batch_size > 0 {
+            self.db.write(batch).await?;
         }
+        Ok(stream_became_empty)
     }
 
     #[instrument(ret, err, skip(self))]
@@ -207,7 +206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_records_writes_tail_marker_before_returning_empty_tail() {
+    async fn delete_records_writes_tail_marker_before_reporting_stream_became_empty() {
         let backend = test_backend().await;
         let stream_id: StreamId = [6u8; StreamId::LEN].into();
         let metered = test_record();
