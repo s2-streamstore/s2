@@ -876,7 +876,7 @@ pub struct CreateBasinInput {
     pub config: Option<BasinConfig>,
     /// Scope of the basin.
     ///
-    /// If omitted, the server assigns the default scope.
+    /// If omitted when creating, uses the configured default scope.
     pub scope: Option<BasinScope>,
     idempotency_token: String,
 }
@@ -936,7 +936,7 @@ pub struct EnsureBasinInput {
     config: Option<api::config::BasinConfig>,
     /// Scope of the basin.
     ///
-    /// If omitted when creating, the server assigns the default scope. Cannot be changed once set.
+    /// If omitted when creating, uses the configured default scope. Cannot be changed once set.
     pub scope: Option<BasinScope>,
 }
 
