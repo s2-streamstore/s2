@@ -263,7 +263,7 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
-    /// Cloud provider and region for the basin.
+    /// Basin scope.
     #[arg(long)]
     pub scope: Option<BasinScope>,
 

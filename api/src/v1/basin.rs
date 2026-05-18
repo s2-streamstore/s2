@@ -48,7 +48,7 @@ pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
     /// Basin scope.
-    pub scope: Option<BasinScope>,
+    pub scope: Option<String>,
     /// Creation time in RFC 3339 format.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -71,7 +71,7 @@ impl From<types::basin::BasinInfo> for BasinInfo {
 
         Self {
             name,
-            scope: scope.map(Into::into),
+            scope,
             created_at,
             deleted_at,
             state: basin_state_for_deleted_at(deleted_at.as_ref()),
@@ -90,7 +90,7 @@ fn basin_state_for_deleted_at(deleted_at: Option<&OffsetDateTime>) -> BasinState
 #[derive(Deserialize)]
 struct BasinInfoSerde {
     name: BasinName,
-    scope: Option<BasinScope>,
+    scope: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     #[serde(default, with = "time::serde::rfc3339::option")]
@@ -123,41 +123,6 @@ impl<'de> Deserialize<'de> for BasinInfo {
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub enum BasinScope {
-    /// AWS `us-east-1` region.
-    #[serde(rename = "aws:us-east-1")]
-    AwsUsEast1,
-    /// AWS `us-west-2` region.
-    #[serde(rename = "aws:us-west-2")]
-    AwsUsWest2,
-    /// AWS `eu-north-1` region.
-    #[serde(rename = "aws:eu-north-1")]
-    AwsEuNorth1,
-}
-
-impl From<BasinScope> for types::basin::BasinScope {
-    fn from(value: BasinScope) -> Self {
-        match value {
-            BasinScope::AwsUsEast1 => Self::AwsUsEast1,
-            BasinScope::AwsUsWest2 => Self::AwsUsWest2,
-            BasinScope::AwsEuNorth1 => Self::AwsEuNorth1,
-        }
-    }
-}
-
-impl From<types::basin::BasinScope> for BasinScope {
-    fn from(value: types::basin::BasinScope) -> Self {
-        match value {
-            types::basin::BasinScope::AwsUsEast1 => Self::AwsUsEast1,
-            types::basin::BasinScope::AwsUsWest2 => Self::AwsUsWest2,
-            types::basin::BasinScope::AwsEuNorth1 => Self::AwsEuNorth1,
-        }
-    }
-}
-
-#[rustfmt::skip]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum BasinState {
     /// Basin is active.
@@ -175,7 +140,7 @@ pub struct EnsureBasinRequest {
     /// Basin scope.
     /// If omitted when creating, defaults to `aws:us-east-1`.
     /// This cannot be changed.
-    pub scope: Option<BasinScope>,
+    pub scope: Option<String>,
 }
 
 #[rustfmt::skip]
@@ -190,5 +155,5 @@ pub struct CreateBasinRequest {
     pub config: Option<BasinConfig>,
     /// Basin scope.
     /// If omitted, defaults to `aws:us-east-1`.
-    pub scope: Option<BasinScope>,
+    pub scope: Option<String>,
 }

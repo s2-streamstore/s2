@@ -200,17 +200,7 @@ impl crate::http::ParseableHeader for BasinName {
 
 pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAfter>;
 
-#[derive(
-    Debug, strum::Display, strum::EnumString, strum::IntoStaticStr, Clone, Copy, PartialEq, Eq,
-)]
-pub enum BasinScope {
-    #[strum(serialize = "aws:us-east-1")]
-    AwsUsEast1,
-    #[strum(serialize = "aws:us-west-2")]
-    AwsUsWest2,
-    #[strum(serialize = "aws:eu-north-1")]
-    AwsEuNorth1,
-}
+pub type BasinScope = String;
 
 #[derive(Debug, Clone)]
 pub struct BasinInfo {

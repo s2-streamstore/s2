@@ -861,37 +861,8 @@ impl From<BasinConfig> for api::config::BasinConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Scope of a basin.
-#[non_exhaustive]
-pub enum BasinScope {
-    /// AWS `us-east-1` region.
-    AwsUsEast1,
-    /// AWS `us-west-2` region.
-    AwsUsWest2,
-    /// AWS `eu-north-1` region.
-    AwsEuNorth1,
-}
-
-impl From<api::basin::BasinScope> for BasinScope {
-    fn from(value: api::basin::BasinScope) -> Self {
-        match value {
-            api::basin::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
-            api::basin::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
-            api::basin::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
-        }
-    }
-}
-
-impl From<BasinScope> for api::basin::BasinScope {
-    fn from(value: BasinScope) -> Self {
-        match value {
-            BasinScope::AwsUsEast1 => api::basin::BasinScope::AwsUsEast1,
-            BasinScope::AwsUsWest2 => api::basin::BasinScope::AwsUsWest2,
-            BasinScope::AwsEuNorth1 => api::basin::BasinScope::AwsEuNorth1,
-        }
-    }
-}
+pub type BasinScope = String;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -905,7 +876,7 @@ pub struct CreateBasinInput {
     pub config: Option<BasinConfig>,
     /// Scope of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1).
+    /// Defaults to `aws:us-east-1`.
     pub scope: Option<BasinScope>,
     idempotency_token: String,
 }
@@ -930,9 +901,9 @@ impl CreateBasinInput {
     }
 
     /// Set the scope of the basin.
-    pub fn with_scope(self, scope: BasinScope) -> Self {
+    pub fn with_scope(self, scope: impl Into<BasinScope>) -> Self {
         Self {
-            scope: Some(scope),
+            scope: Some(scope.into()),
             ..self
         }
     }
@@ -944,7 +915,7 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
             api::basin::CreateBasinRequest {
                 basin: value.name,
                 config: value.config.map(Into::into),
-                scope: value.scope.map(Into::into),
+                scope: value.scope,
             },
             value.idempotency_token,
         )
@@ -965,7 +936,7 @@ pub struct EnsureBasinInput {
     config: Option<api::config::BasinConfig>,
     /// Scope of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
+    /// Defaults to `aws:us-east-1`. Cannot be changed once set.
     pub scope: Option<BasinScope>,
 }
 
@@ -989,9 +960,9 @@ impl EnsureBasinInput {
     }
 
     /// Set the scope of the basin.
-    pub fn with_scope(self, scope: BasinScope) -> Self {
+    pub fn with_scope(self, scope: impl Into<BasinScope>) -> Self {
         Self {
-            scope: Some(scope),
+            scope: Some(scope.into()),
             ..self
         }
     }
@@ -1004,7 +975,7 @@ impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinReques
         let request = if config.is_some() || value.scope.is_some() {
             Some(api::basin::EnsureBasinRequest {
                 config,
-                scope: value.scope.map(Into::into),
+                scope: value.scope,
             })
         } else {
             None
@@ -1140,7 +1111,7 @@ impl TryFrom<api::basin::BasinInfo> for BasinInfo {
     fn try_from(value: api::basin::BasinInfo) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name,
-            scope: value.scope.map(Into::into),
+            scope: value.scope,
             created_at: value.created_at.try_into()?,
             deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
         })

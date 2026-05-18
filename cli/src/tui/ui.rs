@@ -2473,16 +2473,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
         } else {
             ("Active", BADGE_ACTIVE)
         };
-        let scope = basin
-            .scope
-            .as_ref()
-            .map(|s| match s {
-                s2_sdk::types::BasinScope::AwsUsEast1 => "aws:us-east-1",
-                s2_sdk::types::BasinScope::AwsUsWest2 => "aws:us-west-2",
-                s2_sdk::types::BasinScope::AwsEuNorth1 => "aws:eu-north-1",
-                _ => "unknown",
-            })
-            .unwrap_or("—");
+        let scope = basin.scope.as_ref().map(String::as_str).unwrap_or("—");
 
         let prefix = if is_selected { "▸ " } else { "  " };
         let name_style = if is_selected {
@@ -4423,7 +4414,7 @@ fn get_selected_line_hint(mode: &InputMode) -> usize {
         InputMode::Normal => 0,
         InputMode::CreateBasin { selected, .. } => match selected {
             0 => 3,   // Name
-            1 => 7,   // Region
+            1 => 7,   // Scope
             2 => 12,  // Storage
             3 => 16,  // Retention
             4 => 19,  // Duration
@@ -4528,16 +4519,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             editing,
             cursor,
         } => {
-            use crate::tui::app::BasinScopeOption;
-
             let name_valid = name.len() >= 8 && name.len() <= 48;
-
-            // Scope options
-            let scope_opts = [
-                ("AWS us-east-1", *scope == BasinScopeOption::AwsUsEast1),
-                ("AWS us-west-2", *scope == BasinScopeOption::AwsUsWest2),
-                ("AWS eu-north-1", *scope == BasinScopeOption::AwsEuNorth1),
-            ];
 
             // Storage class options
             let storage_opts = [
@@ -4622,14 +4604,17 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 Span::styled(hint_text, Style::default().fg(hint_color).italic()),
             ]));
 
-            // Basin Scope (Cloud Provider/Region)
+            // Basin scope
             lines.push(Line::from(""));
-            let (ind, lbl) = render_field_row_bold(1, "Region", *selected);
+            let (ind, lbl) = render_field_row_bold(1, "Scope", *selected);
             let mut scope_spans = vec![ind, lbl, Span::raw("  ")];
-            for (label, active) in &scope_opts {
-                scope_spans.push(render_pill(label, *selected == 1, *active));
-                scope_spans.push(Span::raw(" "));
-            }
+            scope_spans.extend(render_text_input_with_cursor(
+                scope,
+                *selected == 1 && *editing,
+                "aws:us-east-1",
+                CYAN,
+                *cursor,
+            ));
             lines.push(Line::from(scope_spans));
 
             // Default stream configuration section

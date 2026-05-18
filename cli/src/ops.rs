@@ -96,7 +96,7 @@ pub async fn list_basins(
 pub async fn create_basin(s2: &S2, args: CreateBasinArgs) -> Result<BasinInfo, CliError> {
     let mut input = CreateBasinInput::new(args.basin.into()).with_config(args.config.into());
     if let Some(scope) = args.scope {
-        input = input.with_scope(scope.into());
+        input = input.with_scope(scope);
     }
     s2.create_basin(input)
         .await
