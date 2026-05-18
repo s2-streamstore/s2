@@ -107,16 +107,10 @@ impl Backend {
             batch.delete(kv.key);
             batch.delete(kv::stream_record_data::ser_key(stream_id, pos));
             batch_size += 1;
-            let tail_pos = StreamPosition {
+            last_deleted_tail = Some(StreamPosition {
                 seq_num: pos.seq_num + 1,
                 timestamp: pos.timestamp,
-            };
-            if match last_deleted_tail {
-                Some(current) => tail_pos.seq_num > current.seq_num,
-                None => true,
-            } {
-                last_deleted_tail = Some(tail_pos);
-            }
+            });
         }
         let Some(tail_pos) = last_deleted_tail else {
             return Ok(false);
