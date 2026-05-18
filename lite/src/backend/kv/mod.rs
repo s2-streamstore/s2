@@ -75,6 +75,8 @@ pub enum Key {
     /// (SP) per-stream, updatable
     /// Key: StreamID
     /// Value: SeqNum Timestamp WriteTimestampSecs
+    /// Valid only when the stream has no records; otherwise derive tail from last record.
+    /// No records and missing implies StreamPosition::MIN.
     StreamTailPosition(StreamId),
     /// (SFT) per-stream, updatable, optional, default empty
     /// Key: StreamID
