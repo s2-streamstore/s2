@@ -18,7 +18,7 @@ use s2_common::{
 };
 use slatedb::{
     IterationOrder,
-    config::{DurabilityLevel, ScanOptions},
+    config::{DurabilityLevel, ReadOptions, ScanOptions},
 };
 use tokio::sync::{Semaphore, broadcast};
 
@@ -97,7 +97,7 @@ impl Backend {
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
             ),
-            self.derive_tail_position(stream_id),
+            derive_tail_position(&self.db, stream_id),
             self.db_get(
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
@@ -137,59 +137,6 @@ impl Backend {
                 matches!(slot, StreamerClientSlot::Ready { client } if client.generation_id() == client_id)
             });
         }))
-    }
-
-    /// Derive the stream tail position by reverse-scanning lightweight timestamp index keys.
-    /// If no records exist, falls back to the explicit `StreamTailPosition` marker key.
-    async fn derive_tail_position(
-        &self,
-        stream_id: StreamId,
-    ) -> Result<StreamPosition, StorageError> {
-        let lower_bound = kv::stream_record_timestamp::ser_key(stream_id, StreamPosition::MIN);
-        let upper_bound = kv::stream_record_timestamp::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: SeqNum::MAX,
-                timestamp: Timestamp::MAX,
-            },
-        );
-        let scan_opts = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
-            order: IterationOrder::Descending,
-            ..Default::default()
-        };
-        let mut it = self
-            .db
-            .scan_with_options(lower_bound..upper_bound, &scan_opts)
-            .await?;
-        if let Some(kv_entry) = it.next().await? {
-            if kv_entry.key.first().copied() == Some(kv::KeyType::StreamRecordTimestamp as u8) {
-                let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv_entry.key)?;
-                if deser_stream_id == stream_id {
-                    kv::stream_record_timestamp::deser_value(kv_entry.value)?;
-                    // Found the last record — tail is one past it.
-                    let tail = StreamPosition {
-                        seq_num: pos.seq_num + 1,
-                        timestamp: pos.timestamp,
-                    };
-                    return Ok(tail);
-                }
-            }
-        }
-
-        // No records found — fall back to the explicit tail position marker.
-        if let Some((pos, _)) = self
-            .db_get(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::deser_value,
-            )
-            .await?
-        {
-            return Ok(pos);
-        }
-
-        // No marker either — stream starts at MIN.
-        Ok(StreamPosition::MIN)
     }
 
     fn streamer_client_slot(&self, basin: &BasinName, stream: &StreamName) -> StreamerClientSlot {
@@ -372,6 +319,58 @@ impl Backend {
     }
 }
 
+/// Derive the stream tail position by reverse-scanning lightweight timestamp index keys.
+/// If no records exist, falls back to the explicit `StreamTailPosition` marker key.
+async fn derive_tail_position(
+    db: &slatedb::Db,
+    stream_id: StreamId,
+) -> Result<StreamPosition, StorageError> {
+    let lower_bound = kv::stream_record_timestamp::ser_key(stream_id, StreamPosition::MIN);
+    let upper_bound = kv::stream_record_timestamp::ser_key(
+        stream_id,
+        StreamPosition {
+            seq_num: SeqNum::MAX,
+            timestamp: Timestamp::MAX,
+        },
+    );
+    let scan_opts = ScanOptions {
+        durability_filter: DurabilityLevel::Remote,
+        order: IterationOrder::Descending,
+        ..Default::default()
+    };
+    let mut it = db
+        .scan_with_options(lower_bound..upper_bound, &scan_opts)
+        .await?;
+    if let Some(kv_entry) = it.next().await? {
+        if kv_entry.key.first().copied() == Some(kv::KeyType::StreamRecordTimestamp as u8) {
+            let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv_entry.key)?;
+            if deser_stream_id == stream_id {
+                kv::stream_record_timestamp::deser_value(kv_entry.value)?;
+                // Found the last record — tail is one past it.
+                return Ok(StreamPosition {
+                    seq_num: pos.seq_num + 1,
+                    timestamp: pos.timestamp,
+                });
+            }
+        }
+    }
+
+    let read_opts = ReadOptions {
+        durability_filter: DurabilityLevel::Remote,
+        ..Default::default()
+    };
+    if let Some((pos, _)) = db
+        .get_with_options(kv::stream_tail_position::ser_key(stream_id), &read_opts)
+        .await?
+        .map(kv::stream_tail_position::deser_value)
+        .transpose()?
+    {
+        return Ok(pos);
+    }
+
+    Ok(StreamPosition::MIN)
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr as _;
@@ -452,7 +451,7 @@ mod tests {
         backend.db.write(wb).await.unwrap();
 
         // derive_tail_position should find the record and derive tail as seq_num=2.
-        let tail_pos = backend.derive_tail_position(stream_id).await.unwrap();
+        let tail_pos = derive_tail_position(&backend.db, stream_id).await.unwrap();
         assert_eq!(tail_pos.seq_num, 2);
         assert_eq!(tail_pos.timestamp, 123);
     }
