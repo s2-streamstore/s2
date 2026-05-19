@@ -29,6 +29,13 @@ pub mod access_tokens {
     pub const REVOKE: &str = "/access-tokens/{id}";
 }
 
+pub mod scopes {
+    pub const TAG: &str = "scopes";
+    pub const DESCRIPTION: &str = "Manage scopes";
+
+    pub const LIST: &str = "/scopes";
+}
+
 pub mod streams {
     pub const TAG: &str = "streams";
     pub const DESCRIPTION: &str = "Manage streams";

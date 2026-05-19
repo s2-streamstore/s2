@@ -42,12 +42,15 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
-/// Basin scope.
-pub use s2_common::types::basin::BasinScope;
 /// Result of provisioning a resource.
 #[doc(hidden)]
 #[cfg(feature = "_hidden")]
 pub use s2_common::types::resources::ProvisionResult;
+/// Scope name.
+///
+/// **Note:** It must be less than 40 characters in length and can only comprise ASCII
+/// letters, numbers, colons, hyphens, and periods.
+pub use s2_common::types::scope::ScopeName;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -876,7 +879,7 @@ pub struct CreateBasinInput {
     /// Scope of the basin.
     ///
     /// If omitted when creating, uses the configured default scope.
-    pub scope: Option<BasinScope>,
+    pub scope: Option<ScopeName>,
     idempotency_token: String,
 }
 
@@ -902,7 +905,7 @@ impl CreateBasinInput {
     /// Set the scope of the basin.
     pub fn with_scope<S>(self, scope: S) -> Result<Self, ValidationError>
     where
-        S: TryInto<BasinScope>,
+        S: TryInto<ScopeName>,
         S::Error: fmt::Display,
     {
         let scope = scope
@@ -943,7 +946,7 @@ pub struct EnsureBasinInput {
     /// Scope of the basin.
     ///
     /// If omitted when creating, uses the configured default scope. Cannot be changed once set.
-    pub scope: Option<BasinScope>,
+    pub scope: Option<ScopeName>,
 }
 
 #[cfg(feature = "_hidden")]
@@ -968,7 +971,7 @@ impl EnsureBasinInput {
     /// Set the scope of the basin.
     pub fn with_scope<S>(self, scope: S) -> Result<Self, ValidationError>
     where
-        S: TryInto<BasinScope>,
+        S: TryInto<ScopeName>,
         S::Error: fmt::Display,
     {
         let scope = scope
@@ -1111,7 +1114,7 @@ pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
     /// Scope of the basin.
-    pub scope: Option<BasinScope>,
+    pub scope: Option<ScopeName>,
     /// Creation time.
     pub created_at: S2DateTime,
     /// Deletion time if the basin is being deleted.

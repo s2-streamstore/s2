@@ -3,6 +3,7 @@ pub mod basin;
 pub mod config;
 pub mod metrics;
 pub mod resources;
+pub mod scope;
 pub mod stream;
 mod strings;
 

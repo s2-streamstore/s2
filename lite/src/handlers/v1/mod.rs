@@ -8,6 +8,7 @@ mod error;
 pub mod metrics;
 pub mod paths;
 pub mod records;
+pub mod scopes;
 pub mod streams;
 
 const MAX_UNARY_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -24,6 +25,7 @@ pub fn router() -> axum::Router<Backend> {
         .merge(basins::router())
         .merge(streams::router())
         .merge(records::router())
+        .merge(scopes::router())
         .merge(access_tokens::router())
         .merge(metrics::router())
         .route_layer((

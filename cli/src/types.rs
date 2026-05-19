@@ -172,7 +172,7 @@ impl StreamConfig {
     }
 }
 
-pub use sdk::types::BasinScope;
+pub use sdk::types::ScopeName;
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]

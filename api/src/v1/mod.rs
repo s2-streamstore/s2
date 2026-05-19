@@ -3,6 +3,7 @@ pub mod basin;
 pub mod config;
 pub mod error;
 pub mod metrics;
+pub mod scope;
 pub mod stream;
 
 use s2_common::types::{self, resources::RequestToken};

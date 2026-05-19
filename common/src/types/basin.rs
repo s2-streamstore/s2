@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 
 use super::{
     ValidationError,
+    scope::ScopeName,
     strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
 };
 use crate::{caps, types::resources::ListItemsRequest};
@@ -200,138 +201,10 @@ impl crate::http::ParseableHeader for BasinName {
 
 pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAfter>;
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BasinScope(CompactString);
-
-impl BasinScope {
-    fn validate_str(scope: &str) -> Result<(), ValidationError> {
-        if scope.chars().count() > caps::MAX_BASIN_SCOPE_LEN {
-            return Err(format!(
-                "basin scope must be less than {} characters in length",
-                caps::MAX_BASIN_SCOPE_LEN + 1
-            )
-            .into());
-        }
-
-        if scope
-            .chars()
-            .any(|c| !c.is_ascii_alphanumeric() && c != ':' && c != '-' && c != '.')
-        {
-            return Err(
-                "basin scope must comprise ASCII letters, numbers, colons, hyphens, and periods"
-                    .into(),
-            );
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(feature = "utoipa")]
-impl utoipa::PartialSchema for BasinScope {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::Object::builder()
-            .schema_type(utoipa::openapi::Type::String)
-            .max_length(Some(caps::MAX_BASIN_SCOPE_LEN))
-            .into()
-    }
-}
-
-#[cfg(feature = "utoipa")]
-impl utoipa::ToSchema for BasinScope {}
-
-impl serde::Serialize for BasinScope {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for BasinScope {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
-    }
-}
-
-impl AsRef<str> for BasinScope {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Deref for BasinScope {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl TryFrom<CompactString> for BasinScope {
-    type Error = ValidationError;
-
-    fn try_from(scope: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&scope)?;
-        Ok(Self(scope))
-    }
-}
-
-impl TryFrom<String> for BasinScope {
-    type Error = ValidationError;
-
-    fn try_from(scope: String) -> Result<Self, Self::Error> {
-        scope.to_compact_string().try_into()
-    }
-}
-
-impl TryFrom<&str> for BasinScope {
-    type Error = ValidationError;
-
-    fn try_from(scope: &str) -> Result<Self, Self::Error> {
-        scope.to_compact_string().try_into()
-    }
-}
-
-impl FromStr for BasinScope {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.try_into()
-    }
-}
-
-impl std::fmt::Debug for BasinScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::fmt::Display for BasinScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<BasinScope> for CompactString {
-    fn from(value: BasinScope) -> Self {
-        value.0
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct BasinInfo {
     pub name: BasinName,
-    pub scope: Option<BasinScope>,
+    pub scope: Option<ScopeName>,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
 }
@@ -340,7 +213,7 @@ pub struct BasinInfo {
 mod test {
     use rstest::rstest;
 
-    use super::{BasinNameStr, BasinScope, NameProps, PrefixProps, StartAfterProps};
+    use super::{BasinNameStr, NameProps, PrefixProps, StartAfterProps};
 
     #[rstest]
     #[case::min_len("abcdefgh".to_owned())]
@@ -377,27 +250,6 @@ mod test {
     #[case::invalid_characters("ab_cd".to_owned())]
     fn validate_prefix_err(#[case] prefix: String) {
         BasinNameStr::<PrefixProps>::validate_str(&prefix).expect_err("expected validation error");
-    }
-
-    #[rstest]
-    #[case::empty("")]
-    #[case::aws_region("aws:us-east-1")]
-    #[case::uppercase_and_period("cloud:US-West-2.edge")]
-    #[case::max_len("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
-    fn validate_scope_ok(#[case] scope: &str) {
-        assert_eq!(scope.parse::<BasinScope>().as_deref(), Ok(scope));
-    }
-
-    #[rstest]
-    #[case::too_long("a".repeat(crate::caps::MAX_BASIN_SCOPE_LEN + 1))]
-    #[case::underscore("aws:us_east-1".to_owned())]
-    #[case::slash("aws/us-east-1".to_owned())]
-    #[case::space("aws:us east-1".to_owned())]
-    #[case::multibyte("aws:é".to_owned())]
-    fn validate_scope_err(#[case] scope: String) {
-        scope
-            .parse::<BasinScope>()
-            .expect_err("expected validation error");
     }
 
     #[rstest]

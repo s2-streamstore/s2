@@ -14,6 +14,7 @@ use s2_lite::handlers::v1::{
     metrics::{__path_account_metrics, __path_basin_metrics, __path_stream_metrics},
     paths::{self, cloud_endpoints},
     records::{__path_append, __path_check_tail, __path_read},
+    scopes::__path_list_scopes,
     streams::{
         __path_create_stream, __path_delete_stream, __path_ensure_stream, __path_get_stream_config,
         __path_list_streams, __path_reconfigure_stream,
@@ -46,6 +47,7 @@ use utoipa::{
         (name = paths::metrics::TAG, description = paths::metrics::DESCRIPTION),
         (name = paths::basins::TAG, description = paths::basins::DESCRIPTION),
         (name = paths::access_tokens::TAG, description = paths::access_tokens::DESCRIPTION),
+        (name = paths::scopes::TAG, description = paths::scopes::DESCRIPTION),
         (name = paths::streams::TAG, description = paths::streams::DESCRIPTION),
         (name = paths::streams::records::TAG, description = paths::streams::records::DESCRIPTION),
     ),
@@ -72,6 +74,8 @@ use utoipa::{
         list_access_tokens,
         issue_access_token,
         revoke_access_token,
+        // Scope ops
+        list_scopes,
         // Metrics ops
         account_metrics,
         basin_metrics,

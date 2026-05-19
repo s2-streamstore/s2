@@ -1,6 +1,6 @@
 pub const MIN_BASIN_NAME_LEN: usize = 8;
 pub const MAX_BASIN_NAME_LEN: usize = 48;
-pub const MAX_BASIN_SCOPE_LEN: usize = 39;
+pub const MAX_SCOPE_NAME_LEN: usize = 39;
 
 pub const MIN_STREAM_NAME_LEN: usize = 1;
 pub const MAX_STREAM_NAME_LEN: usize = 512;

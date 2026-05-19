@@ -13,9 +13,9 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, BasinScope, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
-        StorageClass, StreamConfig, StreamMatcher,
+        ScopeName, StorageClass, StreamConfig, StreamMatcher,
     },
 };
 
@@ -265,7 +265,7 @@ pub struct CreateBasinArgs {
 
     /// Basin scope.
     #[arg(long)]
-    pub scope: Option<BasinScope>,
+    pub scope: Option<ScopeName>,
 
     #[command(flatten)]
     pub config: BasinConfig,
