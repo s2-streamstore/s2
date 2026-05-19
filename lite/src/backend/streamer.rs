@@ -895,13 +895,7 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
 }
 
 async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<bool, StorageError> {
-    let start_key = kv::stream_record_timestamp::ser_key(
-        stream_id,
-        StreamPosition {
-            seq_num: SeqNum::MIN,
-            timestamp: Timestamp::MIN,
-        },
-    );
+    let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
     // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
     let scan_opts = ScanOptions {
         durability_filter: DurabilityLevel::Memory,
@@ -910,16 +904,9 @@ async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<boo
         max_fetch_tasks: 1,
         ..Default::default()
     };
-    let mut it = db.scan_with_options(start_key.., &scan_opts).await?;
+    let mut it = db.scan_prefix_with_options(prefix, &scan_opts).await?;
     // TODO: post-filtering on TTL, because SL8 0.12+ will stop doing it at query-time.
-    let Some(kv) = it.next().await? else {
-        return Ok(false);
-    };
-    if kv.key.first().copied() != Some(kv::KeyType::StreamRecordTimestamp as u8) {
-        return Ok(false);
-    }
-    let (candidate_stream_id, _pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
-    Ok(candidate_stream_id == stream_id)
+    Ok(it.next().await?.is_some())
 }
 
 fn sequenced_records(
