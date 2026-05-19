@@ -60,9 +60,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 utoipa = { workspace = true, optional = true, features = ["time"] }
 
 [dev-dependencies]
+chrono = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
-slatedb-common = { workspace = true, features = ["test-util"] }
+slatedb-common = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 tower = "0.5"
 uuid = { workspace = true, features = ["v4"] }

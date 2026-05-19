@@ -139,7 +139,7 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc, time::Duration};
+    use std::{str::FromStr, time::Duration};
 
     use bytes::Bytes;
     use futures::poll;
@@ -156,11 +156,10 @@ mod tests {
         },
     };
     use slatedb::config::{DurabilityLevel, ScanOptions};
-    use slatedb_common::MockSystemClock;
     use time::OffsetDateTime;
 
     use super::{
-        super::tests::{test_backend, test_backend_with_clock},
+        super::tests::{test_backend, test_backend_with_create_ts},
         TimestampSecs,
     };
     use crate::{
@@ -271,8 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_marks_deleted_and_clears_deadline() {
-        let backend =
-            test_backend_with_clock(Arc::new(MockSystemClock::with_time(9_000_000))).await;
+        let backend = test_backend_with_create_ts(9_000_000).await;
         let basin = BasinName::from_str("doe-basin").unwrap();
         let stream = StreamName::from_str("doe-stream").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
@@ -321,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_deletes_never_written_stream() {
-        let backend = test_backend_with_clock(Arc::new(MockSystemClock::with_time(10_000))).await;
+        let backend = test_backend_with_create_ts(10_000).await;
         let basin = BasinName::from_str("doe-basin-never").unwrap();
         let stream = StreamName::from_str("doe-stream-never").unwrap();
         let stream_id = StreamId::new(&basin, &stream);
@@ -376,8 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_skips_recent_tail_write() {
-        let backend =
-            test_backend_with_clock(Arc::new(MockSystemClock::with_time(10_000_000))).await;
+        let backend = test_backend_with_create_ts(10_000_000).await;
         let basin = BasinName::from_str("doe-basin-recent").unwrap();
         let stream = StreamName::from_str("doe-stream-recent").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
@@ -571,8 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_deletes_if_any_pending_entry_is_eligible() {
-        let backend =
-            test_backend_with_clock(Arc::new(MockSystemClock::with_time(1_050_000))).await;
+        let backend = test_backend_with_create_ts(1_050_000).await;
         let basin = BasinName::from_str("doe-basin-pairs").unwrap();
         let stream = StreamName::from_str("doe-stream-pairs").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
@@ -617,8 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_skips_append_already_serialized_in_streamer() {
-        let backend =
-            test_backend_with_clock(Arc::new(MockSystemClock::with_time(9_000_000))).await;
+        let backend = test_backend_with_create_ts(9_000_000).await;
         let basin = BasinName::from_str("doe-basin-race").unwrap();
         let stream = StreamName::from_str("doe-stream-race").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;

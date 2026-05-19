@@ -133,16 +133,63 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        fmt,
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use bytesize::ByteSize;
+    use chrono::{DateTime, Utc};
     use slatedb::object_store::memory::InMemory;
-    use slatedb_common::{MockSystemClock, SystemClock as _};
+    use slatedb_common::{DefaultSystemClock, SystemClock, SystemClockTicker};
 
     use super::*;
+
+    pub(super) struct FixedCreateTsClock {
+        create_ts: DateTime<Utc>,
+        sleep_clock: DefaultSystemClock,
+    }
+
+    impl FixedCreateTsClock {
+        pub(super) fn new(create_ts_millis: i64) -> Self {
+            Self {
+                create_ts: DateTime::from_timestamp_millis(create_ts_millis)
+                    .expect("valid test timestamp"),
+                sleep_clock: DefaultSystemClock::new(),
+            }
+        }
+    }
+
+    impl fmt::Debug for FixedCreateTsClock {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FixedCreateTsClock")
+                .field("create_ts", &self.create_ts)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl SystemClock for FixedCreateTsClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.create_ts
+        }
+
+        fn sleep<'a>(
+            &'a self,
+            duration: Duration,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            self.sleep_clock.sleep(duration)
+        }
+
+        fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a> {
+            SystemClockTicker::new(self, duration)
+        }
+    }
 
     pub(super) async fn test_backend() -> Backend {
         let object_store = Arc::new(InMemory::new());
@@ -153,19 +200,13 @@ mod tests {
         Backend::new(db, ByteSize::mib(10))
     }
 
-    pub(super) async fn test_backend_with_clock(clock: Arc<MockSystemClock>) -> Backend {
+    pub(super) async fn test_backend_with_create_ts(create_ts_millis: i64) -> Backend {
         let object_store = Arc::new(InMemory::new());
         let db = slatedb::Db::builder("/test", object_store)
-            .with_system_clock(clock.clone())
+            .with_system_clock(Arc::new(FixedCreateTsClock::new(create_ts_millis)))
             .build()
             .await
             .unwrap();
-        tokio::spawn(async move {
-            loop {
-                clock.advance(Duration::from_millis(10)).await;
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        });
         Backend::new(db, ByteSize::mib(10))
     }
 
