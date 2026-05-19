@@ -198,17 +198,11 @@ impl GuardedStreamerClient {
         self.client.append_permit(input).await
     }
 
-    pub(super) async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
-        self.client.terminal_trim().await
-    }
-
-    pub(super) async fn terminal_trim_if_delete_on_empty_eligible(
+    pub(super) async fn terminal_trim(
         &self,
-        pending: Vec<kv::stream_doe_deadline::Entry>,
+        condition: TerminalTrimCondition,
     ) -> Result<bool, DeleteStreamError> {
-        self.client
-            .terminal_trim_if_delete_on_empty_eligible(pending)
-            .await
+        self.client.terminal_trim(condition).await
     }
 }
 
@@ -708,7 +702,7 @@ enum Message {
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
 }
 
-enum TerminalTrimCondition {
+pub(super) enum TerminalTrimCondition {
     Always,
     DeleteOnEmpty(Vec<kv::stream_doe_deadline::Entry>),
 }
@@ -794,21 +788,7 @@ impl StreamerClient {
         self.msg_tx.send(Message::Reconfigure { config }).is_ok()
     }
 
-    async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
-        self.terminal_trim_with_condition(TerminalTrimCondition::Always)
-            .await
-            .map(|_| ())
-    }
-
-    pub async fn terminal_trim_if_delete_on_empty_eligible(
-        &self,
-        pending: Vec<kv::stream_doe_deadline::Entry>,
-    ) -> Result<bool, DeleteStreamError> {
-        self.terminal_trim_with_condition(TerminalTrimCondition::DeleteOnEmpty(pending))
-            .await
-    }
-
-    async fn terminal_trim_with_condition(
+    async fn terminal_trim(
         &self,
         condition: TerminalTrimCondition,
     ) -> Result<bool, DeleteStreamError> {

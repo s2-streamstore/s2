@@ -15,7 +15,11 @@ use slatedb::{
 use time::OffsetDateTime;
 use tracing::instrument;
 
-use super::{Backend, store::db_txn_get, streamer::doe_arm_delay};
+use super::{
+    Backend,
+    store::db_txn_get,
+    streamer::{TerminalTrimCondition, doe_arm_delay},
+};
 use crate::{
     backend::{
         error::{
@@ -331,7 +335,7 @@ impl Backend {
     ) -> Result<(), DeleteStreamError> {
         match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => {
-                client.terminal_trim().await?;
+                client.terminal_trim(TerminalTrimCondition::Always).await?;
             }
             Err(StreamerError::Storage(e)) => {
                 return Err(DeleteStreamError::Storage(e));
@@ -354,7 +358,7 @@ impl Backend {
         let should_mark_deleted = match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => {
                 client
-                    .terminal_trim_if_delete_on_empty_eligible(pending)
+                    .terminal_trim(TerminalTrimCondition::DeleteOnEmpty(pending))
                     .await?
             }
             Err(StreamerError::Storage(e)) => {
