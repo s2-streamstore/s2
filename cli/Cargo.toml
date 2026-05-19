@@ -28,7 +28,6 @@ humantime = { workspace = true }
 indicatif = { workspace = true }
 json_to_table = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
-tikv-jemallocator = { workspace = true }
 rand = { workspace = true }
 ratatui = "0.30"
 rustls = { workspace = true, features = ["aws-lc-rs"] }
@@ -41,6 +40,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 strum = { workspace = true, features = ["derive"] }
 tabled = { workspace = true }
 thiserror = { workspace = true }
+tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true, features = ["io-util"] }
 toml = { workspace = true }

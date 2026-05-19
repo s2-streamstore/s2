@@ -36,7 +36,6 @@ http = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
-tikv-jemallocator = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }
 prometheus = { workspace = true, features = ["process"] }
 prost = { workspace = true }
@@ -51,6 +50,7 @@ serde_json = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "zstd"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+tikv-jemallocator = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
