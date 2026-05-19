@@ -65,7 +65,7 @@ impl Backend {
     ) -> Result<(), StorageError> {
         let has_remaining_records = self.delete_records(stream_id, trim_point).await?;
         if trim_point.end < NonZeroSeqNum::MAX && !has_remaining_records {
-            self.on_stream_trimmed_empty(stream_id).await?;
+            self.arm_doe_on_full_trim(stream_id).await?;
         }
         self.finalize_trim(stream_id, trim_point).await?;
         Ok(())

@@ -106,7 +106,7 @@ impl Backend {
         Ok(())
     }
 
-    pub(super) async fn on_stream_trimmed_empty(
+    pub(super) async fn arm_doe_on_full_trim(
         &self,
         stream_id: StreamId,
     ) -> Result<(), StorageError> {
