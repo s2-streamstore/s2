@@ -94,7 +94,7 @@ impl Backend {
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
             ),
-            self.stream_tail_position(stream_id),
+            self.load_persisted_stream_tail(stream_id),
             self.db_get(
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
@@ -143,7 +143,7 @@ impl Backend {
         }))
     }
 
-    async fn stream_tail_position(
+    async fn load_persisted_stream_tail(
         &self,
         stream_id: StreamId,
     ) -> Result<Option<(StreamPosition, kv::timestamp::TimestampSecs)>, StorageError> {
