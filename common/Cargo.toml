@@ -11,6 +11,7 @@ keywords = ["s2", "durable", "streams", "log", "api"]
 [features]
 axum = ["dep:axum"]
 clap = ["dep:clap"]
+resource_spec = ["dep:humantime", "dep:schemars", "dep:serde_json"]
 rkyv = ["dep:rkyv", "compact_str/rkyv"]
 utoipa = ["dep:utoipa"]
 
@@ -25,13 +26,13 @@ clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
 enumset = { workspace = true }
 http = { workspace = true }
-humantime = { workspace = true }
+humantime = { workspace = true, optional = true }
 rand = { workspace = true }
 rkyv = { workspace = true, optional = true }
-schemars = { workspace = true }
+schemars = { workspace = true, optional = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+serde_json = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true }
@@ -40,3 +41,4 @@ utoipa = { workspace = true, optional = true, features = ["time"] }
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }
+serde_json = { workspace = true }
