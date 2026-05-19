@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [0.34.0] - 2026-05-19
 
+### Features
+
+- Enable lz4 and zstd SlateDB compression codecs ([#461](https://github.com/s2-streamstore/s2/issues/461))
+
 ### Bug Fixes
 
 - Resolve lite stream config reconfigure defaults ([#465](https://github.com/s2-streamstore/s2/issues/465))
