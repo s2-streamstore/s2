@@ -488,7 +488,7 @@ impl Streamer {
         }
     }
 
-    fn handle_terminal_trim_record_scan(
+    fn handle_terminal_trim_record_scan_complete(
         &mut self,
         stable_pos: StreamPosition,
         last_write_cutoff: kv::timestamp::TimestampSecs,
@@ -668,7 +668,7 @@ impl Streamer {
                             has_records,
                             reply_tx,
                         } => {
-                            self.handle_terminal_trim_record_scan(
+                            self.handle_terminal_trim_record_scan_complete(
                                 stable_pos,
                                 last_write_cutoff,
                                 has_records,
