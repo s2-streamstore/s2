@@ -286,7 +286,7 @@ pub type ListScopesRequest = ListItemsRequest<ScopeNamePrefix, ScopeNameStartAft
 #[derive(Debug, Clone)]
 pub struct ScopeInfo {
     pub name: ScopeName,
-    pub scope_visibility: String,
+    pub is_public: bool,
     pub description: Option<String>,
 }
 

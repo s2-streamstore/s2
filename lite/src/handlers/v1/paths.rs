@@ -34,6 +34,7 @@ pub mod scopes {
     pub const DESCRIPTION: &str = "Manage scopes";
 
     pub const LIST: &str = "/scopes";
+    pub const DEFAULT: &str = "/scopes/default";
 }
 
 pub mod streams {

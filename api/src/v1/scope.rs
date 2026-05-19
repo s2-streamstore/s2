@@ -44,8 +44,8 @@ pub struct ListScopesResponse {
 pub struct ScopeInfo {
     /// Scope name.
     pub name: ScopeName,
-    /// Scope visibility.
-    pub scope_visibility: String,
+    /// Whether the scope is publicly shared.
+    pub is_public: bool,
     /// Scope description.
     pub description: Option<String>,
 }
@@ -54,14 +54,18 @@ impl From<types::scope::ScopeInfo> for ScopeInfo {
     fn from(value: types::scope::ScopeInfo) -> Self {
         let types::scope::ScopeInfo {
             name,
-            scope_visibility,
+            is_public,
             description,
         } = value;
 
         Self {
             name,
-            scope_visibility,
+            is_public,
             description,
         }
     }
 }
+
+pub type GetDefaultScopeResponse = ScopeInfo;
+
+pub type SetDefaultScopeRequest = ScopeName;
