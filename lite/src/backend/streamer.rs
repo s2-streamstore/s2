@@ -213,7 +213,7 @@ pub(super) struct Spawner {
     pub config: StreamConfig,
     pub cipher: Option<EncryptionAlgorithm>,
     pub tail_pos: StreamPosition,
-    pub last_write_timestamp: kv::timestamp::TimestampSecs,
+    pub last_tail_write_timestamp: kv::timestamp::TimestampSecs,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
     pub append_inflight_bytes_sema: Arc<Semaphore>,
@@ -233,7 +233,7 @@ impl Spawner {
             config,
             cipher,
             tail_pos,
-            last_write_timestamp,
+            last_tail_write_timestamp,
             fencing_token,
             trim_point,
             append_inflight_bytes_sema,
@@ -248,7 +248,7 @@ impl Spawner {
             stream_id,
             msg_tx: msg_tx.clone(),
             config,
-            last_write_timestamp,
+            last_tail_write_timestamp,
             fencing_token: CommandState {
                 state: fencing_token,
                 applied_point: ..tail_pos.seq_num,
@@ -308,7 +308,7 @@ struct Streamer {
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: StreamConfig,
-    last_write_timestamp: kv::timestamp::TimestampSecs,
+    last_tail_write_timestamp: kv::timestamp::TimestampSecs,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -437,7 +437,7 @@ impl Streamer {
                         .boxed(),
                 );
                 self.pending_appends.accept(ticket, first_pos..next_pos);
-                self.last_write_timestamp = kv::timestamp::TimestampSecs::now();
+                self.last_tail_write_timestamp = kv::timestamp::TimestampSecs::now();
             }
             Err(e) => {
                 self.pending_appends.reject(ticket, e, self.stable_pos);
@@ -455,7 +455,7 @@ impl Streamer {
                 self.append_terminal_trim(reply_tx);
             }
             TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff } => {
-                if self.last_write_timestamp > last_write_cutoff
+                if self.last_tail_write_timestamp > last_write_cutoff
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
@@ -504,7 +504,7 @@ impl Streamer {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::DeletionPending));
                 } else if self.stable_pos != stable_pos_snapshot
                     || self.next_assignable_pos() != stable_pos_snapshot
-                    || self.last_write_timestamp > last_write_cutoff
+                    || self.last_tail_write_timestamp > last_write_cutoff
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                 } else {
@@ -1427,7 +1427,7 @@ mod tests {
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
             config: StreamConfig::default(),
-            last_write_timestamp: kv::timestamp::TimestampSecs::ZERO,
+            last_tail_write_timestamp: kv::timestamp::TimestampSecs::ZERO,
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,
