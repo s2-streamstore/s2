@@ -217,6 +217,16 @@ impl BasinScope {
             .into());
         }
 
+        if scope
+            .chars()
+            .any(|c| !c.is_ascii_alphanumeric() && c != ':' && c != '-' && c != '.')
+        {
+            return Err(
+                "basin scope must comprise ASCII letters, numbers, colons, hyphens, and periods"
+                    .into(),
+            );
+        }
+
         Ok(())
     }
 }
@@ -372,15 +382,19 @@ mod test {
     #[rstest]
     #[case::empty("")]
     #[case::aws_region("aws:us-east-1")]
+    #[case::uppercase_and_period("cloud:US-West-2.edge")]
     #[case::max_len("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
-    #[case::multibyte("éééééééééééééééééééééééééééééééééé")]
     fn validate_scope_ok(#[case] scope: &str) {
         assert_eq!(scope.parse::<BasinScope>().as_deref(), Ok(scope));
     }
 
-    #[test]
-    fn validate_scope_err() {
-        let scope = "a".repeat(crate::caps::MAX_BASIN_SCOPE_LEN + 1);
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_BASIN_SCOPE_LEN + 1))]
+    #[case::underscore("aws:us_east-1".to_owned())]
+    #[case::slash("aws/us-east-1".to_owned())]
+    #[case::space("aws:us east-1".to_owned())]
+    #[case::multibyte("aws:é".to_owned())]
+    fn validate_scope_err(#[case] scope: String) {
         scope
             .parse::<BasinScope>()
             .expect_err("expected validation error");
