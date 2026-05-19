@@ -464,12 +464,12 @@ impl Streamer {
 
                 let db = self.db.clone();
                 let stream_id = self.stream_id;
-                let stable_pos = self.stable_pos;
+                let stable_pos_snapshot = self.stable_pos;
                 let msg_tx = self.msg_tx.clone();
                 tokio::spawn(async move {
                     let has_records = stream_has_records(&db, stream_id).await;
                     let msg = Message::DeleteOnEmptyCheckResult {
-                        stable_pos,
+                        stable_pos_snapshot,
                         last_write_cutoff,
                         has_records,
                         reply_tx,
@@ -490,7 +490,7 @@ impl Streamer {
 
     fn handle_doe_check_result(
         &mut self,
-        stable_pos: StreamPosition,
+        stable_pos_snapshot: StreamPosition,
         last_write_cutoff: kv::timestamp::TimestampSecs,
         has_records: Result<bool, StorageError>,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
@@ -502,8 +502,8 @@ impl Streamer {
             Ok(false) => {
                 if self.trim_point.state.end == SeqNum::MAX {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::DeletionPending));
-                } else if self.stable_pos != stable_pos
-                    || self.next_assignable_pos() != stable_pos
+                } else if self.stable_pos != stable_pos_snapshot
+                    || self.next_assignable_pos() != stable_pos_snapshot
                     || self.last_write_timestamp > last_write_cutoff
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
@@ -663,13 +663,13 @@ impl Streamer {
                             self.handle_terminal_trim(condition, reply_tx);
                         }
                         Message::DeleteOnEmptyCheckResult {
-                            stable_pos,
+                            stable_pos_snapshot,
                             last_write_cutoff,
                             has_records,
                             reply_tx,
                         } => {
                             self.handle_doe_check_result(
-                                stable_pos,
+                                stable_pos_snapshot,
                                 last_write_cutoff,
                                 has_records,
                                 reply_tx,
@@ -732,7 +732,7 @@ enum Message {
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     },
     DeleteOnEmptyCheckResult {
-        stable_pos: StreamPosition,
+        stable_pos_snapshot: StreamPosition,
         last_write_cutoff: kv::timestamp::TimestampSecs,
         has_records: Result<bool, StorageError>,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
