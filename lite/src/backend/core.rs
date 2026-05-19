@@ -109,7 +109,7 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let (tail_pos, tail_write_timestamp) =
+        let (tail_pos, last_write_timestamp) =
             persisted_tail.unwrap_or((StreamPosition::MIN, kv::timestamp::TimestampSecs::ZERO));
 
         self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
@@ -129,7 +129,7 @@ impl Backend {
             config: meta.config,
             cipher: meta.cipher,
             tail_pos,
-            tail_write_timestamp,
+            last_write_timestamp,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
             append_inflight_bytes_sema: self.append_inflight_bytes_sema.clone(),
