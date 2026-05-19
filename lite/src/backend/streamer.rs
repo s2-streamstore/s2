@@ -972,14 +972,13 @@ async fn db_submit_append(
     db: slatedb::Db,
     stream_id: StreamId,
     records: Vec<Metered<StoredSequencedRecord>>,
-    options: DbSubmitAppendOptions,
-) -> Result<InFlightAppend, slatedb::Error> {
-    let DbSubmitAppendOptions {
+    DbSubmitAppendOptions {
         retention,
         doe_deadline,
         fencing_token,
         trim_point,
-    } = options;
+    }: DbSubmitAppendOptions,
+) -> Result<InFlightAppend, slatedb::Error> {
     let ttl = match retention {
         RetentionPolicy::Age(age) => Ttl::ExpireAfter(age.as_millis() as u64),
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
