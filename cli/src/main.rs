@@ -12,7 +12,7 @@ mod tui;
 mod types;
 
 #[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::{pin::Pin, time::Duration};
 

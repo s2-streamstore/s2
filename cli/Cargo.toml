@@ -28,7 +28,7 @@ humantime = { workspace = true }
 indicatif = { workspace = true }
 json_to_table = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
-mimalloc = { workspace = true }
+tikv-jemallocator = { workspace = true }
 rand = { workspace = true }
 ratatui = "0.30"
 rustls = { workspace = true, features = ["aws-lc-rs"] }

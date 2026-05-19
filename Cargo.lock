@@ -2867,15 +2867,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
-name = "libmimalloc-sys"
-version = "0.1.47"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d1eacfa31c33ec25e873c136ba5669f00f9866d0688bea7be4d3f7e43067df6"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "libredox"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3077,15 +3068,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "mimalloc"
-version = "0.1.50"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3627c4272df786b9260cabaa46aec1d59c93ede723d4c3ef646c503816b0640"
-dependencies = [
- "libmimalloc-sys",
 ]
 
 [[package]]
@@ -4646,7 +4628,6 @@ dependencies = [
  "indicatif",
  "json_to_table",
  "miette",
- "mimalloc",
  "predicates",
  "proptest",
  "rand 0.10.1",
@@ -4664,6 +4645,7 @@ dependencies = [
  "tabled",
  "tempfile",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tokio-stream",
  "toml 1.1.2+spec-1.1.0",
@@ -4720,7 +4702,6 @@ dependencies = [
  "humantime",
  "indexmap",
  "itertools",
- "mimalloc",
  "parking_lot",
  "prometheus",
  "proptest",
@@ -4737,6 +4718,7 @@ dependencies = [
  "slatedb",
  "strum 0.28.0",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "time",
  "tokio",
  "tokio-util",
@@ -5631,6 +5613,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

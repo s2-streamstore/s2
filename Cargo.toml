@@ -39,7 +39,7 @@ indicatif = "0.18"
 itertools = "0.14"
 json_to_table = "0.12"
 miette = "7.6"
-mimalloc = "0.1"
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 mime = "0.3"
 parking_lot = "0.12"
 prometheus = "0.14"
