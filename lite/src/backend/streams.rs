@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use s2_common::{
     bash::Bash,
     record::StreamPosition,

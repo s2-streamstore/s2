@@ -461,21 +461,32 @@ impl Streamer {
         })
     }
 
-    async fn handle_delete_on_empty(
+    async fn terminal_trim_is_eligible(
         &mut self,
-        pending: Vec<kv::stream_doe_deadline::Entry>,
+        condition: &TerminalTrimCondition,
+    ) -> Result<bool, DeleteStreamError> {
+        match condition {
+            TerminalTrimCondition::Always => Ok(true),
+            TerminalTrimCondition::DeleteOnEmpty(pending) => {
+                if self.next_assignable_pos().seq_num != self.stable_pos.seq_num {
+                    Ok(false)
+                } else {
+                    match stream_has_records(&self.db, self.stream_id).await {
+                        Ok(true) => Ok(false),
+                        Ok(false) => Ok(self.delete_on_empty_is_eligible(pending)),
+                        Err(err) => Err(err.into()),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_terminal_trim(
+        &mut self,
+        condition: TerminalTrimCondition,
         reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
     ) {
-        let eligible = if self.next_assignable_pos().seq_num != self.stable_pos.seq_num {
-            Ok(false)
-        } else {
-            match stream_has_records(&self.db, self.stream_id).await {
-                Ok(true) => Ok(false),
-                Ok(false) => Ok(self.delete_on_empty_is_eligible(&pending)),
-                Err(err) => Err(err.into()),
-            }
-        };
-        let eligible = match eligible {
+        let eligible = match self.terminal_trim_is_eligible(&condition).await {
             Ok(eligible) => eligible,
             Err(err) => {
                 let _ = reply_tx.send(Err(err));
@@ -487,19 +498,13 @@ impl Streamer {
             return;
         }
 
-        let record: StoredAppendRecord = StoredAppendRecordParts {
-            timestamp: Some(Timestamp::MAX),
-            record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
-        }
-        .try_into()
-        .expect("valid append record");
-        let input = StoredAppendInput {
-            records: vec![record].try_into().expect("valid append batch"),
-            match_seq_num: None,
-            fencing_token: None,
-        };
         let (append_reply_tx, append_reply_rx) = oneshot::channel();
-        self.handle_append(input, None, append_reply_tx, AppendType::Terminal);
+        self.handle_append(
+            terminal_trim_input(),
+            None,
+            append_reply_tx,
+            AppendType::Terminal,
+        );
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
                 Ok(Ok(_)) => Ok(true),
@@ -626,8 +631,11 @@ impl Streamer {
                         } => {
                             self.handle_append(input, session, reply_tx, append_type);
                         }
-                        Message::DeleteOnEmpty { pending, reply_tx } => {
-                            self.handle_delete_on_empty(pending, reply_tx).await;
+                        Message::TerminalTrim {
+                            condition,
+                            reply_tx,
+                        } => {
+                            self.handle_terminal_trim(condition, reply_tx).await;
                         }
                         Message::Follow {
                             start_seq_num,
@@ -681,8 +689,8 @@ enum Message {
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
     },
-    DeleteOnEmpty {
-        pending: Vec<kv::stream_doe_deadline::Entry>,
+    TerminalTrim {
+        condition: TerminalTrimCondition,
         reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
     },
     Follow {
@@ -698,6 +706,11 @@ enum Message {
         config: StreamConfig,
     },
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
+}
+
+enum TerminalTrimCondition {
+    Always,
+    DeleteOnEmpty(Vec<kv::stream_doe_deadline::Entry>),
 }
 
 #[derive(Debug, Clone)]
@@ -782,46 +795,29 @@ impl StreamerClient {
     }
 
     async fn terminal_trim(&self) -> Result<(), DeleteStreamError> {
-        let record: StoredAppendRecord = StoredAppendRecordParts {
-            timestamp: Some(Timestamp::MAX),
-            record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
-        }
-        .try_into()
-        .expect("valid append record");
-        let input = StoredAppendInput {
-            records: vec![record].try_into().expect("valid append batch"),
-            match_seq_num: None,
-            fencing_token: None,
-        };
-        match self
-            .append_permit(input)
-            .await?
-            .submit_internal(None, AppendType::Terminal)
+        self.terminal_trim_with_condition(TerminalTrimCondition::Always)
             .await
-        {
-            Ok(_) | Err(AppendErrorInternal::StreamDeletionPending(_)) => Ok(()),
-            Err(AppendErrorInternal::Storage(e)) => Err(DeleteStreamError::Storage(e)),
-            Err(AppendErrorInternal::StreamerMissingInActionError(e)) => {
-                Err(DeleteStreamError::StreamerMissingInActionError(e))
-            }
-            Err(AppendErrorInternal::RequestDroppedError(e)) => {
-                Err(DeleteStreamError::RequestDroppedError(e))
-            }
-            Err(AppendErrorInternal::ConditionFailed(_)) => unreachable!("unconditional write"),
-            Err(AppendErrorInternal::TimestampMissing(_)) => unreachable!("Timestamp::MAX used"),
-            Err(AppendErrorInternal::MaxSeqNum(_)) => {
-                unreachable!("terminal append is plaintext command record")
-            }
-        }
+            .map(|_| ())
     }
 
     pub async fn terminal_trim_if_delete_on_empty_eligible(
         &self,
         pending: Vec<kv::stream_doe_deadline::Entry>,
     ) -> Result<bool, DeleteStreamError> {
+        self.terminal_trim_with_condition(TerminalTrimCondition::DeleteOnEmpty(pending))
+            .await
+    }
+
+    async fn terminal_trim_with_condition(
+        &self,
+        condition: TerminalTrimCondition,
+    ) -> Result<bool, DeleteStreamError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
-            .send(Message::DeleteOnEmpty { pending, reply_tx })
+            .send(Message::TerminalTrim {
+                condition,
+                reply_tx,
+            })
             .map_err(|_| {
                 DeleteStreamError::StreamerMissingInActionError(StreamerMissingInActionError)
             })?;
@@ -838,6 +834,20 @@ fn timestamp_now() -> Timestamp {
         .as_millis()
         .try_into()
         .expect("Milliseconds since Unix epoch fits into a u64")
+}
+
+fn terminal_trim_input() -> StoredAppendInput {
+    let record: StoredAppendRecord = StoredAppendRecordParts {
+        timestamp: Some(Timestamp::MAX),
+        record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
+    }
+    .try_into()
+    .expect("valid append record");
+    StoredAppendInput {
+        records: vec![record].try_into().expect("valid append batch"),
+        match_seq_num: None,
+        fencing_token: None,
+    }
 }
 
 #[derive(Debug)]
