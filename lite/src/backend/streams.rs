@@ -24,7 +24,7 @@ use crate::{
             StreamAlreadyExistsError, StreamDeletionPendingError, StreamNotFoundError,
             StreamerError,
         },
-        kv::{self, stream_doe_deadline::DeleteOnEmptyEntry},
+        kv,
     },
     stream_id::StreamId,
 };
@@ -346,7 +346,7 @@ impl Backend {
         &self,
         basin: BasinName,
         stream: StreamName,
-        pending: Vec<DeleteOnEmptyEntry>,
+        pending: Vec<kv::stream_doe_deadline::Entry>,
     ) -> Result<(), DeleteStreamError> {
         let should_mark_deleted = match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => {

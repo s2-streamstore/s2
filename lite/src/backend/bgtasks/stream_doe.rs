@@ -12,7 +12,7 @@ use crate::{
     backend::{
         Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
-        kv::{self, stream_doe_deadline::DeleteOnEmptyEntry, timestamp::TimestampSecs},
+        kv::{self, timestamp::TimestampSecs},
         streamer::doe_arm_delay,
     },
     stream_id::StreamId,
@@ -43,7 +43,7 @@ impl Backend {
     async fn list_pending_stream_doe(
         &self,
         now: TimestampSecs,
-    ) -> Result<Page<(StreamId, Vec<DeleteOnEmptyEntry>)>, StorageError> {
+    ) -> Result<Page<(StreamId, Vec<kv::stream_doe_deadline::Entry>)>, StorageError> {
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
@@ -52,7 +52,7 @@ impl Backend {
             .db
             .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &scan_opts)
             .await?;
-        let mut pending: IndexMap<StreamId, Vec<DeleteOnEmptyEntry>> = IndexMap::new();
+        let mut pending: IndexMap<StreamId, Vec<kv::stream_doe_deadline::Entry>> = IndexMap::new();
         let mut has_more = false;
         let mut count = 0;
         while let Some(kv) = it.next().await? {
@@ -62,7 +62,7 @@ impl Backend {
             pending
                 .entry(stream_id)
                 .or_default()
-                .push(DeleteOnEmptyEntry { deadline, min_age });
+                .push(kv::stream_doe_deadline::Entry { deadline, min_age });
             count += 1;
             if count == PENDING_LIST_LIMIT {
                 has_more = true;
@@ -75,7 +75,7 @@ impl Backend {
     async fn process_stream_doe(
         &self,
         stream_id: StreamId,
-        pending: Vec<DeleteOnEmptyEntry>,
+        pending: Vec<kv::stream_doe_deadline::Entry>,
     ) -> Result<(), StreamDeleteOnEmptyError> {
         if let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? {
             match self
@@ -94,7 +94,7 @@ impl Backend {
     async fn clear_doe_deadlines(
         &self,
         stream_id: StreamId,
-        pending: &[DeleteOnEmptyEntry],
+        pending: &[kv::stream_doe_deadline::Entry],
     ) -> Result<(), StorageError> {
         let mut batch = WriteBatch::new();
         for entry in pending {
@@ -160,7 +160,7 @@ mod tests {
 
     use super::{super::tests::test_backend, TimestampSecs};
     use crate::{
-        backend::{Backend, kv, kv::stream_doe_deadline::DeleteOnEmptyEntry},
+        backend::{Backend, kv},
         stream_id::StreamId,
     };
 
@@ -606,11 +606,11 @@ mod tests {
             .process_stream_doe(
                 stream_id,
                 vec![
-                    DeleteOnEmptyEntry {
+                    kv::stream_doe_deadline::Entry {
                         deadline: deadline_after(write_timestamp, Duration::from_secs(50)),
                         min_age: Duration::from_secs(100),
                     },
-                    DeleteOnEmptyEntry {
+                    kv::stream_doe_deadline::Entry {
                         deadline: deadline_after(write_timestamp, Duration::from_secs(10)),
                         min_age: Duration::from_secs(10),
                     },
@@ -649,7 +649,7 @@ mod tests {
         backend
             .process_stream_doe(
                 stream_id,
-                vec![DeleteOnEmptyEntry {
+                vec![kv::stream_doe_deadline::Entry {
                     deadline,
                     min_age: MIN_AGE,
                 }],

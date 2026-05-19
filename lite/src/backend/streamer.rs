@@ -46,7 +46,7 @@ use crate::{
             DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
             StreamDeletionPendingError, StreamerMissingInActionError,
         },
-        kv::{self, stream_doe_deadline::DeleteOnEmptyEntry},
+        kv,
     },
     metrics,
     stream_id::StreamId,
@@ -80,7 +80,7 @@ struct InFlightAppend {
 
 struct DbSubmitAppendOptions {
     retention: RetentionPolicy,
-    doe_deadline: Option<DeleteOnEmptyEntry>,
+    doe_deadline: Option<kv::stream_doe_deadline::Entry>,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
 }
@@ -204,7 +204,7 @@ impl GuardedStreamerClient {
 
     pub(super) async fn terminal_trim_if_delete_on_empty_eligible(
         &self,
-        pending: Vec<DeleteOnEmptyEntry>,
+        pending: Vec<kv::stream_doe_deadline::Entry>,
     ) -> Result<bool, DeleteStreamError> {
         self.client
             .terminal_trim_if_delete_on_empty_eligible(pending)
@@ -458,7 +458,7 @@ impl Streamer {
         }
     }
 
-    fn delete_on_empty_is_eligible(&self, pending: &[DeleteOnEmptyEntry]) -> bool {
+    fn delete_on_empty_is_eligible(&self, pending: &[kv::stream_doe_deadline::Entry]) -> bool {
         let write_timestamp = u64::from(self.tail_write_timestamp.as_u32());
         pending.iter().any(|entry| {
             let deadline_secs = u64::from(entry.deadline.as_u32());
@@ -470,7 +470,7 @@ impl Streamer {
 
     async fn handle_delete_on_empty(
         &mut self,
-        pending: Vec<DeleteOnEmptyEntry>,
+        pending: Vec<kv::stream_doe_deadline::Entry>,
         reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
     ) {
         let eligible = if self.next_assignable_pos().seq_num != self.stable_pos.seq_num {
@@ -520,7 +520,7 @@ impl Streamer {
         });
     }
 
-    fn maybe_doe_deadline(&mut self) -> Option<DeleteOnEmptyEntry> {
+    fn maybe_doe_deadline(&mut self) -> Option<kv::stream_doe_deadline::Entry> {
         let retention_age = self.config.retention_policy.age()?;
         let min_age = self.config.delete_on_empty.min_age()?;
         let now = Instant::now();
@@ -531,7 +531,7 @@ impl Streamer {
             self.last_doe_deadline_at = Some(now);
             let deadline =
                 kv::timestamp::TimestampSecs::after(doe_arm_delay(retention_age, min_age));
-            Some(DeleteOnEmptyEntry { deadline, min_age })
+            Some(kv::stream_doe_deadline::Entry { deadline, min_age })
         } else {
             None
         }
@@ -674,7 +674,7 @@ enum Message {
         append_type: AppendType,
     },
     DeleteOnEmpty {
-        pending: Vec<DeleteOnEmptyEntry>,
+        pending: Vec<kv::stream_doe_deadline::Entry>,
         reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
     },
     Follow {
@@ -809,7 +809,7 @@ impl StreamerClient {
 
     pub async fn terminal_trim_if_delete_on_empty_eligible(
         &self,
-        pending: Vec<DeleteOnEmptyEntry>,
+        pending: Vec<kv::stream_doe_deadline::Entry>,
     ) -> Result<bool, DeleteStreamError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx

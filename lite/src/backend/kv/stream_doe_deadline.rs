@@ -9,7 +9,7 @@ const KEY_LEN: usize = 1 + 4 + StreamId::LEN;
 const VALUE_LEN: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::backend) struct DeleteOnEmptyEntry {
+pub(in crate::backend) struct Entry {
     pub deadline: TimestampSecs,
     pub min_age: Duration,
 }
