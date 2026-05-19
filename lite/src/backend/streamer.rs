@@ -254,7 +254,7 @@ impl Spawner {
             stream_id,
             msg_tx: msg_tx.clone(),
             config,
-            tail_write_timestamp,
+            last_write_timestamp: tail_write_timestamp,
             fencing_token: CommandState {
                 state: fencing_token,
                 applied_point: ..tail_pos.seq_num,
@@ -314,7 +314,7 @@ struct Streamer {
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: StreamConfig,
-    tail_write_timestamp: kv::timestamp::TimestampSecs,
+    last_write_timestamp: kv::timestamp::TimestampSecs,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -412,8 +412,6 @@ impl Streamer {
         };
         match sequenced_records {
             Ok(sequenced_records) => {
-                let retention = self.config.retention_policy;
-                let doe_deadline = self.maybe_doe_deadline();
                 if append_type == AppendType::Terminal {
                     assert_eq!(sequenced_records.len(), 1);
                     assert_eq!(
@@ -426,31 +424,26 @@ impl Streamer {
                         self.apply_command(sr.position().seq_num, cmd, append_type);
                     }
                 }
-                let tail_write_timestamp = kv::timestamp::TimestampSecs::now();
-                self.tail_write_timestamp = tail_write_timestamp;
                 let (first_pos, next_pos) = pos_span(&sequenced_records);
                 let seq_num_range = first_pos.seq_num..next_pos.seq_num;
+                let opts = DbSubmitAppendOptions {
+                    retention: self.config.retention_policy,
+                    doe_deadline: self.doe_deadline_maybe(),
+                    fencing_token: self
+                        .fencing_token
+                        .is_applied_in(&seq_num_range)
+                        .then(|| self.fencing_token.state.clone()),
+                    trim_point: self
+                        .trim_point
+                        .is_applied_in(&seq_num_range)
+                        .then_some(self.trim_point.state),
+                };
                 self.db_writes_pending.push_back(
-                    db_submit_append(
-                        self.db.clone(),
-                        self.stream_id,
-                        sequenced_records,
-                        DbSubmitAppendOptions {
-                            retention,
-                            doe_deadline,
-                            fencing_token: self
-                                .fencing_token
-                                .is_applied_in(&seq_num_range)
-                                .then(|| self.fencing_token.state.clone()),
-                            trim_point: self
-                                .trim_point
-                                .is_applied_in(&seq_num_range)
-                                .then_some(self.trim_point.state),
-                        },
-                    )
-                    .boxed(),
+                    db_submit_append(self.db.clone(), self.stream_id, sequenced_records, opts)
+                        .boxed(),
                 );
                 self.pending_appends.accept(ticket, first_pos..next_pos);
+                self.last_write_timestamp = kv::timestamp::TimestampSecs::now();
             }
             Err(e) => {
                 self.pending_appends.reject(ticket, e, self.stable_pos);
@@ -459,7 +452,7 @@ impl Streamer {
     }
 
     fn delete_on_empty_is_eligible(&self, pending: &[kv::stream_doe_deadline::Entry]) -> bool {
-        let write_timestamp = u64::from(self.tail_write_timestamp.as_u32());
+        let write_timestamp = u64::from(self.last_write_timestamp.as_u32());
         pending.iter().any(|entry| {
             let deadline_secs = u64::from(entry.deadline.as_u32());
             write_timestamp
@@ -520,7 +513,7 @@ impl Streamer {
         });
     }
 
-    fn maybe_doe_deadline(&mut self) -> Option<kv::stream_doe_deadline::Entry> {
+    fn doe_deadline_maybe(&mut self) -> Option<kv::stream_doe_deadline::Entry> {
         let retention_age = self.config.retention_policy.age()?;
         let min_age = self.config.delete_on_empty.min_age()?;
         let now = Instant::now();
@@ -1370,7 +1363,7 @@ mod tests {
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
             config: StreamConfig::default(),
-            tail_write_timestamp: kv::timestamp::TimestampSecs::from_secs(0),
+            last_write_timestamp: kv::timestamp::TimestampSecs::from_secs(0),
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,
