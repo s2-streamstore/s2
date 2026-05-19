@@ -6,6 +6,7 @@ use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
 const VALUE_LEN: usize = 8 + 8;
+const LEGACY_VALUE_LEN: usize = 8 + 8 + 4;
 
 pub fn ser_key(stream_id: StreamId) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
@@ -35,7 +36,15 @@ pub fn ser_value(tail: StreamPosition) -> Bytes {
 }
 
 pub fn deser_value(mut bytes: Bytes) -> Result<StreamPosition, DeserializationError> {
-    check_exact_size(&bytes, VALUE_LEN)?;
+    match bytes.remaining() {
+        VALUE_LEN | LEGACY_VALUE_LEN => {}
+        actual => {
+            return Err(DeserializationError::InvalidSize {
+                expected: VALUE_LEN,
+                actual,
+            });
+        }
+    }
     let seq_num = bytes.get_u64();
     let timestamp = bytes.get_u64();
     Ok(StreamPosition { seq_num, timestamp })
@@ -50,7 +59,7 @@ mod tests {
     use crate::{backend::kv::DeserializationError, stream_id::StreamId};
 
     #[test]
-    fn stream_tail_position_value_requires_exact_size() {
+    fn stream_tail_position_value_rejects_unsupported_size() {
         let err = super::deser_value(Bytes::from_static(&[0u8; 15])).unwrap_err();
         assert!(matches!(
             err,
