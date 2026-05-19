@@ -393,7 +393,7 @@ impl Streamer {
         &mut self,
         input: StoredAppendInput,
         session: Option<append::SessionHandle>,
-        reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
+        reply_tx: impl append::ReplySender,
         append_type: AppendType,
     ) {
         let Some(ticket) = append::admit(reply_tx, session) else {
@@ -512,41 +512,12 @@ impl Streamer {
         &mut self,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     ) {
-        let (append_reply_tx, append_reply_rx) = oneshot::channel();
         self.handle_append(
             terminal_trim_input(),
             None,
-            append_reply_tx,
+            TerminalTrimReplySender(reply_tx),
             AppendType::Terminal,
         );
-        tokio::spawn(async move {
-            let result = match append_reply_rx.await {
-                Ok(Ok(_)) => Ok(TerminalTrimOutcome::DeletionPending),
-                Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => {
-                    Ok(TerminalTrimOutcome::DeletionPending)
-                }
-                Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
-                Ok(Err(AppendErrorInternal::StreamerMissingInActionError(e))) => {
-                    Err(DeleteStreamError::StreamerMissingInActionError(e))
-                }
-                Ok(Err(AppendErrorInternal::RequestDroppedError(e))) => {
-                    Err(DeleteStreamError::RequestDroppedError(e))
-                }
-                Ok(Err(AppendErrorInternal::ConditionFailed(_))) => {
-                    unreachable!("unconditional write")
-                }
-                Ok(Err(AppendErrorInternal::TimestampMissing(_))) => {
-                    unreachable!("Timestamp::MAX used")
-                }
-                Ok(Err(AppendErrorInternal::MaxSeqNum(_))) => {
-                    unreachable!("terminal append is plaintext command record")
-                }
-                Err(_) => Err(DeleteStreamError::StreamerMissingInActionError(
-                    StreamerMissingInActionError,
-                )),
-            };
-            let _ = reply_tx.send(result);
-        });
     }
 
     fn doe_deadline_maybe(&mut self) -> Option<kv::stream_doe_deadline::Entry> {
@@ -754,6 +725,39 @@ pub(super) enum TerminalTrimCondition {
 pub(super) enum TerminalTrimOutcome {
     DeletionPending,
     Ineligible,
+}
+
+struct TerminalTrimReplySender(oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>);
+
+impl append::ReplySender for TerminalTrimReplySender {
+    fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
+    fn send(self: Box<Self>, reply: Result<AppendAck, AppendErrorInternal>) {
+        let result = match reply {
+            Ok(_) | Err(AppendErrorInternal::StreamDeletionPending(_)) => {
+                Ok(TerminalTrimOutcome::DeletionPending)
+            }
+            Err(AppendErrorInternal::Storage(e)) => Err(DeleteStreamError::Storage(e)),
+            Err(AppendErrorInternal::StreamerMissingInActionError(e)) => {
+                Err(DeleteStreamError::StreamerMissingInActionError(e))
+            }
+            Err(AppendErrorInternal::RequestDroppedError(e)) => {
+                Err(DeleteStreamError::RequestDroppedError(e))
+            }
+            Err(AppendErrorInternal::ConditionFailed(_)) => {
+                unreachable!("unconditional write")
+            }
+            Err(AppendErrorInternal::TimestampMissing(_)) => {
+                unreachable!("Timestamp::MAX used")
+            }
+            Err(AppendErrorInternal::MaxSeqNum(_)) => {
+                unreachable!("terminal append is plaintext command record")
+            }
+        };
+        let _ = self.0.send(result);
+    }
 }
 
 #[derive(Debug, Clone)]
