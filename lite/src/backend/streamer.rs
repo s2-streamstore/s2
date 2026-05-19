@@ -445,10 +445,6 @@ impl Streamer {
         }
     }
 
-    fn delete_on_empty_is_eligible(&self, last_write_cutoff: kv::timestamp::TimestampSecs) -> bool {
-        self.last_write_timestamp <= last_write_cutoff
-    }
-
     fn handle_terminal_trim(
         &mut self,
         condition: TerminalTrimCondition,
@@ -459,7 +455,7 @@ impl Streamer {
                 self.append_terminal_trim(reply_tx);
             }
             TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff } => {
-                if !self.delete_on_empty_is_eligible(last_write_cutoff)
+                if self.last_write_timestamp > last_write_cutoff
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
@@ -508,7 +504,7 @@ impl Streamer {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::DeletionPending));
                 } else if self.stable_pos != stable_pos
                     || self.next_assignable_pos() != stable_pos
-                    || !self.delete_on_empty_is_eligible(last_write_cutoff)
+                    || self.last_write_timestamp > last_write_cutoff
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                 } else {
