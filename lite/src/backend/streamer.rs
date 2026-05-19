@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use futures::{
@@ -897,8 +897,16 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
 async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<bool, StorageError> {
     let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
     let mut it = db.scan_prefix(prefix).await?;
-    // TODO: post-filtering on TTL, because SL8 0.12+ will stop doing it at query-time.
-    Ok(it.next().await?.is_some())
+    let now_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    while let Some(kv) = it.next().await? {
+        if kv.expire_ts.is_none_or(|expire_ts| expire_ts > now_millis) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn sequenced_records(
