@@ -468,21 +468,12 @@ impl Streamer {
                 let msg_tx = self.msg_tx.clone();
                 tokio::spawn(async move {
                     let has_records = stream_has_records(&db, stream_id).await;
-                    let msg = Message::DeleteOnEmptyCheckResult {
+                    let _ = msg_tx.send(Message::DeleteOnEmptyCheckResult {
                         stable_pos_snapshot,
                         last_write_cutoff,
                         has_records,
                         reply_tx,
-                    };
-                    if let Err(err) = msg_tx.send(msg) {
-                        let Message::DeleteOnEmptyCheckResult { reply_tx, .. } = err.0 else {
-                            unreachable!("sent delete-on-empty check result message")
-                        };
-                        let _ =
-                            reply_tx.send(Err(DeleteStreamError::StreamerMissingInActionError(
-                                StreamerMissingInActionError,
-                            )));
-                    }
+                    });
                 });
             }
         }
