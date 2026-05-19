@@ -158,10 +158,7 @@ mod tests {
     use slatedb::config::{DurabilityLevel, ScanOptions};
     use time::OffsetDateTime;
 
-    use super::{
-        super::tests::{test_backend, test_backend_with_create_ts},
-        TimestampSecs,
-    };
+    use super::{super::tests::test_backend, TimestampSecs};
     use crate::{
         backend::{Backend, DeleteOnEmptyEntry, kv},
         stream_id::StreamId,
@@ -268,31 +265,65 @@ mod tests {
         entries
     }
 
+    async fn put_tail_position(
+        backend: &Backend,
+        stream_id: StreamId,
+        position: StreamPosition,
+    ) -> TimestampSecs {
+        let key = kv::stream_tail_position::ser_key(stream_id);
+        backend
+            .db
+            .put(key.clone(), kv::stream_tail_position::ser_value(position))
+            .await
+            .unwrap();
+        let kv = backend
+            .db
+            .get_key_value(key)
+            .await
+            .unwrap()
+            .expect("tail position should exist");
+        TimestampSecs::from_millis(kv.create_ts)
+    }
+
+    async fn expired_deadline_at_or_after(write_timestamp: TimestampSecs) -> TimestampSecs {
+        loop {
+            let now = TimestampSecs::now();
+            if write_timestamp <= now {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn deadline_after(write_timestamp: TimestampSecs, age: Duration) -> TimestampSecs {
+        let deadline_secs = u64::from(write_timestamp.as_u32())
+            .saturating_add(age.as_secs())
+            .min(u64::from(u32::MAX)) as u32;
+        TimestampSecs::from_secs(deadline_secs)
+    }
+
     #[tokio::test]
     async fn stream_doe_marks_deleted_and_clears_deadline() {
-        let backend = test_backend_with_create_ts(9_000_000).await;
+        let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin").unwrap();
         let stream = StreamName::from_str("doe-stream").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
-        let deadline = TimestampSecs::from_secs(10_000);
-
-        backend
-            .db
-            .put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition {
-                    seq_num: 1,
-                    timestamp: 1234,
-                }),
-            )
-            .await
-            .unwrap();
+        let write_timestamp = put_tail_position(
+            &backend,
+            stream_id,
+            StreamPosition {
+                seq_num: 1,
+                timestamp: 1234,
+            },
+        )
+        .await;
+        let deadline = expired_deadline_at_or_after(write_timestamp).await;
 
         backend
             .db
             .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
-                kv::stream_doe_deadline::ser_value(MIN_AGE),
+                kv::stream_doe_deadline::ser_value(Duration::ZERO),
             )
             .await
             .unwrap();
@@ -319,35 +350,25 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_deletes_never_written_stream() {
-        let backend = test_backend_with_create_ts(10_000).await;
+        let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-never").unwrap();
         let stream = StreamName::from_str("doe-stream-never").unwrap();
         let stream_id = StreamId::new(&basin, &stream);
-        let created_at = OffsetDateTime::from_unix_timestamp(10).unwrap();
+        let created_at = OffsetDateTime::now_utc();
+        let min_age = Duration::ZERO;
         let mut config = OptionalStreamConfig::default();
-        config.delete_on_empty.min_age = Some(MIN_AGE);
+        config.delete_on_empty.min_age = Some(min_age);
         let meta = stream_meta_with_config(config, created_at);
 
         seed_stream_with_meta(&backend, &basin, &stream, meta).await;
 
-        let write_timestamp = TimestampSecs::from_secs(10);
-        backend
-            .db
-            .put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition::MIN),
-            )
-            .await
-            .unwrap();
-        let deadline_secs = u64::from(write_timestamp.as_u32())
-            .saturating_add(MIN_AGE.as_secs())
-            .min(u64::from(u32::MAX)) as u32;
-        let deadline = TimestampSecs::from_secs(deadline_secs);
+        let write_timestamp = put_tail_position(&backend, stream_id, StreamPosition::MIN).await;
+        let deadline = expired_deadline_at_or_after(write_timestamp).await;
         backend
             .db
             .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
-                kv::stream_doe_deadline::ser_value(MIN_AGE),
+                kv::stream_doe_deadline::ser_value(min_age),
             )
             .await
             .unwrap();
@@ -374,23 +395,21 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_skips_recent_tail_write() {
-        let backend = test_backend_with_create_ts(10_000_000).await;
+        let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-recent").unwrap();
         let stream = StreamName::from_str("doe-stream-recent").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
-        let deadline = TimestampSecs::from_secs(10_000);
+        let write_timestamp = put_tail_position(
+            &backend,
+            stream_id,
+            StreamPosition {
+                seq_num: 1,
+                timestamp: 1234,
+            },
+        )
+        .await;
+        let deadline = expired_deadline_at_or_after(write_timestamp).await;
 
-        backend
-            .db
-            .put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition {
-                    seq_num: 1,
-                    timestamp: 1234,
-                }),
-            )
-            .await
-            .unwrap();
         backend
             .db
             .put(
@@ -568,38 +587,37 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_deletes_if_any_pending_entry_is_eligible() {
-        let backend = test_backend_with_create_ts(1_050_000).await;
+        let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-pairs").unwrap();
         let stream = StreamName::from_str("doe-stream-pairs").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
 
+        let write_timestamp = put_tail_position(
+            &backend,
+            stream_id,
+            StreamPosition {
+                seq_num: 1,
+                timestamp: 1234,
+            },
+        )
+        .await;
+
         backend
-            .db
-            .put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition {
-                    seq_num: 1,
-                    timestamp: 1234,
-                }),
+            .process_stream_doe(
+                stream_id,
+                vec![
+                    DeleteOnEmptyEntry {
+                        deadline: deadline_after(write_timestamp, Duration::from_secs(50)),
+                        min_age: Duration::from_secs(100),
+                    },
+                    DeleteOnEmptyEntry {
+                        deadline: deadline_after(write_timestamp, Duration::from_secs(10)),
+                        min_age: Duration::from_secs(10),
+                    },
+                ],
             )
             .await
             .unwrap();
-
-        for (deadline, min_age) in [
-            (TimestampSecs::from_secs(1_100), Duration::from_secs(100)),
-            (TimestampSecs::from_secs(1_062), Duration::from_secs(10)),
-        ] {
-            backend
-                .db
-                .put(
-                    kv::stream_doe_deadline::ser_key(deadline, stream_id),
-                    kv::stream_doe_deadline::ser_value(min_age),
-                )
-                .await
-                .unwrap();
-        }
-
-        backend.clone().tick_stream_doe().await.unwrap();
 
         let meta = backend
             .db
@@ -613,20 +631,12 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_skips_append_already_serialized_in_streamer() {
-        let backend = test_backend_with_create_ts(9_000_000).await;
+        let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-race").unwrap();
         let stream = StreamName::from_str("doe-stream-race").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
-        let deadline = TimestampSecs::from_secs(10_000);
-
-        backend
-            .db
-            .put(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(StreamPosition::MIN),
-            )
-            .await
-            .unwrap();
+        let write_timestamp = put_tail_position(&backend, stream_id, StreamPosition::MIN).await;
+        let deadline = deadline_after(write_timestamp, MIN_AGE);
 
         let client = backend.streamer_client(&basin, &stream).await.unwrap();
         let permit = client
