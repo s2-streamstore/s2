@@ -15,9 +15,7 @@ use slatedb::{
 use time::OffsetDateTime;
 use tracing::instrument;
 
-use super::{
-    Backend, DeleteOnEmptyEntry, PersistedStreamTail, store::db_txn_get, streamer::doe_arm_delay,
-};
+use super::{Backend, DeleteOnEmptyEntry, store::db_txn_get, streamer::doe_arm_delay};
 use crate::{
     backend::{
         error::{
@@ -186,20 +184,9 @@ impl Backend {
                     kv::stream_id_mapping::ser_key(stream_id),
                     kv::stream_id_mapping::ser_value(&basin, &stream),
                 )?;
-                let created_secs = meta.created_at.unix_timestamp();
-                let created_secs = if created_secs <= 0 {
-                    0
-                } else if created_secs >= i64::from(u32::MAX) {
-                    u32::MAX
-                } else {
-                    created_secs as u32
-                };
                 txn.put(
                     kv::stream_tail_position::ser_key(stream_id),
-                    kv::stream_tail_position::ser_value(PersistedStreamTail {
-                        tail: StreamPosition::MIN,
-                        write_timestamp: kv::timestamp::TimestampSecs::from_secs(created_secs),
-                    }),
+                    kv::stream_tail_position::ser_value(StreamPosition::MIN),
                 )?;
             }
             if let Some(min_age) = meta.config.delete_on_empty.min_age()

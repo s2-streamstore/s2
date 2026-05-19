@@ -16,13 +16,11 @@ use s2_common::{
         stream::StreamName,
     },
 };
-use slatedb::config::{DurabilityLevel, ScanOptions};
+use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
-#[cfg(test)]
-use super::PersistedStreamTail;
 use super::{
-    StreamHandle,
+    PersistedStreamTail, StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
         BasinDeletionPendingError, BasinNotFoundError, GetBasinConfigError, ProvisionStreamError,
@@ -96,10 +94,7 @@ impl Backend {
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
             ),
-            self.db_get(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::deser_value,
-            ),
+            self.stream_tail_position(stream_id),
             self.db_get(
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
@@ -143,6 +138,27 @@ impl Backend {
             streamer_slots.remove_if(&stream_id, |_, slot| {
                 matches!(slot, StreamerClientSlot::Ready { client } if client.generation_id() == client_id)
             });
+        }))
+    }
+
+    async fn stream_tail_position(
+        &self,
+        stream_id: StreamId,
+    ) -> Result<Option<PersistedStreamTail>, StorageError> {
+        let read_opts = ReadOptions {
+            durability_filter: DurabilityLevel::Remote,
+            ..Default::default()
+        };
+        let Some(entry) = self
+            .db
+            .get_key_value_with_options(kv::stream_tail_position::ser_key(stream_id), &read_opts)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PersistedStreamTail {
+            tail: kv::stream_tail_position::deser_value(entry.value)?,
+            write_timestamp: kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
         }))
     }
 
@@ -422,10 +438,7 @@ mod tests {
         );
         wb.put(
             kv::stream_tail_position::ser_key(stream_id),
-            kv::stream_tail_position::ser_value(PersistedStreamTail {
-                tail: tail_pos,
-                write_timestamp: kv::timestamp::TimestampSecs::from_secs(1),
-            }),
+            kv::stream_tail_position::ser_value(tail_pos),
         );
         wb.put(
             kv::stream_record_data::ser_key(stream_id, record_pos),

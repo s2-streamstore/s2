@@ -139,7 +139,7 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, time::Duration};
+    use std::{str::FromStr, sync::Arc, time::Duration};
 
     use bytes::Bytes;
     use futures::poll;
@@ -156,11 +156,15 @@ mod tests {
         },
     };
     use slatedb::config::{DurabilityLevel, ScanOptions};
+    use slatedb_common::MockSystemClock;
     use time::OffsetDateTime;
 
-    use super::{super::tests::test_backend, TimestampSecs};
+    use super::{
+        super::tests::{test_backend, test_backend_with_clock},
+        TimestampSecs,
+    };
     use crate::{
-        backend::{Backend, DeleteOnEmptyEntry, PersistedStreamTail, kv},
+        backend::{Backend, DeleteOnEmptyEntry, kv},
         stream_id::StreamId,
     };
 
@@ -267,23 +271,20 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_marks_deleted_and_clears_deadline() {
-        let backend = test_backend().await;
+        let backend =
+            test_backend_with_clock(Arc::new(MockSystemClock::with_time(9_000_000))).await;
         let basin = BasinName::from_str("doe-basin").unwrap();
         let stream = StreamName::from_str("doe-stream").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
         let deadline = TimestampSecs::from_secs(10_000);
-        let write_timestamp = TimestampSecs::from_secs(9_000);
 
         backend
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: StreamPosition {
-                        seq_num: 1,
-                        timestamp: 1234,
-                    },
-                    write_timestamp,
+                kv::stream_tail_position::ser_value(StreamPosition {
+                    seq_num: 1,
+                    timestamp: 1234,
                 }),
             )
             .await
@@ -320,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_deletes_never_written_stream() {
-        let backend = test_backend().await;
+        let backend = test_backend_with_clock(Arc::new(MockSystemClock::with_time(10_000))).await;
         let basin = BasinName::from_str("doe-basin-never").unwrap();
         let stream = StreamName::from_str("doe-stream-never").unwrap();
         let stream_id = StreamId::new(&basin, &stream);
@@ -336,10 +337,7 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: StreamPosition::MIN,
-                    write_timestamp,
-                }),
+                kv::stream_tail_position::ser_value(StreamPosition::MIN),
             )
             .await
             .unwrap();
@@ -378,23 +376,20 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_skips_recent_tail_write() {
-        let backend = test_backend().await;
+        let backend =
+            test_backend_with_clock(Arc::new(MockSystemClock::with_time(10_000_000))).await;
         let basin = BasinName::from_str("doe-basin-recent").unwrap();
         let stream = StreamName::from_str("doe-stream-recent").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
         let deadline = TimestampSecs::from_secs(10_000);
-        let write_timestamp = TimestampSecs::from_secs(10_000);
 
         backend
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: StreamPosition {
-                        seq_num: 1,
-                        timestamp: 1234,
-                    },
-                    write_timestamp,
+                kv::stream_tail_position::ser_value(StreamPosition {
+                    seq_num: 1,
+                    timestamp: 1234,
                 }),
             )
             .await
@@ -576,7 +571,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_deletes_if_any_pending_entry_is_eligible() {
-        let backend = test_backend().await;
+        let backend =
+            test_backend_with_clock(Arc::new(MockSystemClock::with_time(1_050_000))).await;
         let basin = BasinName::from_str("doe-basin-pairs").unwrap();
         let stream = StreamName::from_str("doe-stream-pairs").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
@@ -585,12 +581,9 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: StreamPosition {
-                        seq_num: 1,
-                        timestamp: 1234,
-                    },
-                    write_timestamp: TimestampSecs::from_secs(1_050),
+                kv::stream_tail_position::ser_value(StreamPosition {
+                    seq_num: 1,
+                    timestamp: 1234,
                 }),
             )
             .await
@@ -624,21 +617,18 @@ mod tests {
 
     #[tokio::test]
     async fn stream_doe_skips_append_already_serialized_in_streamer() {
-        let backend = test_backend().await;
+        let backend =
+            test_backend_with_clock(Arc::new(MockSystemClock::with_time(9_000_000))).await;
         let basin = BasinName::from_str("doe-basin-race").unwrap();
         let stream = StreamName::from_str("doe-stream-race").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
         let deadline = TimestampSecs::from_secs(10_000);
-        let write_timestamp = TimestampSecs::from_secs(9_000);
 
         backend
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: StreamPosition::MIN,
-                    write_timestamp,
-                }),
+                kv::stream_tail_position::ser_value(StreamPosition::MIN),
             )
             .await
             .unwrap();
@@ -704,10 +694,7 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: pos,
-                    write_timestamp: TimestampSecs::now(),
-                }),
+                kv::stream_tail_position::ser_value(pos),
             )
             .await
             .unwrap();

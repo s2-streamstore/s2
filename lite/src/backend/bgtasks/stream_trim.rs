@@ -164,10 +164,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
-    use crate::{
-        backend::{PersistedStreamTail, kv},
-        stream_id::StreamId,
-    };
+    use crate::{backend::kv, stream_id::StreamId};
 
     fn test_record() -> Metered<StoredRecord> {
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"trim-test")).unwrap();
@@ -286,12 +283,9 @@ mod tests {
             .db
             .put(
                 kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::ser_value(PersistedStreamTail {
-                    tail: StreamPosition {
-                        seq_num: 10,
-                        timestamp: 1234,
-                    },
-                    write_timestamp: kv::timestamp::TimestampSecs::from_secs(10),
+                kv::stream_tail_position::ser_value(StreamPosition {
+                    seq_num: 10,
+                    timestamp: 1234,
                 }),
             )
             .await

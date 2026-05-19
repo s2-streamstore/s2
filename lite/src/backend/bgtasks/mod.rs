@@ -140,6 +140,7 @@ mod tests {
 
     use bytesize::ByteSize;
     use slatedb::object_store::memory::InMemory;
+    use slatedb_common::{MockSystemClock, SystemClock as _};
 
     use super::*;
 
@@ -149,6 +150,22 @@ mod tests {
             .build()
             .await
             .unwrap();
+        Backend::new(db, ByteSize::mib(10))
+    }
+
+    pub(super) async fn test_backend_with_clock(clock: Arc<MockSystemClock>) -> Backend {
+        let object_store = Arc::new(InMemory::new());
+        let db = slatedb::Db::builder("/test", object_store)
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            loop {
+                clock.advance(Duration::from_millis(10)).await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
         Backend::new(db, ByteSize::mib(10))
     }
 

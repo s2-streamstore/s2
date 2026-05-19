@@ -82,7 +82,6 @@ struct InFlightAppend {
 struct DbSubmitAppendOptions {
     retention: RetentionPolicy,
     doe_deadline: Option<DeleteOnEmptyEntry>,
-    write_timestamp_secs: kv::timestamp::TimestampSecs,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
 }
@@ -430,8 +429,8 @@ impl Streamer {
                         self.apply_command(sr.position().seq_num, cmd, append_type);
                     }
                 }
-                let write_timestamp_secs = kv::timestamp::TimestampSecs::now();
-                self.tail_write_timestamp = write_timestamp_secs;
+                let tail_write_timestamp = kv::timestamp::TimestampSecs::now();
+                self.tail_write_timestamp = tail_write_timestamp;
                 let (first_pos, next_pos) = pos_span(&sequenced_records);
                 let seq_num_range = first_pos.seq_num..next_pos.seq_num;
                 self.db_writes_pending.push_back(
@@ -442,7 +441,6 @@ impl Streamer {
                         DbSubmitAppendOptions {
                             retention,
                             doe_deadline,
-                            write_timestamp_secs,
                             fencing_token: self
                                 .fencing_token
                                 .is_applied_in(&seq_num_range)
@@ -982,7 +980,6 @@ async fn db_submit_append(
     let DbSubmitAppendOptions {
         retention,
         doe_deadline,
-        write_timestamp_secs,
         fencing_token,
         trim_point,
     } = options;
@@ -1024,10 +1021,7 @@ async fn db_submit_append(
     }
     wb.put(
         kv::stream_tail_position::ser_key(stream_id),
-        kv::stream_tail_position::ser_value(PersistedStreamTail {
-            tail: next_pos(&records),
-            write_timestamp: write_timestamp_secs,
-        }),
+        kv::stream_tail_position::ser_value(next_pos(&records)),
     );
     let write_opts = WriteOptions {
         await_durable: false,
