@@ -91,6 +91,12 @@ pub enum Operation {
     BasinMetrics,
     /// Retrieve stream-level metrics.
     StreamMetrics,
+    /// List scopes.
+    ListScopes,
+    /// Get the default scope.
+    GetDefaultScope,
+    /// Set the default scope.
+    SetDefaultScope,
 }
 
 impl From<Operation> for types::access::Operation {
@@ -117,6 +123,9 @@ impl From<Operation> for types::access::Operation {
             Operation::AccountMetrics => Self::AccountMetrics,
             Operation::BasinMetrics => Self::BasinMetrics,
             Operation::StreamMetrics => Self::StreamMetrics,
+            Operation::ListScopes => Self::ListScopes,
+            Operation::GetDefaultScope => Self::GetDefaultScope,
+            Operation::SetDefaultScope => Self::SetDefaultScope,
         }
     }
 }
@@ -146,6 +155,9 @@ impl From<types::access::Operation> for Operation {
             AccountMetrics => Self::AccountMetrics,
             BasinMetrics => Self::BasinMetrics,
             StreamMetrics => Self::StreamMetrics,
+            ListScopes => Self::ListScopes,
+            GetDefaultScope => Self::GetDefaultScope,
+            SetDefaultScope => Self::SetDefaultScope,
         }
     }
 }

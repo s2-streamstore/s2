@@ -1128,6 +1128,9 @@ fn format_operation(op: &s2_sdk::types::Operation) -> String {
         SdkOp::Fence => "fence",
         SdkOp::Trim => "trim",
         SdkOp::GetAccountMetrics => "get_account_metrics",
+        SdkOp::ListScopes => "list_scopes",
+        SdkOp::GetDefaultScope => "get_default_scope",
+        SdkOp::SetDefaultScope => "set_default_scope",
         SdkOp::ListAccessTokens => "list_access_tokens",
         SdkOp::IssueAccessToken => "issue_access_token",
         SdkOp::RevokeAccessToken => "revoke_access_token",
@@ -1138,7 +1141,14 @@ fn format_operation(op: &s2_sdk::types::Operation) -> String {
 /// Check if operation is account-level
 fn is_account_op(op: &s2_sdk::types::Operation) -> bool {
     use s2_sdk::types::Operation as SdkOp;
-    matches!(op, SdkOp::ListBasins | SdkOp::GetAccountMetrics)
+    matches!(
+        op,
+        SdkOp::ListBasins
+            | SdkOp::GetAccountMetrics
+            | SdkOp::ListScopes
+            | SdkOp::GetDefaultScope
+            | SdkOp::SetDefaultScope
+    )
 }
 
 /// Check if operation is basin-level

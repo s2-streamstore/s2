@@ -6141,8 +6141,12 @@ impl App {
             if account_read {
                 operations.push(Operation::ListBasins);
                 operations.push(Operation::GetAccountMetrics);
+                operations.push(Operation::ListScopes);
+                operations.push(Operation::GetDefaultScope);
             }
-            // (No account-write ops at account level)
+            if account_write {
+                operations.push(Operation::SetDefaultScope);
+            }
 
             // Basin level operations
             if basin_read {

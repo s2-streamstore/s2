@@ -1738,6 +1738,12 @@ pub enum Operation {
     GetBasinMetrics,
     /// Get stream metrics.
     GetStreamMetrics,
+    /// List scopes.
+    ListScopes,
+    /// Get the default scope.
+    GetDefaultScope,
+    /// Set the default scope.
+    SetDefaultScope,
     /// List streams.
     ListStreams,
     /// Create a stream.
@@ -1784,6 +1790,9 @@ impl From<Operation> for api::access::Operation {
             Operation::GetAccountMetrics => api::access::Operation::AccountMetrics,
             Operation::GetBasinMetrics => api::access::Operation::BasinMetrics,
             Operation::GetStreamMetrics => api::access::Operation::StreamMetrics,
+            Operation::ListScopes => api::access::Operation::ListScopes,
+            Operation::GetDefaultScope => api::access::Operation::GetDefaultScope,
+            Operation::SetDefaultScope => api::access::Operation::SetDefaultScope,
         }
     }
 }
@@ -1812,6 +1821,9 @@ impl From<api::access::Operation> for Operation {
             api::access::Operation::AccountMetrics => Operation::GetAccountMetrics,
             api::access::Operation::BasinMetrics => Operation::GetBasinMetrics,
             api::access::Operation::StreamMetrics => Operation::GetStreamMetrics,
+            api::access::Operation::ListScopes => Operation::ListScopes,
+            api::access::Operation::GetDefaultScope => Operation::GetDefaultScope,
+            api::access::Operation::SetDefaultScope => Operation::SetDefaultScope,
         }
     }
 }

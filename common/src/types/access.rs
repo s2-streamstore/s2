@@ -182,6 +182,9 @@ pub enum Operation {
     AccountMetrics = 19,
     BasinMetrics = 20,
     StreamMetrics = 21,
+    ListScopes = 22,
+    GetDefaultScope = 23,
+    SetDefaultScope = 24,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
