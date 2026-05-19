@@ -50,7 +50,6 @@ serde_json = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "zstd"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tikv-jemallocator = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
@@ -58,6 +57,11 @@ tower-http = { workspace = true, features = ["cors", "trace", "sensitive-headers
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 utoipa = { workspace = true, optional = true, features = ["time"] }
+
+# tikv-jemallocator does not build on the MSVC toolchain; on Windows-MSVC
+# Rust falls back to the system allocator (HeapAlloc).
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
