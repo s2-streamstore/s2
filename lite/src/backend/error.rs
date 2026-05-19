@@ -55,11 +55,8 @@ pub struct BasinDeletionPendingError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("stream `{stream}` in basin `{basin}` is being deleted")]
-pub struct StreamDeletionPendingError {
-    pub basin: BasinName,
-    pub stream: StreamName,
-}
+#[error("stream deletion pending")]
+pub struct StreamDeletionPendingError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("unwritten position: {0}")]
@@ -107,6 +104,8 @@ pub(super) enum AppendErrorInternal {
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
     RequestDroppedError(#[from] RequestDroppedError),
+    #[error(transparent)]
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -189,6 +188,7 @@ impl From<AppendErrorInternal> for AppendError {
                 AppendError::StreamerMissingInActionError(e)
             }
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
+            AppendErrorInternal::StreamDeletionPending(e) => AppendError::StreamDeletionPending(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
             AppendErrorInternal::MaxSeqNum(e) => AppendError::MaxSeqNum(e),

@@ -43,7 +43,8 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, MaxSeqNumError, RequestDroppedError, StreamerMissingInActionError,
+            DeleteStreamError, MaxSeqNumError, RequestDroppedError, StreamDeletionPendingError,
+            StreamerMissingInActionError,
         },
         kv,
     },
@@ -390,7 +391,12 @@ impl Streamer {
         let Some(ticket) = append::admit(reply_tx, session) else {
             return;
         };
-        match self.sequence_records(input) {
+        let sequenced_records = if self.trim_point.state.end == SeqNum::MAX {
+            Err(StreamDeletionPendingError.into())
+        } else {
+            self.sequence_records(input)
+        };
+        match sequenced_records {
             Ok(sequenced_records) => {
                 let doe_deadline = self.maybe_doe_deadline();
                 if append_type == AppendType::Terminal {
@@ -527,14 +533,7 @@ impl Streamer {
                             reply_tx,
                             append_type,
                         } => {
-                            if self.trim_point.state.end < SeqNum::MAX {
-                                self.handle_append(
-                                    input,
-                                    session,
-                                    reply_tx,
-                                    append_type,
-                                );
-                            }
+                            self.handle_append(input, session, reply_tx, append_type);
                         }
                         Message::Follow {
                             start_seq_num,
@@ -702,21 +701,19 @@ impl StreamerClient {
             .submit_internal(None, AppendType::Terminal)
             .await
         {
-            Ok(_ack) => Ok(()),
-            Err(e) => Err(match e {
-                AppendErrorInternal::Storage(e) => DeleteStreamError::Storage(e),
-                AppendErrorInternal::StreamerMissingInActionError(e) => {
-                    DeleteStreamError::StreamerMissingInActionError(e)
-                }
-                AppendErrorInternal::RequestDroppedError(e) => {
-                    DeleteStreamError::RequestDroppedError(e)
-                }
-                AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
-                AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::MaxSeqNum(_) => {
-                    unreachable!("terminal append is plaintext command record")
-                }
-            }),
+            Ok(_) | Err(AppendErrorInternal::StreamDeletionPending(_)) => Ok(()),
+            Err(AppendErrorInternal::Storage(e)) => Err(DeleteStreamError::Storage(e)),
+            Err(AppendErrorInternal::StreamerMissingInActionError(e)) => {
+                Err(DeleteStreamError::StreamerMissingInActionError(e))
+            }
+            Err(AppendErrorInternal::RequestDroppedError(e)) => {
+                Err(DeleteStreamError::RequestDroppedError(e))
+            }
+            Err(AppendErrorInternal::ConditionFailed(_)) => unreachable!("unconditional write"),
+            Err(AppendErrorInternal::TimestampMissing(_)) => unreachable!("Timestamp::MAX used"),
+            Err(AppendErrorInternal::MaxSeqNum(_)) => {
+                unreachable!("terminal append is plaintext command record")
+            }
         }
     }
 }
@@ -1314,6 +1311,37 @@ mod tests {
 
         drop(lease);
         assert!(client_lease_state.is_closed());
+    }
+
+    #[tokio::test]
+    async fn append_during_terminal_trim_returns_stream_deletion_pending() {
+        let mut streamer = test_streamer().await;
+        streamer.trim_point = CommandState {
+            state: ..SeqNum::MAX,
+            applied_point: ..1,
+        };
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let run_handle = tokio::spawn(streamer.run(msg_rx));
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        msg_tx
+            .send(Message::Append {
+                input: append_input(b"late"),
+                session: None,
+                reply_tx,
+                append_type: AppendType::Regular,
+            })
+            .expect("streamer should accept append message");
+
+        let err = reply_rx
+            .await
+            .expect("streamer should reply")
+            .expect_err("append should be rejected");
+        let AppendErrorInternal::StreamDeletionPending(_) = err else {
+            panic!("expected stream deletion pending");
+        };
+
+        run_handle.abort();
     }
 
     #[tokio::test]

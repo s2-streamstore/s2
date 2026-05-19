@@ -119,7 +119,7 @@ impl Backend {
         let fencing_token = fencing_token.unwrap_or_default();
 
         if trim_point == Some(..NonZeroSeqNum::MAX) {
-            return Err(StreamDeletionPendingError { basin, stream }.into());
+            return Err(StreamDeletionPendingError.into());
         }
 
         let streamer_slots = self.streamer_slots.clone();

@@ -20,7 +20,7 @@ use s2_common::{
 };
 use s2_lite::backend::error::{
     AppendError, CheckTailError, DeleteStreamError, GetStreamConfigError, ProvisionStreamError,
-    ReadError, ReconfigureStreamError, StreamDeletionPendingError,
+    ReadError, ReconfigureStreamError,
 };
 
 use super::common::*;
@@ -823,9 +823,7 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
         .await;
     assert!(matches!(
         recreate_result,
-        Err(ProvisionStreamError::StreamDeletionPending(
-            StreamDeletionPendingError { basin, stream }
-        )) if basin == basin_name && stream == stream_name
+        Err(ProvisionStreamError::StreamDeletionPending(_))
     ));
 
     let reconfigure_result = backend

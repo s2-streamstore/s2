@@ -105,7 +105,7 @@ impl Backend {
             && existing_meta.deleted_at.is_some()
         {
             return Err(ProvisionStreamError::StreamDeletionPending(
-                StreamDeletionPendingError { basin, stream },
+                StreamDeletionPendingError,
             ));
         }
 
@@ -259,7 +259,7 @@ impl Backend {
                 stream: stream.clone(),
             })?;
         if meta.deleted_at.is_some() {
-            return Err(StreamDeletionPendingError { basin, stream }.into());
+            return Err(StreamDeletionPendingError.into());
         }
         Ok(meta.config)
     }
@@ -295,7 +295,7 @@ impl Backend {
         })?;
 
         if meta.deleted_at.is_some() {
-            return Err(StreamDeletionPendingError { basin, stream }.into());
+            return Err(StreamDeletionPendingError.into());
         }
 
         let prior_doe_min_age = meta.config.delete_on_empty.min_age();
@@ -347,10 +347,7 @@ impl Backend {
             Err(StreamerError::StreamNotFound(e)) => {
                 return Err(DeleteStreamError::StreamNotFound(e));
             }
-            Err(StreamerError::StreamDeletionPending(e)) => {
-                assert_eq!(e.basin, basin);
-                assert_eq!(e.stream, stream);
-            }
+            Err(StreamerError::StreamDeletionPending(_)) => {}
         }
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
