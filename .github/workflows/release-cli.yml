@@ -91,15 +91,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-            # for static bin
             deps: |
-              sudo apt-get update
-              sudo apt-get install -y musl-tools
+              curl -sSL https://musl.cc/x86_64-linux-musl-native.tgz | sudo tar -xzf - -C /opt
+              echo "/opt/x86_64-linux-musl-native/bin" >> "$GITHUB_PATH"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             deps: |
-              sudo apt-get update
-              sudo apt-get install -y musl-tools
+              curl -sSL https://musl.cc/aarch64-linux-musl-native.tgz | sudo tar -xzf - -C /opt
+              echo "/opt/aarch64-linux-musl-native/bin" >> "$GITHUB_PATH"
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: macos-latest
@@ -124,6 +123,18 @@ jobs:
       - name: Set CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+      - name: Configure musl cross compiler
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        run: |
+          ARCH="${MATRIX_TARGET%%-unknown-linux-musl}"
+          CC="${ARCH}-linux-musl-gcc"
+          TARGET_UPPER="$(echo "${MATRIX_TARGET}" | tr 'a-z-' 'A-Z_')"
+          {
+            echo "CC_${MATRIX_TARGET//-/_}=${CC}"
+            echo "CARGO_TARGET_${TARGET_UPPER}_LINKER=${CC}"
+          } >> "$GITHUB_ENV"
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --package s2-cli --target ${{ matrix.target }}
       - name: Create pem and certificate.der files
