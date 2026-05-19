@@ -304,16 +304,6 @@ mod tests {
         TimestampSecs::from_millis(kv.create_ts)
     }
 
-    async fn wait_until_timestamp_reached(timestamp: TimestampSecs) {
-        loop {
-            let now = TimestampSecs::now();
-            if timestamp <= now {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    }
-
     fn deadline_after(write_timestamp: TimestampSecs, age: Duration) -> TimestampSecs {
         let deadline_secs = u64::from(write_timestamp.as_u32())
             .saturating_add(age.as_secs())
@@ -321,7 +311,7 @@ mod tests {
         TimestampSecs::from_secs(deadline_secs)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_doe_marks_deleted_and_clears_deadline() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin").unwrap();
@@ -336,7 +326,6 @@ mod tests {
             },
         )
         .await;
-        wait_until_timestamp_reached(write_timestamp).await;
         let deadline = write_timestamp;
 
         backend
@@ -368,7 +357,7 @@ mod tests {
         assert!(deadline_key.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_doe_deletes_never_written_stream() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-never").unwrap();
@@ -383,7 +372,6 @@ mod tests {
         seed_stream_with_meta(&backend, &basin, &stream, meta).await;
 
         let write_timestamp = put_tail_position(&backend, stream_id, StreamPosition::MIN).await;
-        wait_until_timestamp_reached(write_timestamp).await;
         let deadline = write_timestamp;
         backend
             .db
@@ -414,7 +402,7 @@ mod tests {
         assert!(deadline_key.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_doe_skips_recent_tail_write() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-recent").unwrap();
@@ -429,7 +417,6 @@ mod tests {
             },
         )
         .await;
-        wait_until_timestamp_reached(write_timestamp).await;
         let deadline = write_timestamp;
 
         backend
