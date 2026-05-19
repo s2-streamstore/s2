@@ -112,7 +112,7 @@ impl Backend {
             && let Some((basin, stream)) = self.stream_id_mapping(stream_id).await?
         {
             match self
-                .delete_stream_with_terminal_trim(
+                .delete_stream_with_condition(
                     basin,
                     stream,
                     TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff },
