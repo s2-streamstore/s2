@@ -16,9 +16,7 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend, PersistedStreamTail,
-    store::db_txn_get,
-    streamer::{DeleteOnEmptyEntry, doe_arm_delay},
+    Backend, DeleteOnEmptyEntry, PersistedStreamTail, store::db_txn_get, streamer::doe_arm_delay,
 };
 use crate::{
     backend::{

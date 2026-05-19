@@ -36,7 +36,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::PersistedStreamTail;
+use super::{DeleteOnEmptyEntry, PersistedStreamTail};
 use crate::{
     backend::{
         append,
@@ -71,12 +71,6 @@ impl StreamerGenerationId {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct DeleteOnEmptyEntry {
-    pub(super) deadline: kv::timestamp::TimestampSecs,
-    pub(super) min_age: Duration,
 }
 
 #[derive(Debug)]

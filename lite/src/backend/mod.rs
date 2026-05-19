@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use s2_common::{encryption::EncryptionSpec, record::StreamPosition};
 
 use self::kv::timestamp::TimestampSecs;
@@ -27,6 +29,12 @@ pub struct StreamHandle {
 }
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DeleteOnEmptyEntry {
+    pub deadline: TimestampSecs,
+    pub min_age: Duration,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PersistedStreamTail {
