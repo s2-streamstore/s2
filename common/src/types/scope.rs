@@ -39,6 +39,10 @@ pub struct ScopeName(CompactString);
 
 impl ScopeName {
     fn validate_str(scope: &str) -> Result<(), ValidationError> {
+        if scope.is_empty() {
+            return Err("scope name must be at least 1 character in length".into());
+        }
+
         validate_scope_str("name", scope)
     }
 }
@@ -48,6 +52,7 @@ impl utoipa::PartialSchema for ScopeName {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         utoipa::openapi::Object::builder()
             .schema_type(utoipa::openapi::Type::String)
+            .min_length(Some(1))
             .max_length(Some(caps::MAX_SCOPE_NAME_LEN))
             .into()
     }
@@ -298,7 +303,7 @@ mod test {
     use crate::types::strings::{PrefixProps, StartAfterProps};
 
     #[rstest]
-    #[case::empty("")]
+    #[case::single_char("a")]
     #[case::aws_region("aws:us-east-1")]
     #[case::uppercase_and_period("cloud:US-West-2.edge")]
     #[case::max_len("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
@@ -307,6 +312,7 @@ mod test {
     }
 
     #[rstest]
+    #[case::empty("".to_owned())]
     #[case::too_long("a".repeat(crate::caps::MAX_SCOPE_NAME_LEN + 1))]
     #[case::underscore("aws:us_east-1".to_owned())]
     #[case::slash("aws/us-east-1".to_owned())]
