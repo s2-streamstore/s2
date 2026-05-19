@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use futures::{StreamExt, stream};
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -104,7 +106,10 @@ impl Backend {
         Ok(())
     }
 
-    pub(super) async fn arm_doe_maybe(&self, stream_id: StreamId) -> Result<(), StorageError> {
+    pub(super) async fn on_stream_trimmed_empty(
+        &self,
+        stream_id: StreamId,
+    ) -> Result<(), StorageError> {
         let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? else {
             return Ok(());
         };
@@ -123,10 +128,7 @@ impl Backend {
         let Some(min_age) = meta.config.delete_on_empty.min_age() else {
             return Ok(());
         };
-        let deadline = TimestampSecs::after(doe_arm_delay(
-            meta.config.retention_policy.age().unwrap_or_default(),
-            min_age,
-        ));
+        let deadline = TimestampSecs::after(doe_arm_delay(Duration::ZERO, min_age));
         self.db
             .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),

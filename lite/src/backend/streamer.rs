@@ -56,8 +56,8 @@ pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 // Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
 const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
 
-pub(super) fn doe_arm_delay(retention_age: Duration, min_age: Duration) -> Duration {
-    retention_age
+pub(super) fn doe_arm_delay(base_delay: Duration, min_age: Duration) -> Duration {
+    base_delay
         .saturating_add(min_age)
         .saturating_add(DOE_DEADLINE_REFRESH_PERIOD)
 }

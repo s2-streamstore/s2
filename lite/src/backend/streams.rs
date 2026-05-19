@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use s2_common::{
     bash::Bash,
     record::StreamPosition,
@@ -178,7 +180,9 @@ impl Backend {
             let meta = outcome.inner();
 
             txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;
+
             let stream_id = StreamId::new(&basin, &stream);
+
             if matches!(&outcome, ProvisionResult::Created(_)) {
                 txn.put(
                     kv::stream_id_mapping::ser_key(stream_id),
@@ -189,6 +193,7 @@ impl Backend {
                     kv::stream_tail_position::ser_value(StreamPosition::MIN),
                 )?;
             }
+
             if let Some(min_age) = meta.config.delete_on_empty.min_age()
                 && (matches!(&outcome, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
             {
