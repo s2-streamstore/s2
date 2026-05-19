@@ -92,12 +92,18 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             deps: |
-              curl -sSL https://musl.cc/x86_64-linux-musl-native.tgz | sudo tar -xzf - -C /opt
+              curl -sSL -o /tmp/musl-toolchain.tgz https://musl.cc/x86_64-linux-musl-native.tgz
+              echo "eb1db6f0f3c2bdbdbfb993d7ef7e2eeef82ac1259f6a6e1757c33a97dbcef3ad  /tmp/musl-toolchain.tgz" | sha256sum -c -
+              sudo tar -xzf /tmp/musl-toolchain.tgz -C /opt
+              rm /tmp/musl-toolchain.tgz
               echo "/opt/x86_64-linux-musl-native/bin" >> "$GITHUB_PATH"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             deps: |
-              curl -sSL https://musl.cc/aarch64-linux-musl-native.tgz | sudo tar -xzf - -C /opt
+              curl -sSL -o /tmp/musl-toolchain.tgz https://musl.cc/aarch64-linux-musl-native.tgz
+              echo "daf336cafa2c3c7daf42f6a46edc960f10a181fcf15ab9f1c43b192e8ad2a069  /tmp/musl-toolchain.tgz" | sha256sum -c -
+              sudo tar -xzf /tmp/musl-toolchain.tgz -C /opt
+              rm /tmp/musl-toolchain.tgz
               echo "/opt/aarch64-linux-musl-native/bin" >> "$GITHUB_PATH"
           - os: macos-latest
             target: x86_64-apple-darwin
