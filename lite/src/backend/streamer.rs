@@ -445,14 +445,11 @@ impl Streamer {
         }
     }
 
-    fn delete_on_empty_is_eligible(&self, pending: &[kv::stream_doe_deadline::Entry]) -> bool {
-        let write_timestamp = u64::from(self.last_write_timestamp.as_u32());
-        pending.iter().any(|entry| {
-            let deadline_secs = u64::from(entry.deadline.as_u32());
-            write_timestamp
-                .checked_add(entry.min_age.as_secs())
-                .is_some_and(|sum| sum <= deadline_secs)
-        })
+    fn delete_on_empty_is_eligible(
+        &self,
+        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
+    ) -> bool {
+        last_write_cutoff.is_some_and(|cutoff| self.last_write_timestamp <= cutoff)
     }
 
     async fn terminal_trim_is_eligible(
@@ -461,13 +458,13 @@ impl Streamer {
     ) -> Result<bool, DeleteStreamError> {
         match condition {
             TerminalTrimCondition::Always => Ok(true),
-            TerminalTrimCondition::DeleteOnEmpty(pending) => {
+            TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff } => {
                 if self.next_assignable_pos().seq_num != self.stable_pos.seq_num {
                     Ok(false)
                 } else {
                     match stream_has_records(&self.db, self.stream_id).await {
                         Ok(true) => Ok(false),
-                        Ok(false) => Ok(self.delete_on_empty_is_eligible(pending)),
+                        Ok(false) => Ok(self.delete_on_empty_is_eligible(*last_write_cutoff)),
                         Err(err) => Err(err.into()),
                     }
                 }
@@ -704,7 +701,9 @@ enum Message {
 
 pub(super) enum TerminalTrimCondition {
     Always,
-    DeleteOnEmpty(Vec<kv::stream_doe_deadline::Entry>),
+    DeleteOnEmpty {
+        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -353,12 +353,12 @@ impl Backend {
         &self,
         basin: BasinName,
         stream: StreamName,
-        pending: Vec<kv::stream_doe_deadline::Entry>,
+        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
     ) -> Result<(), DeleteStreamError> {
         let should_mark_deleted = match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => {
                 client
-                    .terminal_trim(TerminalTrimCondition::DeleteOnEmpty(pending))
+                    .terminal_trim(TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff })
                     .await?
             }
             Err(StreamerError::Storage(e)) => {

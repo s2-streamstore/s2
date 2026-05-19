@@ -23,6 +23,17 @@ use crate::{
 const PENDING_LIST_LIMIT: usize = 10_000;
 const CONCURRENCY: usize = 4;
 
+fn last_write_cutoff(pending: &[kv::stream_doe_deadline::Entry]) -> Option<TimestampSecs> {
+    pending
+        .iter()
+        .filter_map(|entry| {
+            u64::from(entry.deadline.as_u32())
+                .checked_sub(entry.min_age.as_secs())
+                .map(|secs| TimestampSecs::from_secs(secs as u32))
+        })
+        .max()
+}
+
 impl Backend {
     pub(super) async fn tick_stream_doe(self) -> Result<bool, StreamDeleteOnEmptyError> {
         let now = TimestampSecs::now();
@@ -81,7 +92,7 @@ impl Backend {
     ) -> Result<(), StreamDeleteOnEmptyError> {
         if let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? {
             match self
-                .delete_stream_if_doe_eligible(basin, stream, pending.clone())
+                .delete_stream_if_doe_eligible(basin, stream, last_write_cutoff(&pending))
                 .await
             {
                 Ok(()) | Err(DeleteStreamError::StreamNotFound(_)) => {}
@@ -613,7 +624,7 @@ mod tests {
                         min_age: Duration::from_secs(100),
                     },
                     kv::stream_doe_deadline::Entry {
-                        deadline: deadline_after(write_timestamp, Duration::from_secs(10)),
+                        deadline: deadline_after(write_timestamp, Duration::from_secs(100)),
                         min_age: Duration::from_secs(10),
                     },
                 ],
