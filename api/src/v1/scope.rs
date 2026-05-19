@@ -44,15 +44,15 @@ pub struct ListScopesResponse {
 pub struct ScopeInfo {
     /// Scope name.
     pub name: ScopeName,
-    /// Whether the scope is dedicated to the account.
-    pub is_dedicated: bool,
+    /// Scope represents a private placement, limited by account.
+    pub is_private: bool,
 }
 
 impl From<types::scope::ScopeInfo> for ScopeInfo {
     fn from(value: types::scope::ScopeInfo) -> Self {
-        let types::scope::ScopeInfo { name, is_dedicated } = value;
+        let types::scope::ScopeInfo { name, is_private } = value;
 
-        Self { name, is_dedicated }
+        Self { name, is_private }
     }
 }
 

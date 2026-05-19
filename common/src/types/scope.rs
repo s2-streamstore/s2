@@ -291,7 +291,7 @@ pub type ListScopesRequest = ListItemsRequest<ScopeNamePrefix, ScopeNameStartAft
 #[derive(Debug, Clone)]
 pub struct ScopeInfo {
     pub name: ScopeName,
-    pub is_dedicated: bool,
+    pub is_private: bool,
 }
 
 #[cfg(test)]

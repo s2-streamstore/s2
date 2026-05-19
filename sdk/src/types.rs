@@ -1583,15 +1583,15 @@ impl ListAllScopesInput {
 pub struct ScopeInfo {
     /// Scope name.
     pub name: ScopeName,
-    /// Whether the scope is dedicated to the account.
-    pub is_dedicated: bool,
+    /// Scope represents a private placement, limited by account.
+    pub is_private: bool,
 }
 
 impl From<api::scope::ScopeInfo> for ScopeInfo {
     fn from(value: api::scope::ScopeInfo) -> Self {
         Self {
             name: value.name,
-            is_dedicated: value.is_dedicated,
+            is_private: value.is_private,
         }
     }
 }
