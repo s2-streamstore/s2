@@ -334,8 +334,7 @@ impl Backend {
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
         self.delete_stream_with_terminal_trim(basin, stream, TerminalTrimCondition::Always)
-            .await?;
-        Ok(())
+            .await
     }
 
     pub(super) async fn delete_stream_with_terminal_trim(
@@ -343,7 +342,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         condition: TerminalTrimCondition,
-    ) -> Result<TerminalTrimOutcome, DeleteStreamError> {
+    ) -> Result<(), DeleteStreamError> {
         let outcome = match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => client.terminal_trim(condition).await?,
             Err(StreamerError::Storage(e)) => {
@@ -352,12 +351,12 @@ impl Backend {
             Err(StreamerError::StreamNotFound(e)) => {
                 return Err(DeleteStreamError::StreamNotFound(e));
             }
-            Err(StreamerError::StreamDeletionPending(_)) => TerminalTrimOutcome::MarkStreamDeleted,
+            Err(StreamerError::StreamDeletionPending(_)) => TerminalTrimOutcome::DeletionPending,
         };
-        if outcome == TerminalTrimOutcome::MarkStreamDeleted {
+        if matches!(outcome, TerminalTrimOutcome::DeletionPending) {
             self.mark_stream_deleted(basin, stream).await?;
         }
-        Ok(outcome)
+        Ok(())
     }
 
     async fn mark_stream_deleted(

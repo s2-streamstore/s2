@@ -119,7 +119,7 @@ impl Backend {
                 )
                 .await
             {
-                Ok(_) | Err(DeleteStreamError::StreamNotFound(_)) => {}
+                Ok(()) | Err(DeleteStreamError::StreamNotFound(_)) => {}
                 Err(err) => return Err(err.into()),
             }
         }

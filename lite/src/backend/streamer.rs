@@ -462,7 +462,7 @@ impl Streamer {
                 if !self.delete_on_empty_is_eligible(last_write_cutoff)
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                 {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::NotEligible));
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                     return;
                 }
 
@@ -501,16 +501,16 @@ impl Streamer {
     ) {
         match has_records {
             Ok(true) => {
-                let _ = reply_tx.send(Ok(TerminalTrimOutcome::NotEligible));
+                let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
             }
             Ok(false) => {
                 if self.trim_point.state.end == SeqNum::MAX {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::MarkStreamDeleted));
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::DeletionPending));
                 } else if self.stable_pos != stable_pos
                     || self.next_assignable_pos() != stable_pos
                     || !self.delete_on_empty_is_eligible(last_write_cutoff)
                 {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::NotEligible));
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                 } else {
                     self.append_terminal_trim(reply_tx);
                 }
@@ -534,9 +534,9 @@ impl Streamer {
         );
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
-                Ok(Ok(_)) => Ok(TerminalTrimOutcome::MarkStreamDeleted),
+                Ok(Ok(_)) => Ok(TerminalTrimOutcome::DeletionPending),
                 Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => {
-                    Ok(TerminalTrimOutcome::MarkStreamDeleted)
+                    Ok(TerminalTrimOutcome::DeletionPending)
                 }
                 Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
                 Ok(Err(AppendErrorInternal::StreamerMissingInActionError(e))) => {
@@ -765,8 +765,8 @@ pub(super) enum TerminalTrimCondition {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TerminalTrimOutcome {
-    MarkStreamDeleted,
-    NotEligible,
+    DeletionPending,
+    Ineligible,
 }
 
 #[derive(Debug, Clone)]
@@ -1548,7 +1548,7 @@ mod tests {
 
         assert_eq!(
             trim_rx.await.expect("terminal trim reply").unwrap(),
-            TerminalTrimOutcome::NotEligible
+            TerminalTrimOutcome::Ineligible
         );
         assert_eq!(streamer.db_writes_pending.len(), 1);
     }
