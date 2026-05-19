@@ -311,7 +311,24 @@ mod tests {
         TimestampSecs::from_secs(deadline_secs)
     }
 
-    #[tokio::test(start_paused = true)]
+    async fn process_pending_stream_doe_at(
+        backend: &Backend,
+        stream_id: StreamId,
+        now: TimestampSecs,
+    ) {
+        let mut page = backend.list_pending_stream_doe(now).await.unwrap();
+        assert!(!page.has_more);
+        assert_eq!(page.values.len(), 1);
+        let (pending_stream_id, pending) = page.values.pop().unwrap();
+        assert_eq!(pending_stream_id, stream_id);
+
+        backend
+            .process_stream_doe(stream_id, pending)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn stream_doe_marks_deleted_and_clears_deadline() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin").unwrap();
@@ -337,8 +354,7 @@ mod tests {
             .await
             .unwrap();
 
-        let has_more = backend.clone().tick_stream_doe().await.unwrap();
-        assert!(!has_more);
+        process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
         let meta = backend
             .db
@@ -357,7 +373,7 @@ mod tests {
         assert!(deadline_key.is_none());
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn stream_doe_deletes_never_written_stream() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-never").unwrap();
@@ -382,8 +398,7 @@ mod tests {
             .await
             .unwrap();
 
-        let has_more = backend.clone().tick_stream_doe().await.unwrap();
-        assert!(!has_more);
+        process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
         let meta = backend
             .db
@@ -402,7 +417,7 @@ mod tests {
         assert!(deadline_key.is_none());
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn stream_doe_skips_recent_tail_write() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-recent").unwrap();
@@ -428,8 +443,7 @@ mod tests {
             .await
             .unwrap();
 
-        let has_more = backend.clone().tick_stream_doe().await.unwrap();
-        assert!(!has_more);
+        process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
         let meta = backend
             .db
