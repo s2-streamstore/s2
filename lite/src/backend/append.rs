@@ -110,38 +110,23 @@ impl SessionHandle {
     }
 }
 
-pub trait ReplySender: Send + 'static {
-    fn is_closed(&self) -> bool;
-    fn send(self: Box<Self>, reply: Result<AppendAck, AppendErrorInternal>);
-}
-
-impl ReplySender for oneshot::Sender<Result<AppendAck, AppendErrorInternal>> {
-    fn is_closed(&self) -> bool {
-        self.is_closed()
-    }
-
-    fn send(self: Box<Self>, reply: Result<AppendAck, AppendErrorInternal>) {
-        let _ = (*self).send(reply);
-    }
-}
-
 #[must_use]
-pub fn admit(tx: impl ReplySender, session: Option<SessionHandle>) -> Option<Ticket> {
+pub fn admit(
+    tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
+    session: Option<SessionHandle>,
+) -> Option<Ticket> {
     if tx.is_closed() {
         return None;
     }
     match session {
-        None => Some(Ticket {
-            tx: Box::new(tx),
-            session: None,
-        }),
+        None => Some(Ticket { tx, session: None }),
         Some(session) => {
             let session = session.0.lock_arc();
             if session.poisoned {
                 None
             } else {
                 Some(Ticket {
-                    tx: Box::new(tx),
+                    tx,
                     session: Some(session),
                 })
             }
@@ -149,7 +134,7 @@ pub fn admit(tx: impl ReplySender, session: Option<SessionHandle>) -> Option<Tic
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct PendingAppends {
     queue: VecDeque<BlockedReplySender>,
     next_ack_pos: Option<StreamPosition>,
@@ -217,7 +202,7 @@ impl PendingAppends {
 }
 
 pub struct Ticket {
-    tx: Box<dyn ReplySender>,
+    tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
     session: Option<parking_lot::ArcMutexGuard<parking_lot::RawMutex, SessionState>>,
 }
 
@@ -251,7 +236,7 @@ impl Ticket {
             durability_dependency = ..durability_dependency.end.max(session.last_ack_end.end);
         }
         if durability_dependency.end <= stable_pos.seq_num {
-            self.tx.send(Err(append_err));
+            let _ = self.tx.send(Err(append_err));
             None
         } else {
             Some(BlockedReplySender {
@@ -263,10 +248,11 @@ impl Ticket {
     }
 }
 
+#[derive(Debug)]
 struct BlockedReplySender {
     reply: Result<Range<StreamPosition>, AppendErrorInternal>,
     durability_dependency: RangeTo<SeqNum>,
-    tx: Box<dyn ReplySender>,
+    tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
 }
 
 impl BlockedReplySender {
@@ -282,6 +268,6 @@ impl BlockedReplySender {
             }
             Err(e) => Err(e.into()),
         };
-        self.tx.send(reply);
+        let _ = self.tx.send(reply);
     }
 }
