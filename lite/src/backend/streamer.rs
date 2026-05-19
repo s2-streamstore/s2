@@ -28,8 +28,8 @@ use s2_common::{
     },
 };
 use slatedb::{
-    WriteBatch,
-    config::{PutOptions, Ttl, WriteOptions},
+    IterationOrder, WriteBatch,
+    config::{PutOptions, ScanOptions, Ttl, WriteOptions},
 };
 use tokio::{
     sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
@@ -889,7 +889,8 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
 
 async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<bool, StorageError> {
     let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
-    let mut it = db.scan_prefix(prefix).await?;
+    let scan_opts = ScanOptions::default().with_order(IterationOrder::Descending);
+    let mut it = db.scan_prefix_with_options(prefix, &scan_opts).await?;
     let now_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
