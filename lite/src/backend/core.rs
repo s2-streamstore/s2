@@ -20,7 +20,7 @@ use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
-    PersistedStreamTail, StreamHandle,
+    StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
         BasinDeletionPendingError, BasinNotFoundError, GetBasinConfigError, ProvisionStreamError,
@@ -109,9 +109,12 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let persisted_tail = persisted_tail.unwrap_or_default();
+        let (tail_pos, tail_write_timestamp) = persisted_tail.unwrap_or((
+            StreamPosition::MIN,
+            kv::timestamp::TimestampSecs::from_secs(0),
+        ));
 
-        self.assert_no_records_following_tail(stream_id, &basin, &stream, persisted_tail.tail)
+        self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
             .await?;
 
         let fencing_token = fencing_token.unwrap_or_default();
@@ -127,7 +130,8 @@ impl Backend {
             stream_id,
             config: meta.config,
             cipher: meta.cipher,
-            tail: persisted_tail,
+            tail_pos,
+            tail_write_timestamp,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
             append_inflight_bytes_sema: self.append_inflight_bytes_sema.clone(),
@@ -144,7 +148,7 @@ impl Backend {
     async fn stream_tail_position(
         &self,
         stream_id: StreamId,
-    ) -> Result<Option<PersistedStreamTail>, StorageError> {
+    ) -> Result<Option<(StreamPosition, kv::timestamp::TimestampSecs)>, StorageError> {
         let read_opts = ReadOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
@@ -156,10 +160,10 @@ impl Backend {
         else {
             return Ok(None);
         };
-        Ok(Some(PersistedStreamTail {
-            tail: kv::stream_tail_position::deser_value(entry.value)?,
-            write_timestamp: kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
-        }))
+        Ok(Some((
+            kv::stream_tail_position::deser_value(entry.value)?,
+            kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
+        )))
     }
 
     async fn assert_no_records_following_tail(

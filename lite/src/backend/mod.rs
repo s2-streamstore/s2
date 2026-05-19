@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use s2_common::{encryption::EncryptionSpec, record::StreamPosition};
+use s2_common::encryption::EncryptionSpec;
 
 use self::kv::timestamp::TimestampSecs;
 
@@ -34,19 +34,4 @@ pub const FOLLOWER_MAX_LAG: usize = 25;
 pub(super) struct DeleteOnEmptyEntry {
     pub deadline: TimestampSecs,
     pub min_age: Duration,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct PersistedStreamTail {
-    pub tail: StreamPosition,
-    pub write_timestamp: TimestampSecs,
-}
-
-impl Default for PersistedStreamTail {
-    fn default() -> Self {
-        Self {
-            tail: StreamPosition::MIN,
-            write_timestamp: TimestampSecs::from_secs(0),
-        }
-    }
 }

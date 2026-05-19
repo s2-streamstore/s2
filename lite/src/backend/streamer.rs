@@ -36,7 +36,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::{DeleteOnEmptyEntry, PersistedStreamTail};
+use super::DeleteOnEmptyEntry;
 use crate::{
     backend::{
         append,
@@ -219,7 +219,8 @@ pub(super) struct Spawner {
     pub stream_id: StreamId,
     pub config: StreamConfig,
     pub cipher: Option<EncryptionAlgorithm>,
-    pub tail: PersistedStreamTail,
+    pub tail_pos: StreamPosition,
+    pub tail_write_timestamp: kv::timestamp::TimestampSecs,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
     pub append_inflight_bytes_sema: Arc<Semaphore>,
@@ -238,17 +239,14 @@ impl Spawner {
             stream_id,
             config,
             cipher,
-            tail,
+            tail_pos,
+            tail_write_timestamp,
             fencing_token,
             trim_point,
             append_inflight_bytes_sema,
             durability_notifier,
             bgtask_trigger_tx,
         } = self;
-        let PersistedStreamTail {
-            tail: tail_pos,
-            write_timestamp: tail_write_timestamp,
-        } = tail;
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (streamer_lease_state, client_lease_state) = StreamerLeaseState::new();
