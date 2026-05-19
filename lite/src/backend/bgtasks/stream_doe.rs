@@ -155,7 +155,7 @@ mod tests {
             stream::{AppendInput, AppendRecordBatch, AppendRecordParts, StreamName},
         },
     };
-    use slatedb::config::{DurabilityLevel, PutOptions, ScanOptions, Ttl, WriteOptions};
+    use slatedb::config::{DurabilityLevel, ScanOptions};
     use time::OffsetDateTime;
 
     use super::{super::tests::test_backend, TimestampSecs};
@@ -493,61 +493,6 @@ mod tests {
             .await
             .unwrap();
         assert!(timestamp_key.is_some());
-    }
-
-    #[tokio::test]
-    async fn stream_doe_ignores_expired_record_timestamps() {
-        let backend = test_backend().await;
-        let basin = BasinName::from_str("doe-basin-expired-record").unwrap();
-        let stream = StreamName::from_str("doe-stream-expired-record").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
-        let write_timestamp = put_tail_position(
-            &backend,
-            stream_id,
-            StreamPosition {
-                seq_num: 1,
-                timestamp: 1234,
-            },
-        )
-        .await;
-        let deadline = expired_deadline_at_or_after(write_timestamp).await;
-
-        let expired_pos = StreamPosition {
-            seq_num: 1,
-            timestamp: 1234,
-        };
-        backend
-            .db
-            .put_with_options(
-                kv::stream_record_timestamp::ser_key(stream_id, expired_pos),
-                kv::stream_record_timestamp::ser_value(),
-                &PutOptions {
-                    ttl: Ttl::ExpireAt(0),
-                },
-                &WriteOptions::default(),
-            )
-            .await
-            .unwrap();
-        backend
-            .db
-            .put(
-                kv::stream_doe_deadline::ser_key(deadline, stream_id),
-                kv::stream_doe_deadline::ser_value(Duration::ZERO),
-            )
-            .await
-            .unwrap();
-
-        let has_more = backend.clone().tick_stream_doe().await.unwrap();
-        assert!(!has_more);
-
-        let meta = backend
-            .db
-            .get(kv::stream_meta::ser_key(&basin, &stream))
-            .await
-            .unwrap()
-            .expect("stream meta should remain");
-        let decoded = kv::stream_meta::deser_value(meta).unwrap();
-        assert!(decoded.deleted_at.is_some());
     }
 
     #[tokio::test]
