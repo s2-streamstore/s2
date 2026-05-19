@@ -304,11 +304,11 @@ mod tests {
         TimestampSecs::from_millis(kv.create_ts)
     }
 
-    async fn expired_deadline_at_or_after(write_timestamp: TimestampSecs) -> TimestampSecs {
+    async fn wait_until_timestamp_reached(timestamp: TimestampSecs) {
         loop {
             let now = TimestampSecs::now();
-            if write_timestamp <= now {
-                return now;
+            if timestamp <= now {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -336,7 +336,8 @@ mod tests {
             },
         )
         .await;
-        let deadline = expired_deadline_at_or_after(write_timestamp).await;
+        wait_until_timestamp_reached(write_timestamp).await;
+        let deadline = write_timestamp;
 
         backend
             .db
@@ -382,7 +383,8 @@ mod tests {
         seed_stream_with_meta(&backend, &basin, &stream, meta).await;
 
         let write_timestamp = put_tail_position(&backend, stream_id, StreamPosition::MIN).await;
-        let deadline = expired_deadline_at_or_after(write_timestamp).await;
+        wait_until_timestamp_reached(write_timestamp).await;
+        let deadline = write_timestamp;
         backend
             .db
             .put(
@@ -427,7 +429,8 @@ mod tests {
             },
         )
         .await;
-        let deadline = expired_deadline_at_or_after(write_timestamp).await;
+        wait_until_timestamp_reached(write_timestamp).await;
+        let deadline = write_timestamp;
 
         backend
             .db
@@ -609,7 +612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_doe_deletes_if_any_pending_entry_is_eligible() {
+    async fn stream_doe_uses_latest_eligible_cutoff_across_pending_entries() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-pairs").unwrap();
         let stream = StreamName::from_str("doe-stream-pairs").unwrap();
