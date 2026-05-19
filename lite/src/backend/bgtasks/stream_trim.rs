@@ -158,7 +158,7 @@ mod tests {
         record::{
             FencingToken, Metered, NonZeroSeqNum, Record, SeqNum, StoredRecord, StreamPosition,
         },
-        types::{basin::BasinName, config::OptionalStreamConfig, stream::StreamName},
+        types::{basin::BasinName, config::StreamConfig, stream::StreamName},
     };
     use slatedb::WriteBatch;
     use time::OffsetDateTime;
@@ -259,7 +259,7 @@ mod tests {
         let metered = test_record();
 
         let meta = kv::stream_meta::StreamMeta {
-            config: OptionalStreamConfig::default(),
+            config: StreamConfig::default(),
             cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,

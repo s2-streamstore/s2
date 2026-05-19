@@ -122,7 +122,7 @@ impl Backend {
         let fencing_token = fencing_token.unwrap_or_default();
 
         if trim_point == Some(..NonZeroSeqNum::MAX) {
-            return Err(StreamDeletionPendingError { basin, stream }.into());
+            return Err(StreamDeletionPendingError.into());
         }
 
         let streamer_slots = self.streamer_slots.clone();
@@ -367,7 +367,7 @@ mod tests {
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
         types::{
-            config::{BasinConfig, OptionalStreamConfig},
+            config::{BasinConfig, OptionalStreamConfig, StreamConfig},
             resources::ProvisionMode,
         },
     };
@@ -396,7 +396,7 @@ mod tests {
         let stream_id = StreamId::new(&basin, &stream);
 
         let meta = kv::stream_meta::StreamMeta {
-            config: OptionalStreamConfig::default(),
+            config: StreamConfig::default(),
             cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,

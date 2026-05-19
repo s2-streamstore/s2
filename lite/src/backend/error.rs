@@ -55,11 +55,8 @@ pub struct BasinDeletionPendingError {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("stream `{stream}` in basin `{basin}` is being deleted")]
-pub struct StreamDeletionPendingError {
-    pub basin: BasinName,
-    pub stream: StreamName,
-}
+#[error("stream deletion pending")]
+pub struct StreamDeletionPendingError;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("unwritten position: {0}")]
@@ -107,6 +104,8 @@ pub(super) enum AppendErrorInternal {
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
     RequestDroppedError(#[from] RequestDroppedError),
+    #[error(transparent)]
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -189,6 +188,7 @@ impl From<AppendErrorInternal> for AppendError {
                 AppendError::StreamerMissingInActionError(e)
             }
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
+            AppendErrorInternal::StreamDeletionPending(e) => AppendError::StreamDeletionPending(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
             AppendErrorInternal::MaxSeqNum(e) => AppendError::MaxSeqNum(e),
@@ -355,6 +355,8 @@ pub enum DeleteStreamError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    TransactionConflict(#[from] TransactionConflictError),
+    #[error(transparent)]
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
     RequestDroppedError(#[from] RequestDroppedError),
@@ -364,7 +366,11 @@ pub enum DeleteStreamError {
 
 impl From<slatedb::Error> for DeleteStreamError {
     fn from(err: slatedb::Error) -> Self {
-        Self::Storage(err.into())
+        if err.kind() == slatedb::ErrorKind::Transaction {
+            Self::TransactionConflict(TransactionConflictError)
+        } else {
+            Self::Storage(err.into())
+        }
     }
 }
 
@@ -376,6 +382,9 @@ impl From<AppendErrorInternal> for DeleteStreamError {
                 Self::StreamerMissingInActionError(e)
             }
             AppendErrorInternal::RequestDroppedError(e) => Self::RequestDroppedError(e),
+            AppendErrorInternal::StreamDeletionPending(_) => {
+                unreachable!("stream deletion pending handled before delete error conversion")
+            }
             AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
             AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
             AppendErrorInternal::MaxSeqNum(_) => {
@@ -424,6 +433,8 @@ pub enum ProvisionBasinError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    TransactionConflict(#[from] TransactionConflictError),
+    #[error(transparent)]
     BasinAlreadyExists(#[from] BasinAlreadyExistsError),
     #[error(transparent)]
     BasinDeletionPending(#[from] BasinDeletionPendingError),
@@ -431,7 +442,11 @@ pub enum ProvisionBasinError {
 
 impl From<slatedb::Error> for ProvisionBasinError {
     fn from(err: slatedb::Error) -> Self {
-        Self::Storage(err.into())
+        if err.kind() == slatedb::ErrorKind::Transaction {
+            Self::TransactionConflict(TransactionConflictError)
+        } else {
+            Self::Storage(err.into())
+        }
     }
 }
 
@@ -474,6 +489,8 @@ pub enum ReconfigureStreamError {
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
+    #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
@@ -496,11 +513,17 @@ pub enum DeleteBasinError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    TransactionConflict(#[from] TransactionConflictError),
+    #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
 }
 
 impl From<slatedb::Error> for DeleteBasinError {
     fn from(err: slatedb::Error) -> Self {
-        Self::Storage(err.into())
+        if err.kind() == slatedb::ErrorKind::Transaction {
+            Self::TransactionConflict(TransactionConflictError)
+        } else {
+            Self::Storage(err.into())
+        }
     }
 }

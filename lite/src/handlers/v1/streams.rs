@@ -181,10 +181,7 @@ pub async fn get_stream_config(
     State(backend): State<Backend>,
     GetConfigArgs { basin, stream }: GetConfigArgs,
 ) -> Result<Json<v1t::config::StreamConfig>, ServiceError> {
-    let config = backend.get_stream_config(basin, stream).await?;
-    Ok(Json(
-        v1t::config::StreamConfig::to_opt(config).unwrap_or_default(),
-    ))
+    Ok(Json(backend.get_stream_config(basin, stream).await?.into()))
 }
 
 #[derive(FromRequest)]
@@ -272,6 +269,7 @@ pub struct DeleteArgs {
     tag = super::paths::streams::TAG,
     responses(
         (status = StatusCode::ACCEPTED),
+        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
@@ -340,7 +338,5 @@ pub async fn reconfigure_stream(
     let config = backend
         .reconfigure_stream(basin, stream, reconfiguration)
         .await?;
-    Ok(Json(
-        v1t::config::StreamConfig::to_opt(config).unwrap_or_default(),
-    ))
+    Ok(Json(config.into()))
 }

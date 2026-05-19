@@ -100,6 +100,9 @@ impl ServiceError {
             },
             ServiceError::ProvisionBasin(e) => match e {
                 ProvisionBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                ProvisionBasinError::TransactionConflict(e) => {
+                    standard(ErrorCode::TransactionConflict, e.to_string())
+                }
                 ProvisionBasinError::BasinAlreadyExists(e) => {
                     standard(ErrorCode::ResourceAlreadyExists, e.to_string())
                 }
@@ -115,6 +118,9 @@ impl ServiceError {
             },
             ServiceError::DeleteBasin(e) => match e {
                 DeleteBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                DeleteBasinError::TransactionConflict(e) => {
+                    standard(ErrorCode::TransactionConflict, e.to_string())
+                }
                 DeleteBasinError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
@@ -164,6 +170,9 @@ impl ServiceError {
             },
             ServiceError::DeleteStream(e) => match e {
                 DeleteStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                DeleteStreamError::TransactionConflict(e) => {
+                    standard(ErrorCode::TransactionConflict, e.to_string())
+                }
                 DeleteStreamError::StreamerMissingInActionError(e) => {
                     standard(ErrorCode::Unavailable, e.to_string())
                 }
@@ -183,6 +192,9 @@ impl ServiceError {
                 }
                 ReconfigureStreamError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
+                }
+                ReconfigureStreamError::BasinDeletionPending(e) => {
+                    standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
                 ReconfigureStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())

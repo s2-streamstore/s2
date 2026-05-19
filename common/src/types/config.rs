@@ -6,8 +6,8 @@
 //!   produced by merging optional configs with defaults using `merge()`.
 //!
 //! - Optional (`OptionalStreamConfig`, `OptionalTimestampingConfig`,
-//!   `OptionalDeleteOnEmptyConfig`): stored metadata, where `None` means "not set at this layer;
-//!   fall back to defaults."
+//!   `OptionalDeleteOnEmptyConfig`): partial configuration layers, where `None` means "not set at
+//!   this layer; fall back to defaults."
 //!
 //! - Reconfiguration (`StreamReconfiguration`, `TimestampingReconfiguration`,
 //!   `DeleteOnEmptyReconfiguration`): PATCH-style updates applied with `reconfigure()`.
@@ -91,6 +91,12 @@ pub struct TimestampingConfig {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOnEmptyConfig {
     pub min_age: Duration,
+}
+
+impl DeleteOnEmptyConfig {
+    pub fn min_age(&self) -> Option<Duration> {
+        Some(self.min_age).filter(|age| !age.is_zero())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

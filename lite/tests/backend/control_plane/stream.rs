@@ -6,9 +6,10 @@ use s2_common::{
     maybe::Maybe,
     types::{
         config::{
-            BasinConfig, BasinReconfiguration, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-            OptionalTimestampingConfig, RetentionPolicy, StorageClass, StreamReconfiguration,
-            TimestampingMode, TimestampingReconfiguration,
+            BasinConfig, BasinReconfiguration, DeleteOnEmptyReconfiguration,
+            OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
+            RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
+            TimestampingReconfiguration,
         },
         resources::{ListItemsRequestParts, ProvisionMode, ProvisionResult, RequestToken},
         stream::{
@@ -19,7 +20,7 @@ use s2_common::{
 };
 use s2_lite::backend::error::{
     AppendError, CheckTailError, DeleteStreamError, GetStreamConfigError, ProvisionStreamError,
-    ReadError, ReconfigureStreamError, StreamDeletionPendingError,
+    ReadError, ReconfigureStreamError,
 };
 
 use super::common::*;
@@ -71,12 +72,9 @@ async fn test_create_stream_honors_basin_defaults() {
         .get_stream_config(basin_name, stream_name)
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(config.storage_class, Some(StorageClass::Standard));
-    assert_eq!(config.retention_policy, Some(RetentionPolicy::Infinite()));
-    assert_eq!(
-        config.timestamping.mode,
-        Some(TimestampingMode::ClientRequire)
-    );
+    assert_eq!(config.storage_class, StorageClass::Standard);
+    assert_eq!(config.retention_policy, RetentionPolicy::Infinite());
+    assert_eq!(config.timestamping.mode, TimestampingMode::ClientRequire);
 }
 
 #[tokio::test]
@@ -238,7 +236,7 @@ async fn test_create_stream_idempotency_and_request_token() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stored stream config");
-    assert_eq!(stored_config.storage_class, Some(StorageClass::Express));
+    assert_eq!(stored_config.storage_class, StorageClass::Express);
 
     let idempotent = backend
         .provision_stream(
@@ -351,11 +349,8 @@ async fn test_provision_stream_ensure_preserves_idempotency_key() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(stored_config.storage_class, Some(StorageClass::Express));
-    assert_eq!(
-        stored_config.timestamping.mode,
-        Some(TimestampingMode::Arrival)
-    );
+    assert_eq!(stored_config.storage_class, StorageClass::Express);
+    assert_eq!(stored_config.timestamping.mode, TimestampingMode::Arrival);
 
     backend
         .provision_stream(
@@ -456,7 +451,7 @@ async fn test_provision_stream_preserves_explicit_zero_delete_on_empty() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(stored_config.delete_on_empty.min_age, Some(Duration::ZERO));
+    assert_eq!(stored_config.delete_on_empty.min_age, Duration::ZERO);
 
     let ensured = backend
         .provision_stream(basin_name, stream_name, config, ProvisionMode::Ensure)
@@ -575,19 +570,106 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .await
         .expect("Failed to reconfigure stream");
 
-    assert_eq!(updated.storage_class, Some(StorageClass::Express));
-    assert_eq!(updated.retention_policy, Some(RetentionPolicy::Infinite()));
-    assert_eq!(updated.timestamping.mode, Some(TimestampingMode::Arrival));
-    assert_eq!(updated.timestamping.uncapped, Some(true));
+    assert_eq!(updated.storage_class, StorageClass::Express);
+    assert_eq!(updated.retention_policy, RetentionPolicy::Infinite());
+    assert_eq!(updated.timestamping.mode, TimestampingMode::Arrival);
+    assert!(updated.timestamping.uncapped);
 
     let fetched = backend
         .get_stream_config(basin_name, stream_name)
         .await
         .expect("Failed to fetch stream config after reconfigure");
-    assert_eq!(fetched.storage_class, Some(StorageClass::Express));
-    assert_eq!(fetched.retention_policy, Some(RetentionPolicy::Infinite()));
-    assert_eq!(fetched.timestamping.mode, Some(TimestampingMode::Arrival));
-    assert_eq!(fetched.timestamping.uncapped, Some(true));
+    assert_eq!(fetched.storage_class, StorageClass::Express);
+    assert_eq!(fetched.retention_policy, RetentionPolicy::Infinite());
+    assert_eq!(fetched.timestamping.mode, TimestampingMode::Arrival);
+    assert!(fetched.timestamping.uncapped);
+}
+
+#[tokio::test]
+async fn test_reconfigure_stream_clears_fields_to_basin_defaults() {
+    let backend = create_backend().await;
+    let basin_name = test_basin_name("stream-reconfigure-clear-defaults");
+
+    let basin_config = BasinConfig {
+        default_stream_config: OptionalStreamConfig {
+            storage_class: Some(StorageClass::Standard),
+            retention_policy: Some(RetentionPolicy::Infinite()),
+            timestamping: OptionalTimestampingConfig {
+                mode: Some(TimestampingMode::Arrival),
+                uncapped: Some(true),
+            },
+            delete_on_empty: OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::from_secs(300)),
+            },
+        },
+        ..Default::default()
+    };
+
+    backend
+        .provision_basin(
+            basin_name.clone(),
+            basin_config,
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
+        )
+        .await
+        .expect("Failed to create basin");
+
+    let stream_name = test_stream_name("stream-reconfigure-clear-defaults");
+    let stream_config = OptionalStreamConfig {
+        storage_class: Some(StorageClass::Express),
+        retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(60))),
+        timestamping: OptionalTimestampingConfig {
+            mode: Some(TimestampingMode::ClientRequire),
+            uncapped: Some(false),
+        },
+        delete_on_empty: OptionalDeleteOnEmptyConfig {
+            min_age: Some(Duration::ZERO),
+        },
+    };
+
+    backend
+        .provision_stream(
+            basin_name.clone(),
+            stream_name.clone(),
+            stream_config,
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
+        )
+        .await
+        .expect("Failed to create stream");
+
+    let reconfig = StreamReconfiguration {
+        storage_class: Maybe::from(None),
+        retention_policy: Maybe::from(None),
+        timestamping: Maybe::from(Some(TimestampingReconfiguration {
+            mode: Maybe::from(None),
+            uncapped: Maybe::from(None),
+        })),
+        delete_on_empty: Maybe::from(Some(DeleteOnEmptyReconfiguration {
+            min_age: Maybe::from(None),
+        })),
+    };
+
+    let updated = backend
+        .reconfigure_stream(basin_name.clone(), stream_name.clone(), reconfig)
+        .await
+        .expect("Failed to reconfigure stream");
+
+    assert_eq!(updated.storage_class, StorageClass::Standard);
+    assert_eq!(updated.retention_policy, RetentionPolicy::Infinite());
+    assert_eq!(updated.timestamping.mode, TimestampingMode::Arrival);
+    assert!(updated.timestamping.uncapped);
+    assert_eq!(updated.delete_on_empty.min_age, Duration::from_secs(300));
+
+    let fetched = backend
+        .get_stream_config(basin_name, stream_name)
+        .await
+        .expect("Failed to fetch stream config after reconfigure");
+
+    assert_eq!(fetched, updated);
 }
 
 #[tokio::test]
@@ -741,9 +823,7 @@ async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
         .await;
     assert!(matches!(
         recreate_result,
-        Err(ProvisionStreamError::StreamDeletionPending(
-            StreamDeletionPendingError { basin, stream }
-        )) if basin == basin_name && stream == stream_name
+        Err(ProvisionStreamError::StreamDeletionPending(_))
     ));
 
     let reconfigure_result = backend
