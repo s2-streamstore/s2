@@ -10,9 +10,9 @@ use tracing::instrument;
 
 use crate::{
     backend::{
-        Backend, DeleteOnEmptyEntry,
+        Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
-        kv::{self, timestamp::TimestampSecs},
+        kv::{self, stream_doe_deadline::DeleteOnEmptyEntry, timestamp::TimestampSecs},
         streamer::doe_arm_delay,
     },
     stream_id::StreamId,
@@ -160,7 +160,7 @@ mod tests {
 
     use super::{super::tests::test_backend, TimestampSecs};
     use crate::{
-        backend::{Backend, DeleteOnEmptyEntry, kv},
+        backend::{Backend, kv, kv::stream_doe_deadline::DeleteOnEmptyEntry},
         stream_id::StreamId,
     };
 

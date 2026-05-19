@@ -15,7 +15,7 @@ use slatedb::{
 use time::OffsetDateTime;
 use tracing::instrument;
 
-use super::{Backend, DeleteOnEmptyEntry, store::db_txn_get, streamer::doe_arm_delay};
+use super::{Backend, store::db_txn_get, streamer::doe_arm_delay};
 use crate::{
     backend::{
         error::{
@@ -24,7 +24,7 @@ use crate::{
             StreamAlreadyExistsError, StreamDeletionPendingError, StreamNotFoundError,
             StreamerError,
         },
-        kv,
+        kv::{self, stream_doe_deadline::DeleteOnEmptyEntry},
     },
     stream_id::StreamId,
 };

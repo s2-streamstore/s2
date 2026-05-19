@@ -36,7 +36,6 @@ use tokio::{
     time::Instant,
 };
 
-use super::DeleteOnEmptyEntry;
 use crate::{
     backend::{
         append,
@@ -47,7 +46,7 @@ use crate::{
             DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
             StreamDeletionPendingError, StreamerMissingInActionError,
         },
-        kv,
+        kv::{self, stream_doe_deadline::DeleteOnEmptyEntry},
     },
     metrics,
     stream_id::StreamId,

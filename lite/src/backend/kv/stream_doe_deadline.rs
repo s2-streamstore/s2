@@ -8,6 +8,12 @@ use crate::stream_id::StreamId;
 const KEY_LEN: usize = 1 + 4 + StreamId::LEN;
 const VALUE_LEN: usize = 8;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::backend) struct DeleteOnEmptyEntry {
+    pub deadline: TimestampSecs,
+    pub min_age: Duration,
+}
+
 pub fn ser_key(deadline: TimestampSecs, stream_id: StreamId) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
     buf.put_u8(KeyType::StreamDeleteOnEmptyDeadline as u8);
