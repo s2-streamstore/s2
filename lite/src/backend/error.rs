@@ -374,26 +374,6 @@ impl From<slatedb::Error> for DeleteStreamError {
     }
 }
 
-impl From<AppendErrorInternal> for DeleteStreamError {
-    fn from(err: AppendErrorInternal) -> Self {
-        match err {
-            AppendErrorInternal::Storage(e) => Self::Storage(e),
-            AppendErrorInternal::StreamerMissingInActionError(e) => {
-                Self::StreamerMissingInActionError(e)
-            }
-            AppendErrorInternal::RequestDroppedError(e) => Self::RequestDroppedError(e),
-            AppendErrorInternal::StreamDeletionPending(_) => {
-                unreachable!("stream deletion pending handled before delete error conversion")
-            }
-            AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
-            AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-            AppendErrorInternal::MaxSeqNum(_) => {
-                unreachable!("terminal append is plaintext command record")
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BasinDeletionError {
     #[error(transparent)]

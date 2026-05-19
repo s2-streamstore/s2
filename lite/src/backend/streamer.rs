@@ -504,7 +504,22 @@ impl Streamer {
             let result = match append_reply_rx.await {
                 Ok(Ok(_)) => Ok(true),
                 Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => Ok(true),
-                Ok(Err(err)) => Err(err.into()),
+                Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
+                Ok(Err(AppendErrorInternal::StreamerMissingInActionError(e))) => {
+                    Err(DeleteStreamError::StreamerMissingInActionError(e))
+                }
+                Ok(Err(AppendErrorInternal::RequestDroppedError(e))) => {
+                    Err(DeleteStreamError::RequestDroppedError(e))
+                }
+                Ok(Err(AppendErrorInternal::ConditionFailed(_))) => {
+                    unreachable!("unconditional write")
+                }
+                Ok(Err(AppendErrorInternal::TimestampMissing(_))) => {
+                    unreachable!("Timestamp::MAX used")
+                }
+                Ok(Err(AppendErrorInternal::MaxSeqNum(_))) => {
+                    unreachable!("terminal append is plaintext command record")
+                }
                 Err(_) => Err(DeleteStreamError::StreamerMissingInActionError(
                     StreamerMissingInActionError,
                 )),
