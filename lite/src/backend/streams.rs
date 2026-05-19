@@ -391,7 +391,6 @@ impl Backend {
             txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
             txn.commit().await?;
         }
-
         Ok(())
     }
 }
