@@ -817,7 +817,7 @@ impl StreamerClient {
         reply_rx.await.map_err(|_| StreamerMissingInActionError)
     }
 
-    pub(super) async fn append_permit(
+    async fn append_permit(
         &self,
         input: StoredAppendInput,
     ) -> Result<AppendPermit<'_>, StreamerMissingInActionError> {
