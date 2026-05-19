@@ -29,9 +29,9 @@ use s2_api::v1::{
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
 };
-use s2_common::{
-    encryption::S2_ENCRYPTION_KEY_HEADER, types::resources::PROVISION_RESULT_HEADER,
-};
+use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
+#[cfg(feature = "_hidden")]
+use s2_common::types::resources::PROVISION_RESULT_HEADER;
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
@@ -930,7 +930,6 @@ impl BaseClient {
             .compression(self.compression)
     }
 
-    #[cfg(feature = "_hidden")]
     pub fn put(&self, url: Url) -> client::RequestBuilder {
         client::RequestBuilder::put(url)
             .timeout(self.request_timeout)

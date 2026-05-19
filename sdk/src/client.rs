@@ -242,7 +242,6 @@ impl RequestBuilder {
         Self::new(Method::PATCH, url)
     }
 
-    #[cfg(feature = "_hidden")]
     pub fn put(url: Url) -> Self {
         Self::new(Method::PUT, url)
     }

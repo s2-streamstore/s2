@@ -11,11 +11,12 @@ use s2_sdk::{
         BasinReconfiguration, CommandRecord, CreateBasinInput, CreateStreamInput, DeleteBasinInput,
         DeleteStreamInput, EncryptionKey, FencingToken, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
-        ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListStreamsInput, MeteredBytes, Metric, ReadBatch, ReadFrom, ReadInput, ReadLimits,
-        ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime,
-        SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition, StreamReconfiguration,
-        Streaming, TimeRange, TimeRangeAndInterval,
+        ListAllAccessTokensInput, ListAllBasinsInput, ListAllScopesInput, ListAllStreamsInput,
+        ListBasinsInput, ListScopesInput, ListStreamsInput, MeteredBytes, Metric, ReadBatch,
+        ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput,
+        ReconfigureStreamInput, S2DateTime, ScopeInfo, ScopeName, SequencedRecord, StreamInfo,
+        StreamMetricSet, StreamPosition, StreamReconfiguration, Streaming, TimeRange,
+        TimeRangeAndInterval,
     },
 };
 
@@ -35,8 +36,8 @@ use crate::{
     cli::{
         CreateBasinArgs, CreateStreamArgs, FenceArgs, GetAccountMetricsArgs, GetBasinMetricsArgs,
         GetStreamMetricsArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
-        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs,
-        TimeRangeArgs, TrimArgs,
+        ListScopesArgs, ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs,
+        TailArgs, TimeRangeArgs, TrimArgs,
     },
     error::{CliError, OpKind},
     types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
@@ -241,6 +242,68 @@ pub async fn revoke_access_token(s2: &S2, id: AccessTokenId) -> Result<(), CliEr
     s2.revoke_access_token(id)
         .await
         .map_err(|e| CliError::op(OpKind::RevokeAccessToken, e))
+}
+
+/// List scopes, returning items and whether there are more.
+pub async fn list_scopes(
+    s2: &S2,
+    args: ListScopesArgs,
+) -> Result<(Vec<ScopeInfo>, bool), CliError> {
+    let ListScopesArgs {
+        prefix,
+        start_after,
+        limit,
+        no_auto_paginate,
+    } = args;
+
+    if no_auto_paginate {
+        let mut input = ListScopesInput::new();
+        if let Some(p) = prefix {
+            input = input.with_prefix(p);
+        }
+        if let Some(s) = start_after {
+            input = input.with_start_after(s);
+        }
+        if let Some(l) = limit {
+            input = input.with_limit(l);
+        }
+
+        let page = s2
+            .list_scopes(input)
+            .await
+            .map_err(|e| CliError::op(OpKind::ListScopes, e))?;
+
+        Ok((page.values, page.has_more))
+    } else {
+        let mut input = ListAllScopesInput::new();
+        if let Some(p) = prefix {
+            input = input.with_prefix(p);
+        }
+        if let Some(s) = start_after {
+            input = input.with_start_after(s);
+        }
+
+        let items: Vec<_> = s2
+            .list_all_scopes(input)
+            .take(limit.unwrap_or(usize::MAX))
+            .try_collect()
+            .await
+            .map_err(|e| CliError::op(OpKind::ListScopes, e))?;
+
+        Ok((items, false))
+    }
+}
+
+pub async fn get_default_scope(s2: &S2) -> Result<ScopeInfo, CliError> {
+    s2.get_default_scope()
+        .await
+        .map_err(|e| CliError::op(OpKind::GetDefaultScope, e))
+}
+
+pub async fn set_default_scope(s2: &S2, scope: ScopeName) -> Result<ScopeInfo, CliError> {
+    s2.set_default_scope(scope)
+        .await
+        .map_err(|e| CliError::op(OpKind::SetDefaultScope, e))
 }
 
 pub async fn get_account_metrics(

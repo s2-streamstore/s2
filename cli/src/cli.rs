@@ -3,8 +3,8 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamNamePrefix,
-    StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, ScopeNamePrefix,
+    ScopeNameStartAfter, StreamNamePrefix, StreamNameStartAfter,
 };
 
 use crate::{
@@ -86,6 +86,18 @@ pub enum Command {
     RevokeAccessToken {
         /// ID of the access token to revoke.
         id: AccessTokenId,
+    },
+
+    /// List scopes.
+    ListScopes(ListScopesArgs),
+
+    /// Get the default scope.
+    GetDefaultScope,
+
+    /// Set the default scope.
+    SetDefaultScope {
+        /// Scope name to make the default.
+        scope: ScopeName,
     },
 
     /// Get account metrics.
@@ -308,6 +320,26 @@ pub struct ListAccessTokensArgs {
     pub limit: Option<usize>,
 
     /// Returns only a single page of access tokens instead of auto-paginating.
+    #[arg(long, default_value_t = false)]
+    pub no_auto_paginate: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ListScopesArgs {
+    /// List scopes that begin with this prefix.
+    #[arg(short = 'p', long)]
+    pub prefix: Option<ScopeNamePrefix>,
+
+    /// Only return scopes that lexicographically start after this scope name.
+    #[arg(short = 's', long)]
+    pub start_after: Option<ScopeNameStartAfter>,
+
+    /// Limit the number of scopes to return. Acts as page size (max 1000) when using
+    /// --no-auto-paginate.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+
+    /// Returns only a single page of scopes instead of auto-paginating.
     #[arg(long, default_value_t = false)]
     pub no_auto_paginate: bool,
 }

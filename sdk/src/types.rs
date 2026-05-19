@@ -1585,8 +1585,6 @@ pub struct ScopeInfo {
     pub name: ScopeName,
     /// Whether the scope is publicly shared.
     pub is_public: bool,
-    /// Scope description.
-    pub description: Option<String>,
 }
 
 impl From<api::scope::ScopeInfo> for ScopeInfo {
@@ -1594,7 +1592,6 @@ impl From<api::scope::ScopeInfo> for ScopeInfo {
         Self {
             name: value.name,
             is_public: value.is_public,
-            description: value.description,
         }
     }
 }

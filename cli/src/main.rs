@@ -289,6 +289,30 @@ async fn run() -> Result<(), CliError> {
             );
         }
 
+        Command::ListScopes(args) => {
+            let (scopes, _) = ops::list_scopes(&s2, args).await?;
+            for scope_info in scopes {
+                print_scope_listing(scope_info.name.to_string(), scope_info.is_public);
+            }
+        }
+
+        Command::GetDefaultScope => {
+            let scope = ops::get_default_scope(&s2).await?;
+            print_scope_details(scope.name.to_string(), scope.is_public);
+        }
+
+        Command::SetDefaultScope { scope } => {
+            let scope_name = scope.to_string();
+            let scope = ops::set_default_scope(&s2, scope).await?;
+            eprintln!(
+                "{}",
+                format!("✓ Default scope set to '{}'", scope_name)
+                    .green()
+                    .bold()
+            );
+            print_scope_details(scope.name.to_string(), scope.is_public);
+        }
+
         Command::GetAccountMetrics(args) => {
             let metrics = ops::get_account_metrics(&s2, args).await?;
             print_metrics(&metrics);
@@ -648,6 +672,24 @@ fn print_basin_listing(name: String, scope: Option<&str>, is_deleting: bool) {
         (Some(scope), false) => println!("{} {}", name, scope),
         (None, true) => println!("{} {}", name, deletion_marker()),
         (None, false) => println!("{name}"),
+    }
+}
+
+fn print_scope_listing(name: String, is_public: bool) {
+    let visibility = format_scope_visibility(is_public);
+    println!("{name} {visibility}");
+}
+
+fn print_scope_details(name: String, is_public: bool) {
+    let visibility = format_scope_visibility(is_public);
+    println!("{name} {visibility}");
+}
+
+fn format_scope_visibility(is_public: bool) -> colored::ColoredString {
+    if is_public {
+        "(public)".green()
+    } else {
+        "(dedicated)".yellow()
     }
 }
 
