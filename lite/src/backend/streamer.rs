@@ -468,15 +468,15 @@ impl Streamer {
                 let msg_tx = self.msg_tx.clone();
                 tokio::spawn(async move {
                     let has_records = stream_has_records(&db, stream_id).await;
-                    let msg = Message::TerminalTrimRecordScanComplete {
+                    let msg = Message::DeleteOnEmptyCheckResult {
                         stable_pos,
                         last_write_cutoff,
                         has_records,
                         reply_tx,
                     };
                     if let Err(err) = msg_tx.send(msg) {
-                        let Message::TerminalTrimRecordScanComplete { reply_tx, .. } = err.0 else {
-                            unreachable!("sent terminal trim record scan completion message")
+                        let Message::DeleteOnEmptyCheckResult { reply_tx, .. } = err.0 else {
+                            unreachable!("sent delete-on-empty check result message")
                         };
                         let _ =
                             reply_tx.send(Err(DeleteStreamError::StreamerMissingInActionError(
@@ -488,7 +488,7 @@ impl Streamer {
         }
     }
 
-    fn handle_terminal_trim_record_scan_complete(
+    fn handle_doe_check_result(
         &mut self,
         stable_pos: StreamPosition,
         last_write_cutoff: kv::timestamp::TimestampSecs,
@@ -662,13 +662,13 @@ impl Streamer {
                         } => {
                             self.handle_terminal_trim(condition, reply_tx);
                         }
-                        Message::TerminalTrimRecordScanComplete {
+                        Message::DeleteOnEmptyCheckResult {
                             stable_pos,
                             last_write_cutoff,
                             has_records,
                             reply_tx,
                         } => {
-                            self.handle_terminal_trim_record_scan_complete(
+                            self.handle_doe_check_result(
                                 stable_pos,
                                 last_write_cutoff,
                                 has_records,
@@ -731,7 +731,7 @@ enum Message {
         condition: TerminalTrimCondition,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     },
-    TerminalTrimRecordScanComplete {
+    DeleteOnEmptyCheckResult {
         stable_pos: StreamPosition,
         last_write_cutoff: kv::timestamp::TimestampSecs,
         has_records: Result<bool, StorageError>,
