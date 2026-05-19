@@ -109,10 +109,8 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let (tail_pos, tail_write_timestamp) = persisted_tail.unwrap_or((
-            StreamPosition::MIN,
-            kv::timestamp::TimestampSecs::from_secs(0),
-        ));
+        let (tail_pos, tail_write_timestamp) =
+            persisted_tail.unwrap_or((StreamPosition::MIN, kv::timestamp::TimestampSecs::ZERO));
 
         self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
             .await?;

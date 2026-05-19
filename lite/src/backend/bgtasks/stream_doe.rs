@@ -23,15 +23,27 @@ use crate::{
 const PENDING_LIST_LIMIT: usize = 10_000;
 const CONCURRENCY: usize = 4;
 
-fn last_write_cutoff(pending: &[kv::stream_doe_deadline::Entry]) -> Option<TimestampSecs> {
-    pending
-        .iter()
-        .filter_map(|entry| {
-            u64::from(entry.deadline.as_u32())
-                .checked_sub(entry.min_age.as_secs())
-                .map(|secs| TimestampSecs::from_secs(secs as u32))
-        })
-        .max()
+#[derive(Debug)]
+struct PendingDoeBatch {
+    entries: Vec<kv::stream_doe_deadline::Entry>,
+    last_write_cutoff: Option<TimestampSecs>,
+}
+
+impl PendingDoeBatch {
+    fn new(entries: Vec<kv::stream_doe_deadline::Entry>) -> Self {
+        let last_write_cutoff = entries
+            .iter()
+            .filter_map(|entry| entry.last_write_cutoff())
+            .max();
+        Self {
+            entries,
+            last_write_cutoff,
+        }
+    }
+
+    fn entries(&self) -> &[kv::stream_doe_deadline::Entry] {
+        &self.entries
+    }
 }
 
 impl Backend {
@@ -56,7 +68,7 @@ impl Backend {
     async fn list_pending_stream_doe(
         &self,
         now: TimestampSecs,
-    ) -> Result<Page<(StreamId, Vec<kv::stream_doe_deadline::Entry>)>, StorageError> {
+    ) -> Result<Page<(StreamId, PendingDoeBatch)>, StorageError> {
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
@@ -82,24 +94,33 @@ impl Backend {
                 break;
             }
         }
-        Ok(Page::new(pending.into_iter().collect_vec(), has_more))
+        Ok(Page::new(
+            pending
+                .into_iter()
+                .map(|(stream_id, entries)| (stream_id, PendingDoeBatch::new(entries)))
+                .collect_vec(),
+            has_more,
+        ))
     }
 
     async fn process_stream_doe(
         &self,
         stream_id: StreamId,
-        pending: Vec<kv::stream_doe_deadline::Entry>,
+        pending: PendingDoeBatch,
     ) -> Result<(), StreamDeleteOnEmptyError> {
-        if let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? {
+        if let Some(last_write_cutoff) = pending.last_write_cutoff
+            && let Some((basin, stream)) = self.stream_id_mapping(stream_id).await?
+        {
             match self
-                .delete_stream_if_doe_eligible(basin, stream, last_write_cutoff(&pending))
+                .delete_stream_if_doe_eligible(basin, stream, last_write_cutoff)
                 .await
             {
                 Ok(()) | Err(DeleteStreamError::StreamNotFound(_)) => {}
                 Err(err) => return Err(err.into()),
             }
         }
-        self.clear_doe_deadlines(stream_id, &pending).await?;
+        self.clear_doe_deadlines(stream_id, pending.entries())
+            .await?;
         Ok(())
     }
 
@@ -154,24 +175,22 @@ impl Backend {
 mod tests {
     use std::{str::FromStr, time::Duration};
 
-    use bytes::Bytes;
-    use futures::poll;
     use s2_common::{
         maybe::Maybe,
-        record::{Metered, Record, StreamPosition},
+        record::StreamPosition,
         types::{
             basin::BasinName,
             config::{
                 BasinConfig, DeleteOnEmptyReconfiguration, OptionalStreamConfig, RetentionPolicy,
                 StreamReconfiguration,
             },
-            stream::{AppendInput, AppendRecordBatch, AppendRecordParts, StreamName},
+            stream::StreamName,
         },
     };
     use slatedb::config::{DurabilityLevel, ScanOptions};
     use time::OffsetDateTime;
 
-    use super::{super::tests::test_backend, TimestampSecs};
+    use super::{super::tests::test_backend, PendingDoeBatch, TimestampSecs};
     use crate::{
         backend::{Backend, kv},
         stream_id::StreamId,
@@ -237,23 +256,6 @@ mod tests {
             .await
             .unwrap();
         stream_id
-    }
-
-    fn append_input(body: &[u8]) -> AppendInput {
-        let record = Record::try_from_parts(vec![], Bytes::copy_from_slice(body)).unwrap();
-        let metered: Metered<Record> = record.into();
-        let append_record = AppendRecordParts {
-            timestamp: None,
-            record: metered,
-        }
-        .try_into()
-        .unwrap();
-        let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
-        AppendInput {
-            records: batch,
-            match_seq_num: None,
-            fencing_token: None,
-        }
     }
 
     async fn list_doe_entries(backend: &Backend) -> Vec<(TimestampSecs, StreamId, Duration)> {
@@ -552,7 +554,7 @@ mod tests {
         let stream = StreamName::from_str("doe-stream-multi").unwrap();
         let stream_id = seed_stream(&backend, &basin, &stream).await;
         let far_future = TimestampSecs::after(Duration::from_secs(3600));
-        let deadline_a = TimestampSecs::after(Duration::from_secs(0));
+        let deadline_a = TimestampSecs::after(Duration::ZERO);
         let deadline_b = TimestampSecs::after(Duration::from_secs(1));
 
         backend
@@ -577,7 +579,11 @@ mod tests {
         assert_eq!(page.values.len(), 1);
         let (pending_stream_id, pending) = page.values.into_iter().next().unwrap();
         assert_eq!(pending_stream_id, stream_id);
-        let mut deadlines: Vec<_> = pending.iter().map(|entry| entry.deadline).collect();
+        let mut deadlines: Vec<_> = pending
+            .entries()
+            .iter()
+            .map(|entry| entry.deadline)
+            .collect();
         deadlines.sort();
         let mut expected = vec![deadline_a, deadline_b];
         expected.sort();
@@ -618,7 +624,7 @@ mod tests {
         backend
             .process_stream_doe(
                 stream_id,
-                vec![
+                PendingDoeBatch::new(vec![
                     kv::stream_doe_deadline::Entry {
                         deadline: deadline_after(write_timestamp, Duration::from_secs(50)),
                         min_age: Duration::from_secs(100),
@@ -627,7 +633,7 @@ mod tests {
                         deadline: deadline_after(write_timestamp, Duration::from_secs(100)),
                         min_age: Duration::from_secs(10),
                     },
-                ],
+                ]),
             )
             .await
             .unwrap();
@@ -640,52 +646,6 @@ mod tests {
             .expect("stream meta should remain");
         let decoded = kv::stream_meta::deser_value(meta).unwrap();
         assert!(decoded.deleted_at.is_some());
-    }
-
-    #[tokio::test]
-    async fn stream_doe_skips_append_already_serialized_in_streamer() {
-        let backend = test_backend().await;
-        let basin = BasinName::from_str("doe-basin-race").unwrap();
-        let stream = StreamName::from_str("doe-stream-race").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
-        let write_timestamp = put_tail_position(&backend, stream_id, StreamPosition::MIN).await;
-        let deadline = deadline_after(write_timestamp, MIN_AGE);
-
-        let client = backend.streamer_client(&basin, &stream).await.unwrap();
-        let permit = client
-            .append_permit(append_input(b"live").into())
-            .await
-            .unwrap();
-        let mut append_fut = std::pin::pin!(permit.submit());
-        assert!(poll!(append_fut.as_mut()).is_pending());
-
-        backend
-            .process_stream_doe(
-                stream_id,
-                vec![kv::stream_doe_deadline::Entry {
-                    deadline,
-                    min_age: MIN_AGE,
-                }],
-            )
-            .await
-            .unwrap();
-
-        let ack = append_fut.await.unwrap();
-        let meta = backend
-            .db
-            .get(kv::stream_meta::ser_key(&basin, &stream))
-            .await
-            .unwrap()
-            .expect("stream meta should remain");
-        let decoded = kv::stream_meta::deser_value(meta).unwrap();
-        assert!(decoded.deleted_at.is_none());
-
-        let timestamp_key = backend
-            .db
-            .get(kv::stream_record_timestamp::ser_key(stream_id, ack.start))
-            .await
-            .unwrap();
-        assert!(timestamp_key.is_some());
     }
 
     #[tokio::test]

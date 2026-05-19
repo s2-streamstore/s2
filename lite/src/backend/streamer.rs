@@ -201,7 +201,7 @@ impl GuardedStreamerClient {
     pub(super) async fn terminal_trim(
         &self,
         condition: TerminalTrimCondition,
-    ) -> Result<bool, DeleteStreamError> {
+    ) -> Result<TerminalTrimOutcome, DeleteStreamError> {
         self.client.terminal_trim(condition).await
     }
 }
@@ -445,17 +445,14 @@ impl Streamer {
         }
     }
 
-    fn delete_on_empty_is_eligible(
-        &self,
-        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
-    ) -> bool {
-        last_write_cutoff.is_some_and(|cutoff| self.last_write_timestamp <= cutoff)
+    fn delete_on_empty_is_eligible(&self, last_write_cutoff: kv::timestamp::TimestampSecs) -> bool {
+        self.last_write_timestamp <= last_write_cutoff
     }
 
     fn handle_terminal_trim(
         &mut self,
         condition: TerminalTrimCondition,
-        reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
+        reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     ) {
         match condition {
             TerminalTrimCondition::Always => {
@@ -465,7 +462,7 @@ impl Streamer {
                 if !self.delete_on_empty_is_eligible(last_write_cutoff)
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                 {
-                    let _ = reply_tx.send(Ok(false));
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::NotEligible));
                     return;
                 }
 
@@ -475,15 +472,15 @@ impl Streamer {
                 let msg_tx = self.msg_tx.clone();
                 tokio::spawn(async move {
                     let has_records = stream_has_records(&db, stream_id).await;
-                    let msg = Message::TerminalTrimRecordScan {
+                    let msg = Message::TerminalTrimRecordScanComplete {
                         stable_pos,
                         last_write_cutoff,
                         has_records,
                         reply_tx,
                     };
                     if let Err(err) = msg_tx.send(msg) {
-                        let Message::TerminalTrimRecordScan { reply_tx, .. } = err.0 else {
-                            unreachable!("sent terminal trim record scan message")
+                        let Message::TerminalTrimRecordScanComplete { reply_tx, .. } = err.0 else {
+                            unreachable!("sent terminal trim record scan completion message")
                         };
                         let _ =
                             reply_tx.send(Err(DeleteStreamError::StreamerMissingInActionError(
@@ -498,22 +495,22 @@ impl Streamer {
     fn handle_terminal_trim_record_scan(
         &mut self,
         stable_pos: StreamPosition,
-        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
+        last_write_cutoff: kv::timestamp::TimestampSecs,
         has_records: Result<bool, StorageError>,
-        reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
+        reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     ) {
         match has_records {
             Ok(true) => {
-                let _ = reply_tx.send(Ok(false));
+                let _ = reply_tx.send(Ok(TerminalTrimOutcome::NotEligible));
             }
             Ok(false) => {
                 if self.trim_point.state.end == SeqNum::MAX {
-                    let _ = reply_tx.send(Ok(true));
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::MarkStreamDeleted));
                 } else if self.stable_pos != stable_pos
                     || self.next_assignable_pos() != stable_pos
                     || !self.delete_on_empty_is_eligible(last_write_cutoff)
                 {
-                    let _ = reply_tx.send(Ok(false));
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::NotEligible));
                 } else {
                     self.append_terminal_trim(reply_tx);
                 }
@@ -524,7 +521,10 @@ impl Streamer {
         }
     }
 
-    fn append_terminal_trim(&mut self, reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>) {
+    fn append_terminal_trim(
+        &mut self,
+        reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
+    ) {
         let (append_reply_tx, append_reply_rx) = oneshot::channel();
         self.handle_append(
             terminal_trim_input(),
@@ -534,8 +534,10 @@ impl Streamer {
         );
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
-                Ok(Ok(_)) => Ok(true),
-                Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => Ok(true),
+                Ok(Ok(_)) => Ok(TerminalTrimOutcome::MarkStreamDeleted),
+                Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => {
+                    Ok(TerminalTrimOutcome::MarkStreamDeleted)
+                }
                 Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
                 Ok(Err(AppendErrorInternal::StreamerMissingInActionError(e))) => {
                     Err(DeleteStreamError::StreamerMissingInActionError(e))
@@ -664,7 +666,7 @@ impl Streamer {
                         } => {
                             self.handle_terminal_trim(condition, reply_tx);
                         }
-                        Message::TerminalTrimRecordScan {
+                        Message::TerminalTrimRecordScanComplete {
                             stable_pos,
                             last_write_cutoff,
                             has_records,
@@ -731,13 +733,13 @@ enum Message {
     },
     TerminalTrim {
         condition: TerminalTrimCondition,
-        reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
+        reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     },
-    TerminalTrimRecordScan {
+    TerminalTrimRecordScanComplete {
         stable_pos: StreamPosition,
-        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
+        last_write_cutoff: kv::timestamp::TimestampSecs,
         has_records: Result<bool, StorageError>,
-        reply_tx: oneshot::Sender<Result<bool, DeleteStreamError>>,
+        reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     },
     Follow {
         start_seq_num: SeqNum,
@@ -757,8 +759,14 @@ enum Message {
 pub(super) enum TerminalTrimCondition {
     Always,
     DeleteOnEmpty {
-        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
+        last_write_cutoff: kv::timestamp::TimestampSecs,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TerminalTrimOutcome {
+    MarkStreamDeleted,
+    NotEligible,
 }
 
 #[derive(Debug, Clone)]
@@ -845,7 +853,7 @@ impl StreamerClient {
     async fn terminal_trim(
         &self,
         condition: TerminalTrimCondition,
-    ) -> Result<bool, DeleteStreamError> {
+    ) -> Result<TerminalTrimOutcome, DeleteStreamError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(Message::TerminalTrim {
@@ -1423,7 +1431,7 @@ mod tests {
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
             config: StreamConfig::default(),
-            last_write_timestamp: kv::timestamp::TimestampSecs::from_secs(0),
+            last_write_timestamp: kv::timestamp::TimestampSecs::ZERO,
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,
@@ -1517,6 +1525,32 @@ mod tests {
         };
 
         run_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_on_empty_terminal_trim_skips_pending_append() {
+        let mut streamer = test_streamer().await;
+        let (append_tx, mut append_rx) = oneshot::channel();
+        streamer.handle_append(append_input(b"live"), None, append_tx, AppendType::Regular);
+        assert_eq!(streamer.db_writes_pending.len(), 1);
+        assert!(matches!(
+            append_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let (trim_tx, trim_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                last_write_cutoff: kv::timestamp::TimestampSecs::MAX,
+            },
+            trim_tx,
+        );
+
+        assert_eq!(
+            trim_rx.await.expect("terminal trim reply").unwrap(),
+            TerminalTrimOutcome::NotEligible
+        );
+        assert_eq!(streamer.db_writes_pending.len(), 1);
     }
 
     #[tokio::test]

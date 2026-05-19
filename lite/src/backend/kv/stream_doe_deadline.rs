@@ -14,6 +14,12 @@ pub(in crate::backend) struct Entry {
     pub min_age: Duration,
 }
 
+impl Entry {
+    pub fn last_write_cutoff(self) -> Option<TimestampSecs> {
+        self.deadline.checked_sub_duration(self.min_age)
+    }
+}
+
 pub fn ser_key(deadline: TimestampSecs, stream_id: StreamId) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
     buf.put_u8(KeyType::StreamDeleteOnEmptyDeadline as u8);

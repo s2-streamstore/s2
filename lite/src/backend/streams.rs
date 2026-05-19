@@ -18,7 +18,7 @@ use tracing::instrument;
 use super::{
     Backend,
     store::db_txn_get,
-    streamer::{TerminalTrimCondition, doe_arm_delay},
+    streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
 };
 use crate::{
     backend::{
@@ -333,46 +333,46 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
-        match self.streamer_client_guarded(&basin, &stream).await {
-            Ok(client) => {
-                client.terminal_trim(TerminalTrimCondition::Always).await?;
-            }
-            Err(StreamerError::Storage(e)) => {
-                return Err(DeleteStreamError::Storage(e));
-            }
-            Err(StreamerError::StreamNotFound(e)) => {
-                return Err(DeleteStreamError::StreamNotFound(e));
-            }
-            Err(StreamerError::StreamDeletionPending(_)) => {}
-        }
-
-        self.mark_stream_deleted(basin, stream).await
+        self.delete_stream_with_terminal_trim(basin, stream, TerminalTrimCondition::Always)
+            .await?;
+        Ok(())
     }
 
     pub(super) async fn delete_stream_if_doe_eligible(
         &self,
         basin: BasinName,
         stream: StreamName,
-        last_write_cutoff: Option<kv::timestamp::TimestampSecs>,
+        last_write_cutoff: kv::timestamp::TimestampSecs,
     ) -> Result<(), DeleteStreamError> {
-        let should_mark_deleted = match self.streamer_client_guarded(&basin, &stream).await {
-            Ok(client) => {
-                client
-                    .terminal_trim(TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff })
-                    .await?
-            }
+        self.delete_stream_with_terminal_trim(
+            basin,
+            stream,
+            TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_stream_with_terminal_trim(
+        &self,
+        basin: BasinName,
+        stream: StreamName,
+        condition: TerminalTrimCondition,
+    ) -> Result<TerminalTrimOutcome, DeleteStreamError> {
+        let outcome = match self.streamer_client_guarded(&basin, &stream).await {
+            Ok(client) => client.terminal_trim(condition).await?,
             Err(StreamerError::Storage(e)) => {
                 return Err(DeleteStreamError::Storage(e));
             }
             Err(StreamerError::StreamNotFound(e)) => {
                 return Err(DeleteStreamError::StreamNotFound(e));
             }
-            Err(StreamerError::StreamDeletionPending(_)) => true,
+            Err(StreamerError::StreamDeletionPending(_)) => TerminalTrimOutcome::MarkStreamDeleted,
         };
-        if should_mark_deleted {
+        if outcome == TerminalTrimOutcome::MarkStreamDeleted {
             self.mark_stream_deleted(basin, stream).await?;
         }
-        Ok(())
+        Ok(outcome)
     }
 
     async fn mark_stream_deleted(
