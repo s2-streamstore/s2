@@ -29,7 +29,7 @@ use s2_common::{
 };
 use slatedb::{
     WriteBatch,
-    config::{DurabilityLevel, PutOptions, ScanOptions, Ttl, WriteOptions},
+    config::{PutOptions, Ttl, WriteOptions},
 };
 use tokio::{
     sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
@@ -896,15 +896,7 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
 
 async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<bool, StorageError> {
     let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
-    // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
-    let scan_opts = ScanOptions {
-        durability_filter: DurabilityLevel::Memory,
-        read_ahead_bytes: 1,
-        cache_blocks: false,
-        max_fetch_tasks: 1,
-        ..Default::default()
-    };
-    let mut it = db.scan_prefix_with_options(prefix, &scan_opts).await?;
+    let mut it = db.scan_prefix(prefix).await?;
     // TODO: post-filtering on TTL, because SL8 0.12+ will stop doing it at query-time.
     Ok(it.next().await?.is_some())
 }
