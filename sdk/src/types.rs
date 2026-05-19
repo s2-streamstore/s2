@@ -903,7 +903,7 @@ pub struct CreateBasinInput {
     pub config: Option<BasinConfig>,
     /// Scope of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
+    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once created.
     pub scope: Option<BasinScope>,
     idempotency_token: String,
 }
@@ -961,7 +961,7 @@ pub struct EnsureBasinInput {
     pub config: Option<BasinConfig>,
     /// Scope of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
+    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once created.
     pub scope: Option<BasinScope>,
 }
 
