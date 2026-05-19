@@ -15,7 +15,7 @@ use crate::{
         Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
         kv::{self, timestamp::TimestampSecs},
-        streamer::doe_arm_delay,
+        streamer::{TerminalTrimCondition, doe_arm_delay},
     },
     stream_id::StreamId,
 };
@@ -112,10 +112,14 @@ impl Backend {
             && let Some((basin, stream)) = self.stream_id_mapping(stream_id).await?
         {
             match self
-                .delete_stream_if_doe_eligible(basin, stream, last_write_cutoff)
+                .delete_stream_with_terminal_trim(
+                    basin,
+                    stream,
+                    TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff },
+                )
                 .await
             {
-                Ok(()) | Err(DeleteStreamError::StreamNotFound(_)) => {}
+                Ok(_) | Err(DeleteStreamError::StreamNotFound(_)) => {}
                 Err(err) => return Err(err.into()),
             }
         }

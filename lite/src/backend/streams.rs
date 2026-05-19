@@ -338,22 +338,7 @@ impl Backend {
         Ok(())
     }
 
-    pub(super) async fn delete_stream_if_doe_eligible(
-        &self,
-        basin: BasinName,
-        stream: StreamName,
-        last_write_cutoff: kv::timestamp::TimestampSecs,
-    ) -> Result<(), DeleteStreamError> {
-        self.delete_stream_with_terminal_trim(
-            basin,
-            stream,
-            TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff },
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn delete_stream_with_terminal_trim(
+    pub(super) async fn delete_stream_with_terminal_trim(
         &self,
         basin: BasinName,
         stream: StreamName,
