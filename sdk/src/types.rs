@@ -487,12 +487,11 @@ impl S2Config {
         }
     }
 
-    /// Set the rustls crypto provider used by the SDK's default TLS connector.
+    /// Use a specific rustls crypto provider for SDK TLS connections.
     ///
-    /// By default, the SDK enables its `rustls-aws-lc-rs` feature and uses the
-    /// `aws-lc-rs` provider. If default features are disabled, the default
-    /// connector falls back to rustls's process-global provider and returns an
-    /// error if one has not been installed.
+    /// With default features enabled, the SDK uses the `aws-lc-rs` provider.
+    /// With default features disabled, the SDK uses rustls's process-global
+    /// provider if one has been installed, or returns an error otherwise.
     ///
     /// Use this when your application needs a specific rustls provider, such as
     /// `ring` or a custom [`RustlsCryptoProvider`]. The corresponding rustls
