@@ -8,8 +8,8 @@ use crate::caps;
 fn validate_location_str(field_name: &str, location: &str) -> Result<(), ValidationError> {
     if location.chars().count() > caps::MAX_LOCATION_NAME_LEN {
         return Err(format!(
-            "location {field_name} must be less than {} characters in length",
-            caps::MAX_LOCATION_NAME_LEN + 1
+            "location {field_name} must be at most {} characters in length",
+            caps::MAX_LOCATION_NAME_LEN
         )
         .into());
     }
