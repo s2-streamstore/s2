@@ -13,7 +13,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, BasinScope, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, LocationName, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StorageClass, StreamConfig, StreamMatcher,
     },
@@ -86,6 +86,18 @@ pub enum Command {
     RevokeAccessToken {
         /// ID of the access token to revoke.
         id: AccessTokenId,
+    },
+
+    /// List locations.
+    ListLocations,
+
+    /// Get the default location.
+    GetDefaultLocation,
+
+    /// Set the default location.
+    SetDefaultLocation {
+        /// Location name to make the default.
+        location: LocationName,
     },
 
     /// Get account metrics.
@@ -263,9 +275,9 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
-    /// Cloud provider and region for the basin.
+    /// Basin location.
     #[arg(long)]
-    pub scope: Option<BasinScope>,
+    pub location: Option<LocationName>,
 
     #[command(flatten)]
     pub config: BasinConfig,

@@ -227,7 +227,11 @@ async fn run() -> Result<(), CliError> {
 
                 let (basins, _) = ops::list_basins(&s2, list_basins_args).await?;
                 for basin_info in basins {
-                    print_listing_uri(basin_info.name.to_string(), basin_info.deleted_at.is_some());
+                    print_basin_listing(
+                        basin_info.name.to_string(),
+                        basin_info.location.as_deref(),
+                        basin_info.deleted_at.is_some(),
+                    );
                 }
             }
         }
@@ -235,7 +239,11 @@ async fn run() -> Result<(), CliError> {
         Command::ListBasins(args) => {
             let (basins, _) = ops::list_basins(&s2, args).await?;
             for basin_info in basins {
-                print_listing_uri(basin_info.name.to_string(), basin_info.deleted_at.is_some());
+                print_basin_listing(
+                    basin_info.name.to_string(),
+                    basin_info.location.as_deref(),
+                    basin_info.deleted_at.is_some(),
+                );
             }
         }
 
@@ -280,6 +288,30 @@ async fn run() -> Result<(), CliError> {
                 "{}",
                 format!("✓ Access token '{}' revoked", id).green().bold()
             );
+        }
+
+        Command::ListLocations => {
+            let locations = ops::list_locations(&s2).await?;
+            for location_info in locations {
+                print_location_listing(location_info.name.to_string(), location_info.is_private);
+            }
+        }
+
+        Command::GetDefaultLocation => {
+            let location = ops::get_default_location(&s2).await?;
+            print_location_listing(location.name.to_string(), location.is_private);
+        }
+
+        Command::SetDefaultLocation { location } => {
+            let location_name = location.to_string();
+            let location = ops::set_default_location(&s2, location).await?;
+            eprintln!(
+                "{}",
+                format!("✓ Default location set to '{}'", location_name)
+                    .green()
+                    .bold()
+            );
+            print_location_listing(location.name.to_string(), location.is_private);
         }
 
         Command::GetAccountMetrics(args) => {
@@ -633,6 +665,31 @@ fn print_listing_uri(uri: String, is_deleting: bool) {
     }
 }
 
+fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) {
+    let name = format_listing_uri(name, is_deleting);
+    let location =
+        location.map(|location| format_listing_location(&format!("({location})"), is_deleting));
+    match (location, is_deleting) {
+        (Some(location), true) => println!("{} {} {}", name, location, deletion_marker()),
+        (Some(location), false) => println!("{} {}", name, location),
+        (None, true) => println!("{} {}", name, deletion_marker()),
+        (None, false) => println!("{name}"),
+    }
+}
+
+fn print_location_listing(name: String, is_private: bool) {
+    let visibility = format_location_visibility(is_private);
+    println!("{name} {visibility}");
+}
+
+fn format_location_visibility(is_private: bool) -> colored::ColoredString {
+    if is_private {
+        "(private)".yellow()
+    } else {
+        "(public)".green()
+    }
+}
+
 fn print_listing_with_created_at(uri: String, created_at: String, is_deleting: bool) {
     let uri = format_listing_uri(uri, is_deleting);
     let created_at = if is_deleting {
@@ -650,6 +707,14 @@ fn print_listing_with_created_at(uri: String, created_at: String, is_deleting: b
 
 fn format_listing_uri(uri: String, is_deleting: bool) -> colored::ColoredString {
     if is_deleting { uri.red() } else { uri.normal() }
+}
+
+fn format_listing_location(location: &str, is_deleting: bool) -> colored::ColoredString {
+    if is_deleting {
+        location.red()
+    } else {
+        location.yellow()
+    }
 }
 
 fn deletion_marker() -> colored::ColoredString {

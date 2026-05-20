@@ -57,7 +57,7 @@ impl Backend {
             let meta = kv::basin_meta::deser_value(kv.value)?;
             basins.push(BasinInfo {
                 name: basin,
-                scope: None,
+                location: None,
                 created_at: meta.created_at,
                 deleted_at: meta.deleted_at,
             });
@@ -92,7 +92,7 @@ impl Backend {
                 {
                     Ok(ProvisionResult::Noop(BasinInfo {
                         name: basin,
-                        scope: None,
+                        location: None,
                         created_at: existing.created_at,
                         deleted_at: None,
                     }))
@@ -141,7 +141,7 @@ impl Backend {
 
         Ok(outcome.map(|meta| BasinInfo {
             name: basin,
-            scope: None,
+            location: None,
             created_at: meta.created_at,
             deleted_at: None,
         }))

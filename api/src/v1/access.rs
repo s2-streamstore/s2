@@ -91,6 +91,12 @@ pub enum Operation {
     BasinMetrics,
     /// Retrieve stream-level metrics.
     StreamMetrics,
+    /// List locations.
+    ListLocations,
+    /// Get the default location.
+    GetDefaultLocation,
+    /// Set the default location.
+    SetDefaultLocation,
 }
 
 impl From<Operation> for types::access::Operation {
@@ -117,6 +123,9 @@ impl From<Operation> for types::access::Operation {
             Operation::AccountMetrics => Self::AccountMetrics,
             Operation::BasinMetrics => Self::BasinMetrics,
             Operation::StreamMetrics => Self::StreamMetrics,
+            Operation::ListLocations => Self::ListLocations,
+            Operation::GetDefaultLocation => Self::GetDefaultLocation,
+            Operation::SetDefaultLocation => Self::SetDefaultLocation,
         }
     }
 }
@@ -146,6 +155,9 @@ impl From<types::access::Operation> for Operation {
             AccountMetrics => Self::AccountMetrics,
             BasinMetrics => Self::BasinMetrics,
             StreamMetrics => Self::StreamMetrics,
+            ListLocations => Self::ListLocations,
+            GetDefaultLocation => Self::GetDefaultLocation,
+            SetDefaultLocation => Self::SetDefaultLocation,
         }
     }
 }

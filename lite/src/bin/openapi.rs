@@ -11,6 +11,7 @@ use s2_lite::handlers::v1::{
         __path_create_basin, __path_delete_basin, __path_ensure_basin, __path_get_basin_config,
         __path_list_basins, __path_reconfigure_basin,
     },
+    locations::{__path_get_default_location, __path_list_locations, __path_set_default_location},
     metrics::{__path_account_metrics, __path_basin_metrics, __path_stream_metrics},
     paths::{self, cloud_endpoints},
     records::{__path_append, __path_check_tail, __path_read},
@@ -46,6 +47,7 @@ use utoipa::{
         (name = paths::metrics::TAG, description = paths::metrics::DESCRIPTION),
         (name = paths::basins::TAG, description = paths::basins::DESCRIPTION),
         (name = paths::access_tokens::TAG, description = paths::access_tokens::DESCRIPTION),
+        (name = paths::locations::TAG, description = paths::locations::DESCRIPTION),
         (name = paths::streams::TAG, description = paths::streams::DESCRIPTION),
         (name = paths::streams::records::TAG, description = paths::streams::records::DESCRIPTION),
     ),
@@ -72,6 +74,10 @@ use utoipa::{
         list_access_tokens,
         issue_access_token,
         revoke_access_token,
+        // Location ops
+        list_locations,
+        get_default_location,
+        set_default_location,
         // Metrics ops
         account_metrics,
         basin_metrics,

@@ -1,6 +1,7 @@
 pub mod access;
 pub mod basin;
 pub mod config;
+pub mod location;
 pub mod metrics;
 pub mod resources;
 pub mod stream;

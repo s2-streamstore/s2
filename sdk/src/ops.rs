@@ -12,9 +12,9 @@ use crate::{
         EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListStreamsInput, Metric, Page, ReadBatch, ReadInput, ReconfigureBasinInput,
-        ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo, StreamName,
-        StreamPosition, Streaming,
+        ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
+        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo,
+        StreamName, StreamPosition, Streaming,
     },
 };
 
@@ -209,6 +209,25 @@ impl S2 {
     /// Revoke an access token.
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), S2Error> {
         Ok(self.client.revoke_access_token(id).await?)
+    }
+
+    /// List locations.
+    pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, S2Error> {
+        let response = self.client.list_locations().await?;
+        Ok(response.into_iter().map(Into::into).collect())
+    }
+
+    /// Get the default location.
+    pub async fn get_default_location(&self) -> Result<LocationInfo, S2Error> {
+        Ok(self.client.get_default_location().await?.into())
+    }
+
+    /// Set the default location.
+    pub async fn set_default_location(
+        &self,
+        location: LocationName,
+    ) -> Result<LocationInfo, S2Error> {
+        Ok(self.client.set_default_location(location).await?.into())
     }
 
     /// Get account metrics.
