@@ -61,26 +61,6 @@ The Rust SDK provides ergonomic interface and utilities to interact with the
     }
    ```
 
-## TLS crypto provider
-
-The SDK enables the `rustls-aws-lc-rs` feature by default and uses rustls's
-`aws-lc-rs` crypto provider without installing a process-global rustls provider.
-Applications can opt out of that dependency with `default-features = false`.
-They can then enable `rustls-ring`, pass a custom provider, or install a
-process-global rustls provider before constructing an SDK client:
-
-```rust
-use s2_sdk::{S2, types::S2Config};
-
-let config = S2Config::new("<YOUR_ACCESS_TOKEN>")
-    .with_rustls_aws_lc_rs_crypto_provider();
-let s2 = S2::new(config)?;
-```
-
-Use `default-features = false` plus `rustls-ring` to choose `ring` without
-pulling in `aws-lc-rs`. For custom providers, use
-`S2Config::with_rustls_crypto_provider(...)`.
-
 ## Examples
 
 The [`examples`](./examples) directory in this repository contains a variety of

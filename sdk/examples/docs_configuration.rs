@@ -52,15 +52,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Created client with timeout config: {:?}", client);
     }
 
-    // Example: Explicit rustls crypto provider
-    #[cfg(feature = "rustls-aws-lc-rs")]
-    {
-        let access_token = std::env::var("S2_ACCESS_TOKEN").unwrap_or_else(|_| "demo".into());
-        // ANCHOR: rustls-crypto-provider
-        let client = S2::new(S2Config::new(access_token).with_rustls_aws_lc_rs_crypto_provider())?;
-        // ANCHOR_END: rustls-crypto-provider
-        println!("Created client with rustls crypto provider: {:?}", client);
-    }
-
     Ok(())
 }
