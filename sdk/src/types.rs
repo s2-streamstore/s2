@@ -876,7 +876,7 @@ pub struct CreateBasinInput {
     pub config: Option<BasinConfig>,
     /// Location of the basin.
     ///
-    /// If omitted when creating, uses the default location for the service.
+    /// If omitted when creating, uses the default location for the account.
     pub location: Option<LocationName>,
     idempotency_token: String,
 }
@@ -941,7 +941,7 @@ pub struct EnsureBasinInput {
     pub config: Option<BasinConfig>,
     /// Location of the basin.
     ///
-    /// If omitted when creating, uses the default location for the service. Cannot be changed once
+    /// If omitted when creating, uses the default location for the account. Cannot be changed once
     /// set.
     pub location: Option<LocationName>,
 }

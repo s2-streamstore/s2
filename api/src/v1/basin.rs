@@ -139,7 +139,7 @@ pub struct EnsureBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin location.
-    /// If omitted when creating, uses the default location for the service.
+    /// If omitted when creating, uses the default location for the account.
     /// This cannot be changed.
     pub location: Option<LocationName>,
 }
@@ -155,6 +155,6 @@ pub struct CreateBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin location.
-    /// If omitted when creating, uses the default location for the service.
+    /// If omitted when creating, uses the default location for the account.
     pub location: Option<LocationName>,
 }
