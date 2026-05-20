@@ -18,7 +18,7 @@ pub struct BasinConfigInfo {
     pub storage_class: Option<StorageClass>,
     pub retention_age_secs: Option<u64>, // None = infinite
     pub timestamping_mode: Option<TimestampingMode>,
-    pub timestamping_uncapped: bool,
+    pub timestamping_uncapped: Option<bool>,
 }
 
 /// Stream config info for reconfiguration
@@ -27,7 +27,7 @@ pub struct StreamConfigInfo {
     pub storage_class: Option<StorageClass>,
     pub retention_age_secs: Option<u64>, // None = infinite
     pub timestamping_mode: Option<TimestampingMode>,
-    pub timestamping_uncapped: bool,
+    pub timestamping_uncapped: Option<bool>,
     pub delete_on_empty_min_age_secs: Option<u64>, // None = disabled
 }
 

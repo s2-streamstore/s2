@@ -131,6 +131,9 @@ impl TryFrom<Bytes> for EnvelopeRecord {
                 .try_get_uint(flag.name_length_bytes.get() as usize)
                 .map_err(|_| RecordDecodeError::Truncated("HeaderNameLen"))?
                 as usize;
+            if name_len == 0 {
+                return Err(RecordDecodeError::InvalidValue("HeaderName", "empty"));
+            }
             if buf.remaining() < name_len {
                 return Err(RecordDecodeError::Truncated("HeaderName"));
             }
@@ -275,7 +278,7 @@ impl TryFrom<&[Header]> for EncodingInfo {
 mod test {
     use std::num::NonZeroU8;
 
-    use bytes::Bytes;
+    use bytes::{BufMut, Bytes, BytesMut};
 
     use super::{
         Encodable as _, EnvelopeRecord, Header, HeaderFlag, MeteredSize, RecordDecodeError,
@@ -318,6 +321,29 @@ mod test {
     #[test]
     fn framed_no_headers() {
         roundtrip_parts(vec![], Bytes::from("hello"));
+    }
+
+    #[test]
+    fn decode_rejects_empty_header_name() {
+        let mut encoded = BytesMut::new();
+        encoded.put_u8(
+            HeaderFlag {
+                num_headers_length_bytes: 1,
+                name_length_bytes: NonZeroU8::new(1).unwrap(),
+                value_length_bytes: NonZeroU8::new(1).unwrap(),
+            }
+            .into(),
+        );
+        encoded.put_u8(1); // number of headers
+        encoded.put_u8(0); // header name length
+        encoded.put_u8(5); // header value length
+        encoded.put_slice(b"value");
+        encoded.put_slice(b"body");
+
+        assert_eq!(
+            EnvelopeRecord::try_from(encoded.freeze()),
+            Err(RecordDecodeError::InvalidValue("HeaderName", "empty"))
+        );
     }
 
     #[test]

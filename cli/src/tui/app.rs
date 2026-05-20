@@ -1731,7 +1731,7 @@ impl App {
                                 *retention_policy = RetentionPolicyOption::Infinite;
                             }
                             *timestamping_mode = info.timestamping_mode;
-                            *timestamping_uncapped = Some(info.timestamping_uncapped);
+                            *timestamping_uncapped = info.timestamping_uncapped;
                         }
                         Err(e) => {
                             self.input_mode = InputMode::Normal;
@@ -1768,7 +1768,7 @@ impl App {
                                 *retention_policy = RetentionPolicyOption::Infinite;
                             }
                             *timestamping_mode = info.timestamping_mode;
-                            *timestamping_uncapped = Some(info.timestamping_uncapped);
+                            *timestamping_uncapped = info.timestamping_uncapped;
 
                             if let Some(min_age_secs) = info.delete_on_empty_min_age_secs {
                                 *delete_on_empty_enabled = true;
@@ -4804,11 +4804,10 @@ impl App {
                         let ts_uncapped = default_config
                             .timestamping
                             .as_ref()
-                            .map(|t| t.uncapped)
-                            .unwrap_or(false);
+                            .and_then(|t| t.uncapped);
                         (sc, age, ts_mode, ts_uncapped)
                     } else {
-                        (None, None, None, false)
+                        (None, None, None, None)
                     };
 
                     let info = BasinConfigInfo {
@@ -4848,11 +4847,8 @@ impl App {
                         .timestamping
                         .as_ref()
                         .and_then(|t| t.mode.map(TimestampingMode::from));
-                    let timestamping_uncapped = config
-                        .timestamping
-                        .as_ref()
-                        .map(|t| t.uncapped)
-                        .unwrap_or(false);
+                    let timestamping_uncapped =
+                        config.timestamping.as_ref().and_then(|t| t.uncapped);
                     let delete_on_empty_min_age_secs =
                         config.delete_on_empty.map(|d| d.min_age_secs);
 

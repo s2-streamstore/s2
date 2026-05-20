@@ -85,7 +85,6 @@ pub enum Command {
     /// Revoke an access token.
     RevokeAccessToken {
         /// ID of the access token to revoke.
-        #[arg(long)]
         id: AccessTokenId,
     },
 
@@ -162,16 +161,15 @@ pub enum Command {
     /// Benchmark a stream to measure throughput and latency.
     Bench(BenchArgs),
 
-    /// Apply a declarative spec file, creating or reconfiguring basins and streams.
+    /// Apply a declarative spec file, ensuring basins and streams.
     ///
     /// Reads a JSON file and ensures the declared basins and streams exist with the
-    /// specified configuration. Basins and streams that already exist
-    /// are reconfigured to match the spec. Only the fields present in the spec are
-    /// updated.
+    /// specified configuration. Defaults are applied before comparison; omitted fields are
+    /// defaulted, not preserved.
     ///
     /// Dry-run output legend:
     ///   `+` create
-    ///   `~` reconfigure
+    ///   `~` ensure
     ///   `=` unchanged
     ///
     /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
@@ -317,7 +315,6 @@ pub struct ListAccessTokensArgs {
 #[derive(Args, Debug)]
 pub struct IssueAccessTokenArgs {
     /// Access token ID.
-    #[arg(long)]
     pub id: AccessTokenId,
 
     /// Token validity duration (e.g., "30d", "1w", "24h"). Token expires after this duration from
@@ -585,7 +582,7 @@ pub struct TailArgs {
 
 #[derive(Args, Debug)]
 pub struct ApplyArgs {
-    /// Path to a JSON spec file defining basins and streams to create or reconfigure.
+    /// Path to a JSON spec file defining basins and streams to ensure.
     #[arg(
         short = 'f',
         long,
@@ -597,7 +594,7 @@ pub struct ApplyArgs {
     ///
     /// Dry-run output legend:
     ///   `+` create
-    ///   `~` reconfigure
+    ///   `~` ensure
     ///   `=` unchanged
     #[arg(long)]
     pub dry_run: bool,

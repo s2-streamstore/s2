@@ -6,8 +6,8 @@
 //!   produced by merging optional configs with defaults using `merge()`.
 //!
 //! - Optional (`OptionalStreamConfig`, `OptionalTimestampingConfig`,
-//!   `OptionalDeleteOnEmptyConfig`): stored metadata, where `None` means "not set at this layer;
-//!   fall back to defaults."
+//!   `OptionalDeleteOnEmptyConfig`): partial configuration layers, where `None` means "not set at
+//!   this layer; fall back to defaults."
 //!
 //! - Reconfiguration (`StreamReconfiguration`, `TimestampingReconfiguration`,
 //!   `DeleteOnEmptyReconfiguration`): PATCH-style updates applied with `reconfigure()`.
@@ -93,6 +93,12 @@ pub struct DeleteOnEmptyConfig {
     pub min_age: Duration,
 }
 
+impl DeleteOnEmptyConfig {
+    pub fn min_age(&self) -> Option<Duration> {
+        Some(self.min_age).filter(|age| !age.is_zero())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamConfig {
     pub storage_class: StorageClass,
@@ -120,7 +126,7 @@ pub struct StreamReconfiguration {
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OptionalTimestampingConfig {
     pub mode: Option<TimestampingMode>,
     pub uncapped: Option<bool>,
@@ -174,7 +180,7 @@ impl From<OptionalTimestampingConfig> for TimestampingReconfiguration {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalDeleteOnEmptyConfig {
     pub min_age: Option<Duration>,
 }
@@ -217,7 +223,7 @@ impl From<OptionalDeleteOnEmptyConfig> for DeleteOnEmptyReconfiguration {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalStreamConfig {
     pub storage_class: Option<StorageClass>,
     pub retention_policy: Option<RetentionPolicy>,
@@ -330,7 +336,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BasinConfig {
     pub default_stream_config: OptionalStreamConfig,
     pub stream_cipher: Option<EncryptionAlgorithm>,

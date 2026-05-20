@@ -1,11 +1,12 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::record::StreamPosition;
 
-use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
+use super::{DeserializationError, KeyType, check_exact_size};
 use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN;
-const VALUE_LEN: usize = 8 + 8 + 4;
+const VALUE_LEN: usize = 8 + 8;
+const LEGACY_VALUE_LEN: usize = 8 + 8 + 4;
 
 pub fn ser_key(stream_id: StreamId) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
@@ -26,23 +27,27 @@ pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
     Ok(stream_id_bytes.into())
 }
 
-pub fn ser_value(pos: StreamPosition, write_timestamp_secs: TimestampSecs) -> Bytes {
+pub fn ser_value(tail: StreamPosition) -> Bytes {
     let mut buf = BytesMut::with_capacity(VALUE_LEN);
-    buf.put_u64(pos.seq_num);
-    buf.put_u64(pos.timestamp);
-    buf.put_u32(write_timestamp_secs.as_u32());
+    buf.put_u64(tail.seq_num);
+    buf.put_u64(tail.timestamp);
     debug_assert_eq!(buf.len(), VALUE_LEN, "serialized length mismatch");
     buf.freeze()
 }
 
-pub fn deser_value(
-    mut bytes: Bytes,
-) -> Result<(StreamPosition, TimestampSecs), DeserializationError> {
-    check_exact_size(&bytes, VALUE_LEN)?;
+pub fn deser_value(mut bytes: Bytes) -> Result<StreamPosition, DeserializationError> {
+    match bytes.remaining() {
+        VALUE_LEN | LEGACY_VALUE_LEN => {}
+        actual => {
+            return Err(DeserializationError::InvalidSize {
+                expected: VALUE_LEN,
+                actual,
+            });
+        }
+    }
     let seq_num = bytes.get_u64();
     let timestamp = bytes.get_u64();
-    let write_timestamp_secs = TimestampSecs::from_secs(bytes.get_u32());
-    Ok((StreamPosition { seq_num, timestamp }, write_timestamp_secs))
+    Ok(StreamPosition { seq_num, timestamp })
 }
 
 #[cfg(test)]
@@ -51,13 +56,10 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::record::{SeqNum, Timestamp};
 
-    use crate::{
-        backend::kv::{DeserializationError, timestamp::TimestampSecs},
-        stream_id::StreamId,
-    };
+    use crate::{backend::kv::DeserializationError, stream_id::StreamId};
 
     #[test]
-    fn stream_tail_position_value_requires_exact_size() {
+    fn stream_tail_position_value_rejects_unsupported_size() {
         let err = super::deser_value(Bytes::from_static(&[0u8; 15])).unwrap_err();
         assert!(matches!(
             err,
@@ -81,14 +83,11 @@ mod tests {
         fn roundtrip_stream_tail_position_value(
             seq_num in any::<SeqNum>(),
             timestamp in any::<Timestamp>(),
-            write_ts_secs in any::<u32>(),
         ) {
-            let pos = s2_common::record::StreamPosition { seq_num, timestamp };
-            let write_timestamp_secs = TimestampSecs::from_secs(write_ts_secs);
-            let bytes = super::ser_value(pos, write_timestamp_secs);
+            let tail = s2_common::record::StreamPosition { seq_num, timestamp };
+            let bytes = super::ser_value(tail);
             let decoded = super::deser_value(bytes).unwrap();
-            prop_assert_eq!(pos, decoded.0);
-            prop_assert_eq!(write_timestamp_secs, decoded.1);
+            prop_assert_eq!(tail, decoded);
         }
     }
 }

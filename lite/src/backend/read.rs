@@ -14,10 +14,7 @@ use s2_common::{
         },
     },
 };
-use slatedb::{
-    IterationOrder,
-    config::{DurabilityLevel, ScanOptions},
-};
+use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
 
 use super::{Backend, StreamHandle};
@@ -128,15 +125,14 @@ async fn read_session(
                         timestamp: 0,
                     },
                 );
-                static SCAN_OPTS: ScanOptions = ScanOptions {
+                let scan_opts = ScanOptions {
                     durability_filter: DurabilityLevel::Remote,
-                    dirty: false,
                     read_ahead_bytes: 1024 * 1024,
                     cache_blocks: true,
                     max_fetch_tasks: 8,
-                    order: IterationOrder::Ascending,
+                    ..Default::default()
                 };
-                let mut it = db.scan_with_options(start_key..end_key, &SCAN_OPTS).await?;
+                let mut it = db.scan_with_options(start_key..end_key, &scan_opts).await?;
 
                 let mut records = Metered::with_capacity(
                     limit.count()
@@ -313,15 +309,11 @@ async fn resolve_timestamp(
             timestamp: Timestamp::MAX,
         },
     );
-    static SCAN_OPTS: ScanOptions = ScanOptions {
+    let scan_opts = ScanOptions {
         durability_filter: DurabilityLevel::Remote,
-        dirty: false,
-        read_ahead_bytes: 1,
-        cache_blocks: false,
-        max_fetch_tasks: 1,
-        order: IterationOrder::Ascending,
+        ..Default::default()
     };
-    let mut it = db.scan_with_options(start_key..end_key, &SCAN_OPTS).await?;
+    let mut it = db.scan_with_options(start_key..end_key, &scan_opts).await?;
     Ok(match it.next().await? {
         Some(kv) => {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
@@ -432,14 +424,14 @@ mod tests {
         types::{
             basin::BasinName,
             config::{BasinConfig, OptionalStreamConfig},
-            resources::CreateMode,
+            resources::ProvisionMode,
             stream::{
                 AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
                 ReadSessionOutput, ReadStart,
             },
         },
     };
-    use slatedb::{Db, WriteBatch, config::WriteOptions, object_store::memory::InMemory};
+    use slatedb::{Db, WriteBatch, object_store::memory::InMemory};
     use tokio::time::Instant;
 
     use super::*;
@@ -561,20 +553,24 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -592,14 +588,7 @@ mod tests {
         let stream_id = StreamId::new(&basin, &stream);
         let mut batch = WriteBatch::new();
         batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        backend
-            .db
-            .write_with_options(batch, &WRITE_OPTS)
-            .await
-            .unwrap();
+        backend.db.write(batch).await.unwrap();
 
         let start = ReadStart {
             from: ReadFrom::SeqNum(0),
@@ -634,20 +623,24 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -713,20 +706,24 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -866,20 +863,24 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
@@ -929,14 +930,7 @@ mod tests {
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
         }
 
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        backend
-            .db
-            .write_with_options(delete_batch, &WRITE_OPTS)
-            .await
-            .unwrap();
+        backend.db.write(delete_batch).await.unwrap();
 
         tokio::time::advance(wait + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
@@ -956,20 +950,24 @@ mod tests {
 
         let basin: BasinName = "test-basin".parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
                 BasinConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();
         let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .unwrap();

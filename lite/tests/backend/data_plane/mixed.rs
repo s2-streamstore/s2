@@ -159,7 +159,7 @@ async fn test_concurrent_reconfigure_during_append() {
         .reconfigure_stream(basin_name.clone(), stream_name.clone(), reconfig)
         .await
         .expect("Failed to reconfigure stream during appends");
-    assert_eq!(updated_config.storage_class, Some(StorageClass::Express));
+    assert_eq!(updated_config.storage_class, StorageClass::Express);
 
     append_handle.await.unwrap();
 

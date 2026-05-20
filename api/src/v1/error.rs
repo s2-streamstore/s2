@@ -18,8 +18,6 @@ use serde::{Deserialize, Serialize};
 // Keep this alphabetized.
 pub enum ErrorCode {
     AccessTokenNotFound,
-    Authn,
-    Authz,
     BadFrame,
     BadHeader,
     BadJson,
@@ -49,7 +47,6 @@ pub enum ErrorCode {
 impl ErrorCode {
     pub fn status(self) -> http::StatusCode {
         match self {
-            Self::Authn => http::StatusCode::UNAUTHORIZED,
             Self::DecryptionFailed
             | Self::BadFrame
             | Self::BadHeader
@@ -57,9 +54,7 @@ impl ErrorCode {
             | Self::BadPath
             | Self::BadProto
             | Self::BadQuery => http::StatusCode::BAD_REQUEST,
-            Self::Authz | Self::PermissionDenied | Self::QuotaExhausted => {
-                http::StatusCode::FORBIDDEN
-            }
+            Self::PermissionDenied | Self::QuotaExhausted => http::StatusCode::FORBIDDEN,
             Self::AccessTokenNotFound | Self::BasinNotFound | Self::StreamNotFound => {
                 http::StatusCode::NOT_FOUND
             }

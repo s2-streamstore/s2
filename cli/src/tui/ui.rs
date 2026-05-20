@@ -2465,6 +2465,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
                 s2_sdk::types::BasinScope::AwsUsEast1 => "aws:us-east-1",
                 s2_sdk::types::BasinScope::AwsUsWest2 => "aws:us-west-2",
                 s2_sdk::types::BasinScope::AwsEuNorth1 => "aws:eu-north-1",
+                _ => "unknown",
             })
             .unwrap_or("—");
 

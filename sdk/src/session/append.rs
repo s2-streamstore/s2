@@ -44,8 +44,8 @@ pub enum AppendSessionError {
     SessionClosing,
     #[error("session dropped without calling close")]
     SessionDropped,
-    #[error("unexpected append acknowledgement during resend")]
-    UnexpectedAck,
+    #[error("invalid append acknowledgement: {0}")]
+    InvalidAck(String),
 }
 
 impl AppendSessionError {
@@ -608,7 +608,7 @@ async fn run_session(
                             state,
                             timer.as_mut(),
                             ack_timeout,
-                        );
+                        )?;
                     }
                     Some(Err(err)) => {
                         return Err(err.into());
@@ -692,10 +692,12 @@ async fn resend(
                             state,
                             timer.as_mut(),
                             ack_timeout,
-                        );
-                        resend_index = resend_index
-                            .checked_sub(1)
-                            .ok_or(AppendSessionError::UnexpectedAck)?;
+                        )?;
+                        resend_index = resend_index.checked_sub(1).ok_or_else(|| {
+                            AppendSessionError::InvalidAck(
+                                "received ack without a corresponding resent append in flight".to_string(),
+                            )
+                        })?;
                     }
                     Some(Err(err)) => {
                         return Err(err.into());
@@ -746,30 +748,35 @@ fn process_ack(
     state: &mut SessionState,
     timer: Pin<&mut MuxTimer<N_TIMER_VARIANTS>>,
     ack_timeout: Duration,
-) {
-    let corresponding_append = state
-        .inflight_appends
-        .pop_front()
-        .expect("corresponding append should be present for an ack");
+) -> Result<(), AppendSessionError> {
+    let corresponding_append = state.inflight_appends.pop_front().ok_or_else(|| {
+        AppendSessionError::InvalidAck(
+            "received ack without a corresponding append in flight".to_string(),
+        )
+    })?;
 
-    assert!(
-        ack.end.seq_num >= ack.start.seq_num,
-        "ack end seq_num should be greater than or equal to start seq_num"
-    );
+    if ack.end.seq_num < ack.start.seq_num {
+        return Err(AppendSessionError::InvalidAck(
+            "ack end seq_num should be greater than or equal to start seq_num".to_string(),
+        ));
+    }
 
-    if let Some(end) = state.prev_ack_end {
-        assert!(
-            ack.end.seq_num > end.seq_num,
-            "ack end seq_num should be greater than previous ack end"
-        );
+    if state
+        .prev_ack_end
+        .is_some_and(|end| ack.end.seq_num <= end.seq_num)
+    {
+        return Err(AppendSessionError::InvalidAck(
+            "ack end seq_num should be greater than previous ack end".to_string(),
+        ));
     }
 
     let num_acked_records = (ack.end.seq_num - ack.start.seq_num) as usize;
-    assert_eq!(
-        num_acked_records,
-        corresponding_append.input.records.len(),
-        "ack record count should match submitted batch size"
-    );
+    let expected_records = corresponding_append.input.records.len();
+    if num_acked_records != expected_records {
+        return Err(AppendSessionError::InvalidAck(format!(
+            "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
+        )));
+    }
 
     state.total_acked_records += num_acked_records;
     state.inflight_bytes -= corresponding_append.input_metered_bytes;
@@ -790,6 +797,8 @@ fn process_ack(
             "all records should be acked when inflight is empty"
         );
     }
+
+    Ok(())
 }
 
 struct StashedSubmission {

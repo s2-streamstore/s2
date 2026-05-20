@@ -7,7 +7,7 @@ use s2_common::{
     encryption::EncryptionAlgorithm,
     types::{
         basin::BasinName,
-        config::OptionalStreamConfig,
+        config::{OptionalStreamConfig, StreamConfig},
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     },
 };
@@ -23,7 +23,7 @@ const FIELD_SEPARATOR: u8 = b'\0';
 
 #[derive(Debug, Clone)]
 pub struct StreamMeta {
-    pub config: OptionalStreamConfig,
+    pub config: StreamConfig,
     pub cipher: Option<EncryptionAlgorithm>,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
@@ -44,7 +44,7 @@ struct StreamMetaSerde {
 impl From<StreamMeta> for StreamMetaSerde {
     fn from(meta: StreamMeta) -> Self {
         Self {
-            config: s2_api::v1::config::StreamConfig::to_opt(meta.config),
+            config: Some(meta.config.into()),
             cipher: meta.cipher,
             created_at: meta.created_at,
             deleted_at: meta.deleted_at,
@@ -58,8 +58,8 @@ impl TryFrom<StreamMetaSerde> for StreamMeta {
 
     fn try_from(serde: StreamMetaSerde) -> Result<Self, Self::Error> {
         let config = match serde.config {
-            Some(api_config) => api_config.try_into()?,
-            None => OptionalStreamConfig::default(),
+            Some(api_config) => OptionalStreamConfig::try_from(api_config)?.into(),
+            None => StreamConfig::default(),
         };
 
         Ok(Self {
@@ -151,7 +151,7 @@ pub fn deser_value(bytes: Bytes) -> Result<StreamMeta, DeserializationError> {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, time::Duration};
 
     use bytes::Bytes;
     use proptest::prelude::*;
@@ -160,7 +160,9 @@ mod tests {
         encryption::EncryptionAlgorithm,
         types::{
             basin::BasinName,
-            config::{OptionalStreamConfig, StorageClass},
+            config::{
+                OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass, StreamConfig,
+            },
             stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
         },
     };
@@ -172,6 +174,9 @@ mod tests {
     fn value_roundtrip_stream_meta() {
         let config = OptionalStreamConfig {
             storage_class: Some(StorageClass::Express),
+            delete_on_empty: OptionalDeleteOnEmptyConfig {
+                min_age: Some(Duration::ZERO),
+            },
             ..Default::default()
         };
         let created_at = OffsetDateTime::from_unix_timestamp(1234567890)
@@ -185,7 +190,7 @@ mod tests {
                 .unwrap(),
         );
         let stream_meta = super::StreamMeta {
-            config: config.clone(),
+            config: config.into(),
             cipher: Some(EncryptionAlgorithm::Aegis256),
             created_at,
             deleted_at,
@@ -202,6 +207,10 @@ mod tests {
         assert_eq!(
             stream_meta.config.storage_class,
             decoded.config.storage_class
+        );
+        assert_eq!(
+            stream_meta.config.delete_on_empty.min_age,
+            decoded.config.delete_on_empty.min_age
         );
         assert_eq!(stream_meta.cipher, decoded.cipher);
         assert_eq!(stream_meta.created_at, decoded.created_at);
@@ -223,7 +232,7 @@ mod tests {
         };
         let bytes = Bytes::from(serde_json::to_vec(&serde_value).unwrap());
         let decoded = super::deser_value(bytes).unwrap();
-        let default_config = OptionalStreamConfig::default();
+        let default_config = StreamConfig::default();
 
         assert_eq!(decoded.config.storage_class, default_config.storage_class);
         assert_eq!(

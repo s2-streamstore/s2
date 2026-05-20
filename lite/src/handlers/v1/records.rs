@@ -470,7 +470,7 @@ mod tests {
         types::{
             basin::{BASIN_HEADER, BasinName},
             config::{BasinConfig, OptionalStreamConfig},
-            resources::CreateMode,
+            resources::ProvisionMode,
             stream::{
                 AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
                 ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
@@ -518,16 +518,24 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(basin.clone(), basin_config, CreateMode::CreateOnly(None))
+            .provision_basin(
+                basin.clone(),
+                basin_config,
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
             .await
             .expect("create basin");
         let stream: StreamName = format!("test-stream-{test_suffix}").parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
                 stream_config,
-                CreateMode::CreateOnly(None),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
             )
             .await
             .expect("create stream");
@@ -542,7 +550,13 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(basin.clone(), basin_config, CreateMode::CreateOnly(None))
+            .provision_basin(
+                basin.clone(),
+                basin_config,
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
             .await
             .expect("create basin");
         let stream: StreamName = format!("test-stream-{test_suffix}").parse().unwrap();

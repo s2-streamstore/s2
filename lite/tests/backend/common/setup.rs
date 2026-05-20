@@ -8,7 +8,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        resources::CreateMode,
+        resources::ProvisionMode,
         stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName},
     },
 };
@@ -151,7 +151,13 @@ pub fn create_test_record_batch_with_timestamps(
 pub async fn create_test_basin(backend: &Backend, suffix: &str, config: BasinConfig) -> BasinName {
     let basin_name = test_basin_name(suffix);
     backend
-        .create_basin(basin_name.clone(), config, CreateMode::CreateOnly(None))
+        .provision_basin(
+            basin_name.clone(),
+            config,
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
+        )
         .await
         .expect("Failed to create basin");
     basin_name
@@ -165,11 +171,13 @@ pub async fn create_test_stream(
 ) -> StreamName {
     let stream_name = test_stream_name(suffix);
     backend
-        .create_stream(
+        .provision_stream(
             basin.clone(),
             stream_name.clone(),
             config,
-            CreateMode::CreateOnly(None),
+            ProvisionMode::CreateOnly {
+                request_token: None,
+            },
         )
         .await
         .expect("Failed to create stream");
