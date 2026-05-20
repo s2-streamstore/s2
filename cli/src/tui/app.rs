@@ -62,6 +62,127 @@ fn calculate_throughput(bytes: u64, records: u64, elapsed_secs: f64) -> (f64, f6
     (mibps, recps)
 }
 
+fn handle_filter_input(
+    filter: &mut String,
+    cursor: &mut usize,
+    selected: &mut usize,
+    filter_active: &mut bool,
+    key: KeyEvent,
+) {
+    match key.code {
+        KeyCode::Esc => {
+            *filter_active = false;
+            filter.clear();
+            cursor_move_home(cursor);
+            *selected = 0;
+        }
+        KeyCode::Enter => {
+            *filter_active = false;
+        }
+        KeyCode::Left => cursor_move_left(filter, cursor),
+        KeyCode::Right => cursor_move_right(filter, cursor),
+        KeyCode::Home => cursor_move_home(cursor),
+        KeyCode::End => cursor_move_end(filter, cursor),
+        KeyCode::Backspace => {
+            cursor_backspace(filter, cursor);
+            *selected = 0;
+        }
+        KeyCode::Delete => {
+            cursor_delete(filter, cursor);
+            *selected = 0;
+        }
+        KeyCode::Char(c) => {
+            cursor_insert(filter, cursor, c);
+            *selected = 0;
+        }
+        _ => {}
+    }
+}
+
+fn append_cursor_move_left(state: &mut AppendViewState) {
+    match state.selected {
+        0 => cursor_move_left(&state.body, &mut state.cursor),
+        1 if state.editing_header_key => {
+            cursor_move_left(&state.header_key_input, &mut state.cursor)
+        }
+        1 => cursor_move_left(&state.header_value_input, &mut state.cursor),
+        2 => cursor_move_left(&state.match_seq_num, &mut state.cursor),
+        3 => cursor_move_left(&state.fencing_token, &mut state.cursor),
+        4 => cursor_move_left(&state.input_file, &mut state.cursor),
+        _ => {}
+    }
+}
+
+fn append_cursor_move_right(state: &mut AppendViewState) {
+    match state.selected {
+        0 => cursor_move_right(&state.body, &mut state.cursor),
+        1 if state.editing_header_key => {
+            cursor_move_right(&state.header_key_input, &mut state.cursor);
+        }
+        1 => cursor_move_right(&state.header_value_input, &mut state.cursor),
+        2 => cursor_move_right(&state.match_seq_num, &mut state.cursor),
+        3 => cursor_move_right(&state.fencing_token, &mut state.cursor),
+        4 => cursor_move_right(&state.input_file, &mut state.cursor),
+        _ => {}
+    }
+}
+
+fn append_cursor_move_end(state: &mut AppendViewState) {
+    match state.selected {
+        0 => cursor_move_end(&state.body, &mut state.cursor),
+        1 if state.editing_header_key => {
+            cursor_move_end(&state.header_key_input, &mut state.cursor)
+        }
+        1 => cursor_move_end(&state.header_value_input, &mut state.cursor),
+        2 => cursor_move_end(&state.match_seq_num, &mut state.cursor),
+        3 => cursor_move_end(&state.fencing_token, &mut state.cursor),
+        4 => cursor_move_end(&state.input_file, &mut state.cursor),
+        _ => cursor_move_home(&mut state.cursor),
+    }
+}
+
+fn append_cursor_backspace(state: &mut AppendViewState) {
+    match state.selected {
+        0 => cursor_backspace(&mut state.body, &mut state.cursor),
+        1 if state.editing_header_key => {
+            cursor_backspace(&mut state.header_key_input, &mut state.cursor);
+        }
+        1 => cursor_backspace(&mut state.header_value_input, &mut state.cursor),
+        2 => cursor_backspace(&mut state.match_seq_num, &mut state.cursor),
+        3 => cursor_backspace(&mut state.fencing_token, &mut state.cursor),
+        4 => cursor_backspace(&mut state.input_file, &mut state.cursor),
+        _ => {}
+    }
+}
+
+fn append_cursor_delete(state: &mut AppendViewState) {
+    match state.selected {
+        0 => cursor_delete(&mut state.body, &mut state.cursor),
+        1 if state.editing_header_key => {
+            cursor_delete(&mut state.header_key_input, &mut state.cursor)
+        }
+        1 => cursor_delete(&mut state.header_value_input, &mut state.cursor),
+        2 => cursor_delete(&mut state.match_seq_num, &mut state.cursor),
+        3 => cursor_delete(&mut state.fencing_token, &mut state.cursor),
+        4 => cursor_delete(&mut state.input_file, &mut state.cursor),
+        _ => {}
+    }
+}
+
+fn append_cursor_insert(state: &mut AppendViewState, c: char) {
+    match state.selected {
+        0 => cursor_insert(&mut state.body, &mut state.cursor, c),
+        1 if state.editing_header_key => {
+            cursor_insert(&mut state.header_key_input, &mut state.cursor, c);
+        }
+        1 => cursor_insert(&mut state.header_value_input, &mut state.cursor, c),
+        2 if c.is_ascii_digit() => cursor_insert(&mut state.match_seq_num, &mut state.cursor, c),
+        3 => cursor_insert(&mut state.fencing_token, &mut state.cursor, c),
+        4 => cursor_insert(&mut state.input_file, &mut state.cursor, c),
+        _ => {}
+    }
+}
+
 /// Top-level navigation tabs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
@@ -102,6 +223,7 @@ pub struct BasinsState {
     pub selected: usize,
     pub loading: bool,
     pub filter: String,
+    pub filter_cursor: usize,
     pub filter_active: bool,
     pub has_more: bool,
     pub loading_more: bool,
@@ -115,6 +237,7 @@ pub struct StreamsState {
     pub selected: usize,
     pub loading: bool,
     pub filter: String,
+    pub filter_cursor: usize,
     pub filter_active: bool,
     pub has_more: bool,
     pub loading_more: bool,
@@ -186,6 +309,7 @@ pub struct AppendViewState {
     pub fencing_token: String,
     pub selected: usize,
     pub editing: bool,
+    pub cursor: usize,
     pub header_key_input: String, // For adding new header
     pub header_value_input: String,
     pub editing_header_key: bool,
@@ -231,6 +355,7 @@ pub struct AccessTokensState {
     pub selected: usize,
     pub loading: bool,
     pub filter: String,
+    pub filter_cursor: usize,
     pub filter_active: bool,
 }
 
@@ -540,6 +665,7 @@ pub struct BenchViewState {
     pub catchup_delay_secs: u64, // seconds (default 20)
     pub editing: bool,
     pub edit_buffer: String,
+    pub edit_cursor: usize,
     pub stream_name: Option<String>,
     pub phase: BenchPhase,
     pub running: bool,
@@ -577,6 +703,7 @@ impl BenchViewState {
             catchup_delay_secs: 20,
             editing: false,
             edit_buffer: String::new(),
+            edit_cursor: 0,
             stream_name: None,
             phase: BenchPhase::Write,
             running: false,
@@ -3465,25 +3592,13 @@ impl App {
 
         // Handle filter mode
         if state.filter_active {
-            match key.code {
-                KeyCode::Esc => {
-                    state.filter_active = false;
-                    state.filter.clear();
-                    state.selected = 0;
-                }
-                KeyCode::Enter => {
-                    state.filter_active = false;
-                }
-                KeyCode::Backspace => {
-                    state.filter.pop();
-                    state.selected = 0;
-                }
-                KeyCode::Char(c) => {
-                    state.filter.push(c);
-                    state.selected = 0;
-                }
-                _ => {}
-            }
+            handle_filter_input(
+                &mut state.filter,
+                &mut state.filter_cursor,
+                &mut state.selected,
+                &mut state.filter_active,
+                key,
+            );
             return;
         }
 
@@ -3502,6 +3617,7 @@ impl App {
         match key.code {
             KeyCode::Char('/') => {
                 state.filter_active = true;
+                cursor_move_end(&state.filter, &mut state.filter_cursor);
             }
             KeyCode::Up | KeyCode::Char('k') if state.selected > 0 => {
                 state.selected -= 1;
@@ -3552,6 +3668,7 @@ impl App {
                         selected: 0,
                         loading: true,
                         filter: String::new(),
+                        filter_cursor: 0,
                         filter_active: false,
                         has_more: false,
                         loading_more: false,
@@ -3666,6 +3783,7 @@ impl App {
             }
             KeyCode::Esc if !state.filter.is_empty() => {
                 state.filter.clear();
+                state.filter_cursor = 0;
                 state.selected = 0;
             }
             _ => {}
@@ -3679,25 +3797,13 @@ impl App {
 
         // Handle filter mode
         if state.filter_active {
-            match key.code {
-                KeyCode::Esc => {
-                    state.filter_active = false;
-                    state.filter.clear();
-                    state.selected = 0;
-                }
-                KeyCode::Enter => {
-                    state.filter_active = false;
-                }
-                KeyCode::Backspace => {
-                    state.filter.pop();
-                    state.selected = 0;
-                }
-                KeyCode::Char(c) => {
-                    state.filter.push(c);
-                    state.selected = 0;
-                }
-                _ => {}
-            }
+            handle_filter_input(
+                &mut state.filter,
+                &mut state.filter_cursor,
+                &mut state.selected,
+                &mut state.filter_active,
+                key,
+            );
             return;
         }
 
@@ -3717,10 +3823,12 @@ impl App {
         match key.code {
             KeyCode::Char('/') => {
                 state.filter_active = true;
+                cursor_move_end(&state.filter, &mut state.filter_cursor);
             }
             KeyCode::Esc => {
                 if !state.filter.is_empty() {
                     state.filter.clear();
+                    state.filter_cursor = 0;
                     state.selected = 0;
                 } else {
                     self.screen = Screen::Basins(BasinsState {
@@ -3889,6 +3997,7 @@ impl App {
                     selected: 0,
                     loading: true,
                     filter: String::new(),
+                    filter_cursor: 0,
                     filter_active: false,
                     has_more: false,
                     loading_more: false,
@@ -5016,6 +5125,7 @@ impl App {
             fencing_token: String::new(),
             selected: 0,
             editing: false,
+            cursor: 0,
             header_key_input: String::new(),
             header_value_input: String::new(),
             editing_header_key: true,
@@ -5028,7 +5138,7 @@ impl App {
     }
 
     /// Handle keys in append view
-    /// Layout: 0=body, 1=headers, 2=match_seq, 3=fencing, 4=send
+    /// Layout: 0=body, 1=headers, 2=match_seq, 3=fencing, 4=file, 5=format, 6=send
     fn handle_append_view_key(&mut self, key: KeyEvent, tx: mpsc::UnboundedSender<Event>) {
         let Screen::AppendView(state) = &mut self.screen else {
             return;
@@ -5051,6 +5161,7 @@ impl App {
                         if state.editing_header_key {
                             if !state.header_key_input.is_empty() {
                                 state.editing_header_key = false;
+                                append_cursor_move_end(state);
                             }
                         } else {
                             if !state.header_key_input.is_empty() {
@@ -5061,6 +5172,7 @@ impl App {
                                 state.header_key_input.clear();
                                 state.header_value_input.clear();
                                 state.editing_header_key = true;
+                                cursor_move_home(&mut state.cursor);
                             }
                             state.editing = false;
                         }
@@ -5071,51 +5183,15 @@ impl App {
                 KeyCode::Tab if state.selected == 1 => {
                     // Toggle between key and value in headers
                     state.editing_header_key = !state.editing_header_key;
+                    append_cursor_move_end(state);
                 }
-                KeyCode::Backspace => match state.selected {
-                    0 => {
-                        state.body.pop();
-                    }
-                    1 => {
-                        if state.editing_header_key {
-                            state.header_key_input.pop();
-                        } else {
-                            state.header_value_input.pop();
-                        }
-                    }
-                    2 => {
-                        state.match_seq_num.pop();
-                    }
-                    3 => {
-                        state.fencing_token.pop();
-                    }
-                    4 => {
-                        state.input_file.pop();
-                    }
-                    _ => {}
-                },
-                KeyCode::Char(c) => match state.selected {
-                    0 => {
-                        state.body.push(c);
-                    }
-                    1 => {
-                        if state.editing_header_key {
-                            state.header_key_input.push(c);
-                        } else {
-                            state.header_value_input.push(c);
-                        }
-                    }
-                    2 if c.is_ascii_digit() => {
-                        state.match_seq_num.push(c);
-                    }
-                    3 => {
-                        state.fencing_token.push(c);
-                    }
-                    4 => {
-                        state.input_file.push(c);
-                    }
-                    _ => {}
-                },
+                KeyCode::Left => append_cursor_move_left(state),
+                KeyCode::Right => append_cursor_move_right(state),
+                KeyCode::Home => cursor_move_home(&mut state.cursor),
+                KeyCode::End => append_cursor_move_end(state),
+                KeyCode::Backspace => append_cursor_backspace(state),
+                KeyCode::Delete => append_cursor_delete(state),
+                KeyCode::Char(c) => append_cursor_insert(state, c),
                 _ => {}
             }
             return;
@@ -5199,12 +5275,15 @@ impl App {
                             tx,
                         );
                     }
+                } else if state.selected == 5 {
+                    state.input_format = state.input_format.next();
                 } else {
                     // Start editing the selected field
                     state.editing = true;
                     if state.selected == 1 {
                         state.editing_header_key = true;
                     }
+                    append_cursor_move_end(state);
                 }
             }
             _ => {}
@@ -5721,25 +5800,13 @@ impl App {
 
         // Handle filter mode
         if state.filter_active {
-            match key.code {
-                KeyCode::Esc => {
-                    state.filter_active = false;
-                    state.filter.clear();
-                    state.selected = 0;
-                }
-                KeyCode::Enter => {
-                    state.filter_active = false;
-                }
-                KeyCode::Backspace => {
-                    state.filter.pop();
-                    state.selected = 0;
-                }
-                KeyCode::Char(c) => {
-                    state.filter.push(c);
-                    state.selected = 0;
-                }
-                _ => {}
-            }
+            handle_filter_input(
+                &mut state.filter,
+                &mut state.filter_cursor,
+                &mut state.selected,
+                &mut state.filter_active,
+                key,
+            );
             return;
         }
 
@@ -5776,6 +5843,7 @@ impl App {
             }
             KeyCode::Char('/') => {
                 state.filter_active = true;
+                cursor_move_end(&state.filter, &mut state.filter_cursor);
             }
             KeyCode::Char('c') => {
                 self.input_mode = InputMode::IssueAccessToken {
@@ -6475,6 +6543,7 @@ impl App {
                             selected: 0,
                             loading: true,
                             filter: String::new(),
+                            filter_cursor: 0,
                             filter_active: false,
                             has_more: false,
                             loading_more: false,
@@ -7062,6 +7131,7 @@ impl App {
                 KeyCode::Esc => {
                     state.editing = false;
                     state.edit_buffer.clear();
+                    cursor_move_home(&mut state.edit_cursor);
                 }
                 KeyCode::Enter => {
                     // Apply the edit
@@ -7085,6 +7155,7 @@ impl App {
                             }
                             state.editing = false;
                             state.edit_buffer.clear();
+                            cursor_move_home(&mut state.edit_cursor);
                         }
                         Ok(_) => {
                             // Value is 0, show error
@@ -7103,11 +7174,18 @@ impl App {
                     }
                 }
                 KeyCode::Char(c) if c.is_ascii_digit() => {
-                    state.edit_buffer.push(c);
+                    cursor_insert(&mut state.edit_buffer, &mut state.edit_cursor, c);
                 }
                 KeyCode::Backspace => {
-                    state.edit_buffer.pop();
+                    cursor_backspace(&mut state.edit_buffer, &mut state.edit_cursor);
                 }
+                KeyCode::Delete => {
+                    cursor_delete(&mut state.edit_buffer, &mut state.edit_cursor);
+                }
+                KeyCode::Left => cursor_move_left(&state.edit_buffer, &mut state.edit_cursor),
+                KeyCode::Right => cursor_move_right(&state.edit_buffer, &mut state.edit_cursor),
+                KeyCode::Home => cursor_move_home(&mut state.edit_cursor),
+                KeyCode::End => cursor_move_end(&state.edit_buffer, &mut state.edit_cursor),
                 _ => {}
             }
             return;
@@ -7152,6 +7230,7 @@ impl App {
                         BenchConfigField::CatchupDelay => state.catchup_delay_secs.to_string(),
                         BenchConfigField::Start => String::new(),
                     };
+                    cursor_move_end(&state.edit_buffer, &mut state.edit_cursor);
                 }
             }
             KeyCode::Left | KeyCode::Char('h') => {
@@ -7644,5 +7723,89 @@ mod tests {
             panic!()
         };
         assert_eq!(*cursor, 4);
+    }
+
+    #[test]
+    fn access_token_filter_cursor_edits_multibyte_text() {
+        let mut app = App::new(None);
+        app.screen = Screen::AccessTokens(AccessTokensState {
+            filter_active: true,
+            ..Default::default()
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        for c in "café".chars() {
+            app.handle_access_tokens_key(key(KeyCode::Char(c)), tx.clone());
+        }
+        app.handle_access_tokens_key(key(KeyCode::Left), tx.clone());
+        app.handle_access_tokens_key(key(KeyCode::Char('!')), tx.clone());
+
+        let Screen::AccessTokens(s) = &app.screen else {
+            panic!()
+        };
+        assert_eq!(s.filter, "caf!é");
+        assert_eq!(s.filter_cursor, 4);
+    }
+
+    #[test]
+    fn append_view_body_cursor_edits_multibyte_text() {
+        let mut app = App::new(None);
+        app.screen = Screen::AppendView(AppendViewState {
+            basin_name: "test-basin".parse().unwrap(),
+            stream_name: "stream".parse().unwrap(),
+            body: String::new(),
+            headers: Vec::new(),
+            match_seq_num: String::new(),
+            fencing_token: String::new(),
+            selected: 0,
+            editing: true,
+            cursor: 0,
+            header_key_input: String::new(),
+            header_value_input: String::new(),
+            editing_header_key: true,
+            history: Vec::new(),
+            appending: false,
+            input_file: String::new(),
+            input_format: InputFormat::Text,
+            file_append_progress: None,
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        for c in "café".chars() {
+            app.handle_append_view_key(key(KeyCode::Char(c)), tx.clone());
+        }
+        app.handle_append_view_key(key(KeyCode::Left), tx.clone());
+        app.handle_append_view_key(key(KeyCode::Char('!')), tx.clone());
+        app.handle_append_view_key(key(KeyCode::Backspace), tx.clone());
+        app.handle_append_view_key(key(KeyCode::Delete), tx.clone());
+
+        let Screen::AppendView(s) = &app.screen else {
+            panic!()
+        };
+        assert_eq!(s.body, "caf");
+        assert_eq!(s.cursor, 3);
+    }
+
+    #[test]
+    fn bench_edit_buffer_cursor_edits_mid_string() {
+        let mut app = App::new(None);
+        app.screen = Screen::BenchView(BenchViewState::new("test-basin".parse().unwrap()));
+        let Screen::BenchView(s) = &mut app.screen else {
+            panic!()
+        };
+        s.editing = true;
+        s.edit_buffer = "123".to_string();
+        s.edit_cursor = s.edit_buffer.len();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.handle_bench_view_key(key(KeyCode::Left), tx.clone());
+        app.handle_bench_view_key(key(KeyCode::Char('4')), tx.clone());
+        app.handle_bench_view_key(key(KeyCode::Delete), tx.clone());
+
+        let Screen::BenchView(s) = &app.screen else {
+            panic!()
+        };
+        assert_eq!(s.edit_buffer, "124");
+        assert_eq!(s.edit_cursor, 3);
     }
 }

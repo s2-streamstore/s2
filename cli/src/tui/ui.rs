@@ -344,6 +344,7 @@ fn render_text_input_with_cursor(
 /// Render a search/filter bar with consistent styling
 fn render_search_bar(
     filter: &str,
+    filter_cursor: usize,
     filter_active: bool,
     placeholder: &str,
 ) -> (Block<'static>, Line<'static>) {
@@ -353,10 +354,12 @@ fn render_search_bar(
         .style(Style::default().bg(BG_PANEL));
 
     let line = if filter_active {
+        let (before, after) = cursor_split_at(filter, filter_cursor);
         Line::from(vec![
             Span::styled(" [/] ", Style::default().fg(CYAN)),
-            Span::styled(filter.to_string(), Style::default().fg(TEXT_PRIMARY)),
+            Span::styled(before.to_string(), Style::default().fg(TEXT_PRIMARY)),
             Span::styled(CURSOR, Style::default().fg(CYAN)),
+            Span::styled(after.to_string(), Style::default().fg(TEXT_PRIMARY)),
         ])
     } else if filter.is_empty() {
         Line::from(vec![Span::styled(
@@ -930,8 +933,12 @@ fn draw_access_tokens(f: &mut Frame, area: Rect, state: &AccessTokensState) {
     );
     f.render_widget(title_block, chunks[0]);
 
-    let (search_block, search_text) =
-        render_search_bar(&state.filter, state.filter_active, "Filter by token ID");
+    let (search_block, search_text) = render_search_bar(
+        &state.filter,
+        state.filter_cursor,
+        state.filter_active,
+        "Filter by token ID",
+    );
     f.render_widget(Paragraph::new(search_text).block(search_block), chunks[1]);
 
     let header = Line::from(vec![
@@ -2345,8 +2352,12 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
     );
     f.render_widget(title_block, chunks[0]);
 
-    let (search_block, search_text) =
-        render_search_bar(&state.filter, state.filter_active, "Filter by prefix");
+    let (search_block, search_text) = render_search_bar(
+        &state.filter,
+        state.filter_cursor,
+        state.filter_active,
+        "Filter by prefix",
+    );
     f.render_widget(Paragraph::new(search_text).block(search_block), chunks[1]);
 
     let header_area = chunks[2];
@@ -2549,8 +2560,12 @@ fn draw_streams(f: &mut Frame, area: Rect, state: &StreamsState) {
     );
     f.render_widget(title_block, chunks[0]);
 
-    let (search_block, search_text) =
-        render_search_bar(&state.filter, state.filter_active, "Filter by prefix");
+    let (search_block, search_text) = render_search_bar(
+        &state.filter,
+        state.filter_cursor,
+        state.filter_active,
+        "Filter by prefix",
+    );
     f.render_widget(Paragraph::new(search_text).block(search_block), chunks[1]);
 
     let header_area = chunks[2];
@@ -3489,7 +3504,6 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     let form_inner = form_block.inner(main_chunks[0]);
     f.render_widget(form_block, main_chunks[0]);
 
-    let cursor = |editing: bool| if editing { "▎" } else { "" };
     let selected_marker = |sel: bool| if sel { "▸ " } else { "  " };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -3507,23 +3521,15 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             }),
         ),
     ]));
-    lines.push(Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            if state.body.is_empty() && !body_editing {
-                "(empty)".to_string()
-            } else {
-                format!("{}{}", &state.body, cursor(body_editing))
-            },
-            Style::default().fg(if body_editing {
-                CYAN
-            } else if state.body.is_empty() {
-                TEXT_MUTED
-            } else {
-                TEXT_SECONDARY
-            }),
-        ),
-    ]));
+    let mut body_spans = vec![Span::styled("  ", Style::default())];
+    body_spans.extend(render_text_input_with_cursor(
+        &state.body,
+        body_editing,
+        "(empty)",
+        if body_editing { CYAN } else { TEXT_SECONDARY },
+        state.cursor,
+    ));
+    lines.push(Line::from(body_spans));
     lines.push(Line::from(""));
 
     let headers_selected = state.selected == 1;
@@ -3559,35 +3565,32 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     }
 
     if headers_editing {
-        lines.push(Line::from(vec![
-            Span::styled("  + ", Style::default().fg(CYAN)),
-            Span::styled(
-                format!(
-                    "{}{}",
-                    &state.header_key_input,
-                    if state.editing_header_key { "▎" } else { "" }
-                ),
-                Style::default().fg(if state.editing_header_key {
-                    CYAN
-                } else {
-                    YELLOW
-                }),
-            ),
-            Span::styled(": ", Style::default().fg(TEXT_MUTED)),
-            Span::styled(
-                format!(
-                    "{}{}",
-                    &state.header_value_input,
-                    if !state.editing_header_key { "▎" } else { "" }
-                ),
-                Style::default().fg(if !state.editing_header_key {
-                    CYAN
-                } else {
-                    TEXT_SECONDARY
-                }),
-            ),
-            Span::styled("  ⇥=switch", Style::default().fg(BORDER)),
-        ]));
+        let mut header_spans = vec![Span::styled("  + ", Style::default().fg(CYAN))];
+        header_spans.extend(render_text_input_with_cursor(
+            &state.header_key_input,
+            state.editing_header_key,
+            "",
+            if state.editing_header_key {
+                CYAN
+            } else {
+                YELLOW
+            },
+            state.cursor,
+        ));
+        header_spans.push(Span::styled(": ", Style::default().fg(TEXT_MUTED)));
+        header_spans.extend(render_text_input_with_cursor(
+            &state.header_value_input,
+            !state.editing_header_key,
+            "",
+            if !state.editing_header_key {
+                CYAN
+            } else {
+                TEXT_SECONDARY
+            },
+            state.cursor,
+        ));
+        header_spans.push(Span::styled("  ⇥=switch", Style::default().fg(BORDER)));
+        lines.push(Line::from(header_spans));
     } else if headers_selected {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
@@ -3601,7 +3604,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
 
     let match_selected = state.selected == 2;
     let match_editing = match_selected && state.editing;
-    lines.push(Line::from(vec![
+    let mut match_spans = vec![
         Span::styled(selected_marker(match_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Match Seq#",
@@ -3612,21 +3615,15 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             }),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(
-            if state.match_seq_num.is_empty() && !match_editing {
-                "(none)".to_string()
-            } else {
-                format!("{}{}", &state.match_seq_num, cursor(match_editing))
-            },
-            Style::default().fg(if match_editing {
-                CYAN
-            } else if state.match_seq_num.is_empty() {
-                TEXT_MUTED
-            } else {
-                TEXT_SECONDARY
-            }),
-        ),
-    ]));
+    ];
+    match_spans.extend(render_text_input_with_cursor(
+        &state.match_seq_num,
+        match_editing,
+        "(none)",
+        if match_editing { CYAN } else { TEXT_SECONDARY },
+        state.cursor,
+    ));
+    lines.push(Line::from(match_spans));
     if match_selected {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
@@ -3640,7 +3637,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
 
     let fence_selected = state.selected == 3;
     let fence_editing = fence_selected && state.editing;
-    lines.push(Line::from(vec![
+    let mut fence_spans = vec![
         Span::styled(selected_marker(fence_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Fencing Token",
@@ -3651,21 +3648,15 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             }),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(
-            if state.fencing_token.is_empty() && !fence_editing {
-                "(none)".to_string()
-            } else {
-                format!("{}{}", &state.fencing_token, cursor(fence_editing))
-            },
-            Style::default().fg(if fence_editing {
-                CYAN
-            } else if state.fencing_token.is_empty() {
-                TEXT_MUTED
-            } else {
-                TEXT_SECONDARY
-            }),
-        ),
-    ]));
+    ];
+    fence_spans.extend(render_text_input_with_cursor(
+        &state.fencing_token,
+        fence_editing,
+        "(none)",
+        if fence_editing { CYAN } else { TEXT_SECONDARY },
+        state.cursor,
+    ));
+    lines.push(Line::from(fence_spans));
     if fence_selected {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
@@ -3688,7 +3679,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
     // Input file field
     let file_selected = state.selected == 4;
     let file_editing = file_selected && state.editing;
-    lines.push(Line::from(vec![
+    let mut file_spans = vec![
         Span::styled(selected_marker(file_selected), Style::default().fg(CYAN)),
         Span::styled(
             "Input File",
@@ -3699,21 +3690,15 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             }),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(
-            if state.input_file.is_empty() && !file_editing {
-                "(none)".to_string()
-            } else {
-                format!("{}{}", &state.input_file, cursor(file_editing))
-            },
-            Style::default().fg(if file_editing {
-                CYAN
-            } else if state.input_file.is_empty() {
-                TEXT_MUTED
-            } else {
-                CYAN
-            }),
-        ),
-    ]));
+    ];
+    file_spans.extend(render_text_input_with_cursor(
+        &state.input_file,
+        file_editing,
+        "(none)",
+        CYAN,
+        state.cursor,
+    ));
+    lines.push(Line::from(file_spans));
 
     // Format selector (only shown when file is set)
     let format_selected = state.selected == 5;
@@ -6672,8 +6657,12 @@ fn draw_bench_config(f: &mut Frame, area: Rect, state: &BenchViewState) {
             ]);
             f.render_widget(Paragraph::new(line), area);
         };
+    let edit_buffer_with_cursor = || {
+        let (before, after) = cursor_split_at(&state.edit_buffer, state.edit_cursor);
+        format!("{before}_{after}")
+    };
     let record_size_str = if state.editing && state.config_field == BenchConfigField::RecordSize {
-        format!("{}_", state.edit_buffer)
+        edit_buffer_with_cursor()
     } else {
         format_bytes(state.record_size as u64)
     };
@@ -6688,7 +6677,7 @@ fn draw_bench_config(f: &mut Frame, area: Rect, state: &BenchViewState) {
 
     // Target MiB/s
     let target_str = if state.editing && state.config_field == BenchConfigField::TargetMibps {
-        format!("{}_", state.edit_buffer)
+        edit_buffer_with_cursor()
     } else {
         format!("{} MiB/s", state.target_mibps)
     };
@@ -6703,7 +6692,7 @@ fn draw_bench_config(f: &mut Frame, area: Rect, state: &BenchViewState) {
 
     // Duration
     let duration_str = if state.editing && state.config_field == BenchConfigField::Duration {
-        format!("{}_", state.edit_buffer)
+        edit_buffer_with_cursor()
     } else {
         format!("{}s", state.duration_secs)
     };
@@ -6718,7 +6707,7 @@ fn draw_bench_config(f: &mut Frame, area: Rect, state: &BenchViewState) {
 
     // Catchup delay
     let catchup_str = if state.editing && state.config_field == BenchConfigField::CatchupDelay {
-        format!("{}_", state.edit_buffer)
+        edit_buffer_with_cursor()
     } else {
         format!("{}s", state.catchup_delay_secs)
     };
