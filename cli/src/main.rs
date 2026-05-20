@@ -299,7 +299,7 @@ async fn run() -> Result<(), CliError> {
 
         Command::GetDefaultLocation => {
             let location = ops::get_default_location(&s2).await?;
-            print_location_details(location.name.to_string(), location.is_private);
+            print_location_listing(location.name.to_string(), location.is_private);
         }
 
         Command::SetDefaultLocation { location } => {
@@ -311,7 +311,7 @@ async fn run() -> Result<(), CliError> {
                     .green()
                     .bold()
             );
-            print_location_details(location.name.to_string(), location.is_private);
+            print_location_listing(location.name.to_string(), location.is_private);
         }
 
         Command::GetAccountMetrics(args) => {
@@ -678,11 +678,6 @@ fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) 
 }
 
 fn print_location_listing(name: String, is_private: bool) {
-    let visibility = format_location_visibility(is_private);
-    println!("{name} {visibility}");
-}
-
-fn print_location_details(name: String, is_private: bool) {
     let visibility = format_location_visibility(is_private);
     println!("{name} {visibility}");
 }
