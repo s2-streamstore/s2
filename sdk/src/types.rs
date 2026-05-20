@@ -26,8 +26,6 @@ pub use s2_common::encryption::EncryptionAlgorithm;
 pub use s2_common::encryption::EncryptionKey;
 /// Validation error.
 pub use s2_common::types::ValidationError;
-/// Rustls crypto provider used by the SDK's default TLS connector.
-pub type RustlsCryptoProvider = rustls::crypto::CryptoProvider;
 /// Access token ID.
 ///
 /// **Note:** It must be unique to the account and between 1 and 96 bytes in length.
@@ -406,7 +404,7 @@ pub struct S2Config {
     pub(crate) compression: Compression,
     pub(crate) user_agent: HeaderValue,
     pub(crate) insecure_skip_cert_verification: bool,
-    pub(crate) rustls_crypto_provider: Option<Arc<RustlsCryptoProvider>>,
+    pub(crate) rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
 
 impl S2Config {
@@ -494,11 +492,11 @@ impl S2Config {
     /// provider if one has been installed, or returns an error otherwise.
     ///
     /// Use this when your application needs a specific rustls provider, such as
-    /// `ring` or a custom [`RustlsCryptoProvider`]. The corresponding rustls
-    /// provider feature must be enabled in the dependency graph.
+    /// `ring` or a custom [`rustls::crypto::CryptoProvider`]. The corresponding
+    /// rustls provider feature must be enabled in the dependency graph.
     pub fn with_rustls_crypto_provider(
         self,
-        provider: impl Into<Arc<RustlsCryptoProvider>>,
+        provider: impl Into<Arc<rustls::crypto::CryptoProvider>>,
     ) -> Self {
         Self {
             rustls_crypto_provider: Some(provider.into()),
@@ -506,7 +504,7 @@ impl S2Config {
         }
     }
 
-    /// Use rustls's `aws-lc-rs` crypto provider for this SDK client.
+    /// Use rustls's `aws-lc-rs` crypto provider.
     ///
     /// Requires the `rustls-aws-lc-rs` crate feature.
     #[cfg(feature = "rustls-aws-lc-rs")]
@@ -514,7 +512,7 @@ impl S2Config {
         self.with_rustls_crypto_provider(rustls::crypto::aws_lc_rs::default_provider())
     }
 
-    /// Use rustls's `ring` crypto provider for this SDK client.
+    /// Use rustls's `ring` crypto provider.
     ///
     /// Requires the `rustls-ring` crate feature.
     #[cfg(feature = "rustls-ring")]
@@ -534,17 +532,17 @@ impl S2Config {
 }
 
 #[cfg(feature = "rustls-aws-lc-rs")]
-fn default_rustls_crypto_provider() -> Option<Arc<RustlsCryptoProvider>> {
+fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
     Some(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
 }
 
 #[cfg(all(not(feature = "rustls-aws-lc-rs"), feature = "rustls-ring"))]
-fn default_rustls_crypto_provider() -> Option<Arc<RustlsCryptoProvider>> {
+fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
     Some(Arc::new(rustls::crypto::ring::default_provider()))
 }
 
 #[cfg(all(not(feature = "rustls-aws-lc-rs"), not(feature = "rustls-ring")))]
-fn default_rustls_crypto_provider() -> Option<Arc<RustlsCryptoProvider>> {
+fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
     None
 }
 
