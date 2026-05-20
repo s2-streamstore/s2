@@ -450,7 +450,7 @@ fn resolve_rustls_crypto_provider(
         .or_else(|| rustls::crypto::CryptoProvider::get_default().cloned())
         .ok_or_else(|| {
             std::io::Error::other(
-                "no rustls crypto provider configured; call \
+                "no rustls crypto provider configured; configure \
                  S2Config::with_rustls_crypto_provider(...) or install a \
                  process-global provider with \
                  rustls::crypto::CryptoProvider::install_default()",
