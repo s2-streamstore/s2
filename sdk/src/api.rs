@@ -829,8 +829,9 @@ impl BaseClient {
         let connector = client::default_connector(
             Some(config.connection_timeout),
             config.insecure_skip_cert_verification,
+            config.rustls_crypto_provider.clone(),
         )
-        .map_err(|e| ClientError::Others(format!("failed to load TLS certificates: {e}")))?;
+        .map_err(|e| ClientError::Others(format!("failed to initialize TLS connector: {e}")))?;
         Self::init_with_connector(config, connector)
     }
 
@@ -1305,9 +1306,9 @@ mod tests {
         assert!(!is_safe_to_retry(&non_retryable, policy, Some(&signal)));
     }
 
+    #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     #[tokio::test]
     async fn dns_error_message_is_clear() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let config = crate::types::S2Config::new("test-token".to_owned())
             .with_endpoints(
                 crate::types::S2Endpoints::new(

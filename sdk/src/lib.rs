@@ -40,6 +40,34 @@ The Rust SDK provides ergonomic wrappers and utilities to interact with the
 See [`S2`] for account-level operations, [`S2Basin`] for basin-level operations,
 and [`S2Stream`] for stream-level operations.
 
+# TLS crypto provider
+
+The SDK enables the `rustls-aws-lc-rs` feature by default and uses rustls's
+`aws-lc-rs` crypto provider without installing a process-global rustls provider.
+Applications can opt out of that dependency with `default-features = false`.
+They can then enable `rustls-ring`, pass a custom provider, or install a
+process-global rustls provider before constructing an SDK client:
+
+```no_run
+use s2_sdk::{
+    S2,
+    types::S2Config,
+};
+
+# #[cfg(feature = "rustls-aws-lc-rs")]
+# {
+let config = S2Config::new("<YOUR_ACCESS_TOKEN>")
+    .with_rustls_aws_lc_rs_crypto_provider();
+let s2 = S2::new(config)?;
+# }
+# Ok::<_, Box<dyn std::error::Error>>(())
+```
+
+For custom providers, use [`S2Config::with_rustls_crypto_provider`]. When no SDK
+provider feature or custom provider is configured, the default connector falls
+back to rustls's process-global provider and returns an error if one has not
+been installed.
+
 # Examples
 
 We have curated a bunch of examples in the

@@ -12,9 +12,13 @@ categories = ["api-bindings", "database"]
 
 [package.metadata.docs.rs]
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
+features = ["rustls-aws-lc-rs", "rustls-ring"]
 
 [features]
+default = ["rustls-aws-lc-rs"]
 _hidden = []
+rustls-aws-lc-rs = ["hyper-rustls/aws-lc-rs", "rustls/aws-lc-rs"]
+rustls-ring = ["hyper-rustls/ring", "rustls/ring"]
 
 [dependencies]
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
@@ -26,7 +30,7 @@ http = { workspace = true }
 http-body = "1"
 http-body-util = "0.1"
 hyper = "1.9"
-hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "aws-lc-rs", "tls12"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1", "http2"] }
 pin-project-lite = "0.2"
 prost = { workspace = true }
