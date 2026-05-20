@@ -3,8 +3,8 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, LocationNamePrefix,
-    StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamNamePrefix,
+    StreamNameStartAfter,
 };
 
 use crate::{
@@ -89,7 +89,7 @@ pub enum Command {
     },
 
     /// List locations.
-    ListLocations(ListLocationsArgs),
+    ListLocations,
 
     /// Get the default location.
     GetDefaultLocation,
@@ -322,13 +322,6 @@ pub struct ListAccessTokensArgs {
     /// Returns only a single page of access tokens instead of auto-paginating.
     #[arg(long, default_value_t = false)]
     pub no_auto_paginate: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct ListLocationsArgs {
-    /// List locations that begin with this prefix.
-    #[arg(short = 'p', long)]
-    pub prefix: Option<LocationNamePrefix>,
 }
 
 #[derive(Args, Debug)]

@@ -30,7 +30,7 @@ use s2_api::v1::{
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
     },
-    location::{ListLocationsRequest, LocationInfo},
+    location::LocationInfo,
     stream::{
         AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
         ReadEnd, ReadStart, StreamInfo, TailResponse,
@@ -103,12 +103,9 @@ impl AccountClient {
         Ok(())
     }
 
-    pub async fn list_locations(
-        &self,
-        request: ListLocationsRequest,
-    ) -> Result<Vec<LocationInfo>, ApiError> {
+    pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, ApiError> {
         let url = self.base_url.join("v1/locations")?;
-        let request = self.get(url).query(&request).build()?;
+        let request = self.get(url).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<Vec<LocationInfo>>()?)
     }

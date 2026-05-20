@@ -1,4 +1,4 @@
-use axum::extract::{FromRequest, Query, State};
+use axum::extract::{FromRequest, State};
 use s2_api::{data::Json, v1 as v1t};
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
@@ -9,13 +9,6 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::locations::LIST, get(list_locations))
         .route(super::paths::locations::DEFAULT, get(get_default_location))
         .route(super::paths::locations::DEFAULT, put(set_default_location))
-}
-
-#[derive(FromRequest)]
-#[from_request(rejection(ServiceError))]
-pub struct ListArgs {
-    #[from_request(via(Query))]
-    _request: v1t::location::ListLocationsRequest,
 }
 
 /// List locations.
@@ -29,11 +22,9 @@ pub struct ListArgs {
         (status = 403, body = v1t::error::ErrorInfo),
         (status = 408, body = v1t::error::ErrorInfo),
     ),
-    params(v1t::location::ListLocationsRequest),
 ))]
 pub async fn list_locations(
     State(_backend): State<Backend>,
-    ListArgs { .. }: ListArgs,
 ) -> Result<Json<Vec<v1t::location::LocationInfo>>, ServiceError> {
     Err(ServiceError::NotImplemented)
 }

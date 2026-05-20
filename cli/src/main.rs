@@ -290,8 +290,8 @@ async fn run() -> Result<(), CliError> {
             );
         }
 
-        Command::ListLocations(args) => {
-            let locations = ops::list_locations(&s2, args).await?;
+        Command::ListLocations => {
+            let locations = ops::list_locations(&s2).await?;
             for location_info in locations {
                 print_location_listing(location_info.name.to_string(), location_info.is_private);
             }

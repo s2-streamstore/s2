@@ -12,9 +12,9 @@ use crate::{
         EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListLocationsInput, ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch,
-        ReadInput, ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig,
-        StreamInfo, StreamName, StreamPosition, Streaming,
+        ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
+        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo,
+        StreamName, StreamPosition, Streaming,
     },
 };
 
@@ -212,11 +212,8 @@ impl S2 {
     }
 
     /// List locations.
-    pub async fn list_locations(
-        &self,
-        input: ListLocationsInput,
-    ) -> Result<Vec<LocationInfo>, S2Error> {
-        let response = self.client.list_locations(input.into()).await?;
+    pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, S2Error> {
+        let response = self.client.list_locations().await?;
         Ok(response.into_iter().map(Into::into).collect())
     }
 

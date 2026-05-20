@@ -1,18 +1,5 @@
-use s2_common::types::{
-    self,
-    location::{LocationName, LocationNamePrefix},
-};
+use s2_common::types::{self, location::LocationName};
 use serde::{Deserialize, Serialize};
-
-#[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
-#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
-pub struct ListLocationsRequest {
-    /// Filter to locations whose names begin with this prefix.
-    #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
-    pub prefix: Option<LocationNamePrefix>,
-}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]

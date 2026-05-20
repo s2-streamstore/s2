@@ -12,10 +12,10 @@ use s2_sdk::{
         DeleteStreamInput, EncryptionKey, FencingToken, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListLocationsInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric,
-        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput,
-        ReconfigureStreamInput, S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet,
-        StreamPosition, StreamReconfiguration, Streaming, TimeRange, TimeRangeAndInterval,
+        ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric, ReadBatch, ReadFrom,
+        ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput,
+        S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition,
+        StreamReconfiguration, Streaming, TimeRange, TimeRangeAndInterval,
     },
 };
 
@@ -35,8 +35,8 @@ use crate::{
     cli::{
         CreateBasinArgs, CreateStreamArgs, FenceArgs, GetAccountMetricsArgs, GetBasinMetricsArgs,
         GetStreamMetricsArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
-        ListLocationsArgs, ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs,
-        TailArgs, TimeRangeArgs, TrimArgs,
+        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs,
+        TimeRangeArgs, TrimArgs,
     },
     error::{CliError, OpKind},
     types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
@@ -244,18 +244,8 @@ pub async fn revoke_access_token(s2: &S2, id: AccessTokenId) -> Result<(), CliEr
 }
 
 /// List locations.
-pub async fn list_locations(
-    s2: &S2,
-    args: ListLocationsArgs,
-) -> Result<Vec<LocationInfo>, CliError> {
-    let ListLocationsArgs { prefix } = args;
-
-    let mut input = ListLocationsInput::new();
-    if let Some(p) = prefix {
-        input = input.with_prefix(p);
-    }
-
-    s2.list_locations(input)
+pub async fn list_locations(s2: &S2) -> Result<Vec<LocationInfo>, CliError> {
+    s2.list_locations()
         .await
         .map_err(|e| CliError::op(OpKind::ListLocations, e))
 }

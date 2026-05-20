@@ -47,8 +47,6 @@ pub use s2_common::types::basin::BasinNameStartAfter;
 /// **Note:** It must be between 1 and 64 characters in length and can only comprise ASCII
 /// letters, numbers, colons, hyphens, and periods.
 pub use s2_common::types::location::LocationName;
-/// See [`ListLocationsInput::prefix`].
-pub use s2_common::types::location::LocationNamePrefix;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -1492,36 +1490,6 @@ impl ListAllAccessTokensInput {
         Self {
             start_after,
             ..self
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-/// Input for [`list_locations`](crate::S2::list_locations) operation.
-pub struct ListLocationsInput {
-    /// Filter locations whose names begin with this value.
-    ///
-    /// Defaults to `""`.
-    pub prefix: LocationNamePrefix,
-}
-
-impl ListLocationsInput {
-    /// Create a new [`ListLocationsInput`] with default values.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the prefix used to filter locations whose names begin with this value.
-    pub fn with_prefix(self, prefix: LocationNamePrefix) -> Self {
-        Self { prefix, ..self }
-    }
-}
-
-impl From<ListLocationsInput> for api::location::ListLocationsRequest {
-    fn from(value: ListLocationsInput) -> Self {
-        Self {
-            prefix: Some(value.prefix),
         }
     }
 }
