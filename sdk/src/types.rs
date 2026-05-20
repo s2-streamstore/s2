@@ -941,7 +941,8 @@ pub struct EnsureBasinInput {
     pub config: Option<BasinConfig>,
     /// Location of the basin.
     ///
-    /// If omitted when creating, uses the default location for the service. Cannot be changed once set.
+    /// If omitted when creating, uses the default location for the service. Cannot be changed once
+    /// set.
     pub location: Option<LocationName>,
 }
 
