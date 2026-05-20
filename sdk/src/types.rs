@@ -1827,12 +1827,6 @@ pub enum Operation {
     GetBasinMetrics,
     /// Get stream metrics.
     GetStreamMetrics,
-    /// List locations.
-    ListLocations,
-    /// Get the default location.
-    GetDefaultLocation,
-    /// Set the default location.
-    SetDefaultLocation,
     /// List streams.
     ListStreams,
     /// Create a stream.
@@ -1853,6 +1847,12 @@ pub enum Operation {
     Trim,
     /// Set the fencing token on a stream.
     Fence,
+    /// List locations.
+    ListLocations,
+    /// Get the default location.
+    GetDefaultLocation,
+    /// Set the default location.
+    SetDefaultLocation,
 }
 
 impl From<Operation> for api::access::Operation {

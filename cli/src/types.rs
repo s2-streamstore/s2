@@ -746,9 +746,6 @@ pub enum Operation {
     GetAccountMetrics,
     GetBasinMetrics,
     GetStreamMetrics,
-    ListLocations,
-    GetDefaultLocation,
-    SetDefaultLocation,
     ListStreams,
     CreateStream,
     DeleteStream,
@@ -759,6 +756,9 @@ pub enum Operation {
     Fence,
     Append,
     Read,
+    ListLocations,
+    GetDefaultLocation,
+    SetDefaultLocation,
 }
 
 impl From<Operation> for sdk::types::Operation {
