@@ -241,8 +241,8 @@ impl Producer {
             match_seq_num: config.match_seq_num,
         };
 
-        let mut pending_acks: VecDeque<PendingRecordAck> = VecDeque::new();
-        let mut claimable_tickets: FuturesUnordered<_> = FuturesUnordered::new();
+        let mut pending_batch_acks = FuturesUnordered::new();
+        let mut pending_record_acks = VecDeque::new();
         let mut close_tx: Option<oneshot::Sender<Result<(), S2Error>>> = None;
         let mut stashed_submission: Option<StashedSubmission> = None;
         let mut submit_fut: Option<SubmitFuture> = None;
@@ -261,7 +261,7 @@ impl Producer {
                     let submission = stashed_submission
                         .take()
                         .expect("stashed_submission should not be None");
-                    pending_acks.push_back(PendingRecordAck {
+                    pending_record_acks.push_back(PendingRecordAck {
                         ack_tx: submission.ack_tx,
                         _permit: submission.permit,
                     });
@@ -285,7 +285,7 @@ impl Producer {
                             close_tx = Some(done_tx);
                         }
                         None => {
-                            for pending in pending_acks.drain(..) {
+                            for pending in pending_record_acks.drain(..) {
                                 let _ = pending.ack_tx.send(Err(ProducerError::Dropped.into()));
                             }
                             return;
@@ -300,10 +300,11 @@ impl Producer {
                             submit_fut = Some(Box::pin(session.submit(input)));
                         }
                         Some(Err(err)) => {
-                            propagate_terminal_error(
+                            terminate_producer(
                                 err.into(),
                                 &terminal_err,
-                                &mut pending_acks,
+                                &mut pending_batch_acks,
+                                &mut pending_record_acks,
                                 &mut stashed_submission,
                                 &mut close_tx,
                                 &mut cmd_rx,
@@ -329,16 +330,19 @@ impl Producer {
                             let batch_len = submit_batch_len
                                 .take()
                                 .expect("submit_batch_len should not be None");
-                            claimable_tickets.push(ticket.map({
-                                let pending_acks = pending_acks.drain(..batch_len).collect::<Vec<_>>();
-                                |batch_ack| (batch_ack, pending_acks)
-                            }));
+                            pending_batch_acks.push(PendingBatchAck {
+                                ticket,
+                                pending_record_acks: Some(
+                                    pending_record_acks.drain(..batch_len).collect::<Vec<_>>(),
+                                ),
+                            });
                         }
                         Err(err) => {
-                            propagate_terminal_error(
+                            terminate_producer(
                                 err,
                                 &terminal_err,
-                                &mut pending_acks,
+                                &mut pending_batch_acks,
+                                &mut pending_record_acks,
                                 &mut stashed_submission,
                                 &mut close_tx,
                                 &mut cmd_rx,
@@ -349,8 +353,8 @@ impl Producer {
                     }
                 }
 
-                Some((batch_ack, pending_acks)) = claimable_tickets.next() => {
-                    dispatch_acks(batch_ack, pending_acks);
+                Some((batch_ack, pending_record_acks)) = pending_batch_acks.next() => {
+                    dispatch_acks(batch_ack, pending_record_acks);
                 }
             }
 
@@ -359,8 +363,8 @@ impl Producer {
             }
 
             if close_tx.is_some()
-                && pending_acks.is_empty()
-                && claimable_tickets.is_empty()
+                && pending_record_acks.is_empty()
+                && pending_batch_acks.is_empty()
                 && stashed_submission.is_none()
                 && submit_fut.is_none()
             {
@@ -452,10 +456,34 @@ struct PendingRecordAck {
     _permit: AppendPermit,
 }
 
-fn dispatch_acks(batch_ack: Result<AppendAck, S2Error>, pending_acks: Vec<PendingRecordAck>) {
+struct PendingBatchAck {
+    ticket: BatchSubmitTicket,
+    pending_record_acks: Option<Vec<PendingRecordAck>>,
+}
+
+impl Future for PendingBatchAck {
+    type Output = (Result<AppendAck, S2Error>, Vec<PendingRecordAck>);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.ticket).poll(cx) {
+            Poll::Ready(batch_ack) => Poll::Ready((
+                batch_ack,
+                self.pending_record_acks
+                    .take()
+                    .expect("pending_record_acks should not be None"),
+            )),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn dispatch_acks(
+    batch_ack: Result<AppendAck, S2Error>,
+    pending_record_acks: Vec<PendingRecordAck>,
+) {
     match batch_ack {
         Ok(batch_ack) => {
-            for (offset, pending) in pending_acks.into_iter().enumerate() {
+            for (offset, pending) in pending_record_acks.into_iter().enumerate() {
                 let seq_num = batch_ack.start.seq_num + offset as u64;
                 let _ = pending.ack_tx.send(Ok(IndexedAppendAck {
                     seq_num,
@@ -464,23 +492,30 @@ fn dispatch_acks(batch_ack: Result<AppendAck, S2Error>, pending_acks: Vec<Pendin
             }
         }
         Err(err) => {
-            for pending in pending_acks {
+            for pending in pending_record_acks {
                 let _ = pending.ack_tx.send(Err(err.clone()));
             }
         }
     }
 }
 
-async fn propagate_terminal_error(
+async fn terminate_producer(
     err: S2Error,
     terminal_err: &OnceLock<S2Error>,
-    pending_acks: &mut VecDeque<PendingRecordAck>,
+    pending_batch_acks: &mut FuturesUnordered<PendingBatchAck>,
+    pending_record_acks: &mut VecDeque<PendingRecordAck>,
     stashed_submission: &mut Option<StashedSubmission>,
     close_tx: &mut Option<oneshot::Sender<Result<(), S2Error>>>,
     cmd_rx: &mut mpsc::Receiver<Command>,
 ) {
+    while let Some((batch_ack, pending_record_acks)) =
+        pending_batch_acks.next().now_or_never().flatten()
+    {
+        dispatch_acks(batch_ack, pending_record_acks);
+    }
+
     let _ = terminal_err.set(err.clone());
-    for pending in pending_acks.drain(..) {
+    for pending in pending_record_acks.drain(..) {
         let _ = pending.ack_tx.send(Err(err.clone()));
     }
     if let Some(submission) = stashed_submission.take() {
