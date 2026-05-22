@@ -202,10 +202,6 @@ mod tests {
 
     const MIN_AGE: Duration = Duration::from_secs(60);
 
-    fn stream_meta() -> kv::stream_meta::StreamMeta {
-        stream_meta_with_config(OptionalStreamConfig::default(), OffsetDateTime::now_utc())
-    }
-
     fn stream_meta_with_config(
         config: OptionalStreamConfig,
         created_at: OffsetDateTime,
@@ -219,8 +215,10 @@ mod tests {
         }
     }
 
-    async fn seed_stream(backend: &Backend, basin: &BasinName, stream: &StreamName) -> StreamId {
-        seed_stream_with_meta(backend, basin, stream, stream_meta()).await
+    fn stream_meta_with_doe_min_age(min_age: Duration) -> kv::stream_meta::StreamMeta {
+        let mut config = OptionalStreamConfig::default();
+        config.delete_on_empty.min_age = Some(min_age);
+        stream_meta_with_config(config, OffsetDateTime::now_utc())
     }
 
     async fn seed_stream_with_meta(
@@ -333,7 +331,13 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin").unwrap();
         let stream = StreamName::from_str("doe-stream").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_doe_min_age(MIN_AGE),
+        )
+        .await;
         let write_timestamp = put_tail_position(
             &backend,
             stream_id,
@@ -343,13 +347,13 @@ mod tests {
             },
         )
         .await;
-        let deadline = write_timestamp;
+        let deadline = deadline_after(write_timestamp, MIN_AGE);
 
         backend
             .db
             .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
-                kv::stream_doe_deadline::ser_value(Duration::ZERO),
+                kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
             .await
             .unwrap();
@@ -379,16 +383,13 @@ mod tests {
         let basin = BasinName::from_str("doe-basin-never").unwrap();
         let stream = StreamName::from_str("doe-stream-never").unwrap();
         let stream_id = StreamId::new(&basin, &stream);
-        let created_at = OffsetDateTime::now_utc();
-        let min_age = Duration::ZERO;
-        let mut config = OptionalStreamConfig::default();
-        config.delete_on_empty.min_age = Some(min_age);
-        let meta = stream_meta_with_config(config, created_at);
+        let min_age = MIN_AGE;
+        let meta = stream_meta_with_doe_min_age(min_age);
 
         seed_stream_with_meta(&backend, &basin, &stream, meta).await;
 
         let write_timestamp = put_tail_position(&backend, stream_id, StreamPosition::MIN).await;
-        let deadline = write_timestamp;
+        let deadline = deadline_after(write_timestamp, min_age);
         backend
             .db
             .put(
@@ -422,7 +423,13 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-recent").unwrap();
         let stream = StreamName::from_str("doe-stream-recent").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_doe_min_age(MIN_AGE),
+        )
+        .await;
         let write_timestamp = put_tail_position(
             &backend,
             stream_id,
@@ -467,7 +474,13 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-nonempty").unwrap();
         let stream = StreamName::from_str("doe-stream-nonempty").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_doe_min_age(MIN_AGE),
+        )
+        .await;
         let deadline = TimestampSecs::now();
 
         let pos = StreamPosition {
@@ -523,7 +536,13 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-future").unwrap();
         let stream = StreamName::from_str("doe-stream-future").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_doe_min_age(MIN_AGE),
+        )
+        .await;
         let deadline = TimestampSecs::after(Duration::from_secs(3600));
 
         backend
@@ -560,7 +579,13 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-multi").unwrap();
         let stream = StreamName::from_str("doe-stream-multi").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_doe_min_age(MIN_AGE),
+        )
+        .await;
         let far_future = TimestampSecs::after(Duration::from_secs(3600));
         let deadline_a = TimestampSecs::after(Duration::ZERO);
         let deadline_b = TimestampSecs::after(Duration::from_secs(1));
@@ -617,7 +642,13 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-pairs").unwrap();
         let stream = StreamName::from_str("doe-stream-pairs").unwrap();
-        let stream_id = seed_stream(&backend, &basin, &stream).await;
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_doe_min_age(MIN_AGE),
+        )
+        .await;
 
         let write_timestamp = put_tail_position(
             &backend,

@@ -457,6 +457,7 @@ impl Streamer {
             TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff } => {
                 if self.last_tail_write_timestamp > last_write_cutoff
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
+                    || self.config.delete_on_empty.min_age().is_none()
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                     return;
@@ -496,6 +497,7 @@ impl Streamer {
                 } else if self.stable_pos != stable_pos_snapshot
                     || self.next_assignable_pos() != stable_pos_snapshot
                     || self.last_tail_write_timestamp > last_write_cutoff
+                    || self.config.delete_on_empty.min_age().is_none()
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                 } else {
