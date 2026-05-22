@@ -19,11 +19,6 @@ use http::{
 };
 use rand::RngExt;
 use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
-pub use s2_common::caps::RECORD_BATCH_MAX;
-/// Encryption algorithm.
-pub use s2_common::encryption::EncryptionAlgorithm;
-/// Encryption key for stream operations.
-pub use s2_common::encryption::EncryptionKey;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.
@@ -56,6 +51,10 @@ pub use s2_common::types::stream::StreamName;
 pub use s2_common::types::stream::StreamNamePrefix;
 /// See [`ListStreamsInput::start_after`].
 pub use s2_common::types::stream::StreamNameStartAfter;
+pub use s2_common::{
+    caps::RECORD_BATCH_MAX,
+    encryption::{EncryptionAlgorithm, EncryptionKey},
+};
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
