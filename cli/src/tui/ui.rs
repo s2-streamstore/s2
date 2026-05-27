@@ -4607,8 +4607,6 @@ fn draw_input_dialog(
             lines.push(Line::from(""));
             let known_locs = locations.unwrap_or(&[]);
             if known_locs.is_empty() {
-                // Fallback: freeform text input (locations not loaded yet, fetch failed,
-                // or the account has no listable locations).
                 let (ind, lbl) = render_field_row_bold(1, "Location", *selected);
                 let mut location_spans = vec![ind, lbl, Span::raw("  ")];
                 location_spans.extend(render_text_input_with_cursor(
@@ -4620,7 +4618,6 @@ fn draw_input_dialog(
                 ));
                 lines.push(Line::from(location_spans));
             } else {
-                // Pill row: Default | <known locations> | Custom
                 let custom_pill_idx = known_locs.len() + 1;
                 let pill_idx = if location.is_empty() {
                     0
@@ -4652,7 +4649,6 @@ fn draw_input_dialog(
                 ));
                 lines.push(Line::from(loc_spans));
 
-                // Conditional text input row when Custom is active
                 if pill_idx == custom_pill_idx {
                     let mut custom_spans = vec![Span::raw("                  ")];
                     custom_spans.extend(render_text_input_with_cursor(
