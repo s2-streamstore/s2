@@ -1007,16 +1007,12 @@ pub struct App {
     pub show_help: bool,
     pub input_mode: InputMode,
     pub pip: Option<PipState>,
-    /// Cached list of available basin locations. `None` until first fetched.
     pub locations: Option<Vec<s2_sdk::types::LocationInfo>>,
     should_quit: bool,
     /// Stop signal for the benchmark task
     bench_stop_signal: Option<Arc<AtomicBool>>,
 }
 
-/// Update `location` to the canonical value for a given Location pill index.
-/// Default (0) and Custom (`custom_idx`) both clear the field; a named pill
-/// writes the location's name. Out-of-range indices are ignored.
 fn set_location_for_pill(
     location: &mut String,
     pill_idx: usize,
@@ -1938,7 +1934,6 @@ impl App {
             }
 
             Event::LocationsLoaded(result) => {
-                // Silent on failure: form falls back to freeform text input.
                 if let Ok(locations) = result {
                     self.locations = Some(locations);
                 }
@@ -2316,8 +2311,6 @@ impl App {
             return;
         }
 
-        // Snapshot known location names so we can reference them while holding a
-        // mutable borrow of self.input_mode below.
         let known_location_names: Vec<String> = self
             .locations
             .as_deref()
@@ -2345,9 +2338,6 @@ impl App {
             } => {
                 const FIELD_COUNT: usize = 12;
 
-                // Pill index for the Location field. Only meaningful when
-                // `known_location_names` is non-empty (pill row rendered).
-                // 0 = Default, 1..=N = named, N+1 = Custom.
                 let location_pill_idx = || -> usize {
                     if location.is_empty() {
                         0
@@ -2449,8 +2439,6 @@ impl App {
                                 *editing = true;
                             }
                             1 => {
-                                // Only enter edit mode when there's a text input to edit:
-                                // either no pill row (fallback) or user is on the Custom pill.
                                 let custom_idx = known_location_names.len() + 1;
                                 let editable = known_location_names.is_empty()
                                     || location_pill_idx() == custom_idx;
