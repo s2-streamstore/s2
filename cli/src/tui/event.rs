@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use s2_sdk::types::{
-    AccessTokenInfo, BasinInfo, Metric, SequencedRecord, StreamInfo, StreamPosition,
+    AccessTokenInfo, BasinInfo, LocationInfo, Metric, SequencedRecord, StreamInfo, StreamPosition,
 };
 
 use crate::{
@@ -109,6 +109,9 @@ pub enum Event {
 
     /// Access tokens have been loaded from the API
     AccessTokensLoaded(Result<Vec<AccessTokenInfo>, CliError>),
+
+    /// Available basin locations have been loaded from the API
+    LocationsLoaded(Result<Vec<LocationInfo>, CliError>),
 
     /// Access token issued successfully (token string)
     AccessTokenIssued(Result<String, CliError>),

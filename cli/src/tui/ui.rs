@@ -441,7 +441,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_help_overlay(f, &app.screen);
     }
     if !matches!(app.input_mode, InputMode::Normal) {
-        draw_input_dialog(f, &app.input_mode);
+        draw_input_dialog(f, &app.input_mode, app.locations.as_deref());
     }
     // Draw PiP overlay last so it's on top
     if let Some(ref pip) = app.pip {
@@ -4494,7 +4494,11 @@ fn get_selected_line_hint(mode: &InputMode) -> usize {
     }
 }
 
-fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
+fn draw_input_dialog(
+    f: &mut Frame,
+    mode: &InputMode,
+    locations: Option<&[s2_sdk::types::LocationInfo]>,
+) {
     let (title, content, hint) = match mode {
         InputMode::Normal => return,
 
@@ -4601,16 +4605,66 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
 
             // Basin location
             lines.push(Line::from(""));
-            let (ind, lbl) = render_field_row_bold(1, "Location", *selected);
-            let mut location_spans = vec![ind, lbl, Span::raw("  ")];
-            location_spans.extend(render_text_input_with_cursor(
-                location,
-                *selected == 1 && *editing,
-                "server default",
-                CYAN,
-                *cursor,
-            ));
-            lines.push(Line::from(location_spans));
+            let known_locs = locations.unwrap_or(&[]);
+            if known_locs.is_empty() {
+                // Fallback: freeform text input (locations not loaded yet, fetch failed,
+                // or the account has no listable locations).
+                let (ind, lbl) = render_field_row_bold(1, "Location", *selected);
+                let mut location_spans = vec![ind, lbl, Span::raw("  ")];
+                location_spans.extend(render_text_input_with_cursor(
+                    location,
+                    *selected == 1 && *editing,
+                    "server default",
+                    CYAN,
+                    *cursor,
+                ));
+                lines.push(Line::from(location_spans));
+            } else {
+                // Pill row: Default | <known locations> | Custom
+                let custom_pill_idx = known_locs.len() + 1;
+                let pill_idx = if location.is_empty() {
+                    0
+                } else if let Some(i) = known_locs
+                    .iter()
+                    .position(|l| l.name.as_ref() == location.as_str())
+                {
+                    i + 1
+                } else {
+                    custom_pill_idx
+                };
+
+                let (ind, lbl) = render_field_row_bold(1, "Location", *selected);
+                let mut loc_spans = vec![ind, lbl, Span::raw("  ")];
+                loc_spans.push(render_pill("Default", *selected == 1, pill_idx == 0));
+                loc_spans.push(Span::raw(" "));
+                for (i, loc) in known_locs.iter().enumerate() {
+                    loc_spans.push(render_pill(
+                        loc.name.as_ref(),
+                        *selected == 1,
+                        pill_idx == i + 1,
+                    ));
+                    loc_spans.push(Span::raw(" "));
+                }
+                loc_spans.push(render_pill(
+                    "Custom…",
+                    *selected == 1,
+                    pill_idx == custom_pill_idx,
+                ));
+                lines.push(Line::from(loc_spans));
+
+                // Conditional text input row when Custom is active
+                if pill_idx == custom_pill_idx {
+                    let mut custom_spans = vec![Span::raw("                  ")];
+                    custom_spans.extend(render_text_input_with_cursor(
+                        location,
+                        *selected == 1 && *editing,
+                        "type location",
+                        CYAN,
+                        *cursor,
+                    ));
+                    lines.push(Line::from(custom_spans));
+                }
+            }
 
             // Default stream configuration section
             lines.push(Line::from(""));

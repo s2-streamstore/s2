@@ -1007,9 +1007,28 @@ pub struct App {
     pub show_help: bool,
     pub input_mode: InputMode,
     pub pip: Option<PipState>,
+    /// Cached list of available basin locations. `None` until first fetched.
+    pub locations: Option<Vec<s2_sdk::types::LocationInfo>>,
     should_quit: bool,
     /// Stop signal for the benchmark task
     bench_stop_signal: Option<Arc<AtomicBool>>,
+}
+
+/// Update `location` to the canonical value for a given Location pill index.
+/// Default (0) and Custom (`custom_idx`) both clear the field; a named pill
+/// writes the location's name. Out-of-range indices are ignored.
+fn set_location_for_pill(
+    location: &mut String,
+    pill_idx: usize,
+    names: &[String],
+    custom_idx: usize,
+) {
+    if pill_idx == 0 || pill_idx == custom_idx {
+        location.clear();
+    } else if let Some(name) = names.get(pill_idx - 1) {
+        location.clear();
+        location.push_str(name);
+    }
 }
 
 /// Build a basin config from form values
@@ -1126,6 +1145,7 @@ impl App {
             show_help: false,
             input_mode: InputMode::Normal,
             pip: None,
+            locations: None,
             should_quit: false,
             bench_stop_signal: None,
         }
@@ -1917,6 +1937,13 @@ impl App {
                 }
             }
 
+            Event::LocationsLoaded(result) => {
+                // Silent on failure: form falls back to freeform text input.
+                if let Ok(locations) = result {
+                    self.locations = Some(locations);
+                }
+            }
+
             Event::AccessTokenIssued(result) => {
                 self.input_mode = InputMode::Normal;
                 match result {
@@ -2289,6 +2316,14 @@ impl App {
             return;
         }
 
+        // Snapshot known location names so we can reference them while holding a
+        // mutable borrow of self.input_mode below.
+        let known_location_names: Vec<String> = self
+            .locations
+            .as_deref()
+            .map(|v| v.iter().map(|l| l.name.to_string()).collect())
+            .unwrap_or_default();
+
         match &mut self.input_mode {
             InputMode::Normal => {}
 
@@ -2309,6 +2344,20 @@ impl App {
                 cursor,
             } => {
                 const FIELD_COUNT: usize = 12;
+
+                // Pill index for the Location field. Only meaningful when
+                // `known_location_names` is non-empty (pill row rendered).
+                // 0 = Default, 1..=N = named, N+1 = Custom.
+                let location_pill_idx = || -> usize {
+                    if location.is_empty() {
+                        0
+                    } else if let Some(i) = known_location_names.iter().position(|n| n == location)
+                    {
+                        i + 1
+                    } else {
+                        known_location_names.len() + 1
+                    }
+                };
 
                 if *editing {
                     let field: Option<&mut String> = match *selected {
@@ -2399,8 +2448,15 @@ impl App {
                                 *editing = true;
                             }
                             1 => {
-                                *cursor = location.len();
-                                *editing = true;
+                                // Only enter edit mode when there's a text input to edit:
+                                // either no pill row (fallback) or user is on the Custom pill.
+                                let custom_idx = known_location_names.len() + 1;
+                                let editable = known_location_names.is_empty()
+                                    || location_pill_idx() == custom_idx;
+                                if editable {
+                                    *cursor = location.len();
+                                    *editing = true;
+                                }
                             }
                             4 if *retention_policy == RetentionPolicyOption::Age => {
                                 cursor_move_end(retention_age_input, cursor);
@@ -2441,6 +2497,16 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Left | KeyCode::Char('h') => match *selected {
+                            1 if !known_location_names.is_empty() => {
+                                let custom_idx = known_location_names.len() + 1;
+                                let new_idx = location_pill_idx().saturating_sub(1);
+                                set_location_for_pill(
+                                    location,
+                                    new_idx,
+                                    &known_location_names,
+                                    custom_idx,
+                                );
+                            }
                             2 => *storage_class = storage_class_prev(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_prev(timestamping_mode),
@@ -2448,6 +2514,16 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Right | KeyCode::Char('l') => match *selected {
+                            1 if !known_location_names.is_empty() => {
+                                let custom_idx = known_location_names.len() + 1;
+                                let new_idx = (location_pill_idx() + 1).min(custom_idx);
+                                set_location_for_pill(
+                                    location,
+                                    new_idx,
+                                    &known_location_names,
+                                    custom_idx,
+                                );
+                            }
                             2 => *storage_class = storage_class_next(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_next(timestamping_mode),
@@ -3545,6 +3621,9 @@ impl App {
                 self.load_basins(tx);
             }
             KeyCode::Char('c') => {
+                if self.locations.is_none() {
+                    self.load_locations(tx.clone());
+                }
                 self.input_mode = InputMode::CreateBasin {
                     name: String::new(),
                     location: String::new(),
@@ -4106,6 +4185,16 @@ impl App {
                     }
                 }
             };
+            let _ = tx.send(event);
+        });
+    }
+
+    fn load_locations(&self, tx: mpsc::UnboundedSender<Event>) {
+        let Some(s2) = self.s2.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let event = Event::LocationsLoaded(ops::list_locations(&s2).await);
             let _ = tx.send(event);
         });
     }
