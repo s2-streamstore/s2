@@ -4505,6 +4505,7 @@ fn draw_input_dialog(
         InputMode::CreateBasin {
             name,
             location,
+            custom_location_active,
             create_stream_on_append,
             create_stream_on_read,
             storage_class,
@@ -4618,17 +4619,10 @@ fn draw_input_dialog(
                 ));
                 lines.push(Line::from(location_spans));
             } else {
-                let custom_pill_idx = known_locs.len() + 1;
-                let pill_idx = if location.is_empty() {
-                    0
-                } else if let Some(i) = known_locs
-                    .iter()
-                    .position(|l| l.name.as_ref() == location.as_str())
-                {
-                    i + 1
-                } else {
-                    custom_pill_idx
-                };
+                let names: Vec<&str> = known_locs.iter().map(|l| l.name.as_ref()).collect();
+                let custom_pill_idx = names.len() + 1;
+                let pill_idx =
+                    crate::tui::app::location_pill_idx(location, *custom_location_active, &names);
 
                 let (ind, lbl) = render_field_row_bold(1, "Location", *selected);
                 let mut loc_spans = vec![ind, lbl, Span::raw("  ")];
