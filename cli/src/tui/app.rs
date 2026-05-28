@@ -629,6 +629,7 @@ pub enum InputMode {
     CreateBasin {
         name: String,
         location: String,
+        custom_location_active: bool,
         create_stream_on_append: bool,
         create_stream_on_read: bool,
         storage_class: Option<StorageClass>,
@@ -1013,17 +1014,36 @@ pub struct App {
     bench_stop_signal: Option<Arc<AtomicBool>>,
 }
 
-fn set_location_for_pill(
+pub fn location_pill_idx(location: &str, custom_active: bool, names: &[&str]) -> usize {
+    let custom_idx = names.len() + 1;
+    if custom_active {
+        custom_idx
+    } else if location.is_empty() {
+        0
+    } else if let Some(i) = names.iter().position(|n| *n == location) {
+        i + 1
+    } else {
+        custom_idx
+    }
+}
+
+fn select_location_pill(
     location: &mut String,
+    custom_active: &mut bool,
     pill_idx: usize,
-    names: &[String],
-    custom_idx: usize,
+    names: &[&str],
 ) {
-    if pill_idx == 0 || pill_idx == custom_idx {
+    let custom_idx = names.len() + 1;
+    if pill_idx == 0 {
         location.clear();
+        *custom_active = false;
+    } else if pill_idx == custom_idx {
+        location.clear();
+        *custom_active = true;
     } else if let Some(name) = names.get(pill_idx - 1) {
         location.clear();
         location.push_str(name);
+        *custom_active = false;
     }
 }
 
@@ -2311,10 +2331,10 @@ impl App {
             return;
         }
 
-        let known_location_names: Vec<String> = self
+        let known_location_names: Vec<&str> = self
             .locations
             .as_deref()
-            .map(|v| v.iter().map(|l| l.name.to_string()).collect())
+            .map(|v| v.iter().map(|l| l.name.as_ref()).collect())
             .unwrap_or_default();
 
         match &mut self.input_mode {
@@ -2323,6 +2343,7 @@ impl App {
             InputMode::CreateBasin {
                 name,
                 location,
+                custom_location_active,
                 create_stream_on_append,
                 create_stream_on_read,
                 storage_class,
@@ -2337,17 +2358,6 @@ impl App {
                 cursor,
             } => {
                 const FIELD_COUNT: usize = 12;
-
-                let location_pill_idx = || -> usize {
-                    if location.is_empty() {
-                        0
-                    } else if let Some(i) = known_location_names.iter().position(|n| n == location)
-                    {
-                        i + 1
-                    } else {
-                        known_location_names.len() + 1
-                    }
-                };
 
                 if *editing {
                     let field: Option<&mut String> = match *selected {
@@ -2438,9 +2448,8 @@ impl App {
                                 *editing = true;
                             }
                             1 => {
-                                let custom_idx = known_location_names.len() + 1;
-                                let editable = known_location_names.is_empty()
-                                    || location_pill_idx() == custom_idx;
+                                let editable =
+                                    known_location_names.is_empty() || *custom_location_active;
                                 if editable {
                                     *cursor = location.len();
                                     *editing = true;
@@ -2486,13 +2495,16 @@ impl App {
                         },
                         KeyCode::Left | KeyCode::Char('h') => match *selected {
                             1 if !known_location_names.is_empty() => {
-                                let custom_idx = known_location_names.len() + 1;
-                                let new_idx = location_pill_idx().saturating_sub(1);
-                                set_location_for_pill(
+                                let cur = location_pill_idx(
                                     location,
-                                    new_idx,
+                                    *custom_location_active,
                                     &known_location_names,
-                                    custom_idx,
+                                );
+                                select_location_pill(
+                                    location,
+                                    custom_location_active,
+                                    cur.saturating_sub(1),
+                                    &known_location_names,
                                 );
                             }
                             2 => *storage_class = storage_class_prev(storage_class),
@@ -2504,12 +2516,16 @@ impl App {
                         KeyCode::Right | KeyCode::Char('l') => match *selected {
                             1 if !known_location_names.is_empty() => {
                                 let custom_idx = known_location_names.len() + 1;
-                                let new_idx = (location_pill_idx() + 1).min(custom_idx);
-                                set_location_for_pill(
+                                let cur = location_pill_idx(
                                     location,
-                                    new_idx,
+                                    *custom_location_active,
                                     &known_location_names,
-                                    custom_idx,
+                                );
+                                select_location_pill(
+                                    location,
+                                    custom_location_active,
+                                    (cur + 1).min(custom_idx),
+                                    &known_location_names,
                                 );
                             }
                             2 => *storage_class = storage_class_next(storage_class),
@@ -3615,6 +3631,7 @@ impl App {
                 self.input_mode = InputMode::CreateBasin {
                     name: String::new(),
                     location: String::new(),
+                    custom_location_active: false,
                     create_stream_on_append: false,
                     create_stream_on_read: false,
                     storage_class: None,
