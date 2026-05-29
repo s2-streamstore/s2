@@ -629,6 +629,7 @@ pub enum InputMode {
     CreateBasin {
         name: String,
         location: String,
+        custom_location_active: bool,
         create_stream_on_append: bool,
         create_stream_on_read: bool,
         storage_class: Option<StorageClass>,
@@ -1007,9 +1008,43 @@ pub struct App {
     pub show_help: bool,
     pub input_mode: InputMode,
     pub pip: Option<PipState>,
+    pub locations: Option<Vec<s2_sdk::types::LocationInfo>>,
     should_quit: bool,
     /// Stop signal for the benchmark task
     bench_stop_signal: Option<Arc<AtomicBool>>,
+}
+
+pub fn location_pill_idx(location: &str, custom_active: bool, names: &[&str]) -> usize {
+    let custom_idx = names.len() + 1;
+    if custom_active {
+        custom_idx
+    } else if location.is_empty() {
+        0
+    } else if let Some(i) = names.iter().position(|n| *n == location) {
+        i + 1
+    } else {
+        custom_idx
+    }
+}
+
+fn select_location_pill(
+    location: &mut String,
+    custom_active: &mut bool,
+    pill_idx: usize,
+    names: &[&str],
+) {
+    let custom_idx = names.len() + 1;
+    if pill_idx == 0 {
+        location.clear();
+        *custom_active = false;
+    } else if pill_idx == custom_idx {
+        location.clear();
+        *custom_active = true;
+    } else if let Some(name) = names.get(pill_idx - 1) {
+        location.clear();
+        location.push_str(name);
+        *custom_active = false;
+    }
 }
 
 /// Build a basin config from form values
@@ -1126,6 +1161,7 @@ impl App {
             show_help: false,
             input_mode: InputMode::Normal,
             pip: None,
+            locations: None,
             should_quit: false,
             bench_stop_signal: None,
         }
@@ -1917,6 +1953,12 @@ impl App {
                 }
             }
 
+            Event::LocationsLoaded(result) => {
+                if let Ok(locations) = result {
+                    self.locations = Some(locations);
+                }
+            }
+
             Event::AccessTokenIssued(result) => {
                 self.input_mode = InputMode::Normal;
                 match result {
@@ -2289,12 +2331,19 @@ impl App {
             return;
         }
 
+        let known_location_names: Vec<&str> = self
+            .locations
+            .as_deref()
+            .map(|v| v.iter().map(|l| l.name.as_ref()).collect())
+            .unwrap_or_default();
+
         match &mut self.input_mode {
             InputMode::Normal => {}
 
             InputMode::CreateBasin {
                 name,
                 location,
+                custom_location_active,
                 create_stream_on_append,
                 create_stream_on_read,
                 storage_class,
@@ -2399,8 +2448,12 @@ impl App {
                                 *editing = true;
                             }
                             1 => {
-                                *cursor = location.len();
-                                *editing = true;
+                                let editable =
+                                    known_location_names.is_empty() || *custom_location_active;
+                                if editable {
+                                    *cursor = location.len();
+                                    *editing = true;
+                                }
                             }
                             4 if *retention_policy == RetentionPolicyOption::Age => {
                                 cursor_move_end(retention_age_input, cursor);
@@ -2441,6 +2494,19 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Left | KeyCode::Char('h') => match *selected {
+                            1 if !known_location_names.is_empty() => {
+                                let cur = location_pill_idx(
+                                    location,
+                                    *custom_location_active,
+                                    &known_location_names,
+                                );
+                                select_location_pill(
+                                    location,
+                                    custom_location_active,
+                                    cur.saturating_sub(1),
+                                    &known_location_names,
+                                );
+                            }
                             2 => *storage_class = storage_class_prev(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_prev(timestamping_mode),
@@ -2448,6 +2514,20 @@ impl App {
                             _ => {}
                         },
                         KeyCode::Right | KeyCode::Char('l') => match *selected {
+                            1 if !known_location_names.is_empty() => {
+                                let custom_idx = known_location_names.len() + 1;
+                                let cur = location_pill_idx(
+                                    location,
+                                    *custom_location_active,
+                                    &known_location_names,
+                                );
+                                select_location_pill(
+                                    location,
+                                    custom_location_active,
+                                    (cur + 1).min(custom_idx),
+                                    &known_location_names,
+                                );
+                            }
                             2 => *storage_class = storage_class_next(storage_class),
                             3 => *retention_policy = retention_policy.toggle(),
                             5 => *timestamping_mode = timestamping_mode_next(timestamping_mode),
@@ -3545,9 +3625,13 @@ impl App {
                 self.load_basins(tx);
             }
             KeyCode::Char('c') => {
+                if self.locations.is_none() {
+                    self.load_locations(tx.clone());
+                }
                 self.input_mode = InputMode::CreateBasin {
                     name: String::new(),
                     location: String::new(),
+                    custom_location_active: false,
                     create_stream_on_append: false,
                     create_stream_on_read: false,
                     storage_class: None,
@@ -4106,6 +4190,16 @@ impl App {
                     }
                 }
             };
+            let _ = tx.send(event);
+        });
+    }
+
+    fn load_locations(&self, tx: mpsc::UnboundedSender<Event>) {
+        let Some(s2) = self.s2.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let event = Event::LocationsLoaded(ops::list_locations(&s2).await);
             let _ = tx.send(event);
         });
     }
