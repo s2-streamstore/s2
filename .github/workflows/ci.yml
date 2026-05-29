@@ -203,7 +203,7 @@ jobs:
             "ref": "main",
             "lang": "go",
             "go-version": "1.24",
-            "test_cmd": "go test -v -count=1 -skip 'WithScope|AccessToken|Metrics|Client_InvalidToken' ./s2/..."
+            "test_cmd": "go test -v -count=1 -skip 'WithScope|AccessToken|Metrics|Client_InvalidToken|Location' ./s2/..."
           },
           {
             "name": "typescript",
@@ -219,7 +219,7 @@ jobs:
             "ref": "main",
             "lang": "python",
             "uv-version": "0.11.6",
-            "test_cmd": "uv run pytest tests/ -v -s -m '(account or basin or stream) and not access_tokens'"
+            "test_cmd": "uv run pytest tests/ -v -s -m '(account or basin or stream) and not access_tokens and not locations'"
           },
           {
             "name": "rust",

@@ -122,8 +122,8 @@ fn stream_config_spec_to_sdk(config: StreamConfigSpec) -> s2_sdk::types::StreamC
     if let Some(timestamping) = config.timestamping {
         sdk_config = sdk_config.with_timestamping(timestamping_spec_to_sdk(timestamping));
     }
-    if let Some(delete_on_empty) = config.delete_on_empty {
-        sdk_config = sdk_config.with_delete_on_empty(delete_on_empty_spec_to_sdk(delete_on_empty));
+    if let Some(delete_on_empty) = config.delete_on_empty.and_then(delete_on_empty_spec_to_sdk) {
+        sdk_config = sdk_config.with_delete_on_empty(delete_on_empty);
     }
     sdk_config
 }
@@ -165,12 +165,10 @@ fn timestamping_mode_spec_to_sdk(mode: TimestampingModeSpec) -> s2_sdk::types::T
 
 fn delete_on_empty_spec_to_sdk(
     delete_on_empty: DeleteOnEmptySpec,
-) -> s2_sdk::types::DeleteOnEmptyConfig {
-    let mut sdk_config = s2_sdk::types::DeleteOnEmptyConfig::new();
-    if let Some(min_age) = delete_on_empty.min_age {
-        sdk_config = sdk_config.with_min_age(min_age.0);
-    }
-    sdk_config
+) -> Option<s2_sdk::types::DeleteOnEmptyConfig> {
+    delete_on_empty
+        .min_age
+        .map(|min_age| s2_sdk::types::DeleteOnEmptyConfig::new().with_min_age(min_age.0))
 }
 
 fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
