@@ -560,6 +560,7 @@ async fn run_session(
                     .take()
                     .expect("stashed_submission should not be None");
 
+                let ack_deadline = Instant::now() + ack_timeout;
                 input_tx_permit.send(submission.input.clone());
 
                 state.total_records += submission.input.records.len();
@@ -567,10 +568,16 @@ async fn run_session(
 
                 timer.as_mut().fire_at(
                     TimerEvent::AckDeadline,
-                    submission.since + ack_timeout,
+                    ack_deadline,
                     CoalesceMode::Earliest,
                 );
-                state.inflight_appends.push_back(submission.into());
+                state.inflight_appends.push_back(InflightAppend {
+                    input: submission.input,
+                    input_metered_bytes: submission.input_metered_bytes,
+                    ack_tx: submission.ack_tx,
+                    ack_deadline,
+                    _permit: submission.permit,
+                });
             }
 
             cmd = state.cmd_rx.recv(), if state.stashed_submission.is_none() => {
@@ -587,7 +594,6 @@ async fn run_session(
                                 input_metered_bytes,
                                 ack_tx,
                                 permit,
-                                since: Instant::now(),
                             });
                         }
                     }
@@ -607,7 +613,6 @@ async fn run_session(
                             ack,
                             state,
                             timer.as_mut(),
-                            ack_timeout,
                         )?;
                     }
                     Some(Err(err)) => {
@@ -671,11 +676,11 @@ async fn resend(
                     .map_err(|_| AppendSessionError::ServerDisconnected)?;
 
                 if let Some(inflight_append) = state.inflight_appends.get_mut(resend_index) {
-                    inflight_append.since = Instant::now();
+                    inflight_append.ack_deadline = Instant::now() + ack_timeout;
                     timer.as_mut().fire_at(
                         TimerEvent::AckDeadline,
-                        inflight_append.since + ack_timeout,
-                        CoalesceMode::Earliest,
+                        inflight_append.ack_deadline,
+                        CoalesceMode::Latest,
                     );
                     input_tx_permit.send(inflight_append.input.clone());
                     resend_index += 1;
@@ -691,7 +696,6 @@ async fn resend(
                             ack,
                             state,
                             timer.as_mut(),
-                            ack_timeout,
                         )?;
                         resend_index = resend_index.checked_sub(1).ok_or_else(|| {
                             AppendSessionError::InvalidAck(
@@ -747,7 +751,6 @@ fn process_ack(
     ack: AppendAck,
     state: &mut SessionState,
     timer: Pin<&mut MuxTimer<N_TIMER_VARIANTS>>,
-    ack_timeout: Duration,
 ) -> Result<(), AppendSessionError> {
     let corresponding_append = state.inflight_appends.pop_front().ok_or_else(|| {
         AppendSessionError::InvalidAck(
@@ -787,7 +790,7 @@ fn process_ack(
     if let Some(oldest_append) = state.inflight_appends.front() {
         timer.fire_at(
             TimerEvent::AckDeadline,
-            oldest_append.since + ack_timeout,
+            oldest_append.ack_deadline,
             CoalesceMode::Latest,
         );
     } else {
@@ -806,27 +809,14 @@ struct StashedSubmission {
     input_metered_bytes: usize,
     ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
     permit: Option<AppendPermit>,
-    since: Instant,
 }
 
 struct InflightAppend {
     input: AppendInput,
     input_metered_bytes: usize,
     ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
-    since: Instant,
+    ack_deadline: Instant,
     _permit: Option<AppendPermit>,
-}
-
-impl From<StashedSubmission> for InflightAppend {
-    fn from(value: StashedSubmission) -> Self {
-        Self {
-            input: value.input,
-            input_metered_bytes: value.input_metered_bytes,
-            ack_tx: value.ack_tx,
-            since: value.since,
-            _permit: value.permit,
-        }
-    }
 }
 
 enum Command {
