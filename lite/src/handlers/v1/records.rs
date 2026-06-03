@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::{Stream, StreamExt, TryStreamExt};
-use http::StatusCode;
+use http::{HeaderValue, StatusCode, header};
 use s2_api::{
     data::{Json, Proto},
     mime::JsonOrProto,
@@ -255,7 +255,15 @@ pub async fn read(
                 }
             };
 
-            Ok(axum::response::Sse::new(events).into_response())
+            let mut response = axum::response::Sse::new(events).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-transform"),
+            );
+            response
+                .headers_mut()
+                .insert("x-accel-buffering", HeaderValue::from_static("no"));
+            Ok(response)
         }
         v1t::stream::ReadRequest::S2s {
             encryption_key,
