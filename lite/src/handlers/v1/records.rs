@@ -288,6 +288,8 @@ pub async fn read(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(http::header::CONTENT_TYPE, "s2s/proto")
+                .header(http::header::CACHE_CONTROL, "no-cache, no-transform")
+                .header("x-accel-buffering", "no")
                 .body(Body::from_stream(response_stream))
                 .expect("valid response builder"))
         }
@@ -448,6 +450,8 @@ pub async fn append(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(http::header::CONTENT_TYPE, "s2s/proto")
+                .header(http::header::CACHE_CONTROL, "no-cache, no-transform")
+                .header("x-accel-buffering", "no")
                 .body(Body::from_stream(response_stream))
                 .expect("valid response builder"))
         }
