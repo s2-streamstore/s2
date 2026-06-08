@@ -343,8 +343,8 @@ async fn list_streams_with_start_after_less_than_prefix_succeeds(
         )
         .await?;
 
-    assert_eq!(result.streams.len(), 1);
-    assert_eq!(result.streams[0].name, stream_name_3);
+    assert_eq!(result.values.len(), 1);
+    assert_eq!(result.values[0].name, stream_name_3);
     assert!(!result.has_more);
 
     Ok(())
