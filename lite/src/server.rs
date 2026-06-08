@@ -289,20 +289,22 @@ async fn init_object_store(
             info!(bucket, "using s3 object store");
             let mut builder =
                 object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket);
+
+            if let Some(endpoint) = std::env::var_os("AWS_ENDPOINT_URL_S3")
+                .and_then(|s| s.into_string().ok())
+            {
+                if endpoint.starts_with("http://") {
+                    builder = builder.with_allow_http(true);
+                }
+                builder = builder.with_endpoint(endpoint);
+            }
+
             match (
-                std::env::var_os("AWS_ENDPOINT_URL_S3").and_then(|s| s.into_string().ok()),
                 std::env::var_os("AWS_ACCESS_KEY_ID").and_then(|s| s.into_string().ok()),
                 std::env::var_os("AWS_SECRET_ACCESS_KEY").and_then(|s| s.into_string().ok()),
             ) {
-                (endpoint, Some(key_id), Some(secret_key)) => {
-                    info!(endpoint, key_id, "using static credentials from env vars");
-
-                    if let Some(endpoint) = endpoint {
-                        if endpoint.starts_with("http://") {
-                            builder = builder.with_allow_http(true);
-                        }
-                        builder = builder.with_endpoint(endpoint);
-                    }
+                (Some(key_id), Some(secret_key)) => {
+                    info!(key_id, "using static credentials from env vars");
 
                     builder = builder.with_credentials(Arc::new(
                         object_store::StaticCredentialProvider::new(
