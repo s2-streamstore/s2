@@ -290,8 +290,8 @@ async fn init_object_store(
             let mut builder =
                 object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket);
 
-            if let Some(endpoint) = std::env::var_os("AWS_ENDPOINT_URL_S3")
-                .and_then(|s| s.into_string().ok())
+            if let Some(endpoint) =
+                std::env::var_os("AWS_ENDPOINT_URL_S3").and_then(|s| s.into_string().ok())
             {
                 if endpoint.starts_with("http://") {
                     builder = builder.with_allow_http(true);
