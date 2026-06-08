@@ -392,3 +392,168 @@ mod json {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::*;
+
+    // -- parse_records_input_source --
+
+    #[test]
+    fn parse_input_empty_is_stdin() {
+        assert!(matches!(
+            parse_records_input_source("").unwrap(),
+            RecordsIn::Stdin
+        ));
+    }
+
+    #[test]
+    fn parse_input_dash_is_stdin() {
+        assert!(matches!(
+            parse_records_input_source("-").unwrap(),
+            RecordsIn::Stdin
+        ));
+    }
+
+    #[test]
+    fn parse_input_path_is_file() {
+        match parse_records_input_source("/tmp/data.txt").unwrap() {
+            RecordsIn::File(p) => assert_eq!(p.to_str().unwrap(), "/tmp/data.txt"),
+            _ => panic!("expected File"),
+        }
+    }
+
+    // -- parse_records_output_source --
+
+    #[test]
+    fn parse_output_empty_is_stdout() {
+        assert!(matches!(
+            parse_records_output_source("").unwrap(),
+            RecordsOut::Stdout
+        ));
+    }
+
+    #[test]
+    fn parse_output_dash_is_stdout() {
+        assert!(matches!(
+            parse_records_output_source("-").unwrap(),
+            RecordsOut::Stdout
+        ));
+    }
+
+    #[test]
+    fn parse_output_path_is_file() {
+        match parse_records_output_source("/tmp/out.txt").unwrap() {
+            RecordsOut::File(p) => assert_eq!(p.to_str().unwrap(), "/tmp/out.txt"),
+            _ => panic!("expected File"),
+        }
+    }
+
+    // -- TextFormatter: parse_records --
+
+    #[tokio::test]
+    async fn text_parse_records() {
+        let lines =
+            futures::stream::iter(vec![Ok("line one".to_string()), Ok("line two".to_string())]);
+        let mut stream = TextFormatter::parse_records(lines);
+        let r1 = stream.next().await.unwrap().unwrap();
+        assert_eq!(r1.body(), b"line one");
+        let r2 = stream.next().await.unwrap().unwrap();
+        assert_eq!(r2.body(), b"line two");
+        assert!(stream.next().await.is_none());
+    }
+
+    // -- JsonFormatter: parse_records --
+
+    #[tokio::test]
+    async fn json_parse_records_basic() {
+        let json_line = r#"{"body":"hello","timestamp":42}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        let r = stream.next().await.unwrap().unwrap();
+        assert_eq!(r.body(), b"hello");
+        assert_eq!(r.timestamp(), Some(42));
+    }
+
+    #[tokio::test]
+    async fn json_parse_records_with_headers() {
+        let json_line = r#"{"body":"data","headers":[["key","val"]]}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        let r = stream.next().await.unwrap().unwrap();
+        assert_eq!(r.headers().len(), 1);
+        assert_eq!(r.headers()[0].name.as_ref(), b"key");
+        assert_eq!(r.headers()[0].value.as_ref(), b"val");
+    }
+
+    #[tokio::test]
+    async fn json_parse_records_invalid_json() {
+        let lines = futures::stream::iter(vec![Ok("not json".to_string())]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        assert!(stream.next().await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn json_parse_records_empty_body() {
+        let json_line = r#"{}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        let r = stream.next().await.unwrap().unwrap();
+        assert_eq!(r.body(), b"");
+        assert!(r.headers().is_empty());
+        assert_eq!(r.timestamp(), None);
+    }
+
+    // -- JsonBase64Formatter: parse_records --
+
+    #[tokio::test]
+    async fn json_base64_parse_records() {
+        // "hello" in base64 = "aGVsbG8="
+        let json_line = r#"{"body":"aGVsbG8="}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
+        let r = stream.next().await.unwrap().unwrap();
+        assert_eq!(r.body(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn json_base64_parse_records_with_headers() {
+        // "k" -> "aw==", "v" -> "dg=="
+        let json_line = r#"{"body":"","headers":[["aw==","dg=="]]}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
+        let r = stream.next().await.unwrap().unwrap();
+        assert_eq!(r.headers().len(), 1);
+        assert_eq!(r.headers()[0].name.as_ref(), b"k");
+        assert_eq!(r.headers()[0].value.as_ref(), b"v");
+    }
+
+    #[tokio::test]
+    async fn json_base64_parse_records_invalid_base64() {
+        let json_line = r#"{"body":"not-valid-base64!!!"}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
+        assert!(stream.next().await.unwrap().is_err());
+    }
+
+    // -- TextFormatter: parse IO error propagation --
+
+    #[tokio::test]
+    async fn text_parse_records_io_error() {
+        let lines = futures::stream::iter(vec![Err(io::Error::other("test error"))]);
+        let mut stream = TextFormatter::parse_records(lines);
+        let result = stream.next().await.unwrap();
+        assert!(result.is_err());
+    }
+
+    // -- JsonFormatter: parse IO error propagation --
+
+    #[tokio::test]
+    async fn json_parse_records_io_error() {
+        let lines = futures::stream::iter(vec![Err(io::Error::other("io error"))]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        assert!(stream.next().await.unwrap().is_err());
+    }
+}

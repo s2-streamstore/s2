@@ -68,3 +68,86 @@ macro_rules! impl_deep_size_prim {
 }
 
 impl_deep_size_prim!(bool, u64, usize, std::num::NonZeroU64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primitives() {
+        assert_eq!(42u64.deep_size(), size_of::<u64>());
+        assert_eq!(true.deep_size(), size_of::<bool>());
+        assert_eq!(0usize.deep_size(), size_of::<usize>());
+        let nz = std::num::NonZeroU64::new(1).unwrap();
+        assert_eq!(nz.deep_size(), size_of::<std::num::NonZeroU64>());
+    }
+
+    #[test]
+    fn string_deep_size() {
+        let s = String::from("hello");
+        assert_eq!(s.deep_size(), 5);
+        assert_eq!(String::new().deep_size(), 0);
+    }
+
+    #[test]
+    fn bytes_deep_size() {
+        let b = bytes::Bytes::from("world");
+        assert_eq!(b.deep_size(), 5);
+        assert_eq!(bytes::Bytes::new().deep_size(), 0);
+    }
+
+    #[test]
+    fn vec_deep_size() {
+        let v: Vec<u64> = vec![1, 2, 3];
+        assert_eq!(v.deep_size(), 3 * size_of::<u64>());
+    }
+
+    #[test]
+    fn slice_deep_size() {
+        let v: Vec<u64> = vec![10, 20];
+        let s: &[u64] = &v;
+        assert_eq!(s.deep_size(), 2 * size_of::<u64>());
+    }
+
+    #[test]
+    fn option_some() {
+        let o: Option<u64> = Some(42);
+        assert_eq!(o.deep_size(), size_of::<u64>());
+    }
+
+    #[test]
+    fn option_none() {
+        let o: Option<u64> = None;
+        assert_eq!(o.deep_size(), 1);
+    }
+
+    #[test]
+    fn tuple_deep_size() {
+        let t = (42u64, String::from("hi"));
+        assert_eq!(t.deep_size(), size_of::<u64>() + 2);
+    }
+
+    #[test]
+    fn bound_included() {
+        let b = std::ops::Bound::Included(100u64);
+        assert_eq!(b.deep_size(), size_of::<u64>());
+    }
+
+    #[test]
+    fn bound_excluded() {
+        let b = std::ops::Bound::Excluded(100u64);
+        assert_eq!(b.deep_size(), size_of::<u64>());
+    }
+
+    #[test]
+    fn bound_unbounded() {
+        let b: std::ops::Bound<u64> = std::ops::Bound::Unbounded;
+        assert_eq!(b.deep_size(), 1);
+    }
+
+    #[test]
+    fn nested_vec_of_strings() {
+        let v = vec![String::from("ab"), String::from("cde")];
+        assert_eq!(v.deep_size(), 2 + 3);
+    }
+}
