@@ -35,6 +35,7 @@ use tokio::{
     sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
     time::Instant,
 };
+use tracing::debug;
 
 use crate::{
     backend::{
@@ -604,7 +605,9 @@ impl Streamer {
             {
                 let _ = self.bgtask_trigger_tx.send(BgtaskTrigger::StreamTrim);
             }
-            let _ = self.follow_tx.send(records);
+            if self.follow_tx.send(records).is_err() {
+                debug!(stream_id = %self.stream_id, "no active followers for durable records broadcast");
+            }
         }
     }
 

@@ -4739,7 +4739,14 @@ impl App {
                                                 )
                                             }
                                         };
-                                        let _ = writer.write_all(line.as_bytes()).await;
+                                        if let Err(e) = writer.write_all(line.as_bytes()).await {
+                                            let _ = tx.send(Event::RecordReceived(Err(
+                                                crate::error::CliError::RecordWrite(format!(
+                                                    "failed to write to output file: {e}"
+                                                )),
+                                            )));
+                                            return;
+                                        }
                                     }
 
                                     if tx.send(Event::RecordReceived(Ok(record))).is_err() {

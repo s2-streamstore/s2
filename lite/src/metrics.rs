@@ -62,10 +62,12 @@ pub fn observe_append_batch_size(count: usize, bytes: usize) {
     BYTES.observe(bytes as f64);
 }
 
-pub fn gather() -> Bytes {
+pub fn gather() -> Result<Bytes, std::fmt::Error> {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = BytesMut::new().writer();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    buffer.into_inner().freeze()
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .map_err(|_| std::fmt::Error)?;
+    Ok(buffer.into_inner().freeze())
 }
