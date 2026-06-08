@@ -152,13 +152,13 @@ pub fn save_cli_config(config: &CliConfig) -> Result<PathBuf, CliConfigError> {
 }
 
 pub fn set_config_value(key: ConfigKey, value: String) -> Result<PathBuf, CliConfigError> {
-    let mut config = load_config_file().unwrap_or_default();
+    let mut config = load_config_file()?;
     config.set(key, value)?;
     save_cli_config(&config)
 }
 
 pub fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigError> {
-    let mut config = load_config_file().unwrap_or_default();
+    let mut config = load_config_file()?;
     config.unset(key);
     save_cli_config(&config)
 }
