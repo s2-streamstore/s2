@@ -10,10 +10,11 @@ pub mod stream_tail_position;
 pub mod stream_trim_point;
 pub mod timestamp;
 
-use std::ops::Range;
+use std::{ops::Range, str::FromStr};
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::{
+    caps::MIN_BASIN_NAME_LEN,
     record::StreamPosition,
     types::{basin::BasinName, stream::StreamName},
 };
@@ -154,6 +155,57 @@ impl TryFrom<Bytes> for Key {
                 .map(|(deadline, stream_id)| Key::StreamDeleteOnEmptyDeadline(deadline, stream_id)),
         }
     }
+}
+
+/// Shared serializer for keys of the form `[KeyType][StreamId]`.
+pub fn ser_stream_id_key(key_type: KeyType, stream_id: StreamId) -> Bytes {
+    let key_len = 1 + StreamId::LEN;
+    let mut buf = BytesMut::with_capacity(key_len);
+    buf.put_u8(key_type as u8);
+    buf.put_slice(stream_id.as_bytes());
+    debug_assert_eq!(buf.len(), key_len, "serialized length mismatch");
+    buf.freeze()
+}
+
+/// Shared deserializer for keys of the form `[KeyType][StreamId]`.
+pub fn deser_stream_id_key(
+    key_type: KeyType,
+    mut bytes: Bytes,
+) -> Result<StreamId, DeserializationError> {
+    let key_len = 1 + StreamId::LEN;
+    check_exact_size(&bytes, key_len)?;
+    let ordinal = bytes.get_u8();
+    if ordinal != (key_type as u8) {
+        return Err(DeserializationError::InvalidOrdinal(ordinal));
+    }
+    let mut stream_id_bytes = [0u8; StreamId::LEN];
+    bytes.copy_to_slice(&mut stream_id_bytes);
+    Ok(stream_id_bytes.into())
+}
+
+/// Shared serializer for keys of the form `[KeyType][BasinName]`.
+pub fn ser_basin_name_key(key_type: KeyType, basin: &BasinName) -> Bytes {
+    let basin_bytes = basin.as_bytes();
+    let capacity = 1 + basin_bytes.len();
+    let mut buf = BytesMut::with_capacity(capacity);
+    buf.put_u8(key_type as u8);
+    buf.put_slice(basin_bytes);
+    debug_assert_eq!(buf.len(), capacity, "serialized length mismatch");
+    buf.freeze()
+}
+
+/// Shared deserializer for keys of the form `[KeyType][BasinName]`.
+pub fn deser_basin_name_key(
+    key_type: KeyType,
+    mut bytes: Bytes,
+) -> Result<BasinName, DeserializationError> {
+    check_min_size(&bytes, 1 + MIN_BASIN_NAME_LEN)?;
+    let ordinal = bytes.get_u8();
+    if ordinal != (key_type as u8) {
+        return Err(DeserializationError::InvalidOrdinal(ordinal));
+    }
+    let basin_str = std::str::from_utf8(&bytes).map_err(|e| invalid_value_err("basin", e))?;
+    BasinName::from_str(basin_str).map_err(|e| invalid_value_err("basin", e))
 }
 
 fn check_exact_size(bytes: &Bytes, expected: usize) -> Result<(), DeserializationError> {
