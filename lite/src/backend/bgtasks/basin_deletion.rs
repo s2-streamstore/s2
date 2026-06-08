@@ -74,8 +74,7 @@ impl Backend {
             start_after: cursor.clone(),
             limit: ListLimit::MAX,
         }
-        .try_into()
-        .expect("valid list streams request");
+        .into();
         let page = self
             .list_streams(basin.clone(), request)
             .await

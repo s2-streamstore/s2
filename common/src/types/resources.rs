@@ -92,26 +92,13 @@ where
     }
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("`start_after` must be greater than or equal to the `prefix`")]
-pub struct StartAfterLessThanPrefixError;
-
-impl<P, S> TryFrom<ListItemsRequestParts<P, S>> for ListItemsRequest<P, S>
+impl<P, S> From<ListItemsRequestParts<P, S>> for ListItemsRequest<P, S>
 where
-    P: Deref<Target = str> + Default,
-    S: Deref<Target = str> + Default,
+    P: Default,
+    S: Default,
 {
-    type Error = StartAfterLessThanPrefixError;
-
-    fn try_from(parts: ListItemsRequestParts<P, S>) -> Result<Self, Self::Error> {
-        let start_after: &str = &parts.start_after;
-        let prefix: &str = &parts.prefix;
-
-        if !start_after.is_empty() && !prefix.is_empty() && start_after < prefix {
-            return Err(StartAfterLessThanPrefixError);
-        }
-
-        Ok(Self(parts))
+    fn from(parts: ListItemsRequestParts<P, S>) -> Self {
+        Self(parts)
     }
 }
 
