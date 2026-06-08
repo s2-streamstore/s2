@@ -304,8 +304,8 @@ async fn init_object_store(
                         builder = builder.with_endpoint(endpoint);
                     }
 
-                    let token = std::env::var_os("AWS_SESSION_TOKEN")
-                        .and_then(|s| s.into_string().ok());
+                    let token =
+                        std::env::var_os("AWS_SESSION_TOKEN").and_then(|s| s.into_string().ok());
                     builder = builder.with_credentials(Arc::new(
                         object_store::StaticCredentialProvider::new(
                             object_store::aws::AwsCredential {
