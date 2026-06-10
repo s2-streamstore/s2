@@ -6,26 +6,14 @@ use s2_common::record::NonZeroSeqNum;
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
 use crate::stream_id::StreamId;
 
-const KEY_LEN: usize = 1 + StreamId::LEN;
 const VALUE_LEN: usize = 8;
 
 pub fn ser_key(stream_id: StreamId) -> Bytes {
-    let mut buf = BytesMut::with_capacity(KEY_LEN);
-    buf.put_u8(KeyType::StreamTrimPoint as u8);
-    buf.put_slice(stream_id.as_bytes());
-    debug_assert_eq!(buf.len(), KEY_LEN, "serialized length mismatch");
-    buf.freeze()
+    super::ser_stream_id_key(KeyType::StreamTrimPoint, stream_id)
 }
 
-pub fn deser_key(mut bytes: Bytes) -> Result<StreamId, DeserializationError> {
-    check_exact_size(&bytes, KEY_LEN)?;
-    let ordinal = bytes.get_u8();
-    if ordinal != (KeyType::StreamTrimPoint as u8) {
-        return Err(DeserializationError::InvalidOrdinal(ordinal));
-    }
-    let mut stream_id_bytes = [0u8; StreamId::LEN];
-    bytes.copy_to_slice(&mut stream_id_bytes);
-    Ok(stream_id_bytes.into())
+pub fn deser_key(bytes: Bytes) -> Result<StreamId, DeserializationError> {
+    super::deser_stream_id_key(KeyType::StreamTrimPoint, bytes)
 }
 
 pub fn ser_value(trim_point: RangeTo<NonZeroSeqNum>) -> Bytes {
