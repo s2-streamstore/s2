@@ -156,8 +156,9 @@ async fn run() -> Result<(), CliError> {
         &cli_config,
         &format!("s2-cli/{}", env!("CARGO_PKG_VERSION")),
     )?;
-    let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
     let token_source = access_token_source(&cli_config);
+    let s2 = S2::new(sdk_config.clone())
+        .map_err(|e| CliError::SdkInit(e).with_token_source(token_source))?;
     let result: Result<(), CliError> = (async {
         match command {
         Command::Config(..) | Command::Lite(..) => unreachable!(),

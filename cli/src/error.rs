@@ -38,6 +38,14 @@ pub enum CliError {
     #[diagnostic(help("{}", HELP))]
     SdkInit(#[source] S2Error),
 
+    #[error("Failed to initialize S2 SDK")]
+    #[diagnostic(help(
+        "Token loaded from {1}. Verify it does not contain invalid characters.\n\
+         Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`.\n\n{}",
+        HELP
+    ))]
+    SdkInitWithTokenSource(#[source] S2Error, TokenSource),
+
     #[error(transparent)]
     #[diagnostic(help("{}", BUG_HELP))]
     InvalidConfig(#[from] serde_json::Error),
@@ -83,6 +91,9 @@ impl CliError {
         match (self, token_source) {
             (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
                 CliError::OperationWithTokenSource(kind, source, token_source)
+            }
+            (CliError::SdkInit(source), Some(token_source)) => {
+                CliError::SdkInitWithTokenSource(source, token_source)
             }
             (err, _) => err,
         }
@@ -169,7 +180,10 @@ impl std::fmt::Display for TokenSource {
 fn is_auth_error(err: &S2Error) -> bool {
     match err {
         S2Error::Server(response) => {
-            matches!(response.code.as_str(), "authn" | "permission_denied")
+            matches!(
+                response.code.as_str(),
+                "authn" | "permission_denied" | "access_token_not_found"
+            )
         }
         _ => false,
     }

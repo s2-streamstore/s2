@@ -1,31 +1,16 @@
 use std::str::FromStr;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use s2_common::{
-    caps::MIN_BASIN_NAME_LEN,
-    types::{basin::BasinName, stream::StreamNameStartAfter},
-};
+use bytes::{BufMut, Bytes, BytesMut};
+use s2_common::types::{basin::BasinName, stream::StreamNameStartAfter};
 
-use super::{DeserializationError, KeyType, check_min_size, invalid_value_err};
+use super::{DeserializationError, KeyType, invalid_value_err};
 
 pub fn ser_key(basin: &BasinName) -> Bytes {
-    let basin_bytes = basin.as_bytes();
-    let capacity = 1 + basin_bytes.len();
-    let mut buf = BytesMut::with_capacity(capacity);
-    buf.put_u8(KeyType::BasinDeletionPending as u8);
-    buf.put_slice(basin_bytes);
-    debug_assert_eq!(buf.len(), capacity, "serialized length mismatch");
-    buf.freeze()
+    super::ser_basin_name_key(KeyType::BasinDeletionPending, basin)
 }
 
-pub fn deser_key(mut bytes: Bytes) -> Result<BasinName, DeserializationError> {
-    check_min_size(&bytes, 1 + MIN_BASIN_NAME_LEN)?;
-    let ordinal = bytes.get_u8();
-    if ordinal != (KeyType::BasinDeletionPending as u8) {
-        return Err(DeserializationError::InvalidOrdinal(ordinal));
-    }
-    let basin_str = std::str::from_utf8(&bytes).map_err(|e| invalid_value_err("basin", e))?;
-    BasinName::from_str(basin_str).map_err(|e| invalid_value_err("basin", e))
+pub fn deser_key(bytes: Bytes) -> Result<BasinName, DeserializationError> {
+    super::deser_basin_name_key(KeyType::BasinDeletionPending, bytes)
 }
 
 pub fn ser_value(cursor: &StreamNameStartAfter) -> Bytes {

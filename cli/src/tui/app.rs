@@ -2355,9 +2355,10 @@ impl App {
                                 if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
                                     cursor_insert(name, cursor, c);
                                 }
-                            } else if *selected == 1 && c.is_ascii_graphic() {
-                                location.insert(*cursor, c);
-                                *cursor += 1;
+                            } else if *selected == 1
+                                && (c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '.')
+                            {
+                                cursor_insert(location, cursor, c);
                             } else if *selected == 4 && c.is_ascii_alphanumeric() {
                                 cursor_insert(retention_age_input, cursor, c);
                             } else if *selected == 8 && c.is_ascii_alphanumeric() {
@@ -4739,7 +4740,14 @@ impl App {
                                                 )
                                             }
                                         };
-                                        let _ = writer.write_all(line.as_bytes()).await;
+                                        if let Err(e) = writer.write_all(line.as_bytes()).await {
+                                            let _ = tx.send(Event::RecordReceived(Err(
+                                                crate::error::CliError::RecordWrite(format!(
+                                                    "failed to write to output file: {e}"
+                                                )),
+                                            )));
+                                            return;
+                                        }
                                     }
 
                                     if tx.send(Event::RecordReceived(Ok(record))).is_err() {

@@ -1,7 +1,7 @@
 use std::{error::Error, future::Future, pin::Pin, time::Duration};
 
 use tokio::{sync::broadcast, time::Instant};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::backend::Backend;
 
@@ -87,6 +87,7 @@ fn spawn_bgtask<Tick, Fut, E>(
                             reset_sleep(&mut sleep);
                         }
                         Err(broadcast::error::RecvError::Closed) => {
+                            info!(task = name, "bgtask trigger channel closed, exiting");
                             break;
                         }
                     }
@@ -124,7 +125,7 @@ where
             Ok(true) => continue,
             Ok(false) => break,
             Err(error) => {
-                warn!(task, %error, "bgtask tick failed");
+                warn!(task, %error, error_source = error.source().map(|s| s.to_string()), "bgtask tick failed");
                 break;
             }
         }
