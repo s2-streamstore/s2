@@ -108,11 +108,11 @@ impl Backend {
             Ok(false)
         } else if !cursor.as_ref().is_empty() {
             // No streams on this page but cursor was advanced past earlier
-            // entries. Reset and re-scan from the beginning to verify no
-            // tombstones remain.
+            // entries. Reset and re-scan from the beginning on the next
+            // tick to verify no tombstones remain.
             self.set_basin_deletion_cursor(&basin, &StreamNameStartAfter::default())
                 .await?;
-            Ok(true)
+            Ok(false)
         } else {
             // No streams from the very beginning — safe to complete.
             self.complete_basin_deletion(&basin).await?;
@@ -406,7 +406,7 @@ mod tests {
 
         // First tick resets cursor from past-end back to the beginning.
         let has_more = backend.clone().tick_basin_deletion().await.unwrap();
-        assert!(has_more);
+        assert!(!has_more);
 
         // Second tick scans from the beginning, finds no streams, completes.
         let has_more = backend.clone().tick_basin_deletion().await.unwrap();
