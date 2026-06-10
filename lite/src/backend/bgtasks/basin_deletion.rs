@@ -97,21 +97,14 @@ impl Backend {
             self.set_basin_deletion_cursor(&basin, &last_stream.expect("non-empty stream page"))
                 .await?;
             Ok(true)
-        } else if last_stream.is_some() {
-            // Streams still pending deletion (waiting for stream_trim to clean
-            // up tombstoned metadata). Reset cursor so the next tick re-scans
-            // from the beginning.
+        } else if last_stream.is_some() || !cursor.as_ref().is_empty() {
+            // Streams still pending deletion or cursor was advanced past
+            // earlier entries. Reset cursor so the next tick re-scans from
+            // the beginning.
             if !cursor.as_ref().is_empty() {
                 self.set_basin_deletion_cursor(&basin, &StreamNameStartAfter::default())
                     .await?;
             }
-            Ok(false)
-        } else if !cursor.as_ref().is_empty() {
-            // No streams on this page but cursor was advanced past earlier
-            // entries. Reset and re-scan from the beginning on the next
-            // tick to verify no tombstones remain.
-            self.set_basin_deletion_cursor(&basin, &StreamNameStartAfter::default())
-                .await?;
             Ok(false)
         } else {
             // No streams from the very beginning — safe to complete.
