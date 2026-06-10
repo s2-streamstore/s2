@@ -152,13 +152,13 @@ pub fn save_cli_config(config: &CliConfig) -> Result<PathBuf, CliConfigError> {
 }
 
 pub fn set_config_value(key: ConfigKey, value: String) -> Result<PathBuf, CliConfigError> {
-    let mut config = load_config_file().unwrap_or_default();
+    let mut config = load_config_file()?;
     config.set(key, value)?;
     save_cli_config(&config)
 }
 
 pub fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigError> {
-    let mut config = load_config_file().unwrap_or_default();
+    let mut config = load_config_file()?;
     config.unset(key);
     save_cli_config(&config)
 }
@@ -214,7 +214,12 @@ pub fn sdk_config(config: &CliConfig, user_agent: &str) -> Result<S2Config, CliE
 }
 
 pub fn access_token_source(config: &CliConfig) -> Option<TokenSource> {
-    if std::env::var_os("S2_ACCESS_TOKEN").is_some() {
+    let has_env_token = std::env::vars_os().any(|(key, _)| {
+        key.to_str()
+            .map(|k| k.eq_ignore_ascii_case("S2_ACCESS_TOKEN"))
+            .unwrap_or(false)
+    });
+    if has_env_token {
         return Some(TokenSource::Environment);
     }
 

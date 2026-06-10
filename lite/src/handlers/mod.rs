@@ -23,13 +23,16 @@ async fn health(State(backend): State<Backend>) -> Response {
     }
 }
 
-async fn metrics(State(_backend): State<Backend>) -> impl axum::response::IntoResponse {
-    let body = crate::metrics::gather();
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4",
-        )],
-        body,
-    )
+async fn metrics(State(_backend): State<Backend>) -> Response {
+    match crate::metrics::gather() {
+        Ok(body) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4",
+            )],
+            body,
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
