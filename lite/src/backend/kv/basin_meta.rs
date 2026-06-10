@@ -1,9 +1,8 @@
-use std::{ops::Range, str::FromStr};
+use std::ops::Range;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use s2_common::{
     bash::Bash,
-    caps::MIN_BASIN_NAME_LEN,
     types::{
         basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
         config::BasinConfig,
@@ -12,10 +11,7 @@ use s2_common::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{
-    DeserializationError, KeyType, check_min_size, deser_json_value, increment_bytes,
-    invalid_value_err, ser_json_value,
-};
+use super::{DeserializationError, KeyType, deser_json_value, increment_bytes, ser_json_value};
 
 #[derive(Debug, Clone)]
 pub struct BasinMeta {
@@ -64,6 +60,15 @@ impl TryFrom<BasinMetaSerde> for BasinMeta {
     }
 }
 
+fn ser_key_internal(basin: &[u8]) -> BytesMut {
+    let capacity = 1 + basin.len();
+    let mut buf = BytesMut::with_capacity(capacity);
+    buf.put_u8(KeyType::BasinMeta as u8);
+    buf.put_slice(basin);
+    debug_assert_eq!(buf.len(), capacity, "serialized length mismatch");
+    buf
+}
+
 pub fn ser_key_prefix(prefix: &BasinNamePrefix) -> Bytes {
     ser_key_internal(prefix.as_bytes()).freeze()
 }
@@ -93,26 +98,11 @@ pub fn ser_key_range(prefix: &BasinNamePrefix, start_after: &BasinNameStartAfter
 }
 
 pub fn ser_key(basin: &BasinName) -> Bytes {
-    ser_key_internal(basin.as_bytes()).freeze()
+    super::ser_basin_name_key(KeyType::BasinMeta, basin)
 }
 
-fn ser_key_internal(basin: &[u8]) -> BytesMut {
-    let capacity = 1 + basin.len();
-    let mut buf = BytesMut::with_capacity(capacity);
-    buf.put_u8(KeyType::BasinMeta as u8);
-    buf.put_slice(basin);
-    debug_assert_eq!(buf.len(), capacity, "serialized length mismatch");
-    buf
-}
-
-pub fn deser_key(mut bytes: Bytes) -> Result<BasinName, DeserializationError> {
-    check_min_size(&bytes, 1 + MIN_BASIN_NAME_LEN)?;
-    let ordinal = bytes.get_u8();
-    if ordinal != (KeyType::BasinMeta as u8) {
-        return Err(DeserializationError::InvalidOrdinal(ordinal));
-    }
-    let basin_str = std::str::from_utf8(&bytes).map_err(|e| invalid_value_err("basin", e))?;
-    BasinName::from_str(basin_str).map_err(|e| invalid_value_err("basin", e))
+pub fn deser_key(bytes: Bytes) -> Result<BasinName, DeserializationError> {
+    super::deser_basin_name_key(KeyType::BasinMeta, bytes)
 }
 
 pub fn ser_value(basin_meta: &BasinMeta) -> Bytes {
