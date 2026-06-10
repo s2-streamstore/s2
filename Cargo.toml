@@ -51,7 +51,7 @@ rkyv = "0.8"
 rstest = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 s2-api = { path = "api", version = "0.30" }
-s2-common = { path = "common", version = "0.37" }
+s2-common = { path = "common", version = "0.38" }
 s2-lite = { path = "lite", version = "0.36" }
 s2-sdk = { path = "sdk", version = "0.31" }
 schemars = "1.2"
