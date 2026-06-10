@@ -172,18 +172,7 @@ impl StreamConfig {
     }
 }
 
-#[derive(ValueEnum, Debug, Clone, Serialize)]
-pub enum BasinScope {
-    #[value(name = "aws:us-east-1")]
-    #[serde(rename = "aws:us-east-1")]
-    AwsUsEast1,
-    #[value(name = "aws:us-west-2")]
-    #[serde(rename = "aws:us-west-2")]
-    AwsUsWest2,
-    #[value(name = "aws:eu-north-1")]
-    #[serde(rename = "aws:eu-north-1")]
-    AwsEuNorth1,
-}
+pub use sdk::types::LocationName;
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -300,29 +289,6 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
     }
 }
 
-impl From<BasinScope> for sdk::types::BasinScope {
-    fn from(scope: BasinScope) -> Self {
-        match scope {
-            BasinScope::AwsUsEast1 => sdk::types::BasinScope::AwsUsEast1,
-            BasinScope::AwsUsWest2 => sdk::types::BasinScope::AwsUsWest2,
-            BasinScope::AwsEuNorth1 => sdk::types::BasinScope::AwsEuNorth1,
-        }
-    }
-}
-
-impl From<sdk::types::BasinScope> for BasinScope {
-    fn from(scope: sdk::types::BasinScope) -> Self {
-        match scope {
-            sdk::types::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
-            sdk::types::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
-            sdk::types::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
-            _ => unreachable!(
-                "s2-cli is released together with s2-sdk; new BasinScope variants are added to both"
-            ),
-        }
-    }
-}
-
 impl From<StorageClass> for sdk::types::StorageClass {
     fn from(class: StorageClass) -> Self {
         match class {
@@ -378,7 +344,7 @@ impl From<sdk::types::TimestampingConfig> for TimestampingConfig {
     fn from(config: sdk::types::TimestampingConfig) -> Self {
         TimestampingConfig {
             timestamping_mode: config.mode.map(Into::into),
-            timestamping_uncapped: Some(config.uncapped),
+            timestamping_uncapped: config.uncapped,
         }
     }
 }
@@ -790,6 +756,9 @@ pub enum Operation {
     Fence,
     Append,
     Read,
+    ListLocations,
+    GetDefaultLocation,
+    SetDefaultLocation,
 }
 
 impl From<Operation> for sdk::types::Operation {
@@ -806,6 +775,9 @@ impl From<Operation> for sdk::types::Operation {
             Operation::GetAccountMetrics => sdk::types::Operation::GetAccountMetrics,
             Operation::GetBasinMetrics => sdk::types::Operation::GetBasinMetrics,
             Operation::GetStreamMetrics => sdk::types::Operation::GetStreamMetrics,
+            Operation::ListLocations => sdk::types::Operation::ListLocations,
+            Operation::GetDefaultLocation => sdk::types::Operation::GetDefaultLocation,
+            Operation::SetDefaultLocation => sdk::types::Operation::SetDefaultLocation,
             Operation::ListStreams => sdk::types::Operation::ListStreams,
             Operation::CreateStream => sdk::types::Operation::CreateStream,
             Operation::DeleteStream => sdk::types::Operation::DeleteStream,
@@ -834,6 +806,9 @@ impl From<sdk::types::Operation> for Operation {
             sdk::types::Operation::GetAccountMetrics => Operation::GetAccountMetrics,
             sdk::types::Operation::GetBasinMetrics => Operation::GetBasinMetrics,
             sdk::types::Operation::GetStreamMetrics => Operation::GetStreamMetrics,
+            sdk::types::Operation::ListLocations => Operation::ListLocations,
+            sdk::types::Operation::GetDefaultLocation => Operation::GetDefaultLocation,
+            sdk::types::Operation::SetDefaultLocation => Operation::SetDefaultLocation,
             sdk::types::Operation::ListStreams => Operation::ListStreams,
             sdk::types::Operation::CreateStream => Operation::CreateStream,
             sdk::types::Operation::DeleteStream => Operation::DeleteStream,

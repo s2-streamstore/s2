@@ -44,8 +44,8 @@ pub enum AppendSessionError {
     SessionClosing,
     #[error("session dropped without calling close")]
     SessionDropped,
-    #[error("unexpected append acknowledgement during resend")]
-    UnexpectedAck,
+    #[error("invalid append acknowledgement: {0}")]
+    InvalidAck(String),
 }
 
 impl AppendSessionError {
@@ -560,6 +560,7 @@ async fn run_session(
                     .take()
                     .expect("stashed_submission should not be None");
 
+                let ack_deadline = Instant::now() + ack_timeout;
                 input_tx_permit.send(submission.input.clone());
 
                 state.total_records += submission.input.records.len();
@@ -567,10 +568,16 @@ async fn run_session(
 
                 timer.as_mut().fire_at(
                     TimerEvent::AckDeadline,
-                    submission.since + ack_timeout,
+                    ack_deadline,
                     CoalesceMode::Earliest,
                 );
-                state.inflight_appends.push_back(submission.into());
+                state.inflight_appends.push_back(InflightAppend {
+                    input: submission.input,
+                    input_metered_bytes: submission.input_metered_bytes,
+                    ack_tx: submission.ack_tx,
+                    ack_deadline,
+                    _permit: submission.permit,
+                });
             }
 
             cmd = state.cmd_rx.recv(), if state.stashed_submission.is_none() => {
@@ -587,7 +594,6 @@ async fn run_session(
                                 input_metered_bytes,
                                 ack_tx,
                                 permit,
-                                since: Instant::now(),
                             });
                         }
                     }
@@ -607,8 +613,7 @@ async fn run_session(
                             ack,
                             state,
                             timer.as_mut(),
-                            ack_timeout,
-                        );
+                        )?;
                     }
                     Some(Err(err)) => {
                         return Err(err.into());
@@ -671,11 +676,11 @@ async fn resend(
                     .map_err(|_| AppendSessionError::ServerDisconnected)?;
 
                 if let Some(inflight_append) = state.inflight_appends.get_mut(resend_index) {
-                    inflight_append.since = Instant::now();
+                    inflight_append.ack_deadline = Instant::now() + ack_timeout;
                     timer.as_mut().fire_at(
                         TimerEvent::AckDeadline,
-                        inflight_append.since + ack_timeout,
-                        CoalesceMode::Earliest,
+                        inflight_append.ack_deadline,
+                        CoalesceMode::Latest,
                     );
                     input_tx_permit.send(inflight_append.input.clone());
                     resend_index += 1;
@@ -691,11 +696,12 @@ async fn resend(
                             ack,
                             state,
                             timer.as_mut(),
-                            ack_timeout,
-                        );
-                        resend_index = resend_index
-                            .checked_sub(1)
-                            .ok_or(AppendSessionError::UnexpectedAck)?;
+                        )?;
+                        resend_index = resend_index.checked_sub(1).ok_or_else(|| {
+                            AppendSessionError::InvalidAck(
+                                "received ack without a corresponding resent append in flight".to_string(),
+                            )
+                        })?;
                     }
                     Some(Err(err)) => {
                         return Err(err.into());
@@ -745,31 +751,35 @@ fn process_ack(
     ack: AppendAck,
     state: &mut SessionState,
     timer: Pin<&mut MuxTimer<N_TIMER_VARIANTS>>,
-    ack_timeout: Duration,
-) {
-    let corresponding_append = state
-        .inflight_appends
-        .pop_front()
-        .expect("corresponding append should be present for an ack");
+) -> Result<(), AppendSessionError> {
+    let corresponding_append = state.inflight_appends.pop_front().ok_or_else(|| {
+        AppendSessionError::InvalidAck(
+            "received ack without a corresponding append in flight".to_string(),
+        )
+    })?;
 
-    assert!(
-        ack.end.seq_num >= ack.start.seq_num,
-        "ack end seq_num should be greater than or equal to start seq_num"
-    );
+    if ack.end.seq_num < ack.start.seq_num {
+        return Err(AppendSessionError::InvalidAck(
+            "ack end seq_num should be greater than or equal to start seq_num".to_string(),
+        ));
+    }
 
-    if let Some(end) = state.prev_ack_end {
-        assert!(
-            ack.end.seq_num > end.seq_num,
-            "ack end seq_num should be greater than previous ack end"
-        );
+    if state
+        .prev_ack_end
+        .is_some_and(|end| ack.end.seq_num <= end.seq_num)
+    {
+        return Err(AppendSessionError::InvalidAck(
+            "ack end seq_num should be greater than previous ack end".to_string(),
+        ));
     }
 
     let num_acked_records = (ack.end.seq_num - ack.start.seq_num) as usize;
-    assert_eq!(
-        num_acked_records,
-        corresponding_append.input.records.len(),
-        "ack record count should match submitted batch size"
-    );
+    let expected_records = corresponding_append.input.records.len();
+    if num_acked_records != expected_records {
+        return Err(AppendSessionError::InvalidAck(format!(
+            "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
+        )));
+    }
 
     state.total_acked_records += num_acked_records;
     state.inflight_bytes -= corresponding_append.input_metered_bytes;
@@ -780,7 +790,7 @@ fn process_ack(
     if let Some(oldest_append) = state.inflight_appends.front() {
         timer.fire_at(
             TimerEvent::AckDeadline,
-            oldest_append.since + ack_timeout,
+            oldest_append.ack_deadline,
             CoalesceMode::Latest,
         );
     } else {
@@ -790,6 +800,8 @@ fn process_ack(
             "all records should be acked when inflight is empty"
         );
     }
+
+    Ok(())
 }
 
 struct StashedSubmission {
@@ -797,27 +809,14 @@ struct StashedSubmission {
     input_metered_bytes: usize,
     ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
     permit: Option<AppendPermit>,
-    since: Instant,
 }
 
 struct InflightAppend {
     input: AppendInput,
     input_metered_bytes: usize,
     ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
-    since: Instant,
+    ack_deadline: Instant,
     _permit: Option<AppendPermit>,
-}
-
-impl From<StashedSubmission> for InflightAppend {
-    fn from(value: StashedSubmission) -> Self {
-        Self {
-            input: value.input,
-            input_metered_bytes: value.input_metered_bytes,
-            ack_tx: value.ack_tx,
-            since: value.since,
-            _permit: value.permit,
-        }
-    }
 }
 
 enum Command {

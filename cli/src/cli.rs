@@ -13,7 +13,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, BasinScope, Interval, Operation,
+        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, LocationName, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StorageClass, StreamConfig, StreamMatcher,
     },
@@ -85,8 +85,19 @@ pub enum Command {
     /// Revoke an access token.
     RevokeAccessToken {
         /// ID of the access token to revoke.
-        #[arg(long)]
         id: AccessTokenId,
+    },
+
+    /// List locations.
+    ListLocations,
+
+    /// Get the default location.
+    GetDefaultLocation,
+
+    /// Set the default location.
+    SetDefaultLocation {
+        /// Location name to make the default.
+        location: LocationName,
     },
 
     /// Get account metrics.
@@ -162,16 +173,15 @@ pub enum Command {
     /// Benchmark a stream to measure throughput and latency.
     Bench(BenchArgs),
 
-    /// Apply a declarative spec file, creating or reconfiguring basins and streams.
+    /// Apply a declarative spec file, ensuring basins and streams.
     ///
     /// Reads a JSON file and ensures the declared basins and streams exist with the
-    /// specified configuration. Basins and streams that already exist
-    /// are reconfigured to match the spec. Only the fields present in the spec are
-    /// updated.
+    /// specified configuration. Defaults are applied before comparison; omitted fields are
+    /// defaulted, not preserved.
     ///
     /// Dry-run output legend:
     ///   `+` create
-    ///   `~` reconfigure
+    ///   `~` ensure
     ///   `=` unchanged
     ///
     /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
@@ -265,9 +275,9 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
-    /// Cloud provider and region for the basin.
+    /// Basin location.
     #[arg(long)]
-    pub scope: Option<BasinScope>,
+    pub location: Option<LocationName>,
 
     #[command(flatten)]
     pub config: BasinConfig,
@@ -317,7 +327,6 @@ pub struct ListAccessTokensArgs {
 #[derive(Args, Debug)]
 pub struct IssueAccessTokenArgs {
     /// Access token ID.
-    #[arg(long)]
     pub id: AccessTokenId,
 
     /// Token validity duration (e.g., "30d", "1w", "24h"). Token expires after this duration from
@@ -585,7 +594,7 @@ pub struct TailArgs {
 
 #[derive(Args, Debug)]
 pub struct ApplyArgs {
-    /// Path to a JSON spec file defining basins and streams to create or reconfigure.
+    /// Path to a JSON spec file defining basins and streams to ensure.
     #[arg(
         short = 'f',
         long,
@@ -597,7 +606,7 @@ pub struct ApplyArgs {
     ///
     /// Dry-run output legend:
     ///   `+` create
-    ///   `~` reconfigure
+    ///   `~` ensure
     ///   `=` unchanged
     #[arg(long)]
     pub dry_run: bool,

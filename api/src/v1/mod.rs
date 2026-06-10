@@ -2,6 +2,7 @@ pub mod access;
 pub mod basin;
 pub mod config;
 pub mod error;
+pub mod location;
 pub mod metrics;
 pub mod stream;
 

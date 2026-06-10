@@ -74,7 +74,7 @@ pub enum Key {
     StreamIdMapping(StreamId),
     /// (SP) per-stream, updatable
     /// Key: StreamID
-    /// Value: SeqNum Timestamp WriteTimestampSecs
+    /// Value: SeqNum Timestamp
     StreamTailPosition(StreamId),
     /// (SFT) per-stream, updatable, optional, default empty
     /// Key: StreamID

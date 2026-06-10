@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::{Stream, StreamExt, TryStreamExt};
-use http::StatusCode;
+use http::{HeaderValue, StatusCode, header};
 use s2_api::{
     data::{Json, Proto},
     mime::JsonOrProto,
@@ -255,7 +255,15 @@ pub async fn read(
                 }
             };
 
-            Ok(axum::response::Sse::new(events).into_response())
+            let mut response = axum::response::Sse::new(events).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-transform"),
+            );
+            response
+                .headers_mut()
+                .insert("x-accel-buffering", HeaderValue::from_static("no"));
+            Ok(response)
         }
         v1t::stream::ReadRequest::S2s {
             encryption_key,
@@ -280,6 +288,8 @@ pub async fn read(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(http::header::CONTENT_TYPE, "s2s/proto")
+                .header(http::header::CACHE_CONTROL, "no-cache, no-transform")
+                .header("x-accel-buffering", "no")
                 .body(Body::from_stream(response_stream))
                 .expect("valid response builder"))
         }
@@ -440,6 +450,8 @@ pub async fn append(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(http::header::CONTENT_TYPE, "s2s/proto")
+                .header(http::header::CACHE_CONTROL, "no-cache, no-transform")
+                .header("x-accel-buffering", "no")
                 .body(Body::from_stream(response_stream))
                 .expect("valid response builder"))
         }
@@ -468,12 +480,12 @@ mod tests {
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
         types::{
-            basin::{BASIN_HEADER, BasinName, CreateBasinIntent},
+            basin::{BASIN_HEADER, BasinName},
             config::{BasinConfig, OptionalStreamConfig},
+            resources::ProvisionMode,
             stream::{
                 AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
-                CreateStreamIntent, ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput,
-                ReadStart, StreamName,
+                ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
             },
         },
     };
@@ -518,10 +530,10 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: basin_config,
+                basin_config,
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -529,11 +541,11 @@ mod tests {
             .expect("create basin");
         let stream: StreamName = format!("test-stream-{test_suffix}").parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
-                CreateStreamIntent::CreateOnly {
-                    config: stream_config,
+                stream_config,
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -550,10 +562,10 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: basin_config,
+                basin_config,
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )

@@ -8,11 +8,14 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph},
 };
 
-use super::app::{
-    AccessTokensState, AgoUnit, App, AppendViewState, BasinsState, BenchViewState,
-    CompressionOption, ExpiryOption, InputMode, MessageLevel, MetricCategory, MetricsType,
-    MetricsViewState, PipState, ReadStartFrom, ReadViewState, RetentionPolicyOption, Screen,
-    SettingsState, SetupState, StreamDetailState, StreamsState, Tab,
+use super::{
+    app::{
+        AccessTokensState, AgoUnit, App, AppendViewState, BasinsState, BenchViewState,
+        CompressionOption, ExpiryOption, InputMode, MessageLevel, MetricCategory, MetricsType,
+        MetricsViewState, PipState, ReadStartFrom, ReadViewState, RetentionPolicyOption, Screen,
+        SettingsState, SetupState, StreamDetailState, StreamsState, Tab,
+    },
+    text_input::cursor_split_at,
 };
 use crate::types::{StorageClass, TimestampingMode};
 
@@ -327,9 +330,7 @@ fn render_text_input_with_cursor(
             Style::default().fg(GRAY_600).italic(),
         )]
     } else if is_editing {
-        let cursor = cursor.min(value.len());
-        let before = &value[..cursor];
-        let after = &value[cursor..];
+        let (before, after) = cursor_split_at(value, cursor);
         vec![
             Span::styled(before.to_string(), Style::default().fg(color)),
             Span::styled(CURSOR, Style::default().fg(CYAN)),
@@ -502,30 +503,13 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
             Span::styled(CURSOR, Style::default().fg(CYAN)),
         ]
     } else {
-        let max_width = 40;
-        let cursor = state.cursor.min(state.access_token.len());
-        let (display, cursor_in_display) = if state.access_token.len() <= max_width {
-            (state.access_token.clone(), cursor)
-        } else {
-            // Show a window around the cursor
-            let half = max_width / 2;
-            let start = cursor.saturating_sub(half);
-            let end = (start + max_width).min(state.access_token.len());
-            let start = if end == state.access_token.len() {
-                end.saturating_sub(max_width)
-            } else {
-                start
-            };
-            (state.access_token[start..end].to_string(), cursor - start)
-        };
-        let before = &display[..cursor_in_display];
-        let after = &display[cursor_in_display..];
+        let (before, after) = state.access_token.split_at_cursor_windowed(40);
         vec![
             Span::styled("Token ", Style::default().fg(TEXT_MUTED)),
             Span::styled("› ", Style::default().fg(CYAN)),
-            Span::styled(before.to_string(), Style::default().fg(WHITE)),
+            Span::styled(before, Style::default().fg(WHITE)),
             Span::styled(CURSOR, Style::default().fg(CYAN)),
-            Span::styled(after.to_string(), Style::default().fg(WHITE)),
+            Span::styled(after, Style::default().fg(WHITE)),
         ]
     };
     lines.push(Line::from(token_display));
@@ -616,13 +600,16 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
 
     let is_editing_token = state.editing && state.selected == 0;
     let token_display = if is_editing_token {
-        state.access_token.clone()
+        state.access_token.value().to_owned()
     } else if state.access_token_masked && !state.access_token.is_empty() {
-        format!("{}...", "*".repeat(20.min(state.access_token.len())))
+        format!(
+            "{}...",
+            "*".repeat(20.min(state.access_token.value().len()))
+        )
     } else if state.access_token.is_empty() {
         "(not set)".to_string()
     } else {
-        state.access_token.clone()
+        state.access_token.value().to_owned()
     };
 
     draw_settings_field(
@@ -632,7 +619,7 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         token_display,
         state.selected == 0,
         if is_editing_token {
-            Some(state.cursor)
+            Some(state.access_token.cursor())
         } else {
             None
         },
@@ -645,11 +632,11 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         if state.account_endpoint.is_empty() {
             "(default)".to_string()
         } else {
-            state.account_endpoint.clone()
+            state.account_endpoint.value().to_owned()
         },
         state.selected == 1,
         if state.editing && state.selected == 1 {
-            Some(state.cursor)
+            Some(state.account_endpoint.cursor())
         } else {
             None
         },
@@ -662,11 +649,11 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         if state.basin_endpoint.is_empty() {
             "(default)".to_string()
         } else {
-            state.basin_endpoint.clone()
+            state.basin_endpoint.value().to_owned()
         },
         state.selected == 2,
         if state.editing && state.selected == 2 {
-            Some(state.cursor)
+            Some(state.basin_endpoint.cursor())
         } else {
             None
         },
@@ -793,9 +780,7 @@ fn draw_settings_field(
     };
 
     let value_display = if let Some(cursor_pos) = cursor {
-        let cursor_pos = cursor_pos.min(value.len());
-        let before = &value[..cursor_pos];
-        let after = &value[cursor_pos..];
+        let (before, after) = cursor_split_at(&value, cursor_pos);
         format!("{}█{}", before, after)
     } else {
         value
@@ -1128,6 +1113,9 @@ fn format_operation(op: &s2_sdk::types::Operation) -> String {
         SdkOp::Fence => "fence",
         SdkOp::Trim => "trim",
         SdkOp::GetAccountMetrics => "get_account_metrics",
+        SdkOp::ListLocations => "list_locations",
+        SdkOp::GetDefaultLocation => "get_default_location",
+        SdkOp::SetDefaultLocation => "set_default_location",
         SdkOp::ListAccessTokens => "list_access_tokens",
         SdkOp::IssueAccessToken => "issue_access_token",
         SdkOp::RevokeAccessToken => "revoke_access_token",
@@ -1138,7 +1126,14 @@ fn format_operation(op: &s2_sdk::types::Operation) -> String {
 /// Check if operation is account-level
 fn is_account_op(op: &s2_sdk::types::Operation) -> bool {
     use s2_sdk::types::Operation as SdkOp;
-    matches!(op, SdkOp::ListBasins | SdkOp::GetAccountMetrics)
+    matches!(
+        op,
+        SdkOp::ListBasins
+            | SdkOp::GetAccountMetrics
+            | SdkOp::ListLocations
+            | SdkOp::GetDefaultLocation
+            | SdkOp::SetDefaultLocation
+    )
 }
 
 /// Check if operation is basin-level
@@ -2367,8 +2362,8 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
     let header_area = chunks[2];
     let total_width = header_area.width as usize;
     let state_col = 12;
-    let scope_col = 16;
-    let name_col = total_width.saturating_sub(state_col + scope_col + 4);
+    let location_col = 16;
+    let name_col = total_width.saturating_sub(state_col + location_col + 4);
 
     let header = Line::from(vec![
         Span::styled(
@@ -2379,7 +2374,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
             format!("{:<width$}", "State", width = state_col),
             Style::default().fg(TEXT_MUTED),
         ),
-        Span::styled("Scope", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Location", Style::default().fg(TEXT_MUTED)),
     ]);
     f.render_widget(
         Paragraph::new(header),
@@ -2473,16 +2468,7 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
         } else {
             ("Active", BADGE_ACTIVE)
         };
-        let scope = basin
-            .scope
-            .as_ref()
-            .map(|s| match s {
-                s2_sdk::types::BasinScope::AwsUsEast1 => "aws:us-east-1",
-                s2_sdk::types::BasinScope::AwsUsWest2 => "aws:us-west-2",
-                s2_sdk::types::BasinScope::AwsEuNorth1 => "aws:eu-north-1",
-                _ => "unknown",
-            })
-            .unwrap_or("—");
+        let location = basin.location.as_deref().unwrap_or("—");
 
         let prefix = if is_selected { "▸ " } else { "  " };
         let name_style = if is_selected {
@@ -2510,10 +2496,10 @@ fn draw_basins(f: &mut Frame, area: Rect, state: &BasinsState) {
             Rect::new(badge_x, y, state_col as u16, 1),
         );
 
-        let scope_x = badge_x + state_col as u16;
+        let location_x = badge_x + state_col as u16;
         f.render_widget(
-            Paragraph::new(Span::styled(scope, Style::default().fg(TEXT_MUTED))),
-            Rect::new(scope_x, y, scope_col as u16, 1),
+            Paragraph::new(Span::styled(location, Style::default().fg(TEXT_MUTED))),
+            Rect::new(location_x, y, location_col as u16, 1),
         );
     }
 }
@@ -4423,7 +4409,7 @@ fn get_selected_line_hint(mode: &InputMode) -> usize {
         InputMode::Normal => 0,
         InputMode::CreateBasin { selected, .. } => match selected {
             0 => 3,   // Name
-            1 => 7,   // Region
+            1 => 7,   // Location
             2 => 12,  // Storage
             3 => 16,  // Retention
             4 => 19,  // Duration
@@ -4514,7 +4500,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
 
         InputMode::CreateBasin {
             name,
-            scope,
+            location,
             create_stream_on_append,
             create_stream_on_read,
             storage_class,
@@ -4528,16 +4514,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             editing,
             cursor,
         } => {
-            use crate::tui::app::BasinScopeOption;
-
             let name_valid = name.len() >= 8 && name.len() <= 48;
-
-            // Scope options
-            let scope_opts = [
-                ("AWS us-east-1", *scope == BasinScopeOption::AwsUsEast1),
-                ("AWS us-west-2", *scope == BasinScopeOption::AwsUsWest2),
-                ("AWS eu-north-1", *scope == BasinScopeOption::AwsEuNorth1),
-            ];
 
             // Storage class options
             let storage_opts = [
@@ -4622,15 +4599,18 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 Span::styled(hint_text, Style::default().fg(hint_color).italic()),
             ]));
 
-            // Basin Scope (Cloud Provider/Region)
+            // Basin location
             lines.push(Line::from(""));
-            let (ind, lbl) = render_field_row_bold(1, "Region", *selected);
-            let mut scope_spans = vec![ind, lbl, Span::raw("  ")];
-            for (label, active) in &scope_opts {
-                scope_spans.push(render_pill(label, *selected == 1, *active));
-                scope_spans.push(Span::raw(" "));
-            }
-            lines.push(Line::from(scope_spans));
+            let (ind, lbl) = render_field_row_bold(1, "Location", *selected);
+            let mut location_spans = vec![ind, lbl, Span::raw("  ")];
+            location_spans.extend(render_text_input_with_cursor(
+                location,
+                *selected == 1 && *editing,
+                "server default",
+                CYAN,
+                *cursor,
+            ));
+            lines.push(Line::from(location_spans));
 
             // Default stream configuration section
             lines.push(Line::from(""));

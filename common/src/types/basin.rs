@@ -5,15 +5,10 @@ use time::OffsetDateTime;
 
 use super::{
     ValidationError,
+    location::LocationName,
     strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
 };
-use crate::{
-    caps,
-    types::{
-        config::{BasinConfig, BasinReconfiguration},
-        resources::{ListItemsRequest, RequestToken},
-    },
-};
+use crate::{caps, types::resources::ListItemsRequest};
 
 pub static BASIN_HEADER: http::HeaderName = http::HeaderName::from_static("s2-basin");
 
@@ -206,51 +201,12 @@ impl crate::http::ParseableHeader for BasinName {
 
 pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAfter>;
 
-#[derive(
-    Debug, strum::Display, strum::EnumString, strum::IntoStaticStr, Clone, Copy, PartialEq, Eq,
-)]
-pub enum BasinScope {
-    #[strum(serialize = "aws:us-east-1")]
-    AwsUsEast1,
-    #[strum(serialize = "aws:us-west-2")]
-    AwsUsWest2,
-    #[strum(serialize = "aws:eu-north-1")]
-    AwsEuNorth1,
-}
-
 #[derive(Debug, Clone)]
 pub struct BasinInfo {
     pub name: BasinName,
-    pub scope: Option<BasinScope>,
+    pub location: Option<LocationName>,
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
-}
-
-/// Basin creation operation intent.
-///
-/// Separates POST-style create-only requests, which carry a complete creation config and optional
-/// idempotency token, from PUT-style create-or-reconfigure requests, which carry only a
-/// reconfiguration patch.
-#[derive(Debug)]
-pub enum CreateBasinIntent {
-    /// Create a new basin.
-    ///
-    /// HTTP POST semantics: idempotent if a request token is provided and the basin was previously
-    /// created using the same token and config.
-    CreateOnly {
-        /// Complete basin configuration for a new basin.
-        config: BasinConfig,
-        /// Optional request token used to make create retries idempotent.
-        request_token: Option<RequestToken>,
-    },
-    /// Create a new basin or reconfigure it if it already exists.
-    ///
-    /// HTTP PUT semantics: always idempotent. When the basin already exists, unspecified fields in
-    /// the reconfiguration preserve the existing config.
-    CreateOrReconfigure {
-        /// Basin reconfiguration patch to apply on create-or-reconfigure.
-        reconfiguration: BasinReconfiguration,
-    },
 }
 
 #[cfg(test)]

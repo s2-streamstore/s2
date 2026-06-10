@@ -1,5 +1,14 @@
 use std::{ops::Deref, pin::Pin, sync::Arc, time::Duration};
 
+use crate::{
+    client::{self, StreamingResponse, UnaryResponse},
+    frame_signal::FrameSignal,
+    retry::{RetryBackoff, RetryBackoffBuilder},
+    types::{
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
+        RetryConfig, S2Config, S2Endpoints, LocationName, StreamName,
+    },
+};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -9,18 +18,19 @@ use http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, InvalidHeaderValue},
 };
 use prost::{self, Message};
-#[cfg(feature = "_hidden")]
-use s2_api::v1::basin::CreateOrReconfigureBasinRequest;
 use s2_api::v1::{
     access::{
         AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
         ListAccessTokensResponse,
     },
-    basin::{BasinInfo, CreateBasinRequest, ListBasinsRequest, ListBasinsResponse},
+    basin::{
+        BasinInfo, CreateBasinRequest, EnsureBasinRequest, ListBasinsRequest, ListBasinsResponse,
+    },
     config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration},
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
     },
+    location::LocationInfo,
     stream::{
         AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
         ReadEnd, ReadStart, StreamInfo, TailResponse,
@@ -28,22 +38,14 @@ use s2_api::v1::{
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
 };
-use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
+use s2_common::{
+    encryption::S2_ENCRYPTION_KEY_HEADER,
+    types::resources::{PROVISION_RESULT_HEADER, ProvisionResult},
+};
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 use url::Url;
-
-use crate::{
-    client::{self, StreamingResponse, UnaryResponse},
-    frame_signal::FrameSignal,
-    retry::{RetryBackoff, RetryBackoffBuilder},
-    types::{
-        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
-        RetryConfig, S2Config, S2Endpoints, StreamName,
-    },
-};
-
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
 const ACCEPT_PROTO: &str = "application/protobuf";
@@ -101,6 +103,30 @@ impl AccountClient {
         Ok(())
     }
 
+    pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, ApiError> {
+        let url = self.base_url.join("v1/locations")?;
+        let request = self.get(url).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<Vec<LocationInfo>>()?)
+    }
+
+    pub async fn get_default_location(&self) -> Result<LocationInfo, ApiError> {
+        let url = self.base_url.join("v1/locations/default")?;
+        let request = self.get(url).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<LocationInfo>()?)
+    }
+
+    pub async fn set_default_location(
+        &self,
+        location: LocationName,
+    ) -> Result<LocationInfo, ApiError> {
+        let url = self.base_url.join("v1/locations/default")?;
+        let request = self.put(url).json(&location).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<LocationInfo>()?)
+    }
+
     pub async fn list_basins(
         &self,
         request: ListBasinsRequest,
@@ -144,20 +170,25 @@ impl AccountClient {
         Ok(response.json::<BasinConfig>()?)
     }
 
-    #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_basin(
+    pub async fn ensure_basin(
         &self,
         name: BasinName,
-        request: Option<CreateOrReconfigureBasinRequest>,
-    ) -> Result<(bool, BasinInfo), ApiError> {
+        request: Option<EnsureBasinRequest>,
+    ) -> Result<ProvisionResult<BasinInfo>, ApiError> {
         let url = self.base_url.join(&format!("v1/basins/{name}"))?;
         let request = match request {
             Some(body) => self.put(url).json(&body).build()?,
             None => self.put(url).build()?,
         };
         let response = self.request(request).send().await?;
-        let was_created = response.status() == StatusCode::CREATED;
-        Ok((was_created, response.json::<BasinInfo>()?))
+        let status = response.status();
+        let provision_result_header_value = provision_result_header_value(&response);
+        let info = response.json::<BasinInfo>()?;
+        Ok(provision_result_from_parts(
+            status,
+            provision_result_header_value.as_deref(),
+            info,
+        ))
     }
 
     pub async fn delete_basin(
@@ -298,12 +329,11 @@ impl BasinClient {
         Ok(response.json::<StreamConfig>()?)
     }
 
-    #[cfg(feature = "_hidden")]
-    pub async fn create_or_reconfigure_stream(
+    pub async fn ensure_stream(
         &self,
         name: StreamName,
-        config: Option<StreamReconfiguration>,
-    ) -> Result<(bool, StreamInfo), ApiError> {
+        config: Option<StreamConfig>,
+    ) -> Result<ProvisionResult<StreamInfo>, ApiError> {
         let url = self
             .base_url
             .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
@@ -312,8 +342,14 @@ impl BasinClient {
             None => self.put(url).build()?,
         };
         let response = self.request(request).send().await?;
-        let was_created = response.status() == StatusCode::CREATED;
-        Ok((was_created, response.json::<StreamInfo>()?))
+        let status = response.status();
+        let provision_result_header_value = provision_result_header_value(&response);
+        let info = response.json::<StreamInfo>()?;
+        Ok(provision_result_from_parts(
+            status,
+            provision_result_header_value.as_deref(),
+            info,
+        ))
     }
 
     pub async fn delete_stream(
@@ -817,8 +853,9 @@ impl BaseClient {
         let connector = client::default_connector(
             Some(config.connection_timeout),
             config.insecure_skip_cert_verification,
+            config.rustls_crypto_provider.clone(),
         )
-        .map_err(|e| ClientError::Others(format!("failed to load TLS certificates: {e}")))?;
+        .map_err(|e| ClientError::Others(format!("failed to initialize TLS connector: {e}")))?;
         Self::init_with_connector(config, connector)
     }
 
@@ -879,7 +916,6 @@ impl BaseClient {
             .compression(self.compression)
     }
 
-    #[cfg(feature = "_hidden")]
     pub fn put(&self, url: Url) -> client::RequestBuilder {
         client::RequestBuilder::put(url)
             .timeout(self.request_timeout)
@@ -1180,6 +1216,28 @@ impl IgnoreNotFound for Result<UnaryResponse, ApiError> {
     }
 }
 
+fn provision_result_header_value(response: &UnaryResponse) -> Option<String> {
+    response
+        .headers()
+        .get(&PROVISION_RESULT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn provision_result_from_parts<T>(
+    status: StatusCode,
+    header_value: Option<&str>,
+    info: T,
+) -> ProvisionResult<T> {
+    match header_value {
+        Some("created") => ProvisionResult::Created(info),
+        Some("noop") => ProvisionResult::Noop(info),
+        Some("updated") => ProvisionResult::Updated(info),
+        _ if status == StatusCode::CREATED => ProvisionResult::Created(info),
+        _ => ProvisionResult::Updated(info),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1272,9 +1330,9 @@ mod tests {
         assert!(!is_safe_to_retry(&non_retryable, policy, Some(&signal)));
     }
 
+    #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     #[tokio::test]
     async fn dns_error_message_is_clear() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let config = crate::types::S2Config::new("test-token".to_owned())
             .with_endpoints(
                 crate::types::S2Endpoints::new(

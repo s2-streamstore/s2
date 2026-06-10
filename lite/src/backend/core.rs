@@ -12,20 +12,18 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        stream::{CreateStreamIntent, StreamName},
+        resources::ProvisionMode,
+        stream::StreamName,
     },
 };
-use slatedb::{
-    IterationOrder,
-    config::{DurabilityLevel, ScanOptions},
-};
+use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
     StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
-        BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
+        BasinDeletionPendingError, BasinNotFoundError, GetBasinConfigError, ProvisionStreamError,
         StorageError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
         StreamerMissingInActionError, TransactionConflictError,
     },
@@ -91,15 +89,12 @@ impl Backend {
     ) -> Result<StreamerClient, StreamerError> {
         let stream_id = StreamId::new(&basin, &stream);
 
-        let (meta, tail_pos, fencing_token, trim_point) = tokio::try_join!(
+        let (meta, persisted_tail, fencing_token, trim_point) = tokio::try_join!(
             self.db_get(
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
             ),
-            self.db_get(
-                kv::stream_tail_position::ser_key(stream_id),
-                kv::stream_tail_position::deser_value,
-            ),
+            self.load_persisted_stream_tail(stream_id),
             self.db_get(
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
@@ -114,14 +109,16 @@ impl Backend {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
-        let tail_pos = tail_pos.map(|(pos, _)| pos).unwrap_or(StreamPosition::MIN);
+        let (tail_pos, last_tail_write_timestamp) =
+            persisted_tail.unwrap_or((StreamPosition::MIN, kv::timestamp::TimestampSecs::ZERO));
+
         self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
             .await?;
 
         let fencing_token = fencing_token.unwrap_or_default();
 
         if trim_point == Some(..NonZeroSeqNum::MAX) {
-            return Err(StreamDeletionPendingError { basin, stream }.into());
+            return Err(StreamDeletionPendingError.into());
         }
 
         let streamer_slots = self.streamer_slots.clone();
@@ -132,6 +129,7 @@ impl Backend {
             config: meta.config,
             cipher: meta.cipher,
             tail_pos,
+            last_tail_write_timestamp,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
             append_inflight_bytes_sema: self.append_inflight_bytes_sema.clone(),
@@ -143,6 +141,27 @@ impl Backend {
                 matches!(slot, StreamerClientSlot::Ready { client } if client.generation_id() == client_id)
             });
         }))
+    }
+
+    async fn load_persisted_stream_tail(
+        &self,
+        stream_id: StreamId,
+    ) -> Result<Option<(StreamPosition, kv::timestamp::TimestampSecs)>, StorageError> {
+        let read_opts = ReadOptions {
+            durability_filter: DurabilityLevel::Remote,
+            ..Default::default()
+        };
+        let Some(entry) = self
+            .db
+            .get_key_value_with_options(kv::stream_tail_position::ser_key(stream_id), &read_opts)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            kv::stream_tail_position::deser_value(entry.value)?,
+            kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
+        )))
     }
 
     async fn assert_no_records_following_tail(
@@ -159,15 +178,11 @@ impl Backend {
                 timestamp: 0,
             },
         );
-        static SCAN_OPTS: ScanOptions = ScanOptions {
+        let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
-            dirty: false,
-            read_ahead_bytes: 1,
-            cache_blocks: false,
-            max_fetch_tasks: 1,
-            order: IterationOrder::Ascending,
+            ..Default::default()
         };
-        let mut it = self.db.scan_with_options(start_key.., &SCAN_OPTS).await?;
+        let mut it = self.db.scan_with_options(start_key.., &scan_opts).await?;
         let Some(kv) = it.next().await? else {
             return Ok(());
         };
@@ -324,24 +339,24 @@ impl Backend {
                 };
                 if should_auto_create(&config) {
                     if let Err(e) = self
-                        .create_stream(
+                        .provision_stream(
                             basin.clone(),
                             stream.clone(),
-                            CreateStreamIntent::CreateOnly {
-                                config: OptionalStreamConfig::default(),
+                            OptionalStreamConfig::default(),
+                            ProvisionMode::CreateOnly {
                                 request_token: None,
                             },
                         )
                         .await
                     {
                         match e {
-                            CreateStreamError::Storage(e) => Err(e)?,
-                            CreateStreamError::TransactionConflict(e) => Err(e)?,
-                            CreateStreamError::BasinDeletionPending(e) => Err(e)?,
-                            CreateStreamError::StreamDeletionPending(e) => Err(e)?,
-                            CreateStreamError::BasinNotFound(e) => Err(e)?,
-                            CreateStreamError::StreamAlreadyExists(_) => {}
-                            CreateStreamError::Validation(_) => {
+                            ProvisionStreamError::Storage(e) => Err(e)?,
+                            ProvisionStreamError::TransactionConflict(e) => Err(e)?,
+                            ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
+                            ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
+                            ProvisionStreamError::BasinNotFound(e) => Err(e)?,
+                            ProvisionStreamError::StreamAlreadyExists(_) => {}
+                            ProvisionStreamError::Validation(_) => {
                                 unreachable!("auto-create uses default config")
                             }
                         }
@@ -370,11 +385,11 @@ mod tests {
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
         types::{
-            basin::CreateBasinIntent,
-            config::{BasinConfig, OptionalStreamConfig},
+            config::{BasinConfig, OptionalStreamConfig, StreamConfig},
+            resources::ProvisionMode,
         },
     };
-    use slatedb::{WriteBatch, config::WriteOptions, object_store};
+    use slatedb::{WriteBatch, object_store};
     use time::OffsetDateTime;
 
     use super::*;
@@ -399,7 +414,7 @@ mod tests {
         let stream_id = StreamId::new(&basin, &stream);
 
         let meta = kv::stream_meta::StreamMeta {
-            config: OptionalStreamConfig::default(),
+            config: StreamConfig::default(),
             cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
@@ -425,23 +440,13 @@ mod tests {
         );
         wb.put(
             kv::stream_tail_position::ser_key(stream_id),
-            kv::stream_tail_position::ser_value(
-                tail_pos,
-                kv::timestamp::TimestampSecs::from_secs(1),
-            ),
+            kv::stream_tail_position::ser_value(tail_pos),
         );
         wb.put(
             kv::stream_record_data::ser_key(stream_id, record_pos),
             kv::stream_record_data::ser_value(metered_record.as_ref()),
         );
-        static WRITE_OPTS: WriteOptions = WriteOptions {
-            await_durable: true,
-        };
-        backend
-            .db
-            .write_with_options(wb, &WRITE_OPTS)
-            .await
-            .unwrap();
+        backend.db.write(wb).await.unwrap();
 
         backend
             .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())
@@ -482,21 +487,21 @@ mod tests {
         let stream = StreamName::from_str("stream3").unwrap();
 
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: BasinConfig::default(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
             .await
             .unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
-                CreateStreamIntent::CreateOnly {
-                    config: OptionalStreamConfig::default(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )

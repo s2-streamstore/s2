@@ -91,15 +91,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-            # for static bin
-            deps: |
-              sudo apt-get update
-              sudo apt-get install -y musl-tools
-          - os: ubuntu-24.04-arm
+            builder: cross
+          - os: ubuntu-22.04
             target: aarch64-unknown-linux-musl
-            deps: |
-              sudo apt-get update
-              sudo apt-get install -y musl-tools
+            builder: cross
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: macos-latest
@@ -124,8 +119,13 @@ jobs:
       - name: Set CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        uses: taiki-e/install-action@f23382d582832e41d5eb4fff2bddb06bc5adf8d3 # v2.62.20
+        with:
+          tool: cross@0.2.5
       - name: Build
-        run: cargo build --release --package s2-cli --target ${{ matrix.target }}
+        run: ${{ matrix.builder || 'cargo' }} build --release --package s2-cli --target ${{ matrix.target }}
       - name: Create pem and certificate.der files
         if: matrix.os == 'macos-latest'
         run: |

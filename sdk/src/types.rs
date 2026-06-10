@@ -8,6 +8,7 @@ use std::{
     ops::{Deref, RangeTo},
     pin::Pin,
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -18,11 +19,6 @@ use http::{
 };
 use rand::RngExt;
 use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
-pub use s2_common::caps::RECORD_BATCH_MAX;
-/// Encryption algorithm.
-pub use s2_common::encryption::EncryptionAlgorithm;
-/// Encryption key for stream operations.
-pub use s2_common::encryption::EncryptionKey;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.
@@ -42,6 +38,11 @@ pub use s2_common::types::basin::BasinName;
 pub use s2_common::types::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
 pub use s2_common::types::basin::BasinNameStartAfter;
+/// Location name.
+///
+/// **Note:** It must be between 1 and 64 characters in length and can only comprise ASCII
+/// letters, numbers, colons, hyphens, and periods.
+pub use s2_common::types::location::LocationName;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
@@ -50,10 +51,16 @@ pub use s2_common::types::stream::StreamName;
 pub use s2_common::types::stream::StreamNamePrefix;
 /// See [`ListStreamsInput::start_after`].
 pub use s2_common::types::stream::StreamNameStartAfter;
+pub use s2_common::{
+    caps::RECORD_BATCH_MAX,
+    encryption::{EncryptionAlgorithm, EncryptionKey},
+};
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
-use s2_common::{maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH};
+use s2_common::{
+    maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH, types::resources::ProvisionResult,
+};
 use secrecy::SecretString;
 
 use crate::api::{ApiError, ApiErrorResponse};
@@ -401,6 +408,7 @@ pub struct S2Config {
     pub(crate) compression: Compression,
     pub(crate) user_agent: HeaderValue,
     pub(crate) insecure_skip_cert_verification: bool,
+    pub(crate) rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
 
 impl S2Config {
@@ -417,6 +425,7 @@ impl S2Config {
                 .parse()
                 .expect("valid user agent"),
             insecure_skip_cert_verification: false,
+            rustls_crypto_provider: default_rustls_crypto_provider(),
         }
     }
 
@@ -480,6 +489,41 @@ impl S2Config {
         }
     }
 
+    /// Use a specific rustls crypto provider for SDK TLS connections.
+    ///
+    /// With default features enabled, the SDK uses the `aws-lc-rs` provider.
+    /// With default features disabled, the SDK uses rustls's process-global
+    /// provider if one has been installed, or returns an error otherwise.
+    ///
+    /// Use this when your application needs a specific rustls provider, such as
+    /// `ring` or a custom [`rustls::crypto::CryptoProvider`]. The corresponding
+    /// rustls provider feature must be enabled in the dependency graph.
+    pub fn with_rustls_crypto_provider(
+        self,
+        provider: impl Into<Arc<rustls::crypto::CryptoProvider>>,
+    ) -> Self {
+        Self {
+            rustls_crypto_provider: Some(provider.into()),
+            ..self
+        }
+    }
+
+    /// Use rustls's `aws-lc-rs` crypto provider.
+    ///
+    /// Requires the `rustls-aws-lc-rs` crate feature.
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    pub fn with_rustls_aws_lc_rs_crypto_provider(self) -> Self {
+        self.with_rustls_crypto_provider(rustls::crypto::aws_lc_rs::default_provider())
+    }
+
+    /// Use rustls's `ring` crypto provider.
+    ///
+    /// Requires the `rustls-ring` crate feature.
+    #[cfg(feature = "rustls-ring")]
+    pub fn with_rustls_ring_crypto_provider(self) -> Self {
+        self.with_rustls_crypto_provider(rustls::crypto::ring::default_provider())
+    }
+
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
     pub fn with_user_agent(self, user_agent: impl Into<String>) -> Result<Self, ValidationError> {
@@ -489,6 +533,21 @@ impl S2Config {
             .map_err(|e| ValidationError(format!("invalid user agent: {e}")))?;
         Ok(Self { user_agent, ..self })
     }
+}
+
+#[cfg(feature = "rustls-aws-lc-rs")]
+fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+    Some(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+}
+
+#[cfg(all(not(feature = "rustls-aws-lc-rs"), feature = "rustls-ring"))]
+fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+    Some(Arc::new(rustls::crypto::ring::default_provider()))
+}
+
+#[cfg(all(not(feature = "rustls-aws-lc-rs"), not(feature = "rustls-ring")))]
+fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+    None
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -608,7 +667,7 @@ pub struct TimestampingConfig {
     /// Whether client-specified timestamps are allowed to exceed the arrival time.
     ///
     /// Defaults to `false` (client timestamps are capped at the arrival time).
-    pub uncapped: bool,
+    pub uncapped: Option<bool>,
 }
 
 impl TimestampingConfig {
@@ -627,7 +686,10 @@ impl TimestampingConfig {
 
     /// Set whether client-specified timestamps are allowed to exceed the arrival time.
     pub fn with_uncapped(self, uncapped: bool) -> Self {
-        Self { uncapped, ..self }
+        Self {
+            uncapped: Some(uncapped),
+            ..self
+        }
     }
 }
 
@@ -635,7 +697,7 @@ impl From<api::config::TimestampingConfig> for TimestampingConfig {
     fn from(value: api::config::TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: value.uncapped.unwrap_or_default(),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -644,7 +706,7 @@ impl From<TimestampingConfig> for api::config::TimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
-            uncapped: Some(value.uncapped),
+            uncapped: value.uncapped,
         }
     }
 }
@@ -772,7 +834,7 @@ impl From<StreamConfig> for api::config::StreamConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 /// Configuration for a basin.
 pub struct BasinConfig {
@@ -854,67 +916,6 @@ impl From<BasinConfig> for api::config::BasinConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Scope of a basin.
-#[non_exhaustive]
-pub enum BasinScope {
-    /// AWS `us-east-1` region.
-    AwsUsEast1,
-    /// AWS `us-west-2` region.
-    AwsUsWest2,
-    /// AWS `eu-north-1` region.
-    AwsEuNorth1,
-}
-
-impl From<api::basin::BasinScope> for BasinScope {
-    fn from(value: api::basin::BasinScope) -> Self {
-        match value {
-            api::basin::BasinScope::AwsUsEast1 => BasinScope::AwsUsEast1,
-            api::basin::BasinScope::AwsUsWest2 => BasinScope::AwsUsWest2,
-            api::basin::BasinScope::AwsEuNorth1 => BasinScope::AwsEuNorth1,
-        }
-    }
-}
-
-impl From<BasinScope> for api::basin::BasinScope {
-    fn from(value: BasinScope) -> Self {
-        match value {
-            BasinScope::AwsUsEast1 => api::basin::BasinScope::AwsUsEast1,
-            BasinScope::AwsUsWest2 => api::basin::BasinScope::AwsUsWest2,
-            BasinScope::AwsEuNorth1 => api::basin::BasinScope::AwsEuNorth1,
-        }
-    }
-}
-
-/// Result of a create-or-reconfigure operation.
-///
-/// Indicates whether the resource was newly created or already existed and was
-/// reconfigured. Both variants hold the resource's current state.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateOrReconfigured<T> {
-    /// Resource was newly created.
-    Created(T),
-    /// Resource already existed and was reconfigured to match the spec.
-    Reconfigured(T),
-}
-
-#[cfg(feature = "_hidden")]
-impl<T> CreateOrReconfigured<T> {
-    /// Returns `true` if the resource was newly created.
-    pub fn is_created(&self) -> bool {
-        matches!(self, Self::Created(_))
-    }
-
-    /// Unwrap the inner value regardless of variant.
-    pub fn into_inner(self) -> T {
-        match self {
-            Self::Created(t) | Self::Reconfigured(t) => t,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Input for [`create_basin`](crate::S2::create_basin) operation.
@@ -925,10 +926,10 @@ pub struct CreateBasinInput {
     ///
     /// See [`BasinConfig`] for defaults.
     pub config: Option<BasinConfig>,
-    /// Scope of the basin.
+    /// Location of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1).
-    pub scope: Option<BasinScope>,
+    /// If omitted when creating, uses the default location for the account.
+    pub location: Option<LocationName>,
     idempotency_token: String,
 }
 
@@ -938,7 +939,7 @@ impl CreateBasinInput {
         Self {
             name,
             config: None,
-            scope: None,
+            location: None,
             idempotency_token: idempotency_token(),
         }
     }
@@ -951,12 +952,19 @@ impl CreateBasinInput {
         }
     }
 
-    /// Set the scope of the basin.
-    pub fn with_scope(self, scope: BasinScope) -> Self {
-        Self {
-            scope: Some(scope),
+    /// Set the location of the basin.
+    pub fn with_location<S>(self, location: S) -> Result<Self, ValidationError>
+    where
+        S: TryInto<LocationName>,
+        S::Error: fmt::Display,
+    {
+        let location = location
+            .try_into()
+            .map_err(|e| ValidationError(e.to_string()))?;
+        Ok(Self {
+            location: Some(location),
             ..self
-        }
+        })
     }
 }
 
@@ -966,7 +974,7 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
             api::basin::CreateBasinRequest {
                 basin: value.name,
                 config: value.config.map(Into::into),
-                scope: value.scope.map(Into::into),
+                location: value.location,
             },
             value.idempotency_token,
         )
@@ -975,67 +983,89 @@ impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-/// Input for [`create_or_reconfigure_basin`](crate::S2::create_or_reconfigure_basin) operation.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
-pub struct CreateOrReconfigureBasinInput {
+/// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
+pub struct EnsureBasinInput {
     /// Basin name.
     pub name: BasinName,
-    /// Reconfiguration for the basin.
+    /// Configuration for the basin.
     ///
-    /// If `None`, the basin is created with default configuration or left unchanged if it exists.
-    pub config: Option<BasinReconfiguration>,
-    /// Scope of the basin.
+    /// See [`BasinConfig`] for defaults.
+    pub config: Option<BasinConfig>,
+    /// Location of the basin.
     ///
-    /// Defaults to [`AwsUsEast1`](BasinScope::AwsUsEast1). Cannot be changed once set.
-    pub scope: Option<BasinScope>,
+    /// If omitted when creating, uses the default location for the account. Cannot be changed once
+    /// set.
+    pub location: Option<LocationName>,
 }
 
-#[cfg(feature = "_hidden")]
-impl CreateOrReconfigureBasinInput {
-    /// Create a new [`CreateOrReconfigureBasinInput`] with the given basin name.
+impl EnsureBasinInput {
+    /// Create a new [`EnsureBasinInput`] with the given basin name.
     pub fn new(name: BasinName) -> Self {
         Self {
             name,
             config: None,
-            scope: None,
+            location: None,
         }
     }
 
-    /// Set the reconfiguration for the basin.
-    pub fn with_config(self, config: BasinReconfiguration) -> Self {
+    /// Set the configuration for the basin.
+    pub fn with_config(self, config: BasinConfig) -> Self {
         Self {
             config: Some(config),
             ..self
         }
     }
 
-    /// Set the scope of the basin.
-    pub fn with_scope(self, scope: BasinScope) -> Self {
-        Self {
-            scope: Some(scope),
+    /// Set the location of the basin.
+    pub fn with_location<S>(self, location: S) -> Result<Self, ValidationError>
+    where
+        S: TryInto<LocationName>,
+        S::Error: fmt::Display,
+    {
+        let location = location
+            .try_into()
+            .map_err(|e| ValidationError(e.to_string()))?;
+        Ok(Self {
+            location: Some(location),
             ..self
-        }
+        })
     }
 }
 
-#[cfg(feature = "_hidden")]
-impl From<CreateOrReconfigureBasinInput>
-    for (
-        BasinName,
-        Option<api::basin::CreateOrReconfigureBasinRequest>,
-    )
-{
-    fn from(value: CreateOrReconfigureBasinInput) -> Self {
-        let request = if value.config.is_some() || value.scope.is_some() {
-            Some(api::basin::CreateOrReconfigureBasinRequest {
-                config: value.config.map(Into::into),
-                scope: value.scope.map(Into::into),
+impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
+    fn from(value: EnsureBasinInput) -> Self {
+        let config = value.config;
+        let request = if config.is_some() || value.location.is_some() {
+            Some(api::basin::EnsureBasinRequest {
+                config: config.map(Into::into),
+                location: value.location,
             })
         } else {
             None
         };
         (value.name, request)
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Output for `ensure` operations ([`ensure_basin`](crate::S2::ensure_basin),
+/// [`ensure_stream`](crate::S2Basin::ensure_stream)).
+pub enum EnsureOutput<T> {
+    /// Resource created.
+    Created(T),
+    /// Resource already existed, and its config was updated.
+    ConfigUpdated(T),
+    /// Resource already existed, and its config is unchanged.
+    ConfigUnchanged(T),
+}
+
+impl<T> From<ProvisionResult<T>> for EnsureOutput<T> {
+    fn from(result: ProvisionResult<T>) -> Self {
+        match result {
+            ProvisionResult::Created(info) => EnsureOutput::Created(info),
+            ProvisionResult::Updated(info) => EnsureOutput::ConfigUpdated(info),
+            ProvisionResult::Noop(info) => EnsureOutput::ConfigUnchanged(info),
+        }
     }
 }
 
@@ -1097,7 +1127,7 @@ impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Input for [`S2::list_all_basins`](crate::S2::list_all_basins).
+/// Input for [`list_all_basins`](crate::S2::list_all_basins) operation.
 pub struct ListAllBasinsInput {
     /// Filter basins whose names begin with this value.
     ///
@@ -1148,8 +1178,8 @@ impl ListAllBasinsInput {
 pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
-    /// Scope of the basin.
-    pub scope: Option<BasinScope>,
+    /// Location of the basin.
+    pub location: Option<LocationName>,
     /// Creation time.
     pub created_at: S2DateTime,
     /// Deletion time if the basin is being deleted.
@@ -1162,7 +1192,7 @@ impl TryFrom<api::basin::BasinInfo> for BasinInfo {
     fn try_from(value: api::basin::BasinInfo) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name,
-            scope: value.scope.map(Into::into),
+            location: value.location,
             created_at: value.created_at.try_into()?,
             deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
         })
@@ -1476,7 +1506,7 @@ impl From<ListAccessTokensInput> for api::access::ListAccessTokensRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Input for [`S2::list_all_access_tokens`](crate::S2::list_all_access_tokens).
+/// Input for [`list_all_access_tokens`](crate::S2::list_all_access_tokens) operation.
 pub struct ListAllAccessTokensInput {
     /// Filter access tokens whose IDs begin with this value.
     ///
@@ -1505,6 +1535,25 @@ impl ListAllAccessTokensInput {
         Self {
             start_after,
             ..self
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+/// Location information.
+pub struct LocationInfo {
+    /// Location name.
+    pub name: LocationName,
+    /// Location represents a private placement, limited by account.
+    pub is_private: bool,
+}
+
+impl From<api::location::LocationInfo> for LocationInfo {
+    fn from(value: api::location::LocationInfo) -> Self {
+        Self {
+            name: value.name,
+            is_private: value.is_private,
         }
     }
 }
@@ -1789,6 +1838,12 @@ pub enum Operation {
     Trim,
     /// Set the fencing token on a stream.
     Fence,
+    /// List locations.
+    ListLocations,
+    /// Get the default location.
+    GetDefaultLocation,
+    /// Set the default location.
+    SetDefaultLocation,
 }
 
 impl From<Operation> for api::access::Operation {
@@ -1815,6 +1870,9 @@ impl From<Operation> for api::access::Operation {
             Operation::GetAccountMetrics => api::access::Operation::AccountMetrics,
             Operation::GetBasinMetrics => api::access::Operation::BasinMetrics,
             Operation::GetStreamMetrics => api::access::Operation::StreamMetrics,
+            Operation::ListLocations => api::access::Operation::ListLocations,
+            Operation::GetDefaultLocation => api::access::Operation::GetDefaultLocation,
+            Operation::SetDefaultLocation => api::access::Operation::SetDefaultLocation,
         }
     }
 }
@@ -1843,6 +1901,9 @@ impl From<api::access::Operation> for Operation {
             api::access::Operation::AccountMetrics => Operation::GetAccountMetrics,
             api::access::Operation::BasinMetrics => Operation::GetBasinMetrics,
             api::access::Operation::StreamMetrics => Operation::GetStreamMetrics,
+            api::access::Operation::ListLocations => Operation::ListLocations,
+            api::access::Operation::GetDefaultLocation => Operation::GetDefaultLocation,
+            api::access::Operation::SetDefaultLocation => Operation::SetDefaultLocation,
         }
     }
 }
@@ -2566,7 +2627,7 @@ impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Input for [`S2Basin::list_all_streams`](crate::S2Basin::list_all_streams).
+/// Input for [`list_all_streams`](crate::S2Basin::list_all_streams) operation.
 pub struct ListAllStreamsInput {
     /// Filter streams whose names begin with this value.
     ///
@@ -2684,28 +2745,25 @@ impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-/// Input for [`create_or_reconfigure_stream`](crate::S2Basin::create_or_reconfigure_stream)
+/// Input for [`ensure_stream`](crate::S2Basin::ensure_stream)
 /// operation.
-#[doc(hidden)]
-#[cfg(feature = "_hidden")]
-pub struct CreateOrReconfigureStreamInput {
+pub struct EnsureStreamInput {
     /// Stream name.
     pub name: StreamName,
-    /// Reconfiguration for the stream.
+    /// Configuration for the stream.
     ///
-    /// If `None`, the stream is created with default configuration or left unchanged if it exists.
-    pub config: Option<StreamReconfiguration>,
+    /// See [`StreamConfig`] for defaults.
+    pub config: Option<StreamConfig>,
 }
 
-#[cfg(feature = "_hidden")]
-impl CreateOrReconfigureStreamInput {
-    /// Create a new [`CreateOrReconfigureStreamInput`] with the given stream name.
+impl EnsureStreamInput {
+    /// Create a new [`EnsureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
         Self { name, config: None }
     }
 
-    /// Set the reconfiguration for the stream.
-    pub fn with_config(self, config: StreamReconfiguration) -> Self {
+    /// Set the configuration for the stream.
+    pub fn with_config(self, config: StreamConfig) -> Self {
         Self {
             config: Some(config),
             ..self
@@ -2713,11 +2771,8 @@ impl CreateOrReconfigureStreamInput {
     }
 }
 
-#[cfg(feature = "_hidden")]
-impl From<CreateOrReconfigureStreamInput>
-    for (StreamName, Option<api::config::StreamReconfiguration>)
-{
-    fn from(value: CreateOrReconfigureStreamInput) -> Self {
+impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
+    fn from(value: EnsureStreamInput) -> Self {
         (value.name, value.config.map(Into::into))
     }
 }

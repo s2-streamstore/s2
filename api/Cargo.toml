@@ -1,6 +1,6 @@
 [package]
 name = "s2-api"
-version = "0.29.0"
+version = "0.30.0"
 description = "API types for S2, the durable streams API"
 edition.workspace = true
 license.workspace = true
@@ -26,7 +26,6 @@ axum = { workspace = true, optional = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }
-enumset = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }

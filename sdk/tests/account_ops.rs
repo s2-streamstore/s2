@@ -27,10 +27,10 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         page.values.as_slice(),
         [BasinInfo {
             name,
-            scope,
+            location,
             deleted_at: None,
             ..
-        }] if name == &basin_info.name && scope == &basin_info.scope
+        }] if name == &basin_info.name && location == &basin_info.location
     );
     assert!(!page.has_more);
 
@@ -46,13 +46,13 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
         [
             BasinInfo {
                 name,
-                scope,
+                location,
                 deleted_at: Some(_),
                 ..
             },
         ] => {
             assert_eq!(name, &basin_info.name);
-            assert_eq!(scope, &basin_info.scope);
+            assert_eq!(location, &basin_info.location);
         }
         values => panic!("unexpected basin listing after delete: {values:?}"),
     }
@@ -133,6 +133,89 @@ async fn reconfigure_basin() -> Result<(), S2Error> {
     );
 
     s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn ensure_basin_created() -> Result<(), S2Error> {
+    let s2 = s2();
+    let basin_name = unique_basin_name();
+
+    let output = s2
+        .ensure_basin(
+            EnsureBasinInput::new(basin_name.clone())
+                .with_config(BasinConfig::new().with_create_stream_on_read(true)),
+        )
+        .await?;
+
+    assert_matches!(output, EnsureOutput::Created(info) => {
+        assert_eq!(basin_name, info.name);
+    });
+
+    let config = s2.get_basin_config(basin_name).await?;
+
+    assert!(config.create_stream_on_read);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn ensure_basin_config_updated() -> Result<(), S2Error> {
+    let s2 = s2();
+    let basin_name = unique_basin_name();
+
+    let output = s2
+        .ensure_basin(
+            EnsureBasinInput::new(basin_name.clone())
+                .with_config(BasinConfig::new().with_create_stream_on_append(true)),
+        )
+        .await?;
+
+    assert_matches!(output, EnsureOutput::Created(info) => {
+        assert_eq!(basin_name, info.name);
+    });
+
+    let output = s2
+        .ensure_basin(
+            EnsureBasinInput::new(basin_name.clone())
+                .with_config(BasinConfig::new().with_create_stream_on_append(false)),
+        )
+        .await?;
+
+    assert_matches!(output, EnsureOutput::ConfigUpdated(_));
+
+    let updated_config = s2.get_basin_config(basin_name).await?;
+
+    assert!(!updated_config.create_stream_on_append);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn ensure_basin_config_unchanged() -> Result<(), S2Error> {
+    let s2 = s2();
+    let basin_name = unique_basin_name();
+
+    let output = s2
+        .ensure_basin(EnsureBasinInput::new(basin_name.clone()))
+        .await?;
+
+    assert_matches!(output, EnsureOutput::Created(info) => {
+        assert_eq!(basin_name, info.name);
+    });
+
+    let config = s2.get_basin_config(basin_name.clone()).await?;
+
+    let output = s2
+        .ensure_basin(EnsureBasinInput::new(basin_name.clone()).with_config(config.clone()))
+        .await?;
+
+    assert_matches!(output, EnsureOutput::ConfigUnchanged(_));
+
+    let updated_config = s2.get_basin_config(basin_name).await?;
+
+    assert_eq!(config, updated_config);
 
     Ok(())
 }

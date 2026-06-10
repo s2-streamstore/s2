@@ -15,10 +15,7 @@ use crate::{
         FencingToken, Metered, MeteredExt, MeteredSize, Record, RecordDecryptionError, SeqNum,
         Sequenced, StoredRecord, StreamPosition, Timestamp, decrypt_stored_record, encrypt_record,
     },
-    types::{
-        config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{ListItemsRequest, RequestToken},
-    },
+    types::resources::ListItemsRequest,
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -173,33 +170,6 @@ pub struct StreamInfo {
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
     pub cipher: Option<EncryptionAlgorithm>,
-}
-
-/// Stream creation operation intent.
-///
-/// Separates POST-style create-only requests, which carry a complete creation config and optional
-/// idempotency token, from PUT-style create-or-reconfigure requests, which carry only a
-/// reconfiguration patch.
-#[derive(Debug)]
-pub enum CreateStreamIntent {
-    /// Create a new stream.
-    ///
-    /// HTTP POST semantics: idempotent if a request token is provided and the stream was previously
-    /// created using the same token and config.
-    CreateOnly {
-        /// Complete stream configuration for a new stream.
-        config: OptionalStreamConfig,
-        /// Optional request token used to make create retries idempotent.
-        request_token: Option<RequestToken>,
-    },
-    /// Create a new stream or reconfigure it if it already exists.
-    ///
-    /// HTTP PUT semantics: always idempotent. When the stream already exists, unspecified fields in
-    /// the reconfiguration preserve the existing config.
-    CreateOrReconfigure {
-        /// Stream reconfiguration patch to apply on create-or-reconfigure.
-        reconfiguration: StreamReconfiguration,
-    },
 }
 
 #[derive(Debug, Clone)]

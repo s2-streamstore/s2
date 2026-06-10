@@ -242,7 +242,6 @@ impl RequestBuilder {
         Self::new(Method::PATCH, url)
     }
 
-    #[cfg(feature = "_hidden")]
     pub fn put(url: Url) -> Self {
         Self::new(Method::PUT, url)
     }
@@ -414,22 +413,28 @@ pub trait RequestExecutor: Send + Sync {
 pub fn default_connector(
     connect_timeout: Option<Duration>,
     insecure_skip_cert_verification: bool,
+    rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 ) -> Result<HttpsConnector<HttpConnector>, std::io::Error> {
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
     if let Some(timeout) = connect_timeout {
         connector.set_connect_timeout(Some(timeout));
     }
+    let rustls_crypto_provider = resolve_rustls_crypto_provider(rustls_crypto_provider)?;
 
     let builder = if insecure_skip_cert_verification {
         HttpsConnectorBuilder::new().with_tls_config(
-            rustls::ClientConfig::builder()
+            rustls::ClientConfig::builder_with_provider(rustls_crypto_provider.clone())
+                .with_safe_default_protocol_versions()
+                .map_err(std::io::Error::other)?
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                .with_custom_certificate_verifier(Arc::new(NoVerifier {
+                    rustls_crypto_provider,
+                }))
                 .with_no_client_auth(),
         )
     } else {
-        HttpsConnectorBuilder::new().with_native_roots()?
+        HttpsConnectorBuilder::new().with_provider_and_native_roots(rustls_crypto_provider)?
     };
 
     Ok(builder
@@ -438,8 +443,25 @@ pub fn default_connector(
         .wrap_connector(connector))
 }
 
+fn resolve_rustls_crypto_provider(
+    provider: Option<Arc<rustls::crypto::CryptoProvider>>,
+) -> Result<Arc<rustls::crypto::CryptoProvider>, std::io::Error> {
+    provider
+        .or_else(|| rustls::crypto::CryptoProvider::get_default().cloned())
+        .ok_or_else(|| {
+            std::io::Error::other(
+                "no rustls crypto provider configured; configure \
+                 S2Config::with_rustls_crypto_provider(...) or install a \
+                 process-global provider with \
+                 rustls::crypto::CryptoProvider::install_default()",
+            )
+        })
+}
+
 #[derive(Debug)]
-struct NoVerifier;
+struct NoVerifier {
+    rustls_crypto_provider: Arc<rustls::crypto::CryptoProvider>,
+}
 
 impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
@@ -472,7 +494,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
+        self.rustls_crypto_provider
             .signature_verification_algorithms
             .supported_schemes()
     }
@@ -862,6 +884,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+    use rustls::client::danger::ServerCertVerifier;
+
     use super::*;
 
     const TEST_HOST: &str = "localhost:8080";
@@ -876,6 +901,39 @@ mod tests {
             Some(pool) => pool.clients.read().await.len(),
             None => 0,
         }
+    }
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    fn test_rustls_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+    }
+
+    #[cfg(all(not(feature = "rustls-aws-lc-rs"), feature = "rustls-ring"))]
+    fn test_rustls_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+        Arc::new(rustls::crypto::ring::default_provider())
+    }
+
+    #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+    #[test]
+    fn default_connector_accepts_explicit_crypto_provider_for_insecure_tls() {
+        let connector = default_connector(None, true, Some(test_rustls_crypto_provider()));
+        assert!(connector.is_ok());
+    }
+
+    #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+    #[test]
+    fn no_verifier_uses_configured_provider_signature_schemes() {
+        let provider = test_rustls_crypto_provider();
+        let verifier = NoVerifier {
+            rustls_crypto_provider: provider.clone(),
+        };
+
+        assert_eq!(
+            verifier.supported_verify_schemes(),
+            provider
+                .signature_verification_algorithms
+                .supported_schemes()
+        );
     }
 
     #[tokio::test]

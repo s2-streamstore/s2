@@ -81,7 +81,7 @@ async fn stream_config_roundtrip(basin: &S2Basin) -> Result<(), S2Error> {
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
 async fn reconfigure_stream(basin: &S2Basin) -> Result<(), S2Error> {
-    let stream_name: StreamName = unique_stream_name();
+    let stream_name = unique_stream_name();
 
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
@@ -102,6 +102,100 @@ async fn reconfigure_stream(basin: &S2Basin) -> Result<(), S2Error> {
             ..
         })
     );
+
+    Ok(())
+}
+
+#[test_context(S2Basin)]
+#[tokio_shared_rt::test(shared)]
+async fn ensure_stream_created(basin: &S2Basin) -> Result<(), S2Error> {
+    let stream_name = unique_stream_name();
+
+    let delete_on_empty_config = DeleteOnEmptyConfig::new().with_min_age(Duration::from_hours(24));
+
+    let output = basin
+        .ensure_stream(
+            EnsureStreamInput::new(stream_name.clone())
+                .with_config(StreamConfig::new().with_delete_on_empty(delete_on_empty_config)),
+        )
+        .await?;
+
+    assert_matches!(output, EnsureOutput::Created(info) => {
+        assert_eq!(stream_name, info.name);
+    });
+
+    let config = basin.get_stream_config(stream_name).await?;
+
+    assert_eq!(config.delete_on_empty, Some(delete_on_empty_config));
+
+    Ok(())
+}
+
+#[test_context(S2Basin)]
+#[tokio_shared_rt::test(shared)]
+async fn ensure_stream_config_updated(basin: &S2Basin) -> Result<(), S2Error> {
+    let stream_name = unique_stream_name();
+
+    let output = basin
+        .ensure_stream(EnsureStreamInput::new(stream_name.clone()).with_config(
+            StreamConfig::new().with_timestamping(
+                TimestampingConfig::new().with_mode(TimestampingMode::ClientRequire),
+            ),
+        ))
+        .await?;
+
+    assert_matches!(output, EnsureOutput::Created(info) => {
+        assert_eq!(stream_name, info.name);
+    });
+
+    let output =
+        basin
+            .ensure_stream(EnsureStreamInput::new(stream_name.clone()).with_config(
+                StreamConfig::new().with_timestamping(
+                    TimestampingConfig::new().with_mode(TimestampingMode::Arrival),
+                ),
+            ))
+            .await?;
+
+    assert_matches!(output, EnsureOutput::ConfigUpdated(_));
+
+    let updated_config = basin.get_stream_config(stream_name).await?;
+
+    assert_matches!(
+        updated_config.timestamping,
+        Some(TimestampingConfig {
+            mode: Some(TimestampingMode::Arrival),
+            ..
+        })
+    );
+
+    Ok(())
+}
+
+#[test_context(S2Basin)]
+#[tokio_shared_rt::test(shared)]
+async fn ensure_basin_config_unchanged(basin: &S2Basin) -> Result<(), S2Error> {
+    let stream_name = unique_stream_name();
+
+    let output = basin
+        .ensure_stream(EnsureStreamInput::new(stream_name.clone()))
+        .await?;
+
+    assert_matches!(output, EnsureOutput::Created(info) => {
+        assert_eq!(stream_name, info.name);
+    });
+
+    let config = basin.get_stream_config(stream_name.clone()).await?;
+
+    let output = basin
+        .ensure_stream(EnsureStreamInput::new(stream_name.clone()).with_config(config.clone()))
+        .await?;
+
+    assert_matches!(output, EnsureOutput::ConfigUnchanged(_));
+
+    let updated_config = basin.get_stream_config(stream_name).await?;
+
+    assert_eq!(config, updated_config);
 
     Ok(())
 }
@@ -561,7 +655,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), S2E
             retention_policy: Some(RetentionPolicy::Age(86400)),
             timestamping: Some(TimestampingConfig {
                 mode: Some(TimestampingMode::ClientRequire),
-                uncapped: true,
+                uncapped: Some(true),
                 ..
             }),
             delete_on_empty: Some(DeleteOnEmptyConfig {
@@ -695,10 +789,10 @@ async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<()
             .await?;
 
         let retrieved = basin.get_stream_config(stream_name.clone()).await?;
-        match retrieved.timestamping {
-            Some(timestamping) => assert_eq!(timestamping.uncapped, uncapped),
-            None => assert!(!uncapped),
-        }
+        let timestamping = retrieved
+            .timestamping
+            .expect("explicit uncapped setting should be preserved");
+        assert_eq!(timestamping.uncapped, Some(uncapped));
 
         basin
             .delete_stream(DeleteStreamInput::new(stream_name))
@@ -958,10 +1052,10 @@ async fn reconfigure_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Resu
             ))
             .await?;
 
-        match config.timestamping {
-            Some(timestamping) => assert_eq!(timestamping.uncapped, uncapped),
-            None => assert!(!uncapped),
-        }
+        let timestamping = config
+            .timestamping
+            .expect("explicit uncapped setting should be preserved");
+        assert_eq!(timestamping.uncapped, Some(uncapped));
 
         basin
             .delete_stream(DeleteStreamInput::new(stream_name))

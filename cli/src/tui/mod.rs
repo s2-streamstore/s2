@@ -1,10 +1,15 @@
 mod app;
 mod event;
+mod text_input;
 mod ui;
-use std::io;
+use std::{
+    io, panic,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use app::App;
 use crossterm::{
+    cursor::Show,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -15,8 +20,61 @@ use crate::{
     error::CliError,
 };
 
+static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
 pub fn user_agent() -> String {
     format!("s2-tui/{}", env!("CARGO_PKG_VERSION"))
+}
+
+fn restore_terminal() {
+    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+}
+
+fn restore_terminal_if_active() {
+    if TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
+        restore_terminal();
+    }
+}
+
+fn install_terminal_panic_hook() {
+    if PANIC_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        restore_terminal_if_active();
+        previous_hook(info);
+    }));
+}
+
+/// Guard that restores the terminal on normal exit.
+///
+/// The panic hook handles panic cleanup because this workspace uses
+/// `panic = "abort"`, which skips destructors.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn acquire() -> Result<Self, CliError> {
+        install_terminal_panic_hook();
+        enable_raw_mode()
+            .map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
+        TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
+        let mut stdout = io::stdout();
+        if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+            restore_terminal_if_active();
+            return Err(CliError::RecordReaderInit(format!("terminal setup: {e}")));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal_if_active();
+    }
 }
 
 pub async fn run() -> Result<(), CliError> {
@@ -28,42 +86,12 @@ pub async fn run() -> Result<(), CliError> {
         Err(_) => None, // No access token - will show setup screen
     };
 
-    // Setup terminal
-    enable_raw_mode().map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
-    let backend = CrosstermBackend::new(stdout);
+    let _guard = TerminalGuard::acquire()?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)
         .map_err(|e| CliError::RecordReaderInit(format!("terminal setup: {e}")))?;
 
     // Create and run app
     let app = App::new(s2);
-    let result = app.run(&mut terminal).await;
-
-    // Restore terminal - attempt all cleanup steps even if some fail
-    // This is critical: a partially restored terminal leaves the user's shell broken
-    let mut cleanup_errors = Vec::new();
-
-    if let Err(e) = disable_raw_mode() {
-        cleanup_errors.push(format!("disable_raw_mode: {e}"));
-    }
-
-    if let Err(e) = execute!(terminal.backend_mut(), LeaveAlternateScreen) {
-        cleanup_errors.push(format!("leave_alternate_screen: {e}"));
-    }
-
-    if let Err(e) = terminal.show_cursor() {
-        cleanup_errors.push(format!("show_cursor: {e}"));
-    }
-
-    // Log cleanup errors to stderr (won't be visible in alternate screen anyway)
-    if !cleanup_errors.is_empty() {
-        eprintln!(
-            "Warning: terminal cleanup errors: {}",
-            cleanup_errors.join(", ")
-        );
-    }
-
-    result
+    app.run(&mut terminal).await
 }
