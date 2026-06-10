@@ -59,7 +59,7 @@ fn apply_last_event_id(
         bytes,
     }) = last_event_id
     {
-        start.from = ReadFrom::SeqNum(seq_num + 1);
+        start.from = ReadFrom::SeqNum(seq_num.saturating_add(1));
         end.count = end.count.map(|c| c.saturating_sub(count));
         end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
     }
