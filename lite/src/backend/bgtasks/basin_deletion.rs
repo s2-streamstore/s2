@@ -97,7 +97,24 @@ impl Backend {
             self.set_basin_deletion_cursor(&basin, &last_stream.expect("non-empty stream page"))
                 .await?;
             Ok(true)
+        } else if last_stream.is_some() {
+            // Streams still pending deletion (waiting for stream_trim to clean
+            // up tombstoned metadata). Reset cursor so the next tick re-scans
+            // from the beginning.
+            if !cursor.as_ref().is_empty() {
+                self.set_basin_deletion_cursor(&basin, &StreamNameStartAfter::default())
+                    .await?;
+            }
+            Ok(false)
+        } else if !cursor.as_ref().is_empty() {
+            // No streams on this page but cursor was advanced past earlier
+            // entries. Reset and re-scan from the beginning to verify no
+            // tombstones remain.
+            self.set_basin_deletion_cursor(&basin, &StreamNameStartAfter::default())
+                .await?;
+            Ok(true)
         } else {
+            // No streams from the very beginning — safe to complete.
             self.complete_basin_deletion(&basin).await?;
             Ok(false)
         }
@@ -272,13 +289,15 @@ mod tests {
             .expect("stream meta present");
         let meta = kv::stream_meta::deser_value(meta).unwrap();
         assert!(meta.deleted_at.is_some());
+        // Basin deletion is blocked until tombstoned stream metadata is cleaned
+        // up by stream_trim.
         assert!(
             backend
                 .db
                 .get(kv::basin_meta::ser_key(&basin))
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
         assert!(
             backend
@@ -286,7 +305,7 @@ mod tests {
                 .get(kv::basin_deletion_pending::ser_key(&basin))
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
     }
 
@@ -385,7 +404,13 @@ mod tests {
             .await
             .unwrap();
 
-        backend.clone().tick_basin_deletion().await.unwrap();
+        // First tick resets cursor from past-end back to the beginning.
+        let has_more = backend.clone().tick_basin_deletion().await.unwrap();
+        assert!(has_more);
+
+        // Second tick scans from the beginning, finds no streams, completes.
+        let has_more = backend.clone().tick_basin_deletion().await.unwrap();
+        assert!(!has_more);
 
         assert!(
             backend
@@ -406,28 +431,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn basin_deletion_completes_when_only_tombstones_remain() {
+    async fn basin_deletion_blocked_when_only_tombstones_remain() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("test-basin").unwrap();
         let stream = StreamName::from_str("tombstoned-stream").unwrap();
         let deleted_at = OffsetDateTime::from_unix_timestamp(1234567890).unwrap();
 
-        backend
-            .db
-            .put(
-                kv::basin_meta::ser_key(&basin),
-                kv::basin_meta::ser_value(&basin_meta(Some(OffsetDateTime::now_utc()))),
-            )
-            .await
-            .unwrap();
-        backend
-            .db
-            .put(
-                kv::basin_deletion_pending::ser_key(&basin),
-                kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
-            )
-            .await
-            .unwrap();
+        seed_basin_for_deletion(&backend, &basin).await;
         backend
             .db
             .put(
@@ -437,8 +447,67 @@ mod tests {
             .await
             .unwrap();
 
-        backend.clone().tick_basin_deletion().await.unwrap();
+        let has_more = backend.clone().tick_basin_deletion().await.unwrap();
+        assert!(!has_more);
 
+        // Basin deletion is blocked while tombstoned stream metadata exists.
+        assert!(
+            backend
+                .db
+                .get(kv::basin_meta::ser_key(&basin))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            backend
+                .db
+                .get(kv::basin_deletion_pending::ser_key(&basin))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn basin_deletion_completes_after_tombstones_cleaned() {
+        let backend = test_backend().await;
+        let basin = BasinName::from_str("test-basin").unwrap();
+        let stream = StreamName::from_str("tombstoned-stream").unwrap();
+        let deleted_at = OffsetDateTime::from_unix_timestamp(1234567890).unwrap();
+
+        seed_basin_for_deletion(&backend, &basin).await;
+        backend
+            .db
+            .put(
+                kv::stream_meta::ser_key(&basin, &stream),
+                kv::stream_meta::ser_value(&stream_meta(Some(deleted_at))),
+            )
+            .await
+            .unwrap();
+
+        // First tick: blocked by tombstoned stream.
+        let has_more = backend.clone().tick_basin_deletion().await.unwrap();
+        assert!(!has_more);
+        assert!(
+            backend
+                .db
+                .get(kv::basin_meta::ser_key(&basin))
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Simulate stream_trim cleaning up the tombstoned stream metadata.
+        backend
+            .db
+            .delete(kv::stream_meta::ser_key(&basin, &stream))
+            .await
+            .unwrap();
+
+        // Second tick: no streams remain, completes.
+        let has_more = backend.clone().tick_basin_deletion().await.unwrap();
+        assert!(!has_more);
         assert!(
             backend
                 .db
