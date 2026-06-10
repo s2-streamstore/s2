@@ -216,7 +216,7 @@ jobs:
           {
             "name": "python",
             "repo": "s2-streamstore/s2-sdk-python",
-            "ref": "devin/1781116554-fix-encryption-error-code",
+            "ref": "main",
             "lang": "python",
             "uv-version": "0.11.6",
             "test_cmd": "uv run pytest tests/ -v -s -m '(account or basin or stream) and not access_tokens'"
