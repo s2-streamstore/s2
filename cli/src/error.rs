@@ -169,7 +169,10 @@ impl std::fmt::Display for TokenSource {
 fn is_auth_error(err: &S2Error) -> bool {
     match err {
         S2Error::Server(response) => {
-            matches!(response.code.as_str(), "authn" | "permission_denied")
+            matches!(
+                response.code.as_str(),
+                "authn" | "permission_denied" | "access_token_not_found"
+            )
         }
         _ => false,
     }
