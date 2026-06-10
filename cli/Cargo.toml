@@ -57,5 +57,5 @@ assert_cmd = "2.2"
 predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }
-serial_test = "3.4"
+serial_test = "3.5"
 tempfile = "3.27"
