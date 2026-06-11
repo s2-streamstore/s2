@@ -6,7 +6,7 @@ mod iterator;
 pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub(crate) use encoding::Encodable;
-pub use encoding::RecordDecodeError;
+pub use encoding::StoredRecordDecodeError;
 use encoding::{decode_command_record, decode_envelope_record};
 pub use encryption::{
     EncryptedRecord, RecordDecryptionError, decrypt_stored_record, encrypt_record,
@@ -174,17 +174,19 @@ impl From<Record> for StoredRecord {
     }
 }
 
-pub fn decode_if_command_record(record: &[u8]) -> Result<Option<CommandRecord>, RecordDecodeError> {
+pub fn decode_if_command_record(
+    record: &[u8],
+) -> Result<Option<CommandRecord>, StoredRecordDecodeError> {
     if record.is_empty() {
-        return Err(RecordDecodeError::Truncated("MagicByte"));
+        return Err(StoredRecordDecodeError::Truncated("MagicByte"));
     }
     let magic_byte = MagicByte::try_from(record[0])
-        .map_err(|msg| RecordDecodeError::InvalidValue("MagicByte", msg))?;
+        .map_err(|msg| StoredRecordDecodeError::InvalidValue("MagicByte", msg))?;
     match magic_byte.record_type {
         RecordType::Command => {
             let offset = 1 + magic_byte.metered_size_varlen as usize;
             if record.len() < offset {
-                return Err(RecordDecodeError::Truncated("MeteredSize"));
+                return Err(StoredRecordDecodeError::Truncated("MeteredSize"));
             }
             Ok(Some(decode_command_record(&record[offset..])?))
         }
@@ -237,16 +239,18 @@ fn magic_byte(record: &Metered<&StoredRecord>) -> MagicByte {
 pub type StoredSequencedBytes = Sequenced<Bytes>;
 pub type StoredSequencedRecord = Sequenced<StoredRecord>;
 
-pub fn decode_stored_record(mut buf: Bytes) -> Result<Metered<StoredRecord>, RecordDecodeError> {
+pub fn decode_stored_record(
+    mut buf: Bytes,
+) -> Result<Metered<StoredRecord>, StoredRecordDecodeError> {
     if buf.is_empty() {
-        return Err(RecordDecodeError::Truncated("MagicByte"));
+        return Err(StoredRecordDecodeError::Truncated("MagicByte"));
     }
     let magic_byte = MagicByte::try_from(buf.get_u8())
-        .map_err(|msg| RecordDecodeError::InvalidValue("MagicByte", msg))?;
+        .map_err(|msg| StoredRecordDecodeError::InvalidValue("MagicByte", msg))?;
 
-    let metered_size = buf
-        .try_get_uint(magic_byte.metered_size_varlen as usize)
-        .map_err(|_| RecordDecodeError::Truncated("MeteredSize"))? as usize;
+    let metered_size =
+        buf.try_get_uint(magic_byte.metered_size_varlen as usize)
+            .map_err(|_| StoredRecordDecodeError::Truncated("MeteredSize"))? as usize;
 
     let record = match magic_byte.record_type {
         RecordType::Command => {
@@ -260,7 +264,7 @@ pub fn decode_stored_record(mut buf: Bytes) -> Result<Metered<StoredRecord>, Rec
         }
     };
     if record.metered_size() != metered_size {
-        return Err(RecordDecodeError::InvalidValue(
+        return Err(StoredRecordDecodeError::InvalidValue(
             "MeteredSize",
             "metered size mismatch",
         ));
@@ -268,11 +272,11 @@ pub fn decode_stored_record(mut buf: Bytes) -> Result<Metered<StoredRecord>, Rec
     Ok(record.metered())
 }
 
-pub fn decode_record(buf: Bytes) -> Result<Metered<Record>, RecordDecodeError> {
+pub fn decode_record(buf: Bytes) -> Result<Metered<Record>, StoredRecordDecodeError> {
     let stored = decode_stored_record(buf)?;
     match stored.into_inner() {
         StoredRecord::Plaintext(record) => Ok(record),
-        StoredRecord::Encrypted { .. } => Err(RecordDecodeError::InvalidValue(
+        StoredRecord::Encrypted { .. } => Err(StoredRecordDecodeError::InvalidValue(
             "RecordType",
             "encrypted envelope requires decryption",
         )),
@@ -472,7 +476,10 @@ mod test {
         // Magic byte: Envelope (0b0000_0010), metered_size_varlen = 1 -> expects 1 more byte.
         let truncated = Bytes::from_static(&[0b0000_0010]);
         let result = decode_record(truncated);
-        assert_eq!(result, Err(RecordDecodeError::Truncated("MeteredSize")));
+        assert_eq!(
+            result,
+            Err(StoredRecordDecodeError::Truncated("MeteredSize"))
+        );
     }
 
     #[test]

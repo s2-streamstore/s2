@@ -9,7 +9,7 @@ use s2_common::record::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RecordDecodeError {
+pub enum StoredRecordDecodeError {
     #[error("truncated: {0}")]
     Truncated(&'static str),
     #[error("invalid value [{0}]: {1}")]
@@ -49,17 +49,18 @@ fn command_op_from_ordinal(ordinal: u8) -> Option<CommandOp> {
     }
 }
 
-impl From<CommandPayloadError> for RecordDecodeError {
+impl From<CommandPayloadError> for StoredRecordDecodeError {
     fn from(e: CommandPayloadError) -> Self {
         match e {
-            CommandPayloadError::InvalidUtf8(_) => {
-                RecordDecodeError::InvalidValue("CommandPayload", "fencing token not valid utf8")
-            }
+            CommandPayloadError::InvalidUtf8(_) => StoredRecordDecodeError::InvalidValue(
+                "CommandPayload",
+                "fencing token not valid utf8",
+            ),
             CommandPayloadError::FencingTokenTooLong(_) => {
-                RecordDecodeError::InvalidValue("CommandPayload", "fencing token too long")
+                StoredRecordDecodeError::InvalidValue("CommandPayload", "fencing token too long")
             }
             CommandPayloadError::TrimPointSize(_) => {
-                RecordDecodeError::InvalidValue("CommandPayload", "trim point size")
+                StoredRecordDecodeError::InvalidValue("CommandPayload", "trim point size")
             }
         }
     }
@@ -86,12 +87,16 @@ impl Encodable for CommandRecord {
     }
 }
 
-pub(super) fn decode_command_record(record: &[u8]) -> Result<CommandRecord, RecordDecodeError> {
+pub(super) fn decode_command_record(
+    record: &[u8],
+) -> Result<CommandRecord, StoredRecordDecodeError> {
     if record.is_empty() {
-        return Err(RecordDecodeError::Truncated("CommandOrdinal"));
+        return Err(StoredRecordDecodeError::Truncated("CommandOrdinal"));
     }
-    let op = command_op_from_ordinal(record[0])
-        .ok_or(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))?;
+    let op = command_op_from_ordinal(record[0]).ok_or(StoredRecordDecodeError::InvalidValue(
+        "CommandOrdinal",
+        "unknown",
+    ))?;
     CommandRecord::try_from_parts(op, &record[1..]).map_err(Into::into)
 }
 
@@ -238,43 +243,50 @@ impl Encodable for EnvelopeRecord {
     }
 }
 
-pub(super) fn decode_envelope_record(mut buf: Bytes) -> Result<EnvelopeRecord, RecordDecodeError> {
+pub(super) fn decode_envelope_record(
+    mut buf: Bytes,
+) -> Result<EnvelopeRecord, StoredRecordDecodeError> {
     if buf.is_empty() {
-        return Err(RecordDecodeError::InvalidValue("HeaderFlag", "missing"));
+        return Err(StoredRecordDecodeError::InvalidValue(
+            "HeaderFlag",
+            "missing",
+        ));
     }
 
     let flag: HeaderFlag = buf
         .get_u8()
         .try_into()
-        .map_err(|info| RecordDecodeError::InvalidValue("HeaderFlag", info))?;
+        .map_err(|info| StoredRecordDecodeError::InvalidValue("HeaderFlag", info))?;
     if flag.num_headers_length_bytes == 0 {
         return EnvelopeRecord::try_from_parts(vec![], buf).map_err(record_parts_decode_error);
     }
 
     let num_headers = buf
         .try_get_uint(flag.num_headers_length_bytes as usize)
-        .map_err(|_| RecordDecodeError::Truncated("NumHeaders"))?;
+        .map_err(|_| StoredRecordDecodeError::Truncated("NumHeaders"))?;
     let num_headers = usize::try_from(num_headers)
-        .map_err(|_| RecordDecodeError::InvalidValue("NumHeaders", "too many"))?;
+        .map_err(|_| StoredRecordDecodeError::InvalidValue("NumHeaders", "too many"))?;
 
     let mut headers: Vec<Header> = Vec::with_capacity(num_headers);
     for _ in 0..num_headers {
-        let name_len =
-            buf.try_get_uint(flag.name_length_bytes.get() as usize)
-                .map_err(|_| RecordDecodeError::Truncated("HeaderNameLen"))? as usize;
+        let name_len = buf
+            .try_get_uint(flag.name_length_bytes.get() as usize)
+            .map_err(|_| StoredRecordDecodeError::Truncated("HeaderNameLen"))?
+            as usize;
         if name_len == 0 {
-            return Err(RecordDecodeError::InvalidValue("HeaderName", "empty"));
+            return Err(StoredRecordDecodeError::InvalidValue("HeaderName", "empty"));
         }
         if buf.remaining() < name_len {
-            return Err(RecordDecodeError::Truncated("HeaderName"));
+            return Err(StoredRecordDecodeError::Truncated("HeaderName"));
         }
         let name = buf.split_to(name_len);
 
-        let value_len =
-            buf.try_get_uint(flag.value_length_bytes.get() as usize)
-                .map_err(|_| RecordDecodeError::Truncated("HeaderValueLen"))? as usize;
+        let value_len = buf
+            .try_get_uint(flag.value_length_bytes.get() as usize)
+            .map_err(|_| StoredRecordDecodeError::Truncated("HeaderValueLen"))?
+            as usize;
         if buf.remaining() < value_len {
-            return Err(RecordDecodeError::Truncated("HeaderValue"));
+            return Err(StoredRecordDecodeError::Truncated("HeaderValue"));
         }
         let value = buf.split_to(value_len);
 
@@ -284,19 +296,19 @@ pub(super) fn decode_envelope_record(mut buf: Bytes) -> Result<EnvelopeRecord, R
     EnvelopeRecord::try_from_parts(headers, buf).map_err(record_parts_decode_error)
 }
 
-fn record_parts_decode_error(error: RecordPartsError) -> RecordDecodeError {
+fn record_parts_decode_error(error: RecordPartsError) -> StoredRecordDecodeError {
     match error {
         RecordPartsError::Header(HeaderValidationError::NameEmpty) => {
-            RecordDecodeError::InvalidValue("HeaderName", "empty")
+            StoredRecordDecodeError::InvalidValue("HeaderName", "empty")
         }
         RecordPartsError::Header(HeaderValidationError::TooMany) => {
-            RecordDecodeError::InvalidValue("NumHeaders", "too many")
+            StoredRecordDecodeError::InvalidValue("NumHeaders", "too many")
         }
         RecordPartsError::Header(HeaderValidationError::TooLong) => {
-            RecordDecodeError::InvalidValue("Header", "too long")
+            StoredRecordDecodeError::InvalidValue("Header", "too long")
         }
         RecordPartsError::UnknownCommand | RecordPartsError::CommandPayload(_, _) => {
-            RecordDecodeError::InvalidValue("EnvelopeRecord", "unexpected command record")
+            StoredRecordDecodeError::InvalidValue("EnvelopeRecord", "unexpected command record")
         }
     }
 }
@@ -337,15 +349,18 @@ mod tests {
         let try_convert = |raw: &[u8]| decode_command_record(raw);
         assert_eq!(
             try_convert(&[]),
-            Err(RecordDecodeError::Truncated("CommandOrdinal"))
+            Err(StoredRecordDecodeError::Truncated("CommandOrdinal"))
         );
         assert_eq!(
             try_convert(&[0xff]),
-            Err(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))
+            Err(StoredRecordDecodeError::InvalidValue(
+                "CommandOrdinal",
+                "unknown"
+            ))
         );
         assert_eq!(
             try_convert(&[command_op_ordinal(CommandOp::Fence), 0xff, 0xff]),
-            Err(RecordDecodeError::InvalidValue(
+            Err(StoredRecordDecodeError::InvalidValue(
                 "CommandPayload",
                 "fencing token not valid utf8"
             ))
@@ -460,7 +475,7 @@ mod tests {
 
         assert_eq!(
             decode_envelope_record(encoded.freeze()),
-            Err(RecordDecodeError::InvalidValue("HeaderName", "empty"))
+            Err(StoredRecordDecodeError::InvalidValue("HeaderName", "empty"))
         );
     }
 
@@ -553,7 +568,7 @@ mod tests {
             assert!(
                 matches!(
                     decode_envelope_record(truncated),
-                    Err(RecordDecodeError::Truncated(_))
+                    Err(StoredRecordDecodeError::Truncated(_))
                 ),
                 "expected Truncated error for len {len}"
             );

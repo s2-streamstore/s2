@@ -38,8 +38,8 @@ use s2_common::{
 };
 
 use super::{
-    Encodable, Metered, MeteredExt as _, MeteredSize, Record, RecordDecodeError, SeqNum,
-    StoredRecord, decode_envelope_record,
+    Encodable, Metered, MeteredExt as _, MeteredSize, Record, SeqNum, StoredRecord,
+    StoredRecordDecodeError, decode_envelope_record,
 };
 
 const FORMAT_ID_LEN: usize = 1;
@@ -54,11 +54,11 @@ pub(crate) enum EncryptedRecordFormat {
 }
 
 impl EncryptedRecordFormat {
-    const fn try_from_format_id(format_id: u8) -> Result<Self, RecordDecodeError> {
+    const fn try_from_format_id(format_id: u8) -> Result<Self, StoredRecordDecodeError> {
         match format_id {
             FORMAT_ID_AEGIS256_V1 => Ok(Self::Aegis256V1),
             FORMAT_ID_AES256GCM_V1 => Ok(Self::Aes256GcmV1),
-            _ => Err(RecordDecodeError::InvalidValue(
+            _ => Err(StoredRecordDecodeError::InvalidValue(
                 "EncryptedRecord",
                 "invalid encrypted record format id",
             )),
@@ -122,7 +122,7 @@ pub enum RecordDecryptionError {
     #[error("decrypted record metered size mismatch: stored {stored}, actual {actual}")]
     MeteredSizeMismatch { stored: usize, actual: usize },
     #[error("malformed decrypted record: {0}")]
-    MalformedDecryptedRecord(#[from] RecordDecodeError),
+    MalformedDecryptedRecord(#[from] StoredRecordDecodeError),
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -262,18 +262,20 @@ fn prep_encryption_buffer(
 }
 
 impl TryFrom<Bytes> for EncryptedRecord {
-    type Error = RecordDecodeError;
+    type Error = StoredRecordDecodeError;
 
     fn try_from(encoded: Bytes) -> Result<Self, Self::Error> {
         if encoded.len() < FORMAT_ID_LEN {
-            return Err(RecordDecodeError::Truncated("EncryptedRecordFormatId"));
+            return Err(StoredRecordDecodeError::Truncated(
+                "EncryptedRecordFormatId",
+            ));
         }
 
         let format = EncryptedRecordFormat::try_from_format_id(encoded[0])?;
         let nonce_len = format.nonce_len();
         let tag_len = format.tag_len();
         if encoded.len() < FORMAT_ID_LEN + nonce_len + tag_len {
-            return Err(RecordDecodeError::Truncated("EncryptedRecordFrame"));
+            return Err(StoredRecordDecodeError::Truncated("EncryptedRecordFrame"));
         }
 
         Ok(Self::new(encoded, format))
@@ -564,7 +566,9 @@ mod tests {
         let result = EncryptedRecord::try_from(Bytes::new());
         assert!(matches!(
             result,
-            Err(RecordDecodeError::Truncated("EncryptedRecordFormatId"))
+            Err(StoredRecordDecodeError::Truncated(
+                "EncryptedRecordFormatId"
+            ))
         ));
     }
 
@@ -666,7 +670,7 @@ mod tests {
         let err = EncryptedRecord::try_from(Bytes::from_static(b"\xFFpayload")).unwrap_err();
         assert_eq!(
             err,
-            RecordDecodeError::InvalidValue(
+            StoredRecordDecodeError::InvalidValue(
                 "EncryptedRecord",
                 "invalid encrypted record format id"
             )
@@ -676,7 +680,10 @@ mod tests {
     #[test]
     fn rejects_truncated_layout() {
         let err = EncryptedRecord::try_from(Bytes::from_static(b"\x01tiny")).unwrap_err();
-        assert_eq!(err, RecordDecodeError::Truncated("EncryptedRecordFrame"));
+        assert_eq!(
+            err,
+            StoredRecordDecodeError::Truncated("EncryptedRecordFrame")
+        );
     }
 
     #[test]
