@@ -6,7 +6,7 @@ use s2_common::{
 };
 
 use super::{
-    encoding::{Encodable, StoredRecordDecodeError, decode_command_record, decode_envelope_record},
+    codec::{Encodable, StoredRecordDecodeError, decode_command_record, decode_envelope_record},
     encryption::EncryptedRecord,
 };
 

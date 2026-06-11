@@ -44,7 +44,7 @@ use s2_common::{
 
 use super::{
     Encodable, StoredAppendInput, StoredReadBatch, StoredReadSessionOutput, StoredRecord,
-    StoredRecordDecodeError, encoding::decode_envelope_record,
+    StoredRecordDecodeError, codec::decode_envelope_record,
 };
 
 const FORMAT_ID_LEN: usize = 1;

@@ -1,12 +1,12 @@
 mod batcher;
-mod encoding;
+mod codec;
 mod encryption;
 mod framing;
 mod iterator;
 
 pub use batcher::{RecordBatch, RecordBatcher};
-pub(crate) use encoding::Encodable;
-pub use encoding::StoredRecordDecodeError;
+pub(crate) use codec::Encodable;
+pub use codec::StoredRecordDecodeError;
 pub use encryption::{
     EncryptedRecord, RecordDecryptionError, decrypt_read_session_output, decrypt_stored_record,
     encrypt_append_input, encrypt_record,
