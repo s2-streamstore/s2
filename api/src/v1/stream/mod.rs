@@ -64,11 +64,7 @@ pub struct ListStreamsRequest {
     pub limit: Option<usize>,
 }
 
-super::impl_list_request_conversions!(
-    ListStreamsRequest,
-    s2_common::stream::StreamNamePrefix,
-    s2_common::stream::StreamNameStartAfter
-);
+super::impl_list_request_conversions!(ListStreamsRequest, StreamNamePrefix, StreamNameStartAfter);
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -24,11 +24,7 @@ pub struct ListBasinsRequest {
     pub limit: Option<usize>,
 }
 
-super::impl_list_request_conversions!(
-    ListBasinsRequest,
-    s2_common::basin::BasinNamePrefix,
-    s2_common::basin::BasinNameStartAfter
-);
+super::impl_list_request_conversions!(ListBasinsRequest, BasinNamePrefix, BasinNameStartAfter);
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]

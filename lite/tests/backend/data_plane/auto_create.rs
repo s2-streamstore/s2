@@ -2,11 +2,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
+    basin::BasinName,
     config::BasinConfig,
     encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
     record::StreamPosition,
-    stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart},
+    stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamName},
 };
 use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
 
@@ -16,7 +17,7 @@ const MAX_AUTO_CREATE_ATTEMPTS: usize = 50;
 
 async fn assert_stream_count(
     backend: &s2_lite::backend::Backend,
-    basin_name: &s2_common::basin::BasinName,
+    basin_name: &BasinName,
     expected: usize,
 ) {
     let stream_list = backend
@@ -28,8 +29,8 @@ async fn assert_stream_count(
 
 async fn assert_stream_cipher(
     backend: &s2_lite::backend::Backend,
-    basin_name: &s2_common::basin::BasinName,
-    stream_name: &s2_common::stream::StreamName,
+    basin_name: &BasinName,
+    stream_name: &StreamName,
     expected: Option<EncryptionAlgorithm>,
 ) {
     let stream_list = backend

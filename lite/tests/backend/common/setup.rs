@@ -8,7 +8,9 @@ use s2_common::{
     encryption::{EncryptionAlgorithm, EncryptionKey, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     resources::ProvisionMode,
-    stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName},
+    stream::{
+        AppendAck, AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName,
+    },
 };
 use s2_lite::backend::Backend;
 use slatedb::{Db, config::Settings, object_store::memory::InMemory};
@@ -213,7 +215,7 @@ pub async fn append_payloads(
     basin: &BasinName,
     stream: &StreamName,
     payloads: &[&[u8]],
-) -> s2_common::stream::AppendAck {
+) -> AppendAck {
     let encryption = EncryptionSpec::Plain;
     append_payloads_with_encryption(backend, basin, stream, payloads, &encryption).await
 }
@@ -224,7 +226,7 @@ pub async fn append_payloads_with_encryption(
     stream: &StreamName,
     payloads: &[&[u8]],
     encryption: &EncryptionSpec,
-) -> s2_common::stream::AppendAck {
+) -> AppendAck {
     let bodies = payloads
         .iter()
         .map(|bytes| Bytes::copy_from_slice(bytes))
@@ -248,7 +250,7 @@ pub async fn append_timestamped_payloads(
     basin: &BasinName,
     stream: &StreamName,
     payloads: Vec<(Bytes, Timestamp)>,
-) -> s2_common::stream::AppendAck {
+) -> AppendAck {
     let input = AppendInput {
         records: create_test_record_batch_with_timestamps(payloads),
         match_seq_num: None,

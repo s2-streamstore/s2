@@ -1,6 +1,6 @@
 use s2_common::{
     self,
-    access::{AccessTokenId, AccessTokenIdPrefix},
+    access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
     basin::{BasinName, BasinNamePrefix},
     stream::{StreamName, StreamNamePrefix},
 };
@@ -168,7 +168,7 @@ impl From<s2_common::access::Operation> for Operation {
 pub struct AccessTokenInfo {
     /// Access token ID.
     /// It must be unique to the account and between 1 and 96 bytes in length.
-    pub id: s2_common::access::AccessTokenId,
+    pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
     #[serde(default, with = "time::serde::rfc3339::option")]
@@ -404,10 +404,10 @@ impl From<s2_common::access::ReadWritePermissions> for ReadWritePermissions {
 pub struct ListAccessTokensRequest {
     /// Filter to access tokens whose IDs begin with this prefix.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
-    pub prefix: Option<s2_common::access::AccessTokenIdPrefix>,
+    pub prefix: Option<AccessTokenIdPrefix>,
     /// Filter to access tokens whose IDs lexicographically start after this string.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
-    pub start_after: Option<s2_common::access::AccessTokenIdStartAfter>,
+    pub start_after: Option<AccessTokenIdStartAfter>,
     /// Number of results, up to a maximum of 1000.
     #[cfg_attr(feature = "utoipa", param(value_type = usize, maximum = 1000, default = 1000, required = false))]
     pub limit: Option<usize>,
@@ -415,8 +415,8 @@ pub struct ListAccessTokensRequest {
 
 super::impl_list_request_conversions!(
     ListAccessTokensRequest,
-    s2_common::access::AccessTokenIdPrefix,
-    s2_common::access::AccessTokenIdStartAfter
+    AccessTokenIdPrefix,
+    AccessTokenIdStartAfter
 );
 
 #[rustfmt::skip]

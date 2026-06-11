@@ -6,7 +6,9 @@ pub mod location;
 pub mod metrics;
 pub mod stream;
 
-use s2_common::resources::RequestToken;
+use s2_common::{
+    access::AccessTokenId, basin::BasinName, resources::RequestToken, stream::StreamName,
+};
 
 #[rustfmt::skip]
 #[derive(Debug)]
@@ -24,7 +26,7 @@ pub struct S2RequestTokenHeader {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct AccessTokenIdPathSegment {
     /// Access token ID.
-    pub id: s2_common::access::AccessTokenId,
+    pub id: AccessTokenId,
 }
 
 #[rustfmt::skip]
@@ -33,7 +35,7 @@ pub struct AccessTokenIdPathSegment {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct BasinNamePathSegment {
     /// Basin name.
-    pub basin: s2_common::basin::BasinName,
+    pub basin: BasinName,
 }
 
 #[rustfmt::skip]
@@ -42,7 +44,7 @@ pub struct BasinNamePathSegment {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct StreamNamePathSegment {
     /// Stream name.
-    pub stream: s2_common::stream::StreamName,
+    pub stream: StreamName,
 }
 
 macro_rules! impl_list_request_conversions {

@@ -423,7 +423,7 @@ mod tests {
         resources::ProvisionMode,
         stream::{
             AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
-            ReadSessionOutput, ReadStart,
+            ReadSessionOutput, ReadStart, StreamName,
         },
     };
     use slatedb::{Db, WriteBatch, object_store::memory::InMemory};
@@ -557,7 +557,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -627,7 +627,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -710,7 +710,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -867,7 +867,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -954,7 +954,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
