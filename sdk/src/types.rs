@@ -3525,6 +3525,22 @@ pub struct SequencedRecord {
 }
 
 impl SequencedRecord {
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub fn from_parts(
+        seq_num: u64,
+        timestamp: u64,
+        headers: Vec<Header>,
+        body: impl Into<Bytes>,
+    ) -> Self {
+        Self {
+            seq_num,
+            timestamp,
+            body: body.into(),
+            headers,
+        }
+    }
+
     /// Whether this is a command record.
     pub fn is_command_record(&self) -> bool {
         self.headers.len() == 1 && *self.headers[0].name == *b""
@@ -3656,4 +3672,683 @@ impl From<ApiErrorResponse> for ErrorResponse {
 
 fn idempotency_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    use super::*;
+
+    type HeaderParts = (Vec<u8>, Vec<u8>);
+    type AppendRecordParts = (Vec<u8>, Vec<HeaderParts>);
+
+    fn byte_vec_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=max_len)
+    }
+
+    fn header_parts_strategy() -> impl Strategy<Value = HeaderParts> {
+        (byte_vec_strategy(32), byte_vec_strategy(64))
+    }
+
+    fn string_strategy(max_chars: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..=max_chars)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn read_from_strategy() -> impl Strategy<Value = ReadFrom> {
+        prop_oneof![
+            any::<u64>().prop_map(ReadFrom::SeqNum),
+            any::<u64>().prop_map(ReadFrom::Timestamp),
+            any::<u64>().prop_map(ReadFrom::TailOffset),
+        ]
+    }
+
+    fn append_record_parts_strategy() -> impl Strategy<Value = AppendRecordParts> {
+        (
+            byte_vec_strategy(256),
+            prop::collection::vec(header_parts_strategy(), 0..=16),
+        )
+    }
+
+    fn proto_stream_position_strategy() -> impl Strategy<Value = api::stream::proto::StreamPosition>
+    {
+        (any::<u64>(), any::<u64>()).prop_map(|(seq_num, timestamp)| {
+            api::stream::proto::StreamPosition { seq_num, timestamp }
+        })
+    }
+
+    fn headers_from_parts(headers: &[HeaderParts]) -> Vec<Header> {
+        headers
+            .iter()
+            .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
+            .collect()
+    }
+
+    fn expected_metered_bytes(body: &[u8], headers: &[HeaderParts]) -> usize {
+        8 + (2 * headers.len())
+            + headers
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>()
+            + body.len()
+    }
+
+    // -- S2DateTime --
+
+    #[test]
+    fn s2_datetime_parse_valid_rfc3339() {
+        let dt: S2DateTime = "2024-01-15T12:30:00Z".parse().unwrap();
+        assert_eq!(dt.to_string(), "2024-01-15T12:30:00Z");
+    }
+
+    #[test]
+    fn s2_datetime_parse_with_offset() {
+        let dt: S2DateTime = "2024-06-01T08:00:00+05:30".parse().unwrap();
+        assert_eq!(dt.to_string(), "2024-06-01T08:00:00+05:30");
+
+        let offset_dt: time::OffsetDateTime = dt.into();
+        assert_eq!(
+            offset_dt.offset(),
+            time::UtcOffset::from_hms(5, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn s2_datetime_parse_invalid() {
+        let err = "not-a-date".parse::<S2DateTime>();
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn s2_datetime_roundtrip_via_offset_datetime() {
+        let odt = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let dt = S2DateTime::try_from(odt).unwrap();
+        let back: time::OffsetDateTime = dt.into();
+        assert_eq!(odt, back);
+    }
+
+    // -- AccountEndpoint --
+
+    #[rstest]
+    #[case::https_with_scheme("https://aws.s2.dev", Scheme::HTTPS)]
+    #[case::http_with_scheme("http://localhost:8080", Scheme::HTTP)]
+    #[case::default_https("aws.s2.dev", Scheme::HTTPS)]
+    fn account_endpoint_parse(#[case] input: &str, #[case] expected_scheme: Scheme) {
+        let ep: AccountEndpoint = input.parse().unwrap();
+        assert_eq!(ep.scheme, expected_scheme);
+    }
+
+    // -- BasinEndpoint --
+
+    #[rstest]
+    #[case::https_parent_zone("https://{basin}.b.s2.dev", Scheme::HTTPS, true)]
+    #[case::http_direct("http://localhost:8080", Scheme::HTTP, false)]
+    #[case::default_https_parent_zone("{basin}.b.s2.dev", Scheme::HTTPS, true)]
+    fn basin_endpoint_parse(
+        #[case] input: &str,
+        #[case] expected_scheme: Scheme,
+        #[case] expected_parent_zone: bool,
+    ) {
+        let ep: BasinEndpoint = input.parse().unwrap();
+        assert_eq!(ep.scheme, expected_scheme);
+        assert_eq!(
+            matches!(ep.authority, BasinAuthority::ParentZone(_)),
+            expected_parent_zone
+        );
+    }
+
+    // -- S2Endpoints --
+
+    #[test]
+    fn s2_endpoints_new_requires_same_scheme() {
+        let account: AccountEndpoint = "https://aws.s2.dev".parse().unwrap();
+        let basin: BasinEndpoint = "http://localhost:8080".parse().unwrap();
+        let err = S2Endpoints::new(account, basin);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn s2_endpoints_new_same_scheme_succeeds() {
+        let account: AccountEndpoint = "https://aws.s2.dev".parse().unwrap();
+        let basin: BasinEndpoint = "https://{basin}.b.s2.dev".parse().unwrap();
+        let ep = S2Endpoints::new(account, basin).unwrap();
+        assert_eq!(ep.scheme, Scheme::HTTPS);
+    }
+
+    // -- Compression --
+
+    #[rstest]
+    #[case::none(Compression::None, CompressionAlgorithm::None)]
+    #[case::gzip(Compression::Gzip, CompressionAlgorithm::Gzip)]
+    #[case::zstd(Compression::Zstd, CompressionAlgorithm::Zstd)]
+    fn compression_conversion(#[case] sdk: Compression, #[case] api: CompressionAlgorithm) {
+        assert_eq!(CompressionAlgorithm::from(sdk), api);
+    }
+
+    // -- RetryConfig --
+
+    #[test]
+    fn retry_config_defaults() {
+        let rc = RetryConfig::default();
+        assert_eq!(rc.max_attempts.get(), 3);
+        assert_eq!(rc.min_base_delay, Duration::from_millis(100));
+        assert_eq!(rc.max_base_delay, Duration::from_secs(1));
+        assert!(matches!(rc.append_retry_policy, AppendRetryPolicy::All));
+    }
+
+    #[test]
+    fn retry_config_max_retries() {
+        let rc = RetryConfig::default();
+        assert_eq!(rc.max_retries(), 2);
+    }
+
+    // -- S2Config --
+
+    #[test]
+    fn s2_config_defaults() {
+        let cfg = S2Config::new("test-token");
+        assert_eq!(cfg.connection_timeout, Duration::from_secs(3));
+        assert_eq!(cfg.request_timeout, Duration::from_secs(5));
+        assert!(!cfg.insecure_skip_cert_verification);
+    }
+
+    // -- StorageClass --
+
+    #[rstest]
+    #[case::standard(StorageClass::Standard)]
+    #[case::express(StorageClass::Express)]
+    fn storage_class_roundtrip(#[case] sdk: StorageClass) {
+        let api: api::config::StorageClass = sdk.into();
+        let back: StorageClass = api.into();
+        assert_eq!(back, sdk);
+    }
+
+    // -- RetentionPolicy --
+
+    #[rstest]
+    #[case::age(RetentionPolicy::Age(3600))]
+    #[case::infinite(RetentionPolicy::Infinite)]
+    fn retention_policy_roundtrip(#[case] sdk: RetentionPolicy) {
+        let api: api::config::RetentionPolicy = sdk.into();
+        let back: RetentionPolicy = api.into();
+        assert_eq!(back, sdk);
+    }
+
+    // -- TimestampingMode --
+
+    #[rstest]
+    #[case::client_prefer(
+        TimestampingMode::ClientPrefer,
+        api::config::TimestampingMode::ClientPrefer
+    )]
+    #[case::client_require(
+        TimestampingMode::ClientRequire,
+        api::config::TimestampingMode::ClientRequire
+    )]
+    #[case::arrival(TimestampingMode::Arrival, api::config::TimestampingMode::Arrival)]
+    fn timestamping_mode_roundtrip(
+        #[case] sdk: TimestampingMode,
+        #[case] expected_api: api::config::TimestampingMode,
+    ) {
+        let converted: api::config::TimestampingMode = sdk.into();
+        assert_eq!(converted, expected_api);
+        let back: TimestampingMode = converted.into();
+        assert_eq!(back, sdk);
+    }
+
+    // -- TimestampingConfig --
+
+    #[test]
+    fn timestamping_config_roundtrip() {
+        let sdk = TimestampingConfig {
+            mode: Some(TimestampingMode::Arrival),
+            uncapped: Some(true),
+        };
+        let api: api::config::TimestampingConfig = sdk.into();
+        let back: TimestampingConfig = api.into();
+        assert_eq!(back, sdk);
+    }
+
+    // -- DeleteOnEmptyConfig --
+
+    #[test]
+    fn delete_on_empty_config_roundtrip() {
+        let sdk = DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300));
+        let api: api::config::DeleteOnEmptyConfig = sdk.into();
+        let back: DeleteOnEmptyConfig = api.into();
+        assert_eq!(back, sdk);
+    }
+
+    // -- StreamConfig --
+
+    #[test]
+    fn stream_config_builder_and_roundtrip() {
+        let sdk = StreamConfig::new()
+            .with_storage_class(StorageClass::Express)
+            .with_retention_policy(RetentionPolicy::Age(86400))
+            .with_timestamping(TimestampingConfig {
+                mode: Some(TimestampingMode::ClientPrefer),
+                uncapped: None,
+            })
+            .with_delete_on_empty(DeleteOnEmptyConfig { min_age_secs: 60 });
+        let api: api::config::StreamConfig = sdk.clone().into();
+        let back: StreamConfig = api.into();
+        assert_eq!(back, sdk);
+    }
+
+    // -- BasinConfig --
+
+    #[test]
+    fn basin_config_builder_and_roundtrip() {
+        let sdk = BasinConfig::new()
+            .with_default_stream_config(
+                StreamConfig::new().with_storage_class(StorageClass::Standard),
+            )
+            .with_create_stream_on_append(true)
+            .with_create_stream_on_read(false);
+        let api: api::config::BasinConfig = sdk.clone().into();
+        let back: BasinConfig = api.into();
+        assert_eq!(back, sdk);
+    }
+
+    // -- FencingToken --
+
+    proptest! {
+        #[test]
+        fn fencing_token_parse_accepts_only_within_byte_limit(
+            token in string_strategy(MAX_FENCING_TOKEN_LENGTH + 8),
+        ) {
+            let parsed = token.parse::<FencingToken>();
+
+            if token.len() <= MAX_FENCING_TOKEN_LENGTH {
+                prop_assert_eq!(parsed.unwrap().to_string(), token);
+            } else {
+                prop_assert!(parsed.is_err());
+            }
+        }
+    }
+
+    // -- StreamPosition --
+
+    #[test]
+    fn stream_position_display() {
+        let pos = StreamPosition {
+            seq_num: 42,
+            timestamp: 1700000000,
+        };
+        assert_eq!(pos.to_string(), "seq_num=42, timestamp=1700000000");
+    }
+
+    proptest! {
+        #[test]
+        fn stream_position_conversions_preserve_values(seq_num in any::<u64>(), timestamp in any::<u64>()) {
+            let proto: StreamPosition = api::stream::proto::StreamPosition {
+                seq_num,
+                timestamp,
+            }
+            .into();
+            prop_assert_eq!(proto.seq_num, seq_num);
+            prop_assert_eq!(proto.timestamp, timestamp);
+
+            let api: StreamPosition = api::stream::StreamPosition {
+                seq_num,
+                timestamp,
+            }
+            .into();
+            prop_assert_eq!(api.seq_num, seq_num);
+            prop_assert_eq!(api.timestamp, timestamp);
+        }
+    }
+
+    // -- Header --
+
+    proptest! {
+        #[test]
+        fn header_proto_roundtrip_preserves_binary_parts(
+            name in byte_vec_strategy(64),
+            value in byte_vec_strategy(128),
+        ) {
+            let header = Header::new(Bytes::from(name.clone()), Bytes::from(value.clone()));
+            let proto: api::stream::proto::Header = header.into();
+            let back: Header = proto.into();
+
+            prop_assert_eq!(back.name.as_ref(), name.as_slice());
+            prop_assert_eq!(back.value.as_ref(), value.as_slice());
+        }
+    }
+
+    // -- AppendRecord --
+
+    #[test]
+    fn append_record_too_large() {
+        let big_body = vec![0u8; RECORD_BATCH_MAX.bytes + 1];
+        assert!(AppendRecord::new(big_body).is_err());
+    }
+
+    // -- MeteredBytes --
+
+    proptest! {
+        #[test]
+        fn append_record_preserves_fields_and_metered_byte_formula(
+            (body, headers) in append_record_parts_strategy(),
+            timestamp in proptest::option::of(any::<u64>()),
+        ) {
+            let mut record = AppendRecord::new(body.clone())
+                .unwrap()
+                .with_headers(headers_from_parts(&headers))
+                .unwrap();
+            if let Some(timestamp) = timestamp {
+                record = record.with_timestamp(timestamp);
+            }
+
+            prop_assert_eq!(record.body(), body.as_slice());
+            prop_assert_eq!(record.headers().len(), headers.len());
+            prop_assert_eq!(record.timestamp(), timestamp);
+            prop_assert_eq!(record.metered_bytes(), expected_metered_bytes(&body, &headers));
+
+            for (actual, (expected_name, expected_value)) in record.headers().iter().zip(headers.iter()) {
+                prop_assert_eq!(actual.name.as_ref(), expected_name.as_slice());
+                prop_assert_eq!(actual.value.as_ref(), expected_value.as_slice());
+            }
+        }
+    }
+
+    // -- AppendRecordBatch --
+
+    #[test]
+    fn append_record_batch_empty_is_err() {
+        let result = AppendRecordBatch::try_from_iter(vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn append_record_batch_too_many_records() {
+        let records: Vec<_> = (0..1001).map(|_| AppendRecord::new("x").unwrap()).collect();
+        let result = AppendRecordBatch::try_from_iter(records);
+        assert!(result.is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn append_record_batch_metered_bytes_is_sum_of_records(
+            records in prop::collection::vec(append_record_parts_strategy(), 1..=32),
+        ) {
+            let expected = records
+                .iter()
+                .map(|(body, headers)| expected_metered_bytes(body, headers))
+                .sum::<usize>();
+            let records = records
+                .into_iter()
+                .map(|(body, headers)| {
+                    AppendRecord::new(body)
+                        .unwrap()
+                        .with_headers(headers_from_parts(&headers))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+
+            let batch = AppendRecordBatch::try_from_iter(records).unwrap();
+            prop_assert_eq!(batch.metered_bytes(), expected);
+            prop_assert_eq!(batch.iter().map(MeteredBytes::metered_bytes).sum::<usize>(), expected);
+        }
+    }
+
+    // -- CommandRecord --
+
+    #[test]
+    fn command_record_fence() {
+        let token: FencingToken = "tok".parse().unwrap();
+        let cmd = CommandRecord::fence(token);
+        let record: AppendRecord = cmd.into();
+        assert_eq!(record.headers().len(), 1);
+        assert_eq!(record.headers()[0].name.as_ref(), b"");
+        assert_eq!(record.headers()[0].value.as_ref(), b"fence");
+        assert_eq!(record.body(), b"tok");
+    }
+
+    #[test]
+    fn command_record_trim() {
+        let cmd = CommandRecord::trim(42);
+        let record: AppendRecord = cmd.into();
+        assert_eq!(record.headers().len(), 1);
+        assert_eq!(record.headers()[0].value.as_ref(), b"trim");
+        assert_eq!(record.body(), &42u64.to_be_bytes());
+    }
+
+    // -- SequencedRecord --
+
+    #[rstest]
+    #[case::command(vec![Header::new("", "fence")], true)]
+    #[case::regular(vec![Header::new("key", "value")], false)]
+    #[case::no_headers(vec![], false)]
+    fn sequenced_record_command_detection(#[case] headers: Vec<Header>, #[case] expected: bool) {
+        let record = SequencedRecord {
+            seq_num: 0,
+            body: Bytes::from("data"),
+            headers,
+            timestamp: 0,
+        };
+        assert_eq!(record.is_command_record(), expected);
+    }
+
+    // -- ReadStart --
+
+    proptest! {
+        #[test]
+        fn read_start_to_api_sets_only_selected_position_field(
+            from in read_from_strategy(),
+            clamp_to_tail in any::<bool>(),
+        ) {
+            let (seq_num, timestamp, tail_offset) = match from {
+                ReadFrom::SeqNum(value) => (Some(value), None, None),
+                ReadFrom::Timestamp(value) => (None, Some(value), None),
+                ReadFrom::TailOffset(value) => (None, None, Some(value)),
+            };
+            let api: api::stream::ReadStart = ReadStart::new()
+                .with_from(from)
+                .with_clamp_to_tail(clamp_to_tail)
+                .into();
+
+            prop_assert_eq!(api.seq_num, seq_num);
+            prop_assert_eq!(api.timestamp, timestamp);
+            prop_assert_eq!(api.tail_offset, tail_offset);
+            prop_assert_eq!(api.clamp, clamp_to_tail.then_some(true));
+        }
+    }
+
+    // -- ReadStop --
+
+    #[test]
+    fn read_stop_to_api() {
+        let stop = ReadStop::new()
+            .with_limits(ReadLimits::new().with_count(50))
+            .with_until(..1000)
+            .with_wait(30);
+        let api: api::stream::ReadEnd = stop.into();
+        assert_eq!(api.count, Some(50));
+        assert_eq!(api.until, Some(1000));
+        assert_eq!(api.wait, Some(30));
+    }
+
+    // -- Operation roundtrip --
+
+    #[test]
+    fn operation_roundtrip_all_variants() {
+        let variants = [
+            Operation::ListBasins,
+            Operation::CreateBasin,
+            Operation::GetBasinConfig,
+            Operation::DeleteBasin,
+            Operation::ReconfigureBasin,
+            Operation::ListAccessTokens,
+            Operation::IssueAccessToken,
+            Operation::RevokeAccessToken,
+            Operation::GetAccountMetrics,
+            Operation::GetBasinMetrics,
+            Operation::GetStreamMetrics,
+            Operation::ListStreams,
+            Operation::CreateStream,
+            Operation::GetStreamConfig,
+            Operation::DeleteStream,
+            Operation::ReconfigureStream,
+            Operation::CheckTail,
+            Operation::Append,
+            Operation::Read,
+            Operation::Trim,
+            Operation::Fence,
+            Operation::ListLocations,
+            Operation::GetDefaultLocation,
+            Operation::SetDefaultLocation,
+        ];
+        for op in variants {
+            let api_op: api::access::Operation = op.into();
+            let back: Operation = api_op.into();
+            assert_eq!(back, op);
+        }
+    }
+
+    // -- MetricUnit --
+
+    #[test]
+    fn metric_unit_conversion() {
+        assert_eq!(
+            MetricUnit::from(api::metrics::MetricUnit::Bytes),
+            MetricUnit::Bytes
+        );
+        assert_eq!(
+            MetricUnit::from(api::metrics::MetricUnit::Operations),
+            MetricUnit::Operations
+        );
+    }
+
+    // -- AppendAck --
+
+    proptest! {
+        #[test]
+        fn append_ack_from_proto_preserves_present_positions_and_defaults_missing(
+            start in proptest::option::of(proto_stream_position_strategy()),
+            end in proptest::option::of(proto_stream_position_strategy()),
+            tail in proptest::option::of(proto_stream_position_strategy()),
+        ) {
+            let expected_start = start.unwrap_or_default();
+            let expected_end = end.unwrap_or_default();
+            let expected_tail = tail.unwrap_or_default();
+            let ack: AppendAck = api::stream::proto::AppendAck { start, end, tail }.into();
+
+            prop_assert_eq!(ack.start.seq_num, expected_start.seq_num);
+            prop_assert_eq!(ack.start.timestamp, expected_start.timestamp);
+            prop_assert_eq!(ack.end.seq_num, expected_end.seq_num);
+            prop_assert_eq!(ack.end.timestamp, expected_end.timestamp);
+            prop_assert_eq!(ack.tail.seq_num, expected_tail.seq_num);
+            prop_assert_eq!(ack.tail.timestamp, expected_tail.timestamp);
+        }
+    }
+
+    // -- ReadBatch --
+
+    #[test]
+    fn read_batch_from_api() {
+        let proto_batch = api::stream::proto::ReadBatch {
+            records: vec![api::stream::proto::SequencedRecord {
+                seq_num: 0,
+                body: Bytes::from("hi"),
+                headers: vec![api::stream::proto::Header {
+                    name: Bytes::from("k"),
+                    value: Bytes::from("v"),
+                }],
+                timestamp: 42,
+            }],
+            tail: Some(api::stream::proto::StreamPosition {
+                seq_num: 1,
+                timestamp: 42,
+            }),
+        };
+        let batch = ReadBatch::from_api(proto_batch);
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].seq_num, 0);
+        assert_eq!(batch.records[0].timestamp, 42);
+        assert_eq!(batch.records[0].body.as_ref(), b"hi");
+        assert_eq!(batch.records[0].headers.len(), 1);
+        assert_eq!(batch.records[0].headers[0].name.as_ref(), b"k");
+        assert_eq!(batch.records[0].headers[0].value.as_ref(), b"v");
+        assert_eq!(
+            batch.tail,
+            Some(StreamPosition {
+                seq_num: 1,
+                timestamp: 42,
+            })
+        );
+    }
+
+    // -- CreateBasinInput --
+
+    #[test]
+    fn create_basin_input_to_api() {
+        let name: BasinName = "test-basin-name".parse().unwrap();
+        let input = CreateBasinInput::new(name.clone()).with_config(BasinConfig::new());
+        let (req, token): (api::basin::CreateBasinRequest, String) = input.into();
+        assert_eq!(req.basin, name);
+        assert!(req.config.is_some());
+        assert!(!token.is_empty());
+    }
+
+    // -- CreateStreamInput --
+
+    #[test]
+    fn create_stream_input_to_api() {
+        let name: StreamName = "my-stream".parse().unwrap();
+        let input = CreateStreamInput::new(name.clone()).with_config(StreamConfig::new());
+        let (req, token): (api::stream::CreateStreamRequest, String) = input.into();
+        assert_eq!(req.stream, name);
+        assert!(req.config.is_some());
+        assert!(!token.is_empty());
+    }
+
+    // -- SequencedRecord from proto --
+
+    #[test]
+    fn sequenced_record_from_proto() {
+        let proto = api::stream::proto::SequencedRecord {
+            seq_num: 99,
+            body: Bytes::from("data"),
+            headers: vec![api::stream::proto::Header {
+                name: Bytes::from("k"),
+                value: Bytes::from("v"),
+            }],
+            timestamp: 1234,
+        };
+        let record: SequencedRecord = proto.into();
+        assert_eq!(record.seq_num, 99);
+        assert_eq!(record.body.as_ref(), b"data");
+        assert_eq!(record.headers.len(), 1);
+        assert_eq!(record.headers[0].name.as_ref(), b"k");
+        assert_eq!(record.headers[0].value.as_ref(), b"v");
+        assert_eq!(record.timestamp, 1234);
+    }
+
+    // -- S2Error from ApiError --
+
+    #[test]
+    fn s2_error_from_api_error_client() {
+        let url_err = url::Url::parse("not a url").unwrap_err();
+        let err = ApiError::Url(url_err);
+        let s2_err: S2Error = err.into();
+        assert!(matches!(s2_err, S2Error::Client(_)));
+    }
+
+    // -- ErrorResponse --
+
+    #[test]
+    fn error_response_from_api() {
+        let api_resp = ApiErrorResponse {
+            code: "not_found".to_string(),
+            message: "basin not found".to_string(),
+        };
+        let resp: ErrorResponse = api_resp.into();
+        assert_eq!(resp.code, "not_found");
+        assert_eq!(resp.message, "basin not found");
+        assert!(resp.to_string().contains("not_found"));
+    }
 }

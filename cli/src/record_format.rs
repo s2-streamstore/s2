@@ -392,3 +392,203 @@ mod json {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use futures::{StreamExt, executor::block_on};
+    use proptest::{prelude::*, test_runner::TestCaseResult};
+    use s2_sdk::types::Header;
+
+    use super::*;
+
+    fn ascii_string_strategy(max_len: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(0x20u8..=0x7e, 0..=max_len)
+            .prop_map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    fn string_strategy(max_len: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..=max_len)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn bytes_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=max_len)
+    }
+
+    fn sequenced_record(
+        seq_num: u64,
+        timestamp: u64,
+        headers: Vec<Header>,
+        body: Bytes,
+    ) -> SequencedRecord {
+        SequencedRecord::from_parts(seq_num, timestamp, headers, body)
+    }
+
+    async fn parse_text_line(line: String) -> AppendRecord {
+        let lines = futures::stream::iter(vec![Ok(line)]);
+        let mut stream = TextFormatter::parse_records(lines);
+        let record = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        record
+    }
+
+    async fn parse_json_line<const BIN_SAFE: bool>(line: String) -> AppendRecord {
+        let lines = futures::stream::iter(vec![Ok(line)]);
+        let mut stream =
+            <super::json::Formatter<BIN_SAFE> as RecordParser<_>>::parse_records(lines);
+        let record = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        record
+    }
+
+    fn prop_assert_headers_eq<E>(actual: &[Header], expected: &[(E, E)]) -> TestCaseResult
+    where
+        E: AsRef<[u8]>,
+    {
+        prop_assert_eq!(actual.len(), expected.len());
+        for (actual, (expected_name, expected_value)) in actual.iter().zip(expected.iter()) {
+            prop_assert_eq!(actual.name.as_ref(), expected_name.as_ref());
+            prop_assert_eq!(actual.value.as_ref(), expected_value.as_ref());
+        }
+        Ok(())
+    }
+
+    // -- TextFormatter: parse_records --
+
+    #[tokio::test]
+    async fn text_parse_records() {
+        let lines =
+            futures::stream::iter(vec![Ok("line one".to_string()), Ok("line two".to_string())]);
+        let mut stream = TextFormatter::parse_records(lines);
+        let r1 = stream.next().await.unwrap().unwrap();
+        assert_eq!(r1.body(), b"line one");
+        let r2 = stream.next().await.unwrap().unwrap();
+        assert_eq!(r2.body(), b"line two");
+        assert!(stream.next().await.is_none());
+    }
+
+    // -- JsonFormatter: parse_records --
+
+    #[tokio::test]
+    async fn json_parse_records_invalid_json() {
+        let lines = futures::stream::iter(vec![Ok("not json".to_string())]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        assert!(stream.next().await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn json_parse_records_empty_body() {
+        let json_line = r#"{}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        let r = stream.next().await.unwrap().unwrap();
+        assert_eq!(r.body(), b"");
+        assert!(r.headers().is_empty());
+        assert_eq!(r.timestamp(), None);
+    }
+
+    // -- JsonBase64Formatter: parse_records --
+
+    #[tokio::test]
+    async fn json_base64_parse_records_invalid_base64() {
+        let json_line = r#"{"body":"not-valid-base64!!!"}"#.to_string();
+        let lines = futures::stream::iter(vec![Ok(json_line)]);
+        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
+        assert!(stream.next().await.unwrap().is_err());
+    }
+
+    // -- TextFormatter: parse IO error propagation --
+
+    #[tokio::test]
+    async fn text_parse_records_io_error() {
+        let lines = futures::stream::iter(vec![Err(io::Error::other("test error"))]);
+        let mut stream = TextFormatter::parse_records(lines);
+        let result = stream.next().await.unwrap();
+        assert!(result.is_err());
+    }
+
+    // -- JsonFormatter: parse IO error propagation --
+
+    #[tokio::test]
+    async fn json_parse_records_io_error() {
+        let lines = futures::stream::iter(vec![Err(io::Error::other("io error"))]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        assert!(stream.next().await.unwrap().is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn text_formatter_write_then_parse_preserves_ascii_body(body in ascii_string_strategy(256)) {
+            let record = sequenced_record(0, 0, vec![], Bytes::from(body.clone()));
+
+            let output = block_on(async {
+                let mut output = Vec::new();
+                TextFormatter::write_record(&record, &mut output).await.unwrap();
+                output
+            });
+            prop_assert_eq!(output.as_slice(), body.as_bytes());
+
+            let parsed = block_on(parse_text_line(String::from_utf8(output).unwrap()));
+            prop_assert_eq!(parsed.body(), body.as_bytes());
+            prop_assert!(parsed.headers().is_empty());
+            prop_assert_eq!(parsed.timestamp(), None);
+        }
+
+        #[test]
+        fn json_formatter_write_then_parse_preserves_utf8_fields(
+            body in string_strategy(256),
+            headers in prop::collection::vec((string_strategy(32), string_strategy(64)), 0..=8),
+            timestamp in any::<u64>(),
+        ) {
+            let record = sequenced_record(
+                17,
+                timestamp,
+                headers
+                    .iter()
+                    .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
+                    .collect(),
+                Bytes::from(body.clone()),
+            );
+
+            let output = block_on(async {
+                let mut output = Vec::new();
+                JsonFormatter::write_record(&record, &mut output).await.unwrap();
+                output
+            });
+
+            let parsed = block_on(parse_json_line::<false>(String::from_utf8(output).unwrap()));
+            prop_assert_eq!(parsed.body(), body.as_bytes());
+            prop_assert_eq!(parsed.timestamp(), Some(timestamp));
+            prop_assert_headers_eq(parsed.headers(), &headers)?;
+        }
+
+        #[test]
+        fn json_base64_formatter_write_then_parse_preserves_binary_fields(
+            body in bytes_strategy(256),
+            headers in prop::collection::vec((bytes_strategy(32), bytes_strategy(64)), 0..=8),
+            timestamp in any::<u64>(),
+        ) {
+            let record = sequenced_record(
+                17,
+                timestamp,
+                headers
+                    .iter()
+                    .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
+                    .collect(),
+                Bytes::from(body.clone()),
+            );
+
+            let output = block_on(async {
+                let mut output = Vec::new();
+                JsonBase64Formatter::write_record(&record, &mut output).await.unwrap();
+                output
+            });
+
+            let parsed = block_on(parse_json_line::<true>(String::from_utf8(output).unwrap()));
+            prop_assert_eq!(parsed.body(), body.as_slice());
+            prop_assert_eq!(parsed.timestamp(), Some(timestamp));
+            prop_assert_headers_eq(parsed.headers(), &headers)?;
+        }
+    }
+}
