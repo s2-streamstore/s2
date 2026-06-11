@@ -12,10 +12,12 @@ pub use encryption::{
     EncryptedRecord, RecordDecryptionError, decrypt_stored_record, encrypt_record,
 };
 pub use iterator::StoredRecordIterator;
-pub use s2_common::record::{
-    CommandRecord, EnvelopeRecord, FencingToken, FencingTokenTooLongError, Header,
-    MAX_FENCING_TOKEN_LENGTH, Metered, MeteredExt, MeteredSize, NonZeroSeqNum, Record,
-    RecordPartsError, SeqNum, Sequenced, SequencedRecord, StreamPosition, Timestamp,
+pub(crate) use s2_common::record::{
+    CommandRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum, Sequenced,
+};
+#[cfg(test)]
+use s2_common::record::{
+    FencingToken, Header, MAX_FENCING_TOKEN_LENGTH, SequencedRecord, StreamPosition, Timestamp,
 };
 use s2_common::{deep_size::DeepSize, encryption::EncryptionAlgorithm};
 
