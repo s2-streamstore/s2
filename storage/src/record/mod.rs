@@ -19,9 +19,8 @@ use s2_common::{
     record::{CommandRecord, Metered, MeteredSize, Record, SeqNum, Sequenced},
 };
 pub use stream_payload::{
-    AppendInputStorageExt, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
-    StoredAppendRecordParts, StoredReadBatch, StoredReadBatchExt, StoredReadSessionOutput,
-    StoredReadSessionOutputExt,
+    StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
+    StoredReadBatch, StoredReadSessionOutput, decrypt_read_session_output, encrypt_append_input,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]

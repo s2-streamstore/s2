@@ -10,7 +10,7 @@ use s2_common::{
     stream::{ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
 };
 use s2_storage::record::{
-    StoredReadBatch, StoredReadSessionOutput, StoredReadSessionOutputExt, StoredSequencedRecord,
+    StoredReadBatch, StoredReadSessionOutput, StoredSequencedRecord, decrypt_read_session_output,
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
@@ -75,9 +75,10 @@ impl StreamHandle {
             tokio::pin!(session);
             while let Some(output) = session.next().await {
                 let output = match output {
-                    Ok(output) => output
-                        .decrypt(&self.encryption, stream_id.as_bytes())
-                        .map_err(ReadError::from),
+                    Ok(output) => {
+                        decrypt_read_session_output(output, &self.encryption, stream_id.as_bytes())
+                            .map_err(ReadError::from)
+                    }
                     Err(err) => Err(err),
                 };
                 let should_stop = output.is_err();
