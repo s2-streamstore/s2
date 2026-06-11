@@ -181,8 +181,8 @@ mod tests {
     };
 
     use crate::record::{
-        RecordBatch, RecordBatcher, StoredEncodable, StoredRecord, StoredRecordDecodeError,
-        StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord,
+        RecordBatch, RecordBatcher, StoredRecord, StoredRecordDecodeError, StoredRecordIterator,
+        StoredSequencedBytes, StoredSequencedRecord, encode_stored_record,
     };
 
     fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
@@ -231,7 +231,7 @@ mod tests {
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
-                Sequenced::new(position, (&record).metered().to_bytes())
+                Sequenced::new(position, encode_stored_record((&record).metered()))
             })
             .map(Ok)
     }

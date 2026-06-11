@@ -49,7 +49,8 @@ mod tests {
 
     use super::*;
     use crate::record::{
-        EncryptedRecord, StoredEncodable, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+        EncryptedRecord, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+        encode_stored_record,
     };
 
     fn test_stored_plaintext_record(
@@ -95,7 +96,7 @@ mod tests {
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
-                Sequenced::new(position, record.as_ref().to_bytes())
+                Sequenced::new(position, encode_stored_record(record.as_ref()))
             })
             .map(Ok)
     }

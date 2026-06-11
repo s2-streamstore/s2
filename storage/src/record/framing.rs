@@ -1,4 +1,6 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(test)]
+use bytes::BytesMut;
+use bytes::{Buf, BufMut, Bytes};
 use s2_common::{
     deep_size::DeepSize,
     encryption::EncryptionAlgorithm,
@@ -6,7 +8,7 @@ use s2_common::{
 };
 
 use super::{
-    codec::{Encodable, StoredRecordDecodeError, decode_command_record, decode_envelope_record},
+    codec::{StoredRecordDecodeError, WireEncode, decode_command_record, decode_envelope_record},
     encryption::EncryptedRecord,
 };
 
@@ -185,21 +187,19 @@ pub fn decode_if_command_record(
     }
 }
 
-pub trait StoredEncodable {
-    fn to_bytes(&self) -> Bytes {
-        let expected_size = self.encoded_size();
-        let mut buf = BytesMut::with_capacity(expected_size);
-        self.encode_into(&mut buf);
-        assert_eq!(buf.len(), expected_size, "no reallocation");
-        buf.freeze()
-    }
-
-    fn encoded_size(&self) -> usize;
-
-    fn encode_into(&self, buf: &mut impl BufMut);
+pub fn encode_stored_record(record: Metered<&StoredRecord>) -> Bytes {
+    record.to_bytes()
 }
 
-impl StoredEncodable for Metered<&StoredRecord> {
+pub fn stored_record_encoded_size(record: Metered<&StoredRecord>) -> usize {
+    record.encoded_size()
+}
+
+pub fn encode_stored_record_into(record: Metered<&StoredRecord>, buf: &mut impl BufMut) {
+    record.encode_into(buf);
+}
+
+impl WireEncode for Metered<&StoredRecord> {
     fn encoded_size(&self) -> usize {
         1 + magic_byte(self).metered_size_varlen as usize + self.encoded_body_size()
     }
@@ -300,7 +300,7 @@ mod test {
         }
     }
 
-    impl Encodable for LegacyPlaintextFrame<'_> {
+    impl WireEncode for LegacyPlaintextFrame<'_> {
         fn encoded_size(&self) -> usize {
             let body_size = match self.record {
                 Record::Command(record) => record.encoded_size(),
@@ -377,10 +377,8 @@ mod test {
         ) {
             let record = Record::try_from_parts(headers, body).unwrap();
             let metered_record: Metered<Record> = record.clone().into();
-            let encoded_record = StoredRecord::from(record.clone())
-                .metered()
-                .as_ref()
-                .to_bytes();
+            let encoded_record =
+                encode_stored_record(StoredRecord::from(record.clone()).metered().as_ref());
             let legacy_record = legacy_plaintext_bytes(&record);
             prop_assert_eq!(encoded_record.as_ref(), legacy_record.as_ref());
             let decoded_record = decode_record(encoded_record).unwrap();
@@ -400,10 +398,8 @@ mod test {
             body in bytes_strategy(true),
         ) {
             let record = Record::try_from_parts(headers.clone(), body.clone()).unwrap();
-            let encoded_record = StoredRecord::from(record.clone())
-                .metered()
-                .as_ref()
-                .to_bytes();
+            let encoded_record =
+                encode_stored_record(StoredRecord::from(record.clone()).metered().as_ref());
             assert_eq!(record.metered_size(), semantic_metered_size(&record));
             assert_eq!(record.metered_size(), try_metered_size(encoded_record.as_ref()).unwrap() as usize);
         }
@@ -414,10 +410,8 @@ mod test {
         #[test]
         fn roundtrip_command_metered(command in command_strategy()) {
             let record = Record::Command(command);
-            let encoded_record = StoredRecord::from(record.clone())
-                .metered()
-                .as_ref()
-                .to_bytes();
+            let encoded_record =
+                encode_stored_record(StoredRecord::from(record.clone()).metered().as_ref());
             let expected_metered = semantic_metered_size(&record);
             let wire_metered = try_metered_size(encoded_record.as_ref()).unwrap() as usize;
             let decoded_record = decode_record(encoded_record).unwrap();
@@ -438,7 +432,7 @@ mod test {
         let record =
             StoredRecord::encrypted(EncryptedRecord::try_from(encoded.freeze()).unwrap(), 123);
         let metered_record = record.clone().metered();
-        let encoded_record = metered_record.as_ref().to_bytes();
+        let encoded_record = encode_stored_record(metered_record.as_ref());
         let decoded_record = decode_stored_record(encoded_record).unwrap();
         assert_eq!(decoded_record, metered_record);
     }
@@ -513,9 +507,15 @@ mod test {
         #[case] record: StoredRecord,
         #[case] expected: &[u8],
     ) {
-        let encoded = record.clone().metered().as_ref().to_bytes();
+        let metered_record = record.clone().metered();
+        let encoded_size = stored_record_encoded_size(metered_record.as_ref());
+        let encoded = encode_stored_record(metered_record.as_ref());
+        let mut encoded_into = BytesMut::with_capacity(encoded_size);
+        encode_stored_record_into(metered_record.as_ref(), &mut encoded_into);
 
+        assert_eq!(encoded.len(), encoded_size);
         assert_eq!(encoded.as_ref(), expected);
+        assert_eq!(encoded_into.as_ref(), expected);
         assert_eq!(decode_stored_record(encoded).unwrap().into_inner(), record);
     }
 
@@ -527,7 +527,7 @@ mod test {
             123,
         );
 
-        let encoded = record.clone().metered().as_ref().to_bytes();
+        let encoded = encode_stored_record(record.clone().metered().as_ref());
 
         assert_eq!(
             encoded.as_ref(),
@@ -541,7 +541,7 @@ mod test {
         let record = StoredRecord::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
         ));
-        let mut encoded = record.clone().metered().as_ref().to_bytes().to_vec();
+        let mut encoded = encode_stored_record(record.clone().metered().as_ref()).to_vec();
         encoded[1] = 99;
 
         let decoded = decode_stored_record(Bytes::from(encoded)).unwrap();
@@ -555,11 +555,8 @@ mod test {
         let record = Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
         );
-        let mut encoded = StoredRecord::from(record.clone())
-            .metered()
-            .as_ref()
-            .to_bytes()
-            .to_vec();
+        let mut encoded =
+            encode_stored_record(StoredRecord::from(record.clone()).metered().as_ref()).to_vec();
         encoded[1] = 99;
 
         let decoded = decode_record(Bytes::from(encoded)).unwrap();

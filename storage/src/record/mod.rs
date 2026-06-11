@@ -5,15 +5,16 @@ mod framing;
 mod iterator;
 
 pub use batcher::{RecordBatch, RecordBatcher};
-pub(crate) use codec::Encodable;
 pub use codec::StoredRecordDecodeError;
+pub(crate) use codec::WireEncode;
 pub use encryption::{
     EncryptedRecord, RecordDecryptionError, decrypt_read_session_output, decrypt_stored_record,
     encrypt_append_input, encrypt_record,
 };
 pub use framing::{
-    StoredEncodable, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
-    decode_if_command_record, decode_record, decode_stored_record, try_metered_size,
+    StoredRecord, StoredSequencedBytes, StoredSequencedRecord, decode_if_command_record,
+    decode_record, decode_stored_record, encode_stored_record, encode_stored_record_into,
+    stored_record_encoded_size, try_metered_size,
 };
 pub use iterator::StoredRecordIterator;
 use s2_common::stream::{

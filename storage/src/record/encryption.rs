@@ -43,8 +43,8 @@ use s2_common::{
 };
 
 use super::{
-    Encodable, StoredAppendInput, StoredReadBatch, StoredReadSessionOutput, StoredRecord,
-    StoredRecordDecodeError, codec::decode_envelope_record,
+    StoredAppendInput, StoredReadBatch, StoredReadSessionOutput, StoredRecord,
+    StoredRecordDecodeError, WireEncode, codec::decode_envelope_record,
 };
 
 const FORMAT_ID_LEN: usize = 1;
@@ -196,7 +196,7 @@ impl DeepSize for EncryptedRecord {
     }
 }
 
-impl Encodable for EncryptedRecord {
+impl WireEncode for EncryptedRecord {
     fn encoded_size(&self) -> usize {
         self.encoded.len()
     }

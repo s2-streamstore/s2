@@ -1,8 +1,6 @@
 use std::num::NonZeroU8;
 
-#[cfg(test)]
-use bytes::BytesMut;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::record::{
     CommandOp, CommandPayloadError, CommandRecord, EnvelopeRecord, Header, HeaderValidationError,
     RecordPartsError,
@@ -16,8 +14,7 @@ pub enum StoredRecordDecodeError {
     InvalidValue(&'static str, &'static str),
 }
 
-pub(crate) trait Encodable {
-    #[cfg(test)]
+pub(crate) trait WireEncode {
     fn to_bytes(&self) -> Bytes {
         let expected_size = self.encoded_size();
         let mut buf = BytesMut::with_capacity(expected_size);
@@ -66,7 +63,7 @@ impl From<CommandPayloadError> for StoredRecordDecodeError {
     }
 }
 
-impl Encodable for CommandRecord {
+impl WireEncode for CommandRecord {
     fn encoded_size(&self) -> usize {
         1 + match self {
             CommandRecord::Fence(token) => token.len(),
@@ -207,7 +204,7 @@ impl TryFrom<&[Header]> for EncodingInfo {
     }
 }
 
-impl Encodable for EnvelopeRecord {
+impl WireEncode for EnvelopeRecord {
     fn encoded_size(&self) -> usize {
         let encoding_info = EncodingInfo::try_from(self.headers())
             .expect("envelope record headers should be validated");

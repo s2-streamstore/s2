@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::record::{Metered, StreamPosition};
-use s2_storage::record::{StoredEncodable, StoredRecord, decode_stored_record};
+use s2_storage::record::{StoredRecord, decode_stored_record, encode_stored_record};
 
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
 use crate::stream_id::StreamId;
@@ -34,7 +34,7 @@ pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, StreamPosition), Deseria
 }
 
 pub fn ser_value(record: Metered<&StoredRecord>) -> Bytes {
-    record.to_bytes()
+    encode_stored_record(record)
 }
 
 pub fn deser_value(bytes: Bytes) -> Result<Metered<StoredRecord>, DeserializationError> {
