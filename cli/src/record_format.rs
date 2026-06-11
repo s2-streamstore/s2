@@ -395,22 +395,12 @@ mod json {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-
     use bytes::Bytes;
-    use futures::StreamExt;
+    use futures::{StreamExt, executor::block_on};
     use proptest::{prelude::*, test_runner::TestCaseResult};
     use s2_sdk::types::Header;
 
     use super::*;
-
-    fn run_async<F: Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(future)
-    }
 
     fn ascii_string_strategy(max_len: usize) -> impl Strategy<Value = String> {
         prop::collection::vec(0x20u8..=0x7e, 0..=max_len)
@@ -532,14 +522,14 @@ mod tests {
         fn text_formatter_write_then_parse_preserves_ascii_body(body in ascii_string_strategy(256)) {
             let record = sequenced_record(0, 0, vec![], Bytes::from(body.clone()));
 
-            let output = run_async(async {
+            let output = block_on(async {
                 let mut output = Vec::new();
                 TextFormatter::write_record(&record, &mut output).await.unwrap();
                 output
             });
             prop_assert_eq!(output.as_slice(), body.as_bytes());
 
-            let parsed = run_async(parse_text_line(String::from_utf8(output).unwrap()));
+            let parsed = block_on(parse_text_line(String::from_utf8(output).unwrap()));
             prop_assert_eq!(parsed.body(), body.as_bytes());
             prop_assert!(parsed.headers().is_empty());
             prop_assert_eq!(parsed.timestamp(), None);
@@ -561,13 +551,13 @@ mod tests {
                 Bytes::from(body.clone()),
             );
 
-            let output = run_async(async {
+            let output = block_on(async {
                 let mut output = Vec::new();
                 JsonFormatter::write_record(&record, &mut output).await.unwrap();
                 output
             });
 
-            let parsed = run_async(parse_json_line::<false>(String::from_utf8(output).unwrap()));
+            let parsed = block_on(parse_json_line::<false>(String::from_utf8(output).unwrap()));
             prop_assert_eq!(parsed.body(), body.as_bytes());
             prop_assert_eq!(parsed.timestamp(), Some(timestamp));
             prop_assert_headers_eq(parsed.headers(), &headers)?;
@@ -589,13 +579,13 @@ mod tests {
                 Bytes::from(body.clone()),
             );
 
-            let output = run_async(async {
+            let output = block_on(async {
                 let mut output = Vec::new();
                 JsonBase64Formatter::write_record(&record, &mut output).await.unwrap();
                 output
             });
 
-            let parsed = run_async(parse_json_line::<true>(String::from_utf8(output).unwrap()));
+            let parsed = block_on(parse_json_line::<true>(String::from_utf8(output).unwrap()));
             prop_assert_eq!(parsed.body(), body.as_slice());
             prop_assert_eq!(parsed.timestamp(), Some(timestamp));
             prop_assert_headers_eq(parsed.headers(), &headers)?;

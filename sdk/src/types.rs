@@ -3690,12 +3690,21 @@ mod tests {
         prop::collection::vec(any::<u8>(), 0..=max_len)
     }
 
-    fn ascii_bytes_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
-        prop::collection::vec(0x20u8..=0x7e, 0..=max_len)
-    }
-
     fn header_parts_strategy() -> impl Strategy<Value = HeaderParts> {
         (byte_vec_strategy(32), byte_vec_strategy(64))
+    }
+
+    fn string_strategy(max_chars: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..=max_chars)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn read_from_strategy() -> impl Strategy<Value = ReadFrom> {
+        prop_oneof![
+            any::<u64>().prop_map(ReadFrom::SeqNum),
+            any::<u64>().prop_map(ReadFrom::Timestamp),
+            any::<u64>().prop_map(ReadFrom::TailOffset),
+        ]
     }
 
     fn append_record_parts_strategy() -> impl Strategy<Value = AppendRecordParts> {
@@ -3950,10 +3959,9 @@ mod tests {
 
     proptest! {
         #[test]
-        fn fencing_token_ascii_parse_accepts_only_within_byte_limit(
-            bytes in ascii_bytes_strategy(MAX_FENCING_TOKEN_LENGTH + 8),
+        fn fencing_token_parse_accepts_only_within_byte_limit(
+            token in string_strategy(MAX_FENCING_TOKEN_LENGTH + 8),
         ) {
-            let token = String::from_utf8(bytes).unwrap();
             let parsed = token.parse::<FencingToken>();
 
             if token.len() <= MAX_FENCING_TOKEN_LENGTH {
@@ -4132,23 +4140,22 @@ mod tests {
     proptest! {
         #[test]
         fn read_start_to_api_sets_only_selected_position_field(
-            value in any::<u64>(),
-            variant in 0u8..3,
+            from in read_from_strategy(),
             clamp_to_tail in any::<bool>(),
         ) {
-            let from = match variant {
-                0 => ReadFrom::SeqNum(value),
-                1 => ReadFrom::Timestamp(value),
-                _ => ReadFrom::TailOffset(value),
+            let (seq_num, timestamp, tail_offset) = match from {
+                ReadFrom::SeqNum(value) => (Some(value), None, None),
+                ReadFrom::Timestamp(value) => (None, Some(value), None),
+                ReadFrom::TailOffset(value) => (None, None, Some(value)),
             };
             let api: api::stream::ReadStart = ReadStart::new()
                 .with_from(from)
                 .with_clamp_to_tail(clamp_to_tail)
                 .into();
 
-            prop_assert_eq!(api.seq_num, matches!(from, ReadFrom::SeqNum(_)).then_some(value));
-            prop_assert_eq!(api.timestamp, matches!(from, ReadFrom::Timestamp(_)).then_some(value));
-            prop_assert_eq!(api.tail_offset, matches!(from, ReadFrom::TailOffset(_)).then_some(value));
+            prop_assert_eq!(api.seq_num, seq_num);
+            prop_assert_eq!(api.timestamp, timestamp);
+            prop_assert_eq!(api.tail_offset, tail_offset);
             prop_assert_eq!(api.clamp, clamp_to_tail.then_some(true));
         }
     }
@@ -4249,7 +4256,10 @@ mod tests {
             records: vec![api::stream::proto::SequencedRecord {
                 seq_num: 0,
                 body: Bytes::from("hi"),
-                headers: vec![],
+                headers: vec![api::stream::proto::Header {
+                    name: Bytes::from("k"),
+                    value: Bytes::from("v"),
+                }],
                 timestamp: 42,
             }],
             tail: Some(api::stream::proto::StreamPosition {
@@ -4259,8 +4269,19 @@ mod tests {
         };
         let batch = ReadBatch::from_api(proto_batch);
         assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].seq_num, 0);
+        assert_eq!(batch.records[0].timestamp, 42);
         assert_eq!(batch.records[0].body.as_ref(), b"hi");
-        assert!(batch.tail.is_some());
+        assert_eq!(batch.records[0].headers.len(), 1);
+        assert_eq!(batch.records[0].headers[0].name.as_ref(), b"k");
+        assert_eq!(batch.records[0].headers[0].value.as_ref(), b"v");
+        assert_eq!(
+            batch.tail,
+            Some(StreamPosition {
+                seq_num: 1,
+                timestamp: 42,
+            })
+        );
     }
 
     // -- CreateBasinInput --
@@ -4304,6 +4325,8 @@ mod tests {
         assert_eq!(record.seq_num, 99);
         assert_eq!(record.body.as_ref(), b"data");
         assert_eq!(record.headers.len(), 1);
+        assert_eq!(record.headers[0].name.as_ref(), b"k");
+        assert_eq!(record.headers[0].value.as_ref(), b"v");
         assert_eq!(record.timestamp, 1234);
     }
 
