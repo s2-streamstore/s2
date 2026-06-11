@@ -1,18 +1,21 @@
 mod batcher;
+mod encoding;
 mod encryption;
 mod iterator;
 
 pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+pub(crate) use encoding::Encodable;
+pub use encoding::RecordDecodeError;
+use encoding::{decode_command_record, decode_envelope_record};
 pub use encryption::{
     EncryptedRecord, RecordDecryptionError, decrypt_stored_record, encrypt_record,
 };
 pub use iterator::StoredRecordIterator;
 pub use s2_common::record::{
-    CommandRecord, Encodable, EnvelopeRecord, FencingToken, FencingTokenTooLongError, Header,
+    CommandRecord, EnvelopeRecord, FencingToken, FencingTokenTooLongError, Header,
     MAX_FENCING_TOKEN_LENGTH, Metered, MeteredExt, MeteredSize, NonZeroSeqNum, Record,
-    RecordDecodeError, RecordPartsError, SeqNum, Sequenced, SequencedRecord, StreamPosition,
-    Timestamp,
+    RecordPartsError, SeqNum, Sequenced, SequencedRecord, StreamPosition, Timestamp,
 };
 use s2_common::{deep_size::DeepSize, encryption::EncryptionAlgorithm};
 
@@ -183,7 +186,7 @@ pub fn decode_if_command_record(record: &[u8]) -> Result<Option<CommandRecord>, 
             if record.len() < offset {
                 return Err(RecordDecodeError::Truncated("MeteredSize"));
             }
-            Ok(Some(CommandRecord::try_from(&record[offset..])?))
+            Ok(Some(decode_command_record(&record[offset..])?))
         }
         RecordType::Envelope | RecordType::EncryptedEnvelope => Ok(None),
     }
@@ -247,10 +250,10 @@ pub fn decode_stored_record(mut buf: Bytes) -> Result<Metered<StoredRecord>, Rec
 
     let record = match magic_byte.record_type {
         RecordType::Command => {
-            StoredRecord::Plaintext(Record::Command(CommandRecord::try_from(buf.as_ref())?))
+            StoredRecord::Plaintext(Record::Command(decode_command_record(buf.as_ref())?))
         }
         RecordType::Envelope => {
-            StoredRecord::Plaintext(Record::Envelope(EnvelopeRecord::try_from(buf)?))
+            StoredRecord::Plaintext(Record::Envelope(decode_envelope_record(buf)?))
         }
         RecordType::EncryptedEnvelope => {
             StoredRecord::encrypted(EncryptedRecord::try_from(buf)?, metered_size)

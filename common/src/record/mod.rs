@@ -3,11 +3,9 @@ mod envelope;
 mod fencing;
 mod metering;
 
-use bytes::{BufMut, Bytes, BytesMut};
-pub use command::CommandRecord;
-use command::{CommandOp, CommandPayloadError};
-pub use envelope::EnvelopeRecord;
-use envelope::HeaderValidationError;
+use bytes::Bytes;
+pub use command::{CommandOp, CommandPayloadError, CommandRecord};
+pub use envelope::{EnvelopeRecord, HeaderValidationError};
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
 pub use metering::{Metered, MeteredExt, MeteredSize};
 
@@ -40,14 +38,6 @@ impl DeepSize for StreamPosition {
     fn deep_size(&self) -> usize {
         self.seq_num.deep_size() + self.timestamp.deep_size()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RecordDecodeError {
-    #[error("truncated: {0}")]
-    Truncated(&'static str),
-    #[error("invalid value [{0}]: {1}")]
-    InvalidValue(&'static str, &'static str),
 }
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -129,20 +119,6 @@ impl Record {
             }
         }
     }
-}
-
-pub trait Encodable {
-    fn to_bytes(&self) -> Bytes {
-        let expected_size = self.encoded_size();
-        let mut buf = BytesMut::with_capacity(expected_size);
-        self.encode_into(&mut buf);
-        assert_eq!(buf.len(), expected_size, "no reallocation");
-        buf.freeze()
-    }
-
-    fn encoded_size(&self) -> usize;
-
-    fn encode_into(&self, buf: &mut impl BufMut);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

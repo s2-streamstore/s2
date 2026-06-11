@@ -39,7 +39,7 @@ use s2_common::{
 
 use super::{
     Encodable, Metered, MeteredExt as _, MeteredSize, Record, RecordDecodeError, SeqNum,
-    StoredRecord,
+    StoredRecord, decode_envelope_record,
 };
 
 const FORMAT_ID_LEN: usize = 1;
@@ -303,7 +303,7 @@ pub fn decrypt_stored_record(
             record: encrypted,
         } => {
             let plaintext = decrypt_payload(encrypted, encryption, aad)?;
-            let record = Record::Envelope(plaintext.try_into()?);
+            let record = Record::Envelope(decode_envelope_record(plaintext)?);
             let actual_metered_size = record.metered_size();
             if metered_size != actual_metered_size {
                 return Err(RecordDecryptionError::MeteredSizeMismatch {
@@ -539,7 +539,7 @@ mod tests {
             encrypted_record
         };
         let decrypted = decrypt_payload(encrypted_record, &encryption, &aad).unwrap();
-        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
+        let (out_headers, out_body) = decode_envelope_record(decrypted).unwrap().into_parts();
 
         assert_eq!(out_headers, headers);
         assert_eq!(out_body, body);

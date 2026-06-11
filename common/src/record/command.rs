@@ -1,19 +1,15 @@
 use std::{fmt, str::Utf8Error};
 
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use compact_str::CompactString;
-use strum::FromRepr;
 
-use super::{
-    Encodable, FencingTokenTooLongError, MeteredSize, RecordDecodeError, fencing::FencingToken,
-};
+use super::{FencingTokenTooLongError, MeteredSize, fencing::FencingToken};
 use crate::{deep_size::DeepSize, record::SeqNum};
 
 pub const COMMAND_ID_FENCE: &[u8] = b"fence";
 pub const COMMAND_ID_TRIM: &[u8] = b"trim";
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, FromRepr)]
-#[repr(u8)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CommandOp {
     Fence,
     Trim,
@@ -104,40 +100,6 @@ impl CommandRecord {
     }
 }
 
-impl TryFrom<&[u8]> for CommandRecord {
-    type Error = RecordDecodeError;
-
-    fn try_from(record: &[u8]) -> Result<Self, Self::Error> {
-        if record.is_empty() {
-            return Err(RecordDecodeError::Truncated("CommandOrdinal"));
-        }
-        let op = CommandOp::from_repr(record[0])
-            .ok_or(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))?;
-        Self::try_from_parts(op, &record[1..]).map_err(Into::into)
-    }
-}
-
-impl Encodable for CommandRecord {
-    fn encoded_size(&self) -> usize {
-        1 + match self {
-            CommandRecord::Fence(token) => token.len(),
-            CommandRecord::Trim(trim_point) => size_of_val(trim_point),
-        }
-    }
-
-    fn encode_into(&self, buf: &mut impl BufMut) {
-        buf.put_u8(self.op() as u8);
-        match self {
-            CommandRecord::Fence(token) => {
-                buf.put_slice(token.as_bytes());
-            }
-            CommandRecord::Trim(trim_point) => {
-                buf.put_u64(*trim_point);
-            }
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum CommandPayloadError {
     #[error("invalid UTF-8")]
@@ -148,22 +110,6 @@ pub enum CommandPayloadError {
     TrimPointSize(usize),
 }
 
-impl From<CommandPayloadError> for RecordDecodeError {
-    fn from(e: CommandPayloadError) -> Self {
-        match e {
-            CommandPayloadError::InvalidUtf8(_) => {
-                RecordDecodeError::InvalidValue("CommandPayload", "fencing token not valid utf8")
-            }
-            CommandPayloadError::FencingTokenTooLong(_) => {
-                RecordDecodeError::InvalidValue("CommandPayload", "fencing token too long")
-            }
-            CommandPayloadError::TrimPointSize(_) => {
-                RecordDecodeError::InvalidValue("CommandPayload", "trim point size")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use compact_str::ToCompactString;
@@ -171,13 +117,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-
-    fn roundtrip(cmd: CommandRecord, expected_len: usize) {
-        assert_eq!(cmd.encoded_size(), expected_len);
-        let encoded = cmd.to_bytes();
-        assert_eq!(encoded.len(), expected_len);
-        assert_eq!(CommandRecord::try_from(encoded.as_ref()), Ok(cmd));
-    }
 
     #[test]
     fn command_op_names() {
@@ -220,7 +159,10 @@ mod tests {
             CommandRecord::try_from_parts(CommandOp::Fence, token.as_bytes()),
             Ok(cmd.clone())
         );
-        roundtrip(cmd, 1 + token.len());
+        assert_eq!(
+            cmd.metered_size(),
+            8 + 2 + CommandOp::Fence.to_id().len() + token.len()
+        );
     }
 
     #[rstest]
@@ -255,77 +197,7 @@ mod tests {
         fn trim_roundtrip(trim_point in any::<SeqNum>()) {
             let cmd = CommandRecord::Trim(trim_point);
             assert_eq!(CommandRecord::try_from_parts(CommandOp::Trim, trim_point.to_be_bytes().as_slice()), Ok(cmd.clone()));
-            roundtrip(cmd, 9);
+            assert_eq!(cmd.metered_size(), 8 + 2 + CommandOp::Trim.to_id().len() + size_of::<SeqNum>());
         }
-    }
-
-    #[test]
-    fn decode_invalid_command() {
-        let try_convert = |raw: &[u8]| CommandRecord::try_from(raw);
-        assert_eq!(
-            try_convert(&[]),
-            Err(RecordDecodeError::Truncated("CommandOrdinal"))
-        );
-        assert_eq!(
-            try_convert(&[0xff]),
-            Err(RecordDecodeError::InvalidValue("CommandOrdinal", "unknown"))
-        );
-        assert_eq!(
-            try_convert(&[CommandOp::Fence as u8, 0xff, 0xff]),
-            Err(RecordDecodeError::InvalidValue(
-                "CommandPayload",
-                "fencing token not valid utf8"
-            ))
-        );
-        assert_eq!(
-            try_convert(&[
-                CommandOp::Fence as u8,
-                b'0',
-                b'1',
-                b'2',
-                b'3',
-                b'4',
-                b'5',
-                b'6',
-                b'7',
-                b'8',
-                b'9',
-                b'0',
-                b'1',
-                b'2',
-                b'3',
-                b'4',
-                b'5',
-                b'6',
-                b'7',
-                b'8',
-                b'9',
-                b'0',
-                b'1',
-                b'2',
-                b'3',
-                b'4',
-                b'5',
-                b'6',
-                b'7',
-                b'8',
-                b'9',
-                b'0',
-                b'1',
-                b'2',
-                b'3',
-                b'4',
-                b'5',
-                b'6',
-                b'7',
-                b'8',
-                b'9',
-            ]),
-            Err(CommandPayloadError::FencingTokenTooLong(FencingTokenTooLongError(40)).into())
-        );
-        assert_eq!(
-            try_convert(&[CommandOp::Trim as u8, 0xff]),
-            Err(CommandPayloadError::TrimPointSize(1).into())
-        );
     }
 }
