@@ -13,8 +13,8 @@ use s2_common::{
     stream::StreamName,
 };
 use s2_resource_spec::{
-    self as resource_spec, BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec,
-    StorageClassSpec, StreamConfigSpec, TimestampingModeSpec, TimestampingSpec,
+    BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec, StorageClassSpec,
+    StreamConfigSpec, TimestampingModeSpec, TimestampingSpec,
 };
 
 fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> BasinConfig {
@@ -176,7 +176,7 @@ fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
 }
 
 pub fn validate(spec: &ResourcesSpec) -> miette::Result<()> {
-    resource_spec::validate(spec).map_err(|e| miette::miette!("{}", e))
+    s2_resource_spec::validate(spec).map_err(|e| miette::miette!("{}", e))
 }
 
 pub fn load(path: &Path) -> miette::Result<ResourcesSpec> {
