@@ -196,12 +196,16 @@ pub async fn apply(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miette
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin = basin_spec.name;
-        apply_basin(s2, basin.clone(), basin_spec.config).await?;
+        apply_basin(s2, basin_spec.name.clone(), basin_spec.config).await?;
 
         for stream_spec in basin_spec.streams {
-            let stream = stream_spec.name;
-            apply_stream(s2, basin.clone(), stream, stream_spec.config).await?;
+            apply_stream(
+                s2,
+                basin_spec.name.clone(),
+                stream_spec.name,
+                stream_spec.config,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -565,7 +569,6 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin = basin_spec.name;
         let desired_basin_config = basin_spec
             .config
             .clone()
@@ -574,7 +577,7 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
         let desired_basin_default_stream_config =
             desired_basin_config.default_stream_config.clone();
 
-        let basin_action = match s2.get_basin_config(basin.clone()).await {
+        let basin_action = match s2.get_basin_config(basin_spec.name.clone()).await {
             Ok(existing) => {
                 let existing = basin_config_from_sdk(existing);
                 let diffs = diff_basin_config(&existing, &desired_basin_config);
@@ -588,7 +591,7 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
             Err(e) => {
                 return Err(miette::miette!(
                     "failed to check basin {:?}: {}",
-                    basin.as_ref(),
+                    basin_spec.name.as_ref(),
                     e
                 ));
             }
@@ -596,19 +599,20 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
 
         match &basin_action {
             ResourceAction::Create => {
-                print_basin_create(basin.as_ref(), &basin_spec.config);
+                print_basin_create(basin_spec.name.as_ref(), &basin_spec.config);
             }
             action => {
-                print_basin_result(basin.as_ref(), action);
+                print_basin_result(basin_spec.name.as_ref(), action);
             }
         }
 
-        let basin_client = s2.basin(basin.clone());
+        let basin_client = s2.basin(basin_spec.name.clone());
 
         for stream_spec in basin_spec.streams {
-            let stream = stream_spec.name;
-
-            let stream_action = match basin_client.get_stream_config(stream.clone()).await {
+            let stream_action = match basin_client
+                .get_stream_config(stream_spec.name.clone())
+                .await
+            {
                 Ok(existing) => {
                     let existing = stream_config_from_sdk(existing);
                     let desired_stream_config = stream_spec
@@ -628,8 +632,8 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
                 Err(e) => {
                     return Err(miette::miette!(
                         "failed to check stream {:?}/{:?}: {}",
-                        basin.as_ref(),
-                        stream.as_ref(),
+                        basin_spec.name.as_ref(),
+                        stream_spec.name.as_ref(),
                         e
                     ));
                 }
@@ -637,10 +641,18 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
 
             match &stream_action {
                 ResourceAction::Create => {
-                    print_stream_create(basin.as_ref(), stream.as_ref(), &stream_spec.config);
+                    print_stream_create(
+                        basin_spec.name.as_ref(),
+                        stream_spec.name.as_ref(),
+                        &stream_spec.config,
+                    );
                 }
                 action => {
-                    print_stream_result(basin.as_ref(), stream.as_ref(), action);
+                    print_stream_result(
+                        basin_spec.name.as_ref(),
+                        stream_spec.name.as_ref(),
+                        action,
+                    );
                 }
             }
         }

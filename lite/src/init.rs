@@ -24,38 +24,47 @@ pub async fn apply(backend: &Backend, spec: s2_resource_spec::Resources) -> eyre
     s2_resource_spec::validate(&spec).map_err(|e| eyre::eyre!(e))?;
 
     for basin_spec in spec.basins {
-        let basin = basin_spec.name;
         let config = basin_spec.config.map(BasinConfig::from).unwrap_or_default();
 
         backend
-            .provision_basin(basin.clone(), config, ProvisionMode::Ensure)
+            .provision_basin(basin_spec.name.clone(), config, ProvisionMode::Ensure)
             .await
-            .map_err(|e| eyre::eyre!("failed to apply basin {:?}: {}", basin.as_ref(), e))?;
+            .map_err(|e| {
+                eyre::eyre!(
+                    "failed to apply basin {:?}: {}",
+                    basin_spec.name.as_ref(),
+                    e
+                )
+            })?;
 
-        info!(basin = basin.as_ref(), "basin applied");
+        info!(basin = basin_spec.name.as_ref(), "basin applied");
 
         for stream_spec in basin_spec.streams {
-            let stream = stream_spec.name;
             let config = stream_spec
                 .config
                 .map(OptionalStreamConfig::from)
                 .unwrap_or_default();
 
             backend
-                .provision_stream(basin.clone(), stream.clone(), config, ProvisionMode::Ensure)
+                .provision_stream(
+                    basin_spec.name.clone(),
+                    stream_spec.name.clone(),
+                    config,
+                    ProvisionMode::Ensure,
+                )
                 .await
                 .map_err(|e| {
                     eyre::eyre!(
                         "failed to apply stream {:?}/{:?}: {}",
-                        basin.as_ref(),
-                        stream.as_ref(),
+                        basin_spec.name.as_ref(),
+                        stream_spec.name.as_ref(),
                         e
                     )
                 })?;
 
             info!(
-                basin = basin.as_ref(),
-                stream = stream.as_ref(),
+                basin = basin_spec.name.as_ref(),
+                stream = stream_spec.name.as_ref(),
                 "stream applied"
             );
         }
