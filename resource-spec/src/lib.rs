@@ -14,7 +14,8 @@ pub struct Resources {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Basin {
-    pub name: String,
+    #[schemars(with = "String")]
+    pub name: BasinName,
     #[serde(default)]
     pub config: Option<BasinConfig>,
     #[serde(default)]
@@ -24,7 +25,8 @@ pub struct Basin {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Stream {
-    pub name: String,
+    #[schemars(with = "String")]
+    pub name: StreamName,
     #[serde(default)]
     pub config: Option<StreamConfig>,
 }
@@ -311,23 +313,12 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
             errors.push(format!("duplicate basin name {:?}", basin_spec.name));
         }
 
-        if let Err(e) = basin_spec.name.parse::<BasinName>() {
-            errors.push(format!("invalid basin name {:?}: {}", basin_spec.name, e));
-            continue;
-        }
-
         let mut seen_streams = std::collections::HashSet::new();
         for stream_spec in &basin_spec.streams {
             if !seen_streams.insert(stream_spec.name.clone()) {
                 errors.push(format!(
                     "duplicate stream name {:?} in basin {:?}",
                     stream_spec.name, basin_spec.name
-                ));
-            }
-            if let Err(e) = stream_spec.name.parse::<StreamName>() {
-                errors.push(format!(
-                    "invalid stream name {:?} in basin {:?}: {}",
-                    stream_spec.name, basin_spec.name, e
                 ));
             }
         }
@@ -348,6 +339,10 @@ mod tests {
         serde_json::from_str(json).expect("valid JSON")
     }
 
+    fn parse_spec_err(json: &str) -> serde_json::Error {
+        serde_json::from_str::<Resources>(json).expect_err("invalid resource spec")
+    }
+
     #[test]
     fn empty_spec() {
         let spec = parse_spec("{}");
@@ -358,7 +353,7 @@ mod tests {
     fn basin_no_config() {
         let spec = parse_spec(r#"{"basins":[{"name":"my-basin"}]}"#);
         assert_eq!(spec.basins.len(), 1);
-        assert_eq!(spec.basins[0].name, "my-basin");
+        assert_eq!(spec.basins[0].name.as_ref(), "my-basin");
         assert!(spec.basins[0].config.is_none());
         assert!(spec.basins[0].streams.is_empty());
     }
@@ -431,7 +426,7 @@ mod tests {
         let spec = parse_spec(json);
         assert_eq!(spec.basins.len(), 1);
         let basin = &spec.basins[0];
-        assert_eq!(basin.name, "my-basin");
+        assert_eq!(basin.name.as_ref(), "my-basin");
 
         let config = basin.config.as_ref().unwrap();
         assert_eq!(config.create_stream_on_append, Some(true));
@@ -456,7 +451,7 @@ mod tests {
 
         assert_eq!(basin.streams.len(), 1);
         let stream = &basin.streams[0];
-        assert_eq!(stream.name, "events");
+        assert_eq!(stream.name.as_ref(), "events");
         let sc = stream.config.as_ref().unwrap();
         assert!(matches!(sc.storage_class, Some(StorageClass::Standard)));
         assert!(matches!(
@@ -491,17 +486,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_invalid_basin_name() {
-        let spec = parse_spec(r#"{"basins":[{"name":"INVALID_BASIN"}]}"#);
-        let err = validate(&spec).unwrap_err();
-        assert!(err.to_string().contains("invalid basin name"));
+    fn deserialize_invalid_basin_name() {
+        let err = parse_spec_err(r#"{"basins":[{"name":"INVALID_BASIN"}]}"#);
+        assert!(err.to_string().contains("basin name"));
     }
 
     #[test]
-    fn validate_invalid_stream_name() {
-        let spec = parse_spec(r#"{"basins":[{"name":"my-basin","streams":[{"name":""}]}]}"#);
-        let err = validate(&spec).unwrap_err();
-        assert!(err.to_string().contains("invalid stream name"));
+    fn deserialize_invalid_stream_name() {
+        let err = parse_spec_err(r#"{"basins":[{"name":"my-basin","streams":[{"name":""}]}]}"#);
+        assert!(err.to_string().contains("stream name"));
     }
 
     #[test]
@@ -522,11 +515,13 @@ mod tests {
 
     #[test]
     fn validate_multiple_errors() {
-        let spec = parse_spec(r#"{"basins":[{"name":"INVALID"},{"name":"INVALID"}]}"#);
+        let spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","streams":[{"name":"events"},{"name":"events"}]},{"name":"my-basin"}]}"#,
+        );
         let err = validate(&spec).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("invalid basin name"));
         assert!(msg.contains("duplicate basin name"));
+        assert!(msg.contains("duplicate stream name"));
     }
 
     #[test]

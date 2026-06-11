@@ -196,17 +196,11 @@ pub async fn apply(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miette
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin: BasinName = basin_spec
-            .name
-            .parse()
-            .map_err(|e| miette::miette!("invalid basin name {:?}: {}", basin_spec.name, e))?;
-
+        let basin = basin_spec.name;
         apply_basin(s2, basin.clone(), basin_spec.config).await?;
 
         for stream_spec in basin_spec.streams {
-            let stream: StreamName = stream_spec.name.parse().map_err(|e| {
-                miette::miette!("invalid stream name {:?}: {}", stream_spec.name, e)
-            })?;
+            let stream = stream_spec.name;
             apply_stream(s2, basin.clone(), stream, stream_spec.config).await?;
         }
     }
@@ -571,10 +565,7 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
     validate(&spec)?;
 
     for basin_spec in spec.basins {
-        let basin: BasinName = basin_spec
-            .name
-            .parse()
-            .map_err(|e| miette::miette!("invalid basin name {:?}: {}", basin_spec.name, e))?;
+        let basin = basin_spec.name;
         let desired_basin_config = basin_spec
             .config
             .clone()
@@ -615,9 +606,7 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
         let basin_client = s2.basin(basin.clone());
 
         for stream_spec in basin_spec.streams {
-            let stream: StreamName = stream_spec.name.parse().map_err(|e| {
-                miette::miette!("invalid stream name {:?}: {}", stream_spec.name, e)
-            })?;
+            let stream = stream_spec.name;
 
             let stream_action = match basin_client.get_stream_config(stream.clone()).await {
                 Ok(existing) => {

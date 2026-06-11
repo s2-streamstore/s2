@@ -5,10 +5,8 @@
 use std::path::Path;
 
 use s2_common::{
-    basin::BasinName,
     config::{BasinConfig, OptionalStreamConfig},
     resources::ProvisionMode,
-    stream::StreamName,
 };
 use tracing::info;
 
@@ -26,11 +24,7 @@ pub async fn apply(backend: &Backend, spec: s2_resource_spec::Resources) -> eyre
     s2_resource_spec::validate(&spec).map_err(|e| eyre::eyre!(e))?;
 
     for basin_spec in spec.basins {
-        let basin: BasinName = basin_spec
-            .name
-            .parse()
-            .map_err(|e| eyre::eyre!("invalid basin name {:?}: {}", basin_spec.name, e))?;
-
+        let basin = basin_spec.name;
         let config = basin_spec.config.map(BasinConfig::from).unwrap_or_default();
 
         backend
@@ -41,11 +35,7 @@ pub async fn apply(backend: &Backend, spec: s2_resource_spec::Resources) -> eyre
         info!(basin = basin.as_ref(), "basin applied");
 
         for stream_spec in basin_spec.streams {
-            let stream: StreamName = stream_spec
-                .name
-                .parse()
-                .map_err(|e| eyre::eyre!("invalid stream name {:?}: {}", stream_spec.name, e))?;
-
+            let stream = stream_spec.name;
             let config = stream_spec
                 .config
                 .map(OptionalStreamConfig::from)
