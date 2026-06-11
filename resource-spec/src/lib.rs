@@ -2,49 +2,41 @@
 
 use std::{borrow::Cow, time::Duration};
 
-use s2_common::{
-    basin::BasinName,
-    config::{
-        BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
-        RetentionPolicy, StorageClass, TimestampingMode,
-    },
-    encryption::EncryptionAlgorithm,
-    stream::StreamName,
-};
+use s2_common::{basin::BasinName, stream::StreamName};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Default, schemars::JsonSchema)]
-pub struct ResourcesSpec {
+pub struct Resources {
     #[serde(default)]
-    pub basins: Vec<BasinSpec>,
+    pub basins: Vec<Basin>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct BasinSpec {
+pub struct Basin {
     pub name: String,
     #[serde(default)]
-    pub config: Option<BasinConfigSpec>,
+    pub config: Option<BasinConfig>,
     #[serde(default)]
-    pub streams: Vec<StreamSpec>,
+    pub streams: Vec<Stream>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct StreamSpec {
+pub struct Stream {
     pub name: String,
     #[serde(default)]
-    pub config: Option<StreamConfigSpec>,
+    pub config: Option<StreamConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct BasinConfigSpec {
+pub struct BasinConfig {
     #[serde(default)]
-    pub default_stream_config: Option<StreamConfigSpec>,
+    pub default_stream_config: Option<StreamConfig>,
     /// Encryption algorithm to apply to newly created streams in the basin.
     #[serde(default)]
-    pub stream_cipher: Option<EncryptionAlgorithmSpec>,
+    pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
     pub create_stream_on_append: Option<bool>,
@@ -55,32 +47,32 @@ pub struct BasinConfigSpec {
 
 #[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct StreamConfigSpec {
+pub struct StreamConfig {
     /// Storage class for recent writes.
     #[serde(default)]
-    pub storage_class: Option<StorageClassSpec>,
+    pub storage_class: Option<StorageClass>,
     /// Retention policy for the stream. If unspecified, the default is to retain records for 7
     /// days.
     #[serde(default)]
-    pub retention_policy: Option<RetentionPolicySpec>,
+    pub retention_policy: Option<RetentionPolicy>,
     /// Timestamping behavior.
     #[serde(default)]
-    pub timestamping: Option<TimestampingSpec>,
+    pub timestamping: Option<Timestamping>,
     /// Delete-on-empty configuration.
     #[serde(default)]
-    pub delete_on_empty: Option<DeleteOnEmptySpec>,
+    pub delete_on_empty: Option<DeleteOnEmpty>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum StorageClassSpec {
+pub enum StorageClass {
     Standard,
     Express,
 }
 
-impl schemars::JsonSchema for StorageClassSpec {
+impl schemars::JsonSchema for StorageClass {
     fn schema_name() -> Cow<'static, str> {
-        "StorageClassSpec".into()
+        "StorageClass".into()
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -92,26 +84,26 @@ impl schemars::JsonSchema for StorageClassSpec {
     }
 }
 
-impl From<StorageClassSpec> for StorageClass {
-    fn from(s: StorageClassSpec) -> Self {
+impl From<StorageClass> for s2_common::config::StorageClass {
+    fn from(s: StorageClass) -> Self {
         match s {
-            StorageClassSpec::Standard => StorageClass::Standard,
-            StorageClassSpec::Express => StorageClass::Express,
+            StorageClass::Standard => Self::Standard,
+            StorageClass::Express => Self::Express,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum EncryptionAlgorithmSpec {
+pub enum EncryptionAlgorithm {
     #[serde(rename = "aegis-256")]
     Aegis256,
     #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
 }
 
-impl schemars::JsonSchema for EncryptionAlgorithmSpec {
+impl schemars::JsonSchema for EncryptionAlgorithm {
     fn schema_name() -> Cow<'static, str> {
-        "EncryptionAlgorithmSpec".into()
+        "EncryptionAlgorithm".into()
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -123,48 +115,50 @@ impl schemars::JsonSchema for EncryptionAlgorithmSpec {
     }
 }
 
-impl From<EncryptionAlgorithmSpec> for EncryptionAlgorithm {
-    fn from(m: EncryptionAlgorithmSpec) -> Self {
+impl From<EncryptionAlgorithm> for s2_common::encryption::EncryptionAlgorithm {
+    fn from(m: EncryptionAlgorithm) -> Self {
         match m {
-            EncryptionAlgorithmSpec::Aegis256 => Self::Aegis256,
-            EncryptionAlgorithmSpec::Aes256Gcm => Self::Aes256Gcm,
+            EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
 
 /// Accepts `"infinite"` or a humantime duration string such as `"7d"`, `"1w"`.
 #[derive(Debug, Clone, Copy)]
-pub struct RetentionPolicySpec(pub RetentionPolicy);
+pub struct RetentionPolicy(pub s2_common::config::RetentionPolicy);
 
-impl RetentionPolicySpec {
+impl RetentionPolicy {
     pub fn age_secs(self) -> Option<u64> {
         self.0.age().map(|d| d.as_secs())
     }
 }
 
-impl TryFrom<String> for RetentionPolicySpec {
+impl TryFrom<String> for RetentionPolicy {
     type Error = String;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
         if s.eq_ignore_ascii_case("infinite") {
-            return Ok(RetentionPolicySpec(RetentionPolicy::Infinite()));
+            return Ok(RetentionPolicy(
+                s2_common::config::RetentionPolicy::Infinite(),
+            ));
         }
         let d = humantime::parse_duration(&s)
             .map_err(|e| format!("invalid retention_policy {:?}: {}", s, e))?;
-        Ok(RetentionPolicySpec(RetentionPolicy::Age(d)))
+        Ok(RetentionPolicy(s2_common::config::RetentionPolicy::Age(d)))
     }
 }
 
-impl<'de> Deserialize<'de> for RetentionPolicySpec {
+impl<'de> Deserialize<'de> for RetentionPolicy {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        RetentionPolicySpec::try_from(s).map_err(serde::de::Error::custom)
+        RetentionPolicy::try_from(s).map_err(serde::de::Error::custom)
     }
 }
 
-impl schemars::JsonSchema for RetentionPolicySpec {
+impl schemars::JsonSchema for RetentionPolicy {
     fn schema_name() -> Cow<'static, str> {
-        "RetentionPolicySpec".into()
+        "RetentionPolicy".into()
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -179,10 +173,10 @@ impl schemars::JsonSchema for RetentionPolicySpec {
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct TimestampingSpec {
+pub struct Timestamping {
     /// Timestamping mode for appends that influences how timestamps are handled.
     #[serde(default)]
-    pub mode: Option<TimestampingModeSpec>,
+    pub mode: Option<TimestampingMode>,
     /// Allow client-specified timestamps to exceed the arrival time.
     /// If this is `false` or not set, client timestamps will be capped at the arrival time.
     #[serde(default)]
@@ -191,15 +185,15 @@ pub struct TimestampingSpec {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum TimestampingModeSpec {
+pub enum TimestampingMode {
     ClientPrefer,
     ClientRequire,
     Arrival,
 }
 
-impl schemars::JsonSchema for TimestampingModeSpec {
+impl schemars::JsonSchema for TimestampingMode {
     fn schema_name() -> Cow<'static, str> {
-        "TimestampingModeSpec".into()
+        "TimestampingMode".into()
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -211,19 +205,19 @@ impl schemars::JsonSchema for TimestampingModeSpec {
     }
 }
 
-impl From<TimestampingModeSpec> for TimestampingMode {
-    fn from(m: TimestampingModeSpec) -> Self {
+impl From<TimestampingMode> for s2_common::config::TimestampingMode {
+    fn from(m: TimestampingMode) -> Self {
         match m {
-            TimestampingModeSpec::ClientPrefer => TimestampingMode::ClientPrefer,
-            TimestampingModeSpec::ClientRequire => TimestampingMode::ClientRequire,
-            TimestampingModeSpec::Arrival => TimestampingMode::Arrival,
+            TimestampingMode::ClientPrefer => Self::ClientPrefer,
+            TimestampingMode::ClientRequire => Self::ClientRequire,
+            TimestampingMode::Arrival => Self::Arrival,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct DeleteOnEmptySpec {
+pub struct DeleteOnEmpty {
     /// Minimum age before an empty stream can be deleted.
     /// Set to 0 (default) to disable delete-on-empty (don't delete automatically).
     #[serde(default)]
@@ -265,9 +259,9 @@ impl schemars::JsonSchema for HumanDuration {
     }
 }
 
-impl From<BasinConfigSpec> for BasinConfig {
-    fn from(s: BasinConfigSpec) -> Self {
-        BasinConfig {
+impl From<BasinConfig> for s2_common::config::BasinConfig {
+    fn from(s: BasinConfig) -> Self {
+        Self {
             default_stream_config: s.default_stream_config.map(Into::into).unwrap_or_default(),
             stream_cipher: s.stream_cipher.map(Into::into),
             create_stream_on_append: s.create_stream_on_append.unwrap_or_default(),
@@ -276,26 +270,26 @@ impl From<BasinConfigSpec> for BasinConfig {
     }
 }
 
-impl From<TimestampingSpec> for OptionalTimestampingConfig {
-    fn from(s: TimestampingSpec) -> Self {
-        OptionalTimestampingConfig {
+impl From<Timestamping> for s2_common::config::OptionalTimestampingConfig {
+    fn from(s: Timestamping) -> Self {
+        Self {
             mode: s.mode.map(Into::into),
             uncapped: s.uncapped,
         }
     }
 }
 
-impl From<DeleteOnEmptySpec> for OptionalDeleteOnEmptyConfig {
-    fn from(s: DeleteOnEmptySpec) -> Self {
-        OptionalDeleteOnEmptyConfig {
+impl From<DeleteOnEmpty> for s2_common::config::OptionalDeleteOnEmptyConfig {
+    fn from(s: DeleteOnEmpty) -> Self {
+        Self {
             min_age: s.min_age.map(|h| h.0),
         }
     }
 }
 
-impl From<StreamConfigSpec> for OptionalStreamConfig {
-    fn from(s: StreamConfigSpec) -> Self {
-        OptionalStreamConfig {
+impl From<StreamConfig> for s2_common::config::OptionalStreamConfig {
+    fn from(s: StreamConfig) -> Self {
+        Self {
             storage_class: s.storage_class.map(Into::into),
             retention_policy: s.retention_policy.map(|rp| rp.0),
             timestamping: s.timestamping.map(Into::into).unwrap_or_default(),
@@ -305,10 +299,10 @@ impl From<StreamConfigSpec> for OptionalStreamConfig {
 }
 
 pub fn json_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(ResourcesSpec)).unwrap()
+    serde_json::to_value(schemars::schema_for!(Resources)).unwrap()
 }
 
-pub fn validate(spec: &ResourcesSpec) -> Result<(), String> {
+pub fn validate(spec: &Resources) -> Result<(), String> {
     let mut errors = Vec::new();
     let mut seen_basins = std::collections::HashSet::new();
 
@@ -350,7 +344,7 @@ pub fn validate(spec: &ResourcesSpec) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn parse_spec(json: &str) -> ResourcesSpec {
+    fn parse_spec(json: &str) -> Resources {
         serde_json::from_str(json).expect("valid JSON")
     }
 
@@ -371,22 +365,25 @@ mod tests {
 
     #[test]
     fn retention_policy_infinite() {
-        let rp: RetentionPolicySpec = serde_json::from_str(r#""infinite""#).expect("deserialize");
-        assert!(matches!(rp.0, RetentionPolicy::Infinite()));
+        let rp: RetentionPolicy = serde_json::from_str(r#""infinite""#).expect("deserialize");
+        assert!(matches!(
+            rp.0,
+            s2_common::config::RetentionPolicy::Infinite()
+        ));
     }
 
     #[test]
     fn retention_policy_duration() {
-        let rp: RetentionPolicySpec = serde_json::from_str(r#""7days""#).expect("deserialize");
-        assert!(matches!(rp.0, RetentionPolicy::Age(_)));
-        if let RetentionPolicy::Age(d) = rp.0 {
+        let rp: RetentionPolicy = serde_json::from_str(r#""7days""#).expect("deserialize");
+        assert!(matches!(rp.0, s2_common::config::RetentionPolicy::Age(_)));
+        if let s2_common::config::RetentionPolicy::Age(d) = rp.0 {
             assert_eq!(d, Duration::from_secs(7 * 24 * 3600));
         }
     }
 
     #[test]
     fn retention_policy_invalid() {
-        let err = serde_json::from_str::<RetentionPolicySpec>(r#""not-a-duration""#);
+        let err = serde_json::from_str::<RetentionPolicy>(r#""not-a-duration""#);
         assert!(err.is_err());
     }
 
@@ -441,14 +438,14 @@ mod tests {
         assert_eq!(config.create_stream_on_read, Some(false));
 
         let dsc = config.default_stream_config.as_ref().unwrap();
-        assert!(matches!(dsc.storage_class, Some(StorageClassSpec::Express)));
+        assert!(matches!(dsc.storage_class, Some(StorageClass::Express)));
         assert!(matches!(
             dsc.retention_policy.as_ref().map(|r| &r.0),
-            Some(RetentionPolicy::Age(_))
+            Some(s2_common::config::RetentionPolicy::Age(_))
         ));
 
         let ts = dsc.timestamping.as_ref().unwrap();
-        assert!(matches!(ts.mode, Some(TimestampingModeSpec::ClientPrefer)));
+        assert!(matches!(ts.mode, Some(TimestampingMode::ClientPrefer)));
         assert_eq!(ts.uncapped, Some(false));
 
         let doe = dsc.delete_on_empty.as_ref().unwrap();
@@ -461,27 +458,27 @@ mod tests {
         let stream = &basin.streams[0];
         assert_eq!(stream.name, "events");
         let sc = stream.config.as_ref().unwrap();
-        assert!(matches!(sc.storage_class, Some(StorageClassSpec::Standard)));
+        assert!(matches!(sc.storage_class, Some(StorageClass::Standard)));
         assert!(matches!(
             sc.retention_policy.as_ref().map(|r| &r.0),
-            Some(RetentionPolicy::Infinite())
+            Some(s2_common::config::RetentionPolicy::Infinite())
         ));
     }
 
     #[test]
     fn basin_config_conversion() {
-        let spec = BasinConfigSpec {
+        let spec = BasinConfig {
             default_stream_config: None,
             stream_cipher: None,
             create_stream_on_append: Some(true),
             create_stream_on_read: None,
         };
-        let config = BasinConfig::from(spec);
+        let config = s2_common::config::BasinConfig::from(spec);
         assert!(config.create_stream_on_append);
         assert!(!config.create_stream_on_read);
         assert_eq!(
             config.default_stream_config,
-            OptionalStreamConfig::default()
+            s2_common::config::OptionalStreamConfig::default()
         );
     }
 
@@ -565,19 +562,30 @@ mod tests {
 
     #[test]
     fn stream_config_conversion() {
-        let spec = StreamConfigSpec {
-            storage_class: Some(StorageClassSpec::Standard),
-            retention_policy: Some(RetentionPolicySpec(RetentionPolicy::Infinite())),
+        let spec = StreamConfig {
+            storage_class: Some(StorageClass::Standard),
+            retention_policy: Some(RetentionPolicy(
+                s2_common::config::RetentionPolicy::Infinite(),
+            )),
             timestamping: None,
             delete_on_empty: None,
         };
-        let config = OptionalStreamConfig::from(spec);
-        assert_eq!(config.storage_class, Some(StorageClass::Standard));
-        assert_eq!(config.retention_policy, Some(RetentionPolicy::Infinite()));
-        assert_eq!(config.timestamping, OptionalTimestampingConfig::default());
+        let config = s2_common::config::OptionalStreamConfig::from(spec);
+        assert_eq!(
+            config.storage_class,
+            Some(s2_common::config::StorageClass::Standard)
+        );
+        assert_eq!(
+            config.retention_policy,
+            Some(s2_common::config::RetentionPolicy::Infinite())
+        );
+        assert_eq!(
+            config.timestamping,
+            s2_common::config::OptionalTimestampingConfig::default()
+        );
         assert_eq!(
             config.delete_on_empty,
-            OptionalDeleteOnEmptyConfig::default()
+            s2_common::config::OptionalDeleteOnEmptyConfig::default()
         );
     }
 }

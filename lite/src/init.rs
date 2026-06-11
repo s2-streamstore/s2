@@ -10,20 +10,20 @@ use s2_common::{
     resources::ProvisionMode,
     stream::StreamName,
 };
-use s2_resource_spec::{self as resource_spec, ResourcesSpec};
+use s2_resource_spec as resource_spec;
 use tracing::info;
 
 use crate::backend::Backend;
 
-pub fn load(path: &Path) -> eyre::Result<ResourcesSpec> {
+pub fn load(path: &Path) -> eyre::Result<resource_spec::Resources> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| eyre::eyre!("failed to read init file {:?}: {}", path, e))?;
-    let spec: ResourcesSpec = serde_json::from_str(&contents)
+    let spec: resource_spec::Resources = serde_json::from_str(&contents)
         .map_err(|e| eyre::eyre!("failed to parse init file {:?}: {}", path, e))?;
     Ok(spec)
 }
 
-pub async fn apply(backend: &Backend, spec: ResourcesSpec) -> eyre::Result<()> {
+pub async fn apply(backend: &Backend, spec: resource_spec::Resources) -> eyre::Result<()> {
     resource_spec::validate(&spec).map_err(|e| eyre::eyre!(e))?;
 
     for basin_spec in spec.basins {

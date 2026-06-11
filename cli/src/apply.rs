@@ -12,10 +12,7 @@ use s2_common::{
     encryption::EncryptionAlgorithm,
     stream::StreamName,
 };
-use s2_resource_spec::{
-    BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec, StorageClassSpec,
-    StreamConfigSpec, TimestampingModeSpec, TimestampingSpec,
-};
+use s2_resource_spec as resource_spec;
 
 fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> BasinConfig {
     BasinConfig {
@@ -89,11 +86,11 @@ fn delete_on_empty_from_sdk(
     }
 }
 
-fn basin_config_spec_to_sdk(config: BasinConfigSpec) -> s2_sdk::types::BasinConfig {
+fn basin_config_to_sdk(config: resource_spec::BasinConfig) -> s2_sdk::types::BasinConfig {
     let mut sdk_config = s2_sdk::types::BasinConfig::new();
     if let Some(default_stream_config) = config.default_stream_config {
         sdk_config =
-            sdk_config.with_default_stream_config(stream_config_spec_to_sdk(default_stream_config));
+            sdk_config.with_default_stream_config(stream_config_to_sdk(default_stream_config));
     }
     if let Some(stream_cipher) = config.stream_cipher {
         sdk_config = sdk_config.with_stream_cipher(stream_cipher.into());
@@ -107,33 +104,32 @@ fn basin_config_spec_to_sdk(config: BasinConfigSpec) -> s2_sdk::types::BasinConf
     sdk_config
 }
 
-fn stream_config_spec_to_sdk(config: StreamConfigSpec) -> s2_sdk::types::StreamConfig {
+fn stream_config_to_sdk(config: resource_spec::StreamConfig) -> s2_sdk::types::StreamConfig {
     let mut sdk_config = s2_sdk::types::StreamConfig::new();
     if let Some(storage_class) = config.storage_class {
-        sdk_config = sdk_config.with_storage_class(storage_class_spec_to_sdk(storage_class));
+        sdk_config = sdk_config.with_storage_class(storage_class_to_sdk(storage_class));
     }
     if let Some(retention_policy) = config.retention_policy {
-        sdk_config =
-            sdk_config.with_retention_policy(retention_policy_spec_to_sdk(retention_policy));
+        sdk_config = sdk_config.with_retention_policy(retention_policy_to_sdk(retention_policy));
     }
     if let Some(timestamping) = config.timestamping {
-        sdk_config = sdk_config.with_timestamping(timestamping_spec_to_sdk(timestamping));
+        sdk_config = sdk_config.with_timestamping(timestamping_to_sdk(timestamping));
     }
-    if let Some(delete_on_empty) = config.delete_on_empty.and_then(delete_on_empty_spec_to_sdk) {
+    if let Some(delete_on_empty) = config.delete_on_empty.and_then(delete_on_empty_to_sdk) {
         sdk_config = sdk_config.with_delete_on_empty(delete_on_empty);
     }
     sdk_config
 }
 
-fn storage_class_spec_to_sdk(storage_class: StorageClassSpec) -> s2_sdk::types::StorageClass {
+fn storage_class_to_sdk(storage_class: resource_spec::StorageClass) -> s2_sdk::types::StorageClass {
     match storage_class {
-        StorageClassSpec::Standard => s2_sdk::types::StorageClass::Standard,
-        StorageClassSpec::Express => s2_sdk::types::StorageClass::Express,
+        resource_spec::StorageClass::Standard => s2_sdk::types::StorageClass::Standard,
+        resource_spec::StorageClass::Express => s2_sdk::types::StorageClass::Express,
     }
 }
 
-fn retention_policy_spec_to_sdk(
-    retention_policy: RetentionPolicySpec,
+fn retention_policy_to_sdk(
+    retention_policy: resource_spec::RetentionPolicy,
 ) -> s2_sdk::types::RetentionPolicy {
     match retention_policy.0 {
         RetentionPolicy::Age(duration) => s2_sdk::types::RetentionPolicy::Age(duration.as_secs()),
@@ -141,10 +137,12 @@ fn retention_policy_spec_to_sdk(
     }
 }
 
-fn timestamping_spec_to_sdk(timestamping: TimestampingSpec) -> s2_sdk::types::TimestampingConfig {
+fn timestamping_to_sdk(
+    timestamping: resource_spec::Timestamping,
+) -> s2_sdk::types::TimestampingConfig {
     let mut sdk_config = s2_sdk::types::TimestampingConfig::new();
     if let Some(mode) = timestamping.mode {
-        sdk_config = sdk_config.with_mode(timestamping_mode_spec_to_sdk(mode));
+        sdk_config = sdk_config.with_mode(timestamping_mode_to_sdk(mode));
     }
     if let Some(uncapped) = timestamping.uncapped {
         sdk_config = sdk_config.with_uncapped(uncapped);
@@ -152,16 +150,22 @@ fn timestamping_spec_to_sdk(timestamping: TimestampingSpec) -> s2_sdk::types::Ti
     sdk_config
 }
 
-fn timestamping_mode_spec_to_sdk(mode: TimestampingModeSpec) -> s2_sdk::types::TimestampingMode {
+fn timestamping_mode_to_sdk(
+    mode: resource_spec::TimestampingMode,
+) -> s2_sdk::types::TimestampingMode {
     match mode {
-        TimestampingModeSpec::ClientPrefer => s2_sdk::types::TimestampingMode::ClientPrefer,
-        TimestampingModeSpec::ClientRequire => s2_sdk::types::TimestampingMode::ClientRequire,
-        TimestampingModeSpec::Arrival => s2_sdk::types::TimestampingMode::Arrival,
+        resource_spec::TimestampingMode::ClientPrefer => {
+            s2_sdk::types::TimestampingMode::ClientPrefer
+        }
+        resource_spec::TimestampingMode::ClientRequire => {
+            s2_sdk::types::TimestampingMode::ClientRequire
+        }
+        resource_spec::TimestampingMode::Arrival => s2_sdk::types::TimestampingMode::Arrival,
     }
 }
 
-fn delete_on_empty_spec_to_sdk(
-    delete_on_empty: DeleteOnEmptySpec,
+fn delete_on_empty_to_sdk(
+    delete_on_empty: resource_spec::DeleteOnEmpty,
 ) -> Option<s2_sdk::types::DeleteOnEmptyConfig> {
     delete_on_empty
         .min_age
@@ -175,19 +179,19 @@ fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
     }
 }
 
-pub fn validate(spec: &ResourcesSpec) -> miette::Result<()> {
-    s2_resource_spec::validate(spec).map_err(|e| miette::miette!("{}", e))
+pub fn validate(spec: &resource_spec::Resources) -> miette::Result<()> {
+    resource_spec::validate(spec).map_err(|e| miette::miette!("{}", e))
 }
 
-pub fn load(path: &Path) -> miette::Result<ResourcesSpec> {
+pub fn load(path: &Path) -> miette::Result<resource_spec::Resources> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| miette::miette!("failed to read spec file {:?}: {}", path.display(), e))?;
-    let spec: ResourcesSpec = serde_json::from_str(&contents)
+    let spec: resource_spec::Resources = serde_json::from_str(&contents)
         .map_err(|e| miette::miette!("failed to parse spec file {:?}: {}", path.display(), e))?;
     Ok(spec)
 }
 
-pub async fn apply(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()> {
+pub async fn apply(s2: &s2_sdk::S2, spec: resource_spec::Resources) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
@@ -211,11 +215,11 @@ pub async fn apply(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()> {
 async fn apply_basin(
     s2: &s2_sdk::S2,
     basin: BasinName,
-    config: Option<BasinConfigSpec>,
+    config: Option<resource_spec::BasinConfig>,
 ) -> miette::Result<()> {
     let mut input = s2_sdk::types::EnsureBasinInput::new(basin.clone());
     if let Some(c) = config {
-        input = input.with_config(basin_config_spec_to_sdk(c));
+        input = input.with_config(basin_config_to_sdk(c));
     }
     match s2
         .ensure_basin(input)
@@ -242,13 +246,13 @@ async fn apply_stream(
     s2: &s2_sdk::S2,
     basin: BasinName,
     stream: StreamName,
-    config: Option<StreamConfigSpec>,
+    config: Option<resource_spec::StreamConfig>,
 ) -> miette::Result<()> {
     let basin_client = s2.basin(basin.clone());
 
     let mut input = s2_sdk::types::EnsureStreamInput::new(stream.clone());
     if let Some(c) = config {
-        input = input.with_config(stream_config_spec_to_sdk(c));
+        input = input.with_config(stream_config_to_sdk(c));
     }
     match basin_client.ensure_stream(input).await.map_err(|e| {
         miette::miette!(
@@ -427,7 +431,7 @@ fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<F
     diffs
 }
 
-fn spec_basin_fields(spec: &BasinConfigSpec) -> Vec<FieldDiff> {
+fn spec_basin_fields(spec: &resource_spec::BasinConfig) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
 
     if let Some(algorithm) = spec.stream_cipher.clone().map(EncryptionAlgorithm::from) {
@@ -464,7 +468,7 @@ fn spec_basin_fields(spec: &BasinConfigSpec) -> Vec<FieldDiff> {
     fields
 }
 
-fn spec_stream_fields(spec: &StreamConfigSpec) -> Vec<FieldDiff> {
+fn spec_stream_fields(spec: &resource_spec::StreamConfig) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
 
     if let Some(ref sc) = spec.storage_class {
@@ -544,7 +548,7 @@ fn print_stream_result(basin: &str, stream: &str, action: &ResourceAction) {
     }
 }
 
-fn print_basin_create(basin: &str, spec: &Option<BasinConfigSpec>) {
+fn print_basin_create(basin: &str, spec: &Option<resource_spec::BasinConfig>) {
     println!("{}", format!("+ basin {basin}").green().bold());
     if let Some(config) = spec {
         for field in spec_basin_fields(config) {
@@ -553,7 +557,7 @@ fn print_basin_create(basin: &str, spec: &Option<BasinConfigSpec>) {
     }
 }
 
-fn print_stream_create(basin: &str, stream: &str, spec: &Option<StreamConfigSpec>) {
+fn print_stream_create(basin: &str, stream: &str, spec: &Option<resource_spec::StreamConfig>) {
     println!("{}", format!("  + stream {basin}/{stream}").green().bold());
     if let Some(config) = spec {
         for field in spec_stream_fields(config) {
@@ -562,7 +566,7 @@ fn print_stream_create(basin: &str, stream: &str, spec: &Option<StreamConfigSpec
     }
 }
 
-pub async fn dry_run(s2: &s2_sdk::S2, spec: ResourcesSpec) -> miette::Result<()> {
+pub async fn dry_run(s2: &s2_sdk::S2, spec: resource_spec::Resources) -> miette::Result<()> {
     validate(&spec)?;
 
     for basin_spec in spec.basins {
