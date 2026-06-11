@@ -15,7 +15,7 @@ pub use iterator::StoredRecordIterator;
 use s2_common::{
     deep_size::DeepSize,
     encryption::EncryptionAlgorithm,
-    record::{CommandRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum, Sequenced},
+    record::{CommandRecord, Metered, MeteredSize, Record, SeqNum, Sequenced},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -262,17 +262,12 @@ pub fn decode_stored_record(
             StoredRecord::encrypted(EncryptedRecord::try_from(buf)?, metered_size)
         }
     };
-    if record.metered_size() != metered_size {
-        return Err(StoredRecordDecodeError::InvalidValue(
-            "MeteredSize",
-            "metered size mismatch",
-        ));
-    }
-    Ok(record.metered())
+    Ok(Metered::with_size(metered_size, record))
 }
 
 pub fn decode_record(buf: Bytes) -> Result<Metered<Record>, StoredRecordDecodeError> {
     let stored = decode_stored_record(buf)?;
+    let metered_size = stored.metered_size();
     match stored.into_inner() {
         StoredRecord::Plaintext(record) => Ok(record),
         StoredRecord::Encrypted { .. } => Err(StoredRecordDecodeError::InvalidValue(
@@ -280,14 +275,16 @@ pub fn decode_record(buf: Bytes) -> Result<Metered<Record>, StoredRecordDecodeEr
             "encrypted envelope requires decryption",
         )),
     }
-    .map(Metered::from)
+    .map(|record| Metered::with_size(metered_size, record))
 }
 
 #[cfg(test)]
 mod test {
     use proptest::prelude::*;
     use rstest::rstest;
-    use s2_common::record::{Header, MAX_FENCING_TOKEN_LENGTH, StreamPosition, Timestamp};
+    use s2_common::record::{
+        EnvelopeRecord, Header, MAX_FENCING_TOKEN_LENGTH, MeteredExt, StreamPosition, Timestamp,
+    };
 
     use super::*;
 
@@ -480,6 +477,103 @@ mod test {
             result,
             Err(StoredRecordDecodeError::Truncated("MeteredSize"))
         );
+    }
+
+    #[rstest]
+    #[case::envelope_empty_headers(
+        StoredRecord::from(Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap()
+        )),
+        &[
+            0x02, 0x0d, // envelope record, metered size 13
+            0x00, // no headers
+            b'h', b'e', b'l', b'l', b'o',
+        ],
+    )]
+    #[case::envelope_with_header(
+        StoredRecord::from(Record::Envelope(
+            EnvelopeRecord::try_from_parts(
+                vec![Header {
+                    name: Bytes::from_static(b"k"),
+                    value: Bytes::from_static(b"v"),
+                }],
+                Bytes::from_static(b"b"),
+            ).unwrap()
+        )),
+        &[
+            0x02, 0x0d, // envelope record, metered size 13
+            0x10, 0x01, // one header, one byte for num headers
+            0x01, b'k',
+            0x01, b'v',
+            b'b',
+        ],
+    )]
+    #[case::command_trim(
+        StoredRecord::from(Record::Command(CommandRecord::Trim(42))),
+        &[
+            0x01, 0x16, // command record, metered size 22
+            0x01, // trim command ordinal
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x2a,
+        ],
+    )]
+    fn stored_record_encoding_matches_existing_wire_format(
+        #[case] record: StoredRecord,
+        #[case] expected: &[u8],
+    ) {
+        let encoded = record.clone().metered().as_ref().to_bytes();
+
+        assert_eq!(encoded.as_ref(), expected);
+        assert_eq!(decode_stored_record(encoded).unwrap().into_inner(), record);
+    }
+
+    #[test]
+    fn encrypted_stored_record_encoding_matches_existing_wire_format() {
+        let encrypted_payload = Bytes::from_static(b"\x020123456789abciphertext0123456789abcdef");
+        let record = StoredRecord::encrypted(
+            EncryptedRecord::try_from(encrypted_payload.clone()).unwrap(),
+            123,
+        );
+
+        let encoded = record.clone().metered().as_ref().to_bytes();
+
+        assert_eq!(
+            encoded.as_ref(),
+            [&[0x03, 0x7b], encrypted_payload.as_ref()].concat()
+        );
+        assert_eq!(decode_stored_record(encoded).unwrap().into_inner(), record);
+    }
+
+    #[test]
+    fn decode_stored_record_preserves_encoded_metered_size_prefix() {
+        let record = StoredRecord::from(Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
+        ));
+        let mut encoded = record.clone().metered().as_ref().to_bytes().to_vec();
+        encoded[1] = 99;
+
+        let decoded = decode_stored_record(Bytes::from(encoded)).unwrap();
+
+        assert_eq!(decoded.metered_size(), 99);
+        assert_eq!(decoded.into_inner(), record);
+    }
+
+    #[test]
+    fn decode_record_preserves_encoded_metered_size_prefix() {
+        let record = Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap(),
+        );
+        let mut encoded = StoredRecord::from(record.clone())
+            .metered()
+            .as_ref()
+            .to_bytes()
+            .to_vec();
+        encoded[1] = 99;
+
+        let decoded = decode_record(Bytes::from(encoded)).unwrap();
+
+        assert_eq!(decoded.metered_size(), 99);
+        assert_eq!(decoded.into_inner(), record);
     }
 
     #[test]
