@@ -20,7 +20,7 @@ use s2_common::{
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
-pub enum RecordType {
+enum RecordType {
     Command = 1,
     Envelope = 2,
     EncryptedEnvelope = 3,
@@ -40,9 +40,9 @@ impl TryFrom<u8> for RecordType {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub struct MagicByte {
-    pub record_type: RecordType,
-    pub metered_size_varlen: u8,
+struct MagicByte {
+    record_type: RecordType,
+    metered_size_varlen: u8,
 }
 
 /// Read bytes to u32 in big-endian order.
