@@ -4,7 +4,7 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
-        resources::{ListItemsRequestParts, Page, ProvisionMode, ProvisionResult, RequestToken},
+        resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
@@ -39,11 +39,11 @@ impl Backend {
         basin: BasinName,
         request: ListStreamsRequest,
     ) -> Result<Page<StreamInfo>, ListStreamsError> {
-        let ListItemsRequestParts {
+        let ListStreamsRequest {
             prefix,
             start_after,
             limit,
-        } = request.into();
+        } = request;
 
         let key_range = kv::stream_meta::ser_key_range(&basin, &prefix, &start_after);
         if key_range.is_empty() {

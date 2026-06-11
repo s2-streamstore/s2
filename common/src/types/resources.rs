@@ -60,59 +60,10 @@ impl From<ListLimit> for usize {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ListItemsRequestParts<P, S> {
+pub struct ListItemsRequest<P, S> {
     pub prefix: P,
     pub start_after: S,
     pub limit: ListLimit,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ListItemsRequest<P, S>(ListItemsRequestParts<P, S>)
-where
-    P: Default,
-    S: Default;
-
-impl<P, S> ListItemsRequest<P, S>
-where
-    P: Default,
-    S: Default,
-{
-    pub fn parts(&self) -> &ListItemsRequestParts<P, S> {
-        &self.0
-    }
-}
-
-impl<P, S> From<ListItemsRequest<P, S>> for ListItemsRequestParts<P, S>
-where
-    P: Default,
-    S: Default,
-{
-    fn from(ListItemsRequest(parts): ListItemsRequest<P, S>) -> Self {
-        parts
-    }
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("`start_after` must be greater than or equal to the `prefix`")]
-pub struct StartAfterLessThanPrefixError;
-
-impl<P, S> TryFrom<ListItemsRequestParts<P, S>> for ListItemsRequest<P, S>
-where
-    P: Deref<Target = str> + Default,
-    S: Deref<Target = str> + Default,
-{
-    type Error = StartAfterLessThanPrefixError;
-
-    fn try_from(parts: ListItemsRequestParts<P, S>) -> Result<Self, Self::Error> {
-        let start_after: &str = &parts.start_after;
-        let prefix: &str = &parts.prefix;
-
-        if !start_after.is_empty() && !prefix.is_empty() && start_after < prefix {
-            return Err(StartAfterLessThanPrefixError);
-        }
-
-        Ok(Self(parts))
-    }
 }
 
 /// Mode for provisioning a resource.
@@ -184,7 +135,6 @@ impl<T> ProvisionResult<T> {
         }
     }
 }
-
 pub static REQUEST_TOKEN_HEADER: http::HeaderName =
     http::HeaderName::from_static("s2-request-token");
 

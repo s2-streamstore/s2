@@ -1,6 +1,6 @@
 [package]
 name = "s2-cli"
-version = "0.36.2"
+version = "0.36.5"
 description = "CLI for S2"
 edition.workspace = true
 license.workspace = true
@@ -58,5 +58,5 @@ predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }
 s2-api = { workspace = true }
-serial_test = "3.4"
+serial_test = "3.5"
 tempfile = "3.27"

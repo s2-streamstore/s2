@@ -311,51 +311,6 @@ async fn list_streams_with_start_after_returns_empty_page(basin: &S2Basin) -> Re
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_start_after_less_than_prefix_errors(
-    basin: &S2Basin,
-) -> Result<(), S2Error> {
-    let prefix = uuid();
-    let stream_name_1: StreamName = format!("{}-a-a", prefix)
-        .parse()
-        .expect("valid stream name");
-    let stream_name_2: StreamName = format!("{}-a-b", prefix)
-        .parse()
-        .expect("valid stream name");
-    let stream_name_3: StreamName = format!("{}-b-a", prefix)
-        .parse()
-        .expect("valid stream name");
-
-    basin
-        .create_stream(CreateStreamInput::new(stream_name_1.clone()))
-        .await?;
-    basin
-        .create_stream(CreateStreamInput::new(stream_name_2.clone()))
-        .await?;
-    basin
-        .create_stream(CreateStreamInput::new(stream_name_3.clone()))
-        .await?;
-
-    let result = basin
-        .list_streams(
-            ListStreamsInput::new()
-                .with_prefix(format!("{}-b", prefix).parse().expect("valid prefix"))
-                .with_start_after(format!("{}-a", prefix).parse().expect("valid start after")),
-        )
-        .await;
-
-    assert_matches!(
-        result,
-        Err(S2Error::Server(ErrorResponse { code, message, .. })) => {
-            assert_eq!(code, "invalid");
-            assert_eq!(message, "`start_after` must be greater than or equal to the `prefix`");
-        }
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Basin)]
-#[tokio_shared_rt::test(shared)]
 async fn delete_nonexistent_stream_errors(basin: &S2Basin) -> Result<(), S2Error> {
     let result = basin
         .delete_stream(DeleteStreamInput::new(unique_stream_name()))

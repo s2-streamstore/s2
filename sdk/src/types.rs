@@ -1079,8 +1079,6 @@ pub struct ListBasinsInput {
     pub prefix: BasinNamePrefix,
     /// Filter basins whose names are lexicographically greater than this value.
     ///
-    /// **Note:** It must be greater than or equal to [`prefix`](ListBasinsInput::prefix).
-    ///
     /// Defaults to `""`.
     pub start_after: BasinNameStartAfter,
     /// Number of basins to return in a page. Will be clamped to a maximum of `1000`.
@@ -1136,8 +1134,6 @@ pub struct ListAllBasinsInput {
     /// Defaults to `""`.
     pub prefix: BasinNamePrefix,
     /// Filter basins whose names are lexicographically greater than this value.
-    ///
-    /// **Note:** It must be greater than or equal to [`prefix`](ListAllBasinsInput::prefix).
     ///
     /// Defaults to `""`.
     pub start_after: BasinNameStartAfter,
@@ -1462,8 +1458,6 @@ pub struct ListAccessTokensInput {
     pub prefix: AccessTokenIdPrefix,
     /// Filter access tokens whose IDs are lexicographically greater than this value.
     ///
-    /// **Note:** It must be greater than or equal to [`prefix`](ListAccessTokensInput::prefix).
-    ///
     /// Defaults to `""`.
     pub start_after: AccessTokenIdStartAfter,
     /// Number of access tokens to return in a page. Will be clamped to a maximum of `1000`.
@@ -1519,8 +1513,6 @@ pub struct ListAllAccessTokensInput {
     /// Defaults to `""`.
     pub prefix: AccessTokenIdPrefix,
     /// Filter access tokens whose IDs are lexicographically greater than this value.
-    ///
-    /// **Note:** It must be greater than or equal to [`prefix`](ListAllAccessTokensInput::prefix).
     ///
     /// Defaults to `""`.
     pub start_after: AccessTokenIdStartAfter,
@@ -2587,8 +2579,6 @@ pub struct ListStreamsInput {
     pub prefix: StreamNamePrefix,
     /// Filter streams whose names are lexicographically greater than this value.
     ///
-    /// **Note:** It must be greater than or equal to [`prefix`](ListStreamsInput::prefix).
-    ///
     /// Defaults to `""`.
     pub start_after: StreamNameStartAfter,
     /// Number of streams to return in a page. Will be clamped to a maximum of `1000`.
@@ -2644,8 +2634,6 @@ pub struct ListAllStreamsInput {
     /// Defaults to `""`.
     pub prefix: StreamNamePrefix,
     /// Filter streams whose names are lexicographically greater than this value.
-    ///
-    /// **Note:** It must be greater than or equal to [`prefix`](ListAllStreamsInput::prefix).
     ///
     /// Defaults to `""`.
     pub start_after: StreamNameStartAfter,

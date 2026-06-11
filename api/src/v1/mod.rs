@@ -57,11 +57,11 @@ macro_rules! impl_list_request_conversions {
                     limit,
                 } = value;
 
-                Ok(Self::try_from(types::resources::ListItemsRequestParts {
+                Ok(Self {
                     prefix: prefix.unwrap_or_default(),
                     start_after: start_after.unwrap_or_default(),
                     limit: limit.map(Into::into).unwrap_or_default(),
-                })?)
+                })
             }
         }
     };

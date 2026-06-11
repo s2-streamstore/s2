@@ -9,7 +9,7 @@ use s2_common::{
             RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
             TimestampingReconfiguration,
         },
-        resources::{ListItemsRequestParts, ProvisionMode, ProvisionResult, RequestToken},
+        resources::{ProvisionMode, ProvisionResult, RequestToken},
     },
 };
 use s2_lite::backend::error::{
@@ -503,15 +503,11 @@ async fn test_list_basins_pagination() {
     }
 
     let page1 = backend
-        .list_basins(
-            ListItemsRequestParts {
-                prefix: BasinNamePrefix::default(),
-                start_after: BasinNameStartAfter::default(),
-                limit: 5.into(),
-            }
-            .try_into()
-            .unwrap(),
-        )
+        .list_basins(ListBasinsRequest {
+            prefix: BasinNamePrefix::default(),
+            start_after: BasinNameStartAfter::default(),
+            limit: 5.into(),
+        })
         .await
         .expect("Failed to list basins page 1");
 
@@ -529,15 +525,11 @@ async fn test_list_basins_pagination() {
     );
 
     let page2 = backend
-        .list_basins(
-            ListItemsRequestParts {
-                prefix: BasinNamePrefix::default(),
-                start_after: page1.values.last().unwrap().name.clone().into(),
-                limit: 5.into(),
-            }
-            .try_into()
-            .unwrap(),
-        )
+        .list_basins(ListBasinsRequest {
+            prefix: BasinNamePrefix::default(),
+            start_after: page1.values.last().unwrap().name.clone().into(),
+            limit: 5.into(),
+        })
         .await
         .expect("Failed to list basins page 2");
 
@@ -555,15 +547,11 @@ async fn test_list_basins_pagination() {
     );
 
     let page3 = backend
-        .list_basins(
-            ListItemsRequestParts {
-                prefix: BasinNamePrefix::default(),
-                start_after: page2.values.last().unwrap().name.clone().into(),
-                limit: 5.into(),
-            }
-            .try_into()
-            .unwrap(),
-        )
+        .list_basins(ListBasinsRequest {
+            prefix: BasinNamePrefix::default(),
+            start_after: page2.values.last().unwrap().name.clone().into(),
+            limit: 5.into(),
+        })
         .await
         .expect("Failed to list basins page 3");
 
@@ -591,15 +579,11 @@ async fn test_list_basins_prefix_filter() {
     create_test_basin(&backend, "staging-app-1", BasinConfig::default()).await;
 
     let prod_basins = backend
-        .list_basins(
-            ListItemsRequestParts {
-                prefix: "test-basin-prod-".parse().unwrap(),
-                start_after: BasinNameStartAfter::default(),
-                limit: Default::default(),
-            }
-            .try_into()
-            .unwrap(),
-        )
+        .list_basins(ListBasinsRequest {
+            prefix: "test-basin-prod-".parse().unwrap(),
+            start_after: BasinNameStartAfter::default(),
+            limit: Default::default(),
+        })
         .await
         .expect("Failed to list basins with prefix");
 
@@ -629,15 +613,11 @@ async fn test_list_basins_prefix_with_pagination() {
     create_test_basin(&backend, "other-basin", BasinConfig::default()).await;
 
     let page1 = backend
-        .list_basins(
-            ListItemsRequestParts {
-                prefix: "test-basin-prefixed-".parse().unwrap(),
-                start_after: BasinNameStartAfter::default(),
-                limit: 4.into(),
-            }
-            .try_into()
-            .unwrap(),
-        )
+        .list_basins(ListBasinsRequest {
+            prefix: "test-basin-prefixed-".parse().unwrap(),
+            start_after: BasinNameStartAfter::default(),
+            limit: 4.into(),
+        })
         .await
         .expect("Failed to list basins");
 
@@ -654,15 +634,11 @@ async fn test_list_basins_prefix_with_pagination() {
     );
 
     let page2 = backend
-        .list_basins(
-            ListItemsRequestParts {
-                prefix: "test-basin-prefixed-".parse().unwrap(),
-                start_after: page1.values.last().unwrap().name.clone().into(),
-                limit: 4.into(),
-            }
-            .try_into()
-            .unwrap(),
-        )
+        .list_basins(ListBasinsRequest {
+            prefix: "test-basin-prefixed-".parse().unwrap(),
+            start_after: page1.values.last().unwrap().name.clone().into(),
+            limit: 4.into(),
+        })
         .await
         .expect("Failed to list basins");
 
@@ -679,15 +655,11 @@ async fn test_list_basins_prefix_with_pagination() {
     );
 
     let page3 = backend
-        .list_basins(
-            ListItemsRequestParts {
-                prefix: "test-basin-prefixed-".parse().unwrap(),
-                start_after: page2.values.last().unwrap().name.clone().into(),
-                limit: 4.into(),
-            }
-            .try_into()
-            .unwrap(),
-        )
+        .list_basins(ListBasinsRequest {
+            prefix: "test-basin-prefixed-".parse().unwrap(),
+            start_after: page2.values.last().unwrap().name.clone().into(),
+            limit: 4.into(),
+        })
         .await
         .expect("Failed to list basins");
 
