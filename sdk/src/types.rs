@@ -3529,7 +3529,12 @@ pub struct SequencedRecord {
 impl SequencedRecord {
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
-    pub fn new(seq_num: u64, timestamp: u64, headers: Vec<Header>, body: impl Into<Bytes>) -> Self {
+    pub fn from_parts(
+        seq_num: u64,
+        timestamp: u64,
+        headers: Vec<Header>,
+        body: impl Into<Bytes>,
+    ) -> Self {
         Self {
             seq_num,
             timestamp,
@@ -3674,6 +3679,7 @@ fn idempotency_token() -> String {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use rstest::rstest;
 
     use super::*;
 
@@ -3758,44 +3764,32 @@ mod tests {
 
     // -- AccountEndpoint --
 
-    #[test]
-    fn account_endpoint_parse_with_scheme() {
-        let ep: AccountEndpoint = "https://aws.s2.dev".parse().unwrap();
-        assert_eq!(ep.scheme, Scheme::HTTPS);
-    }
-
-    #[test]
-    fn account_endpoint_parse_http() {
-        let ep: AccountEndpoint = "http://localhost:8080".parse().unwrap();
-        assert_eq!(ep.scheme, Scheme::HTTP);
-    }
-
-    #[test]
-    fn account_endpoint_defaults_to_https() {
-        let ep: AccountEndpoint = "aws.s2.dev".parse().unwrap();
-        assert_eq!(ep.scheme, Scheme::HTTPS);
+    #[rstest]
+    #[case::https_with_scheme("https://aws.s2.dev", Scheme::HTTPS)]
+    #[case::http_with_scheme("http://localhost:8080", Scheme::HTTP)]
+    #[case::default_https("aws.s2.dev", Scheme::HTTPS)]
+    fn account_endpoint_parse(#[case] input: &str, #[case] expected_scheme: Scheme) {
+        let ep: AccountEndpoint = input.parse().unwrap();
+        assert_eq!(ep.scheme, expected_scheme);
     }
 
     // -- BasinEndpoint --
 
-    #[test]
-    fn basin_endpoint_parse_parent_zone() {
-        let ep: BasinEndpoint = "https://{basin}.b.s2.dev".parse().unwrap();
-        assert_eq!(ep.scheme, Scheme::HTTPS);
-        assert!(matches!(ep.authority, BasinAuthority::ParentZone(_)));
-    }
-
-    #[test]
-    fn basin_endpoint_parse_direct() {
-        let ep: BasinEndpoint = "http://localhost:8080".parse().unwrap();
-        assert_eq!(ep.scheme, Scheme::HTTP);
-        assert!(matches!(ep.authority, BasinAuthority::Direct(_)));
-    }
-
-    #[test]
-    fn basin_endpoint_defaults_to_https() {
-        let ep: BasinEndpoint = "{basin}.b.s2.dev".parse().unwrap();
-        assert_eq!(ep.scheme, Scheme::HTTPS);
+    #[rstest]
+    #[case::https_parent_zone("https://{basin}.b.s2.dev", Scheme::HTTPS, true)]
+    #[case::http_direct("http://localhost:8080", Scheme::HTTP, false)]
+    #[case::default_https_parent_zone("{basin}.b.s2.dev", Scheme::HTTPS, true)]
+    fn basin_endpoint_parse(
+        #[case] input: &str,
+        #[case] expected_scheme: Scheme,
+        #[case] expected_parent_zone: bool,
+    ) {
+        let ep: BasinEndpoint = input.parse().unwrap();
+        assert_eq!(ep.scheme, expected_scheme);
+        assert_eq!(
+            matches!(ep.authority, BasinAuthority::ParentZone(_)),
+            expected_parent_zone
+        );
     }
 
     // -- S2Endpoints --
@@ -3818,16 +3812,12 @@ mod tests {
 
     // -- Compression --
 
-    #[test]
-    fn compression_conversion_roundtrip() {
-        let cases = [
-            (Compression::None, CompressionAlgorithm::None),
-            (Compression::Gzip, CompressionAlgorithm::Gzip),
-            (Compression::Zstd, CompressionAlgorithm::Zstd),
-        ];
-        for (sdk, api) in cases {
-            assert_eq!(CompressionAlgorithm::from(sdk), api);
-        }
+    #[rstest]
+    #[case::none(Compression::None, CompressionAlgorithm::None)]
+    #[case::gzip(Compression::Gzip, CompressionAlgorithm::Gzip)]
+    #[case::zstd(Compression::Zstd, CompressionAlgorithm::Zstd)]
+    fn compression_conversion(#[case] sdk: Compression, #[case] api: CompressionAlgorithm) {
+        assert_eq!(CompressionAlgorithm::from(sdk), api);
     }
 
     // -- RetryConfig --
@@ -3859,60 +3849,46 @@ mod tests {
 
     // -- StorageClass --
 
-    #[test]
-    fn storage_class_roundtrip() {
-        let sdk_standard = StorageClass::Standard;
-        let api_standard: api::config::StorageClass = sdk_standard.into();
-        let back: StorageClass = api_standard.into();
-        assert_eq!(back, StorageClass::Standard);
-
-        let sdk_express = StorageClass::Express;
-        let api_express: api::config::StorageClass = sdk_express.into();
-        let back: StorageClass = api_express.into();
-        assert_eq!(back, StorageClass::Express);
+    #[rstest]
+    #[case::standard(StorageClass::Standard)]
+    #[case::express(StorageClass::Express)]
+    fn storage_class_roundtrip(#[case] sdk: StorageClass) {
+        let api: api::config::StorageClass = sdk.into();
+        let back: StorageClass = api.into();
+        assert_eq!(back, sdk);
     }
 
     // -- RetentionPolicy --
 
-    #[test]
-    fn retention_policy_age_roundtrip() {
-        let sdk = RetentionPolicy::Age(3600);
+    #[rstest]
+    #[case::age(RetentionPolicy::Age(3600))]
+    #[case::infinite(RetentionPolicy::Infinite)]
+    fn retention_policy_roundtrip(#[case] sdk: RetentionPolicy) {
         let api: api::config::RetentionPolicy = sdk.into();
         let back: RetentionPolicy = api.into();
-        assert_eq!(back, RetentionPolicy::Age(3600));
-    }
-
-    #[test]
-    fn retention_policy_infinite_roundtrip() {
-        let sdk = RetentionPolicy::Infinite;
-        let api: api::config::RetentionPolicy = sdk.into();
-        let back: RetentionPolicy = api.into();
-        assert_eq!(back, RetentionPolicy::Infinite);
+        assert_eq!(back, sdk);
     }
 
     // -- TimestampingMode --
 
-    #[test]
-    fn timestamping_mode_roundtrip() {
-        for (sdk, api) in [
-            (
-                TimestampingMode::ClientPrefer,
-                api::config::TimestampingMode::ClientPrefer,
-            ),
-            (
-                TimestampingMode::ClientRequire,
-                api::config::TimestampingMode::ClientRequire,
-            ),
-            (
-                TimestampingMode::Arrival,
-                api::config::TimestampingMode::Arrival,
-            ),
-        ] {
-            let converted: api::config::TimestampingMode = sdk.into();
-            assert_eq!(converted, api);
-            let back: TimestampingMode = converted.into();
-            assert_eq!(back, sdk);
-        }
+    #[rstest]
+    #[case::client_prefer(
+        TimestampingMode::ClientPrefer,
+        api::config::TimestampingMode::ClientPrefer
+    )]
+    #[case::client_require(
+        TimestampingMode::ClientRequire,
+        api::config::TimestampingMode::ClientRequire
+    )]
+    #[case::arrival(TimestampingMode::Arrival, api::config::TimestampingMode::Arrival)]
+    fn timestamping_mode_roundtrip(
+        #[case] sdk: TimestampingMode,
+        #[case] expected_api: api::config::TimestampingMode,
+    ) {
+        let converted: api::config::TimestampingMode = sdk.into();
+        assert_eq!(converted, expected_api);
+        let back: TimestampingMode = converted.into();
+        assert_eq!(back, sdk);
     }
 
     // -- TimestampingConfig --
@@ -4137,37 +4113,18 @@ mod tests {
 
     // -- SequencedRecord --
 
-    #[test]
-    fn sequenced_record_is_command_record() {
-        let cmd = SequencedRecord {
+    #[rstest]
+    #[case::command(vec![Header::new("", "fence")], true)]
+    #[case::regular(vec![Header::new("key", "value")], false)]
+    #[case::no_headers(vec![], false)]
+    fn sequenced_record_command_detection(#[case] headers: Vec<Header>, #[case] expected: bool) {
+        let record = SequencedRecord {
             seq_num: 0,
             body: Bytes::from("data"),
-            headers: vec![Header::new("", "fence")],
+            headers,
             timestamp: 0,
         };
-        assert!(cmd.is_command_record());
-    }
-
-    #[test]
-    fn sequenced_record_is_not_command_record() {
-        let regular = SequencedRecord {
-            seq_num: 0,
-            body: Bytes::from("data"),
-            headers: vec![Header::new("key", "value")],
-            timestamp: 0,
-        };
-        assert!(!regular.is_command_record());
-    }
-
-    #[test]
-    fn sequenced_record_no_headers_is_not_command_record() {
-        let regular = SequencedRecord {
-            seq_num: 0,
-            body: Bytes::from("data"),
-            headers: vec![],
-            timestamp: 0,
-        };
-        assert!(!regular.is_command_record());
+        assert_eq!(record.is_command_record(), expected);
     }
 
     // -- ReadStart --

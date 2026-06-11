@@ -75,6 +75,11 @@ mod tests {
 
     use super::*;
 
+    fn string_strategy(max_chars: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..=max_chars)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
     #[test]
     fn primitives() {
         assert_eq!(42u64.deep_size(), size_of::<u64>());
@@ -122,7 +127,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn string_deep_size_matches_byte_len(s in ".{0,256}") {
+        fn string_deep_size_matches_byte_len(s in string_strategy(256)) {
             prop_assert_eq!(s.deep_size(), s.len());
         }
 
@@ -141,7 +146,7 @@ mod tests {
 
         #[test]
         fn nested_vec_of_strings_sums_string_lengths(
-            values in prop::collection::vec(proptest::string::string_regex(".{0,64}").unwrap(), 0..=32),
+            values in prop::collection::vec(string_strategy(64), 0..=32),
         ) {
             let expected = values.iter().map(String::len).sum::<usize>();
             prop_assert_eq!(values.deep_size(), expected);

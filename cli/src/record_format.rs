@@ -399,7 +399,7 @@ mod tests {
 
     use bytes::Bytes;
     use futures::StreamExt;
-    use proptest::prelude::*;
+    use proptest::{prelude::*, test_runner::TestCaseResult};
     use s2_sdk::types::Header;
 
     use super::*;
@@ -417,17 +417,22 @@ mod tests {
             .prop_map(|bytes| String::from_utf8(bytes).unwrap())
     }
 
+    fn string_strategy(max_len: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..=max_len)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
     fn bytes_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
         prop::collection::vec(any::<u8>(), 0..=max_len)
     }
 
     fn sequenced_record(
         seq_num: u64,
-        body: Bytes,
-        headers: Vec<Header>,
         timestamp: u64,
+        headers: Vec<Header>,
+        body: Bytes,
     ) -> SequencedRecord {
-        SequencedRecord::new(seq_num, timestamp, headers, body)
+        SequencedRecord::from_parts(seq_num, timestamp, headers, body)
     }
 
     async fn parse_text_line(line: String) -> AppendRecord {
@@ -438,20 +443,25 @@ mod tests {
         record
     }
 
-    async fn parse_json_line(line: String) -> AppendRecord {
+    async fn parse_json_line<const BIN_SAFE: bool>(line: String) -> AppendRecord {
         let lines = futures::stream::iter(vec![Ok(line)]);
-        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        let mut stream =
+            <super::json::Formatter<BIN_SAFE> as RecordParser<_>>::parse_records(lines);
         let record = stream.next().await.unwrap().unwrap();
         assert!(stream.next().await.is_none());
         record
     }
 
-    async fn parse_json_base64_line(line: String) -> AppendRecord {
-        let lines = futures::stream::iter(vec![Ok(line)]);
-        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
-        let record = stream.next().await.unwrap().unwrap();
-        assert!(stream.next().await.is_none());
-        record
+    fn prop_assert_headers_eq<E>(actual: &[Header], expected: &[(E, E)]) -> TestCaseResult
+    where
+        E: AsRef<[u8]>,
+    {
+        prop_assert_eq!(actual.len(), expected.len());
+        for (actual, (expected_name, expected_value)) in actual.iter().zip(expected.iter()) {
+            prop_assert_eq!(actual.name.as_ref(), expected_name.as_ref());
+            prop_assert_eq!(actual.value.as_ref(), expected_value.as_ref());
+        }
+        Ok(())
     }
 
     // -- TextFormatter: parse_records --
@@ -520,7 +530,7 @@ mod tests {
     proptest! {
         #[test]
         fn text_formatter_write_then_parse_preserves_ascii_body(body in ascii_string_strategy(256)) {
-            let record = sequenced_record(0, Bytes::from(body.clone()), vec![], 0);
+            let record = sequenced_record(0, 0, vec![], Bytes::from(body.clone()));
 
             let output = run_async(async {
                 let mut output = Vec::new();
@@ -537,18 +547,18 @@ mod tests {
 
         #[test]
         fn json_formatter_write_then_parse_preserves_utf8_fields(
-            body in ascii_string_strategy(256),
-            headers in prop::collection::vec((ascii_string_strategy(32), ascii_string_strategy(64)), 0..=8),
+            body in string_strategy(256),
+            headers in prop::collection::vec((string_strategy(32), string_strategy(64)), 0..=8),
             timestamp in any::<u64>(),
         ) {
             let record = sequenced_record(
                 17,
-                Bytes::from(body.clone()),
+                timestamp,
                 headers
                     .iter()
                     .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
                     .collect(),
-                timestamp,
+                Bytes::from(body.clone()),
             );
 
             let output = run_async(async {
@@ -557,14 +567,10 @@ mod tests {
                 output
             });
 
-            let parsed = run_async(parse_json_line(String::from_utf8(output).unwrap()));
+            let parsed = run_async(parse_json_line::<false>(String::from_utf8(output).unwrap()));
             prop_assert_eq!(parsed.body(), body.as_bytes());
             prop_assert_eq!(parsed.timestamp(), Some(timestamp));
-            prop_assert_eq!(parsed.headers().len(), headers.len());
-            for (actual, (expected_name, expected_value)) in parsed.headers().iter().zip(headers.iter()) {
-                prop_assert_eq!(actual.name.as_ref(), expected_name.as_bytes());
-                prop_assert_eq!(actual.value.as_ref(), expected_value.as_bytes());
-            }
+            prop_assert_headers_eq(parsed.headers(), &headers)?;
         }
 
         #[test]
@@ -575,12 +581,12 @@ mod tests {
         ) {
             let record = sequenced_record(
                 17,
-                Bytes::from(body.clone()),
+                timestamp,
                 headers
                     .iter()
                     .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
                     .collect(),
-                timestamp,
+                Bytes::from(body.clone()),
             );
 
             let output = run_async(async {
@@ -589,14 +595,10 @@ mod tests {
                 output
             });
 
-            let parsed = run_async(parse_json_base64_line(String::from_utf8(output).unwrap()));
+            let parsed = run_async(parse_json_line::<true>(String::from_utf8(output).unwrap()));
             prop_assert_eq!(parsed.body(), body.as_slice());
             prop_assert_eq!(parsed.timestamp(), Some(timestamp));
-            prop_assert_eq!(parsed.headers().len(), headers.len());
-            for (actual, (expected_name, expected_value)) in parsed.headers().iter().zip(headers.iter()) {
-                prop_assert_eq!(actual.name.as_ref(), expected_name.as_slice());
-                prop_assert_eq!(actual.value.as_ref(), expected_value.as_slice());
-            }
+            prop_assert_headers_eq(parsed.headers(), &headers)?;
         }
     }
 }
