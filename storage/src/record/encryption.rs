@@ -32,12 +32,14 @@ use aegis::aegis256::Aegis256;
 use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
-
-use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, SeqNum, StoredRecord};
-use crate::{
+use s2_common::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionSpec},
-    record::MeteredExt as _,
+};
+
+use super::{
+    Encodable, Metered, MeteredExt as _, MeteredSize, Record, RecordDecodeError, SeqNum,
+    StoredRecord,
 };
 
 const FORMAT_ID_LEN: usize = 1;

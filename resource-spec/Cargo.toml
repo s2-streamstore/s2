@@ -1,0 +1,17 @@
+[package]
+name = "s2-resource-spec"
+version = "0.1.0"
+description = "Declarative resource specifications for S2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["s2", "durable", "streams", "config", "schema"]
+
+[dependencies]
+humantime = { workspace = true }
+s2-common = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+

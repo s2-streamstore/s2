@@ -13,6 +13,7 @@ use s2_common::{
         stream::{AppendAck, AppendInput, StreamName},
     },
 };
+use s2_storage::types::stream::AppendInputStorageExt;
 use tokio::sync::oneshot;
 
 use super::{Backend, StreamHandle};

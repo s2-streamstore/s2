@@ -1,10 +1,11 @@
 use std::iter::FusedIterator;
 
-use crate::{
+use s2_common::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize, Sequenced, StoredRecord},
 };
+
+use super::{Metered, MeteredSize, Sequenced, StoredRecord};
 
 pub struct RecordBatch<T = StoredRecord>
 where
@@ -83,7 +84,7 @@ where
                     if remaining_limit.deny(
                         self.buffered_records.len() + 1,
                         self.buffered_records.metered_size() + record.metered_size(),
-                    ) || self.until.deny(record.position.timestamp)
+                    ) || self.until.deny(record.position().timestamp)
                     {
                         self.read_limit = EvaluatedReadLimit::Exhausted;
                         break;
@@ -169,17 +170,16 @@ where
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-
-    use super::*;
-    use crate::{
+    use s2_common::{
         caps,
         read_extent::{ReadLimit, ReadUntil},
-        record::{
-            CommandRecord, Encodable, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record,
-            RecordDecodeError, SeqNum, Sequenced, SequencedRecord, StoredRecord,
-            StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord, StreamPosition,
-            Timestamp,
-        },
+    };
+
+    use crate::record::{
+        CommandRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, RecordBatch,
+        RecordBatcher, RecordDecodeError, SeqNum, Sequenced, SequencedRecord, StoredEncodable,
+        StoredRecord, StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord,
+        StreamPosition, Timestamp,
     };
 
     fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
@@ -190,11 +190,10 @@ mod tests {
     }
 
     fn test_record(seq_num: SeqNum, timestamp: Timestamp) -> StoredSequencedRecord {
-        Metered::from(StoredRecord::from(Record::Command(CommandRecord::Trim(
-            seq_num,
-        ))))
-        .sequenced(StreamPosition { seq_num, timestamp })
-        .into_inner()
+        StoredRecord::from(Record::Command(CommandRecord::Trim(seq_num)))
+            .metered()
+            .sequenced(StreamPosition { seq_num, timestamp })
+            .into_inner()
     }
 
     fn test_large_record(
@@ -202,9 +201,10 @@ mod tests {
         timestamp: Timestamp,
         body_len: usize,
     ) -> StoredSequencedRecord {
-        Metered::from(StoredRecord::from(Record::Envelope(
+        StoredRecord::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from(vec![0; body_len])).unwrap(),
-        )))
+        ))
+        .metered()
         .sequenced(StreamPosition { seq_num, timestamp })
         .into_inner()
     }

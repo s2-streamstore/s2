@@ -2,9 +2,7 @@
 
 use std::{borrow::Cow, time::Duration};
 
-use serde::{Deserialize, Serialize};
-
-use crate::{
+use s2_common::{
     encryption::EncryptionAlgorithm,
     types::{
         basin::BasinName,
@@ -15,6 +13,7 @@ use crate::{
         stream::StreamName,
     },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Default, schemars::JsonSchema)]
 pub struct ResourcesSpec {

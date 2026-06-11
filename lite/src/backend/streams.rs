@@ -1,5 +1,4 @@
 use s2_common::{
-    bash::Bash,
     record::StreamPosition,
     types::{
         basin::BasinName,
@@ -8,6 +7,7 @@ use s2_common::{
         stream::{ListStreamsRequest, StreamInfo, StreamName},
     },
 };
+use s2_storage::bash::Bash;
 use slatedb::{
     IsolationLevel,
     config::{DurabilityLevel, ScanOptions},

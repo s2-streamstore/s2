@@ -4,15 +4,13 @@
 
 use std::path::Path;
 
-use s2_common::{
-    resource_spec::{self, ResourcesSpec},
-    types::{
-        basin::BasinName,
-        config::{BasinConfig, OptionalStreamConfig},
-        resources::ProvisionMode,
-        stream::StreamName,
-    },
+use s2_common::types::{
+    basin::BasinName,
+    config::{BasinConfig, OptionalStreamConfig},
+    resources::ProvisionMode,
+    stream::StreamName,
 };
+use s2_resource_spec::{self as resource_spec, ResourcesSpec};
 use tracing::info;
 
 use crate::backend::Backend;

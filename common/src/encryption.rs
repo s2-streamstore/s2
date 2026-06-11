@@ -76,7 +76,7 @@ impl<const N: usize> DecodedEncryptionKey<N> {
         Self(Arc::new(SecretBox::new(Box::new(key))))
     }
 
-    pub(crate) fn expose_secret(&self) -> &[u8; N] {
+    pub fn expose_secret(&self) -> &[u8; N] {
         self.0.expose_secret()
     }
 }

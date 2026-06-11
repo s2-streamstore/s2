@@ -1,7 +1,7 @@
 use std::iter::FusedIterator;
 
 use super::{
-    Metered, RecordDecodeError, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+    Metered, RecordDecodeError, StoredSequencedBytes, StoredSequencedRecord, decode_stored_record,
 };
 
 pub struct StoredRecordIterator<I> {
@@ -24,7 +24,7 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|result| {
             let (position, bytes) = result.map_err(Into::into)?.into_parts();
-            let record: Metered<StoredRecord> = bytes.try_into()?;
+            let record = decode_stored_record(bytes)?;
             Ok(record.sequenced(position))
         })
     }
@@ -43,8 +43,8 @@ mod tests {
 
     use super::*;
     use crate::record::{
-        Encodable, EncryptedRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record,
-        SeqNum, Sequenced, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+        EncryptedRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum,
+        Sequenced, StoredEncodable, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
         StreamPosition, Timestamp,
     };
 

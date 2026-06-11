@@ -383,12 +383,13 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
-        record::{Metered, Record, StoredRecord, StreamPosition},
+        record::{Metered, MeteredExt as _, Record, StreamPosition},
         types::{
             config::{BasinConfig, OptionalStreamConfig, StreamConfig},
             resources::ProvisionMode,
         },
     };
+    use s2_storage::record::StoredRecord;
     use slatedb::{WriteBatch, object_store};
     use time::OffsetDateTime;
 
@@ -431,7 +432,7 @@ mod tests {
         };
 
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap();
-        let metered_record: Metered<StoredRecord> = StoredRecord::from(record).into();
+        let metered_record: Metered<StoredRecord> = StoredRecord::from(record).metered();
 
         let mut wb = WriteBatch::new();
         wb.put(

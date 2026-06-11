@@ -156,10 +156,11 @@ mod tests {
     use bytes::Bytes;
     use s2_common::{
         record::{
-            FencingToken, Metered, NonZeroSeqNum, Record, SeqNum, StoredRecord, StreamPosition,
+            FencingToken, Metered, MeteredExt as _, NonZeroSeqNum, Record, SeqNum, StreamPosition,
         },
         types::{basin::BasinName, config::StreamConfig, stream::StreamName},
     };
+    use s2_storage::record::StoredRecord;
     use slatedb::WriteBatch;
     use time::OffsetDateTime;
 
@@ -168,7 +169,7 @@ mod tests {
 
     fn test_record() -> Metered<StoredRecord> {
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"trim-test")).unwrap();
-        StoredRecord::from(record).into()
+        StoredRecord::from(record).metered()
     }
 
     fn trim_point(seq_num: SeqNum) -> RangeTo<NonZeroSeqNum> {

@@ -1,12 +1,10 @@
-use s2_common::{
-    bash::Bash,
-    types::{
-        basin::{BasinInfo, BasinName, ListBasinsRequest},
-        config::{BasinConfig, BasinReconfiguration},
-        resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
-        stream::StreamNameStartAfter,
-    },
+use s2_common::types::{
+    basin::{BasinInfo, BasinName, ListBasinsRequest},
+    config::{BasinConfig, BasinReconfiguration},
+    resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
+    stream::StreamNameStartAfter,
 };
+use s2_storage::bash::Bash;
 use slatedb::{
     IsolationLevel,
     config::{DurabilityLevel, ScanOptions},

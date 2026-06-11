@@ -2,7 +2,6 @@ use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::{
-    bash::Bash,
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
     encryption::EncryptionAlgorithm,
     types::{
@@ -11,6 +10,7 @@ use s2_common::{
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     },
 };
+use s2_storage::bash::Bash;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -156,7 +156,6 @@ mod tests {
     use bytes::Bytes;
     use proptest::prelude::*;
     use s2_common::{
-        bash::Bash,
         encryption::EncryptionAlgorithm,
         types::{
             basin::BasinName,
@@ -166,6 +165,7 @@ mod tests {
             stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
         },
     };
+    use s2_storage::bash::Bash;
     use time::OffsetDateTime;
 
     use crate::backend::kv::proptest_strategies::{basin_name_strategy, stream_name_strategy};

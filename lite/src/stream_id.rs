@@ -1,7 +1,5 @@
-use s2_common::{
-    bash::Bash,
-    types::{basin::BasinName, stream::StreamName},
-};
+use s2_common::types::{basin::BasinName, stream::StreamName};
+use s2_storage::bash::Bash;
 
 /// Unique identifier for a stream scoped by its basin.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

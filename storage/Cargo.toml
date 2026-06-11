@@ -1,0 +1,24 @@
+[package]
+name = "s2-storage"
+version = "0.1.0"
+description = "Storage/backend shared code for S2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["s2", "durable", "streams", "storage"]
+
+[dependencies]
+aegis = { workspace = true }
+aes-gcm = { workspace = true, features = ["zeroize"] }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+s2-common = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rstest = { workspace = true }
+

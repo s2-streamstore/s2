@@ -5,14 +5,15 @@ use s2_common::{
     caps,
     encryption::{EncryptionKey, EncryptionSpec},
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp},
+    record::{Metered, MeteredSize as _, SeqNum, StreamPosition, Timestamp},
     types::{
         basin::BasinName,
-        stream::{
-            ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StoredReadBatch,
-            StoredReadSessionOutput, StreamName,
-        },
+        stream::{ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
     },
+};
+use s2_storage::{
+    record::StoredSequencedRecord,
+    types::stream::{StoredReadBatch, StoredReadSessionOutput, StoredReadSessionOutputExt},
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};

@@ -38,7 +38,7 @@ pub struct Metered<T> {
 }
 
 impl<T> Metered<T> {
-    pub(super) const fn with_size(size: usize, inner: T) -> Self {
+    pub const fn with_size(size: usize, inner: T) -> Self {
         Self { size, inner }
     }
 

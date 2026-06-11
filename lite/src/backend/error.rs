@@ -2,9 +2,10 @@ use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
     encryption::EncryptionSpecResolutionError,
-    record::{FencingToken, RecordDecryptionError, SeqNum, StreamPosition},
+    record::{FencingToken, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
+use s2_storage::record::RecordDecryptionError;
 
 use crate::backend::kv;
 

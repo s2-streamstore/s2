@@ -5,10 +5,6 @@ use std::path::Path;
 use colored::Colorize;
 use s2_common::{
     encryption::EncryptionAlgorithm,
-    resource_spec::{
-        self, BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec,
-        StorageClassSpec, StreamConfigSpec, TimestampingModeSpec, TimestampingSpec,
-    },
     types::{
         basin::BasinName,
         config::{
@@ -18,6 +14,10 @@ use s2_common::{
         },
         stream::StreamName,
     },
+};
+use s2_resource_spec::{
+    self as resource_spec, BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec,
+    StorageClassSpec, StreamConfigSpec, TimestampingModeSpec, TimestampingSpec,
 };
 
 fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> BasinConfig {
