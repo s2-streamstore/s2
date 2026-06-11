@@ -3529,12 +3529,12 @@ pub struct SequencedRecord {
 impl SequencedRecord {
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
-    pub fn new(seq_num: u64, body: impl Into<Bytes>, headers: Vec<Header>, timestamp: u64) -> Self {
+    pub fn new(seq_num: u64, timestamp: u64, headers: Vec<Header>, body: impl Into<Bytes>) -> Self {
         Self {
             seq_num,
+            timestamp,
             body: body.into(),
             headers,
-            timestamp,
         }
     }
 
