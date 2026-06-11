@@ -1,8 +1,9 @@
 use std::iter::FusedIterator;
 
+use s2_common::record::Metered;
+
 use super::{
-    Metered, StoredRecordDecodeError, StoredSequencedBytes, StoredSequencedRecord,
-    decode_stored_record,
+    StoredRecordDecodeError, StoredSequencedBytes, StoredSequencedRecord, decode_stored_record,
 };
 
 pub struct StoredRecordIterator<I> {
@@ -41,12 +42,14 @@ where
 #[cfg(test)]
 mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
+    use s2_common::record::{
+        EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum, Sequenced,
+        StreamPosition, Timestamp,
+    };
 
     use super::*;
     use crate::record::{
-        EncryptedRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum,
-        Sequenced, StoredEncodable, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
-        StreamPosition, Timestamp,
+        EncryptedRecord, StoredEncodable, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
     };
 
     fn test_stored_plaintext_record(

@@ -22,7 +22,7 @@
 //! Encrypted envelope records are stored as `StoredRecord::Encrypted`. Their
 //! outer record type is `RecordType::EncryptedEnvelope`, and the encoded body is
 //! an [`EncryptedRecord`] containing encrypted bytes for the byte-for-byte
-//! plaintext [`EnvelopeRecord`](super::EnvelopeRecord) encoding.
+//! plaintext [`EnvelopeRecord`](s2_common::record::EnvelopeRecord) encoding.
 //!
 //! The stored `metered_size` remains the logical plaintext metered size rather
 //! than the encoded encrypted record size, so protection does not change
@@ -35,12 +35,10 @@ use rand::random;
 use s2_common::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionSpec},
+    record::{EnvelopeRecord, Metered, MeteredExt as _, MeteredSize, Record, SeqNum},
 };
 
-use super::{
-    Encodable, Metered, MeteredExt as _, MeteredSize, Record, SeqNum, StoredRecord,
-    StoredRecordDecodeError, decode_envelope_record,
-};
+use super::{Encodable, StoredRecord, StoredRecordDecodeError, decode_envelope_record};
 
 const FORMAT_ID_LEN: usize = 1;
 
@@ -249,7 +247,7 @@ pub fn encrypt_record(
 }
 
 fn prep_encryption_buffer(
-    envelope: &super::EnvelopeRecord,
+    envelope: &EnvelopeRecord,
     format: EncryptedRecordFormat,
 ) -> (BytesMut, usize) {
     let payload_start = FORMAT_ID_LEN + format.nonce_len();
@@ -424,9 +422,9 @@ fn decryption_finish(mut encoded: BytesMut, payload_start: usize, plaintext_len:
 mod tests {
     use bytes::Bytes;
     use rstest::rstest;
+    use s2_common::record::{CommandRecord, EnvelopeRecord, FencingToken, Header, MeteredExt};
 
     use super::*;
-    use crate::record::{CommandRecord, EnvelopeRecord, Header, MeteredExt};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
     const OTHER_TEST_KEY: [u8; 32] = [0x99; 32];
@@ -717,7 +715,7 @@ mod tests {
 
     #[test]
     fn decrypt_stored_record_preserves_plaintext_command_records() {
-        let token: crate::record::FencingToken = "fence-test".parse().unwrap();
+        let token: FencingToken = "fence-test".parse().unwrap();
         let record = StoredRecord::Plaintext(Record::Command(CommandRecord::Fence(token.clone())));
 
         let decrypted = decrypt_stored_record(

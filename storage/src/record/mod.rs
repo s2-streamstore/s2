@@ -12,14 +12,11 @@ pub use encryption::{
     EncryptedRecord, RecordDecryptionError, decrypt_stored_record, encrypt_record,
 };
 pub use iterator::StoredRecordIterator;
-pub(crate) use s2_common::record::{
-    CommandRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum, Sequenced,
+use s2_common::{
+    deep_size::DeepSize,
+    encryption::EncryptionAlgorithm,
+    record::{CommandRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum, Sequenced},
 };
-#[cfg(test)]
-use s2_common::record::{
-    FencingToken, Header, MAX_FENCING_TOKEN_LENGTH, SequencedRecord, StreamPosition, Timestamp,
-};
-use s2_common::{deep_size::DeepSize, encryption::EncryptionAlgorithm};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
@@ -290,6 +287,7 @@ pub fn decode_record(buf: Bytes) -> Result<Metered<Record>, StoredRecordDecodeEr
 mod test {
     use proptest::prelude::*;
     use rstest::rstest;
+    use s2_common::record::{Header, MAX_FENCING_TOKEN_LENGTH, StreamPosition, Timestamp};
 
     use super::*;
 

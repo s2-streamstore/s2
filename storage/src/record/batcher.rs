@@ -3,9 +3,10 @@ use std::iter::FusedIterator;
 use s2_common::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
+    record::{Metered, MeteredSize, Sequenced},
 };
 
-use super::{Metered, MeteredSize, Sequenced, StoredRecord};
+use super::StoredRecord;
 
 pub struct RecordBatch<T = StoredRecord>
 where
@@ -173,13 +174,15 @@ mod tests {
     use s2_common::{
         caps,
         read_extent::{ReadLimit, ReadUntil},
+        record::{
+            CommandRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum,
+            Sequenced, SequencedRecord, StreamPosition, Timestamp,
+        },
     };
 
     use crate::record::{
-        CommandRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, RecordBatch,
-        RecordBatcher, SeqNum, Sequenced, SequencedRecord, StoredEncodable, StoredRecord,
-        StoredRecordDecodeError, StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord,
-        StreamPosition, Timestamp,
+        RecordBatch, RecordBatcher, StoredEncodable, StoredRecord, StoredRecordDecodeError,
+        StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord,
     };
 
     fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
