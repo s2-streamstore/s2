@@ -1,5 +1,5 @@
 use futures::{StreamExt, stream};
-use s2_common::types::{
+use s2_common::{
     basin::BasinName,
     resources::{ListLimit, Page},
     stream::{ListStreamsRequest, StreamNamePrefix, StreamNameStartAfter},
@@ -140,7 +140,7 @@ impl Backend {
 mod tests {
     use std::str::FromStr;
 
-    use s2_common::types::{
+    use s2_common::{
         basin::BasinName,
         config::{BasinConfig, StreamConfig},
         resources::ListLimit,

@@ -1,5 +1,5 @@
 use base64ct::{Base64, Encoding as _};
-use s2_common::{record, types};
+use s2_common::record;
 use serde::{
     Serialize,
     ser::{SerializeSeq, SerializeStruct, SerializeTuple},
@@ -9,14 +9,14 @@ use crate::data::Format;
 
 pub fn serialize_read_batch(
     format: Format,
-    batch: &types::stream::ReadBatch,
+    batch: &s2_common::stream::ReadBatch,
 ) -> impl Serialize + '_ {
     ReadBatchJson { format, batch }
 }
 
 struct ReadBatchJson<'a> {
     format: Format,
-    batch: &'a types::stream::ReadBatch,
+    batch: &'a s2_common::stream::ReadBatch,
 }
 
 impl Serialize for ReadBatchJson<'_> {
@@ -302,7 +302,7 @@ mod tests {
     use super::*;
     use crate::v1::stream::ReadBatch;
 
-    fn fixture_batch() -> types::stream::ReadBatch {
+    fn fixture_batch() -> s2_common::stream::ReadBatch {
         let envelope = record::Record::try_from_parts(
             vec![record::Header {
                 name: Bytes::from_static(b"kind"),
@@ -322,7 +322,7 @@ mod tests {
 
         let trim = record::Record::Command(record::CommandRecord::Trim(42));
 
-        types::stream::ReadBatch {
+        s2_common::stream::ReadBatch {
             records: vec![
                 envelope.metered().sequenced(record::StreamPosition {
                     seq_num: 7,

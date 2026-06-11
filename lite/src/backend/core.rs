@@ -7,14 +7,12 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use s2_common::{
+    basin::BasinName,
+    config::{BasinConfig, OptionalStreamConfig},
     encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::{NonZeroSeqNum, SeqNum, StreamPosition},
-    types::{
-        basin::BasinName,
-        config::{BasinConfig, OptionalStreamConfig},
-        resources::ProvisionMode,
-        stream::StreamName,
-    },
+    resources::ProvisionMode,
+    stream::StreamName,
 };
 use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
@@ -383,11 +381,9 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
+        config::{BasinConfig, OptionalStreamConfig, StreamConfig},
         record::{Metered, MeteredExt as _, Record, StreamPosition},
-        types::{
-            config::{BasinConfig, OptionalStreamConfig, StreamConfig},
-            resources::ProvisionMode,
-        },
+        resources::ProvisionMode,
     };
     use s2_storage::record::StoredRecord;
     use slatedb::{WriteBatch, object_store};

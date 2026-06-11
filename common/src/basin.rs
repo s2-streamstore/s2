@@ -8,7 +8,7 @@ use super::{
     location::LocationName,
     strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
 };
-use crate::{caps, types::resources::ListItemsRequest};
+use crate::{caps, resources::ListItemsRequest};
 
 pub static BASIN_HEADER: http::HeaderName = http::HeaderName::from_static("s2-basin");
 

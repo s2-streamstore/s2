@@ -4,14 +4,12 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
+    basin::BasinName,
+    config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
     encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
     record::{MeteredSize, StreamPosition},
-    types::{
-        basin::BasinName,
-        config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
-    },
+    stream::{ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
 };
 use s2_lite::backend::{
     Backend,

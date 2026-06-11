@@ -2,8 +2,9 @@ use std::str::FromStr;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use s2_common::{
+    basin::BasinName,
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
-    types::{basin::BasinName, stream::StreamName},
+    stream::StreamName,
 };
 
 use super::{DeserializationError, KeyType, check_min_size, invalid_value_err};
@@ -54,7 +55,7 @@ mod tests {
     use std::str::FromStr;
 
     use proptest::prelude::*;
-    use s2_common::types::{basin::BasinName, stream::StreamName};
+    use s2_common::{basin::BasinName, stream::StreamName};
 
     use crate::stream_id::StreamId;
 

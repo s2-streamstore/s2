@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use s2_common::types::{
+use s2_common::{
     basin::BasinName,
     config::{BasinConfig, OptionalStreamConfig},
     resources::ProvisionMode,

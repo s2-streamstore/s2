@@ -7,7 +7,6 @@ use http::{StatusCode, request::Parts};
 use s2_common::{
     encryption::EncryptionKey,
     http::{ParseableHeader, extract::HeaderRejection},
-    types,
 };
 use tokio_util::{codec::FramedRead, io::StreamReader};
 
@@ -30,7 +29,7 @@ pub enum AppendRequestRejection {
     #[error(transparent)]
     ProtoRejection(#[from] ProtoRejection),
     #[error(transparent)]
-    Validation(#[from] types::ValidationError),
+    Validation(#[from] s2_common::ValidationError),
 }
 
 impl IntoResponse for AppendRequestRejection {
@@ -75,7 +74,7 @@ where
                 match msg? {
                     s2s::SessionMessage::Regular(data) => {
                         let input = data.try_into_proto::<proto::AppendInput>()?;
-                        let input = types::stream::AppendInput::try_from(input)?;
+                        let input = s2_common::stream::AppendInput::try_from(input)?;
                         Ok(Some((input, framed)))
                     }
                     s2s::SessionMessage::Terminal(_) => {

@@ -2,20 +2,18 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
+    config::{
+        BasinConfig, BasinReconfiguration, DeleteOnEmptyReconfiguration,
+        OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
+        RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
+        TimestampingReconfiguration,
+    },
     encryption::EncryptionAlgorithm,
     maybe::Maybe,
-    types::{
-        config::{
-            BasinConfig, BasinReconfiguration, DeleteOnEmptyReconfiguration,
-            OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
-            RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
-            TimestampingReconfiguration,
-        },
-        resources::{ProvisionMode, ProvisionResult, RequestToken},
-        stream::{
-            AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
-            StreamNameStartAfter,
-        },
+    resources::{ProvisionMode, ProvisionResult, RequestToken},
+    stream::{
+        AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
+        StreamNameStartAfter,
     },
 };
 use s2_lite::backend::error::{

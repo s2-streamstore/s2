@@ -1,5 +1,5 @@
 use compact_str::ToCompactString;
-use s2_common::{record, types};
+use s2_common::record;
 
 include!("s2.v1.rs");
 
@@ -21,8 +21,8 @@ impl From<record::Header> for Header {
     }
 }
 
-impl TryFrom<AppendRecord> for types::stream::AppendRecord {
-    type Error = types::ValidationError;
+impl TryFrom<AppendRecord> for s2_common::stream::AppendRecord {
+    type Error = s2_common::ValidationError;
 
     fn try_from(
         AppendRecord {
@@ -31,7 +31,7 @@ impl TryFrom<AppendRecord> for types::stream::AppendRecord {
             body,
         }: AppendRecord,
     ) -> Result<Self, Self::Error> {
-        Ok(Self::try_from(types::stream::AppendRecordParts {
+        Ok(Self::try_from(s2_common::stream::AppendRecordParts {
             timestamp,
             record: record::Record::try_from_parts(
                 headers.into_iter().map(Into::into).collect(),
@@ -43,8 +43,8 @@ impl TryFrom<AppendRecord> for types::stream::AppendRecord {
     }
 }
 
-impl TryFrom<AppendInput> for types::stream::AppendInput {
-    type Error = types::ValidationError;
+impl TryFrom<AppendInput> for s2_common::stream::AppendInput {
+    type Error = s2_common::ValidationError;
 
     fn try_from(
         AppendInput {
@@ -55,11 +55,11 @@ impl TryFrom<AppendInput> for types::stream::AppendInput {
     ) -> Result<Self, Self::Error> {
         let records = records
             .into_iter()
-            .map(types::stream::AppendRecord::try_from)
+            .map(s2_common::stream::AppendRecord::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
-            records: types::stream::AppendRecordBatch::try_from(records)?,
+            records: s2_common::stream::AppendRecordBatch::try_from(records)?,
             match_seq_num,
             fencing_token: fencing_token
                 .as_deref()
@@ -69,8 +69,10 @@ impl TryFrom<AppendInput> for types::stream::AppendInput {
     }
 }
 
-impl From<types::stream::AppendAck> for AppendAck {
-    fn from(types::stream::AppendAck { start, end, tail }: types::stream::AppendAck) -> Self {
+impl From<s2_common::stream::AppendAck> for AppendAck {
+    fn from(
+        s2_common::stream::AppendAck { start, end, tail }: s2_common::stream::AppendAck,
+    ) -> Self {
         Self {
             start: Some(start.into()),
             end: Some(end.into()),
@@ -92,8 +94,8 @@ impl From<record::SequencedRecord> for SequencedRecord {
     }
 }
 
-impl From<types::stream::ReadBatch> for ReadBatch {
-    fn from(batch: types::stream::ReadBatch) -> Self {
+impl From<s2_common::stream::ReadBatch> for ReadBatch {
+    fn from(batch: s2_common::stream::ReadBatch) -> Self {
         Self {
             records: batch.records.into_iter().map(Into::into).collect(),
             tail: batch.tail.map(Into::into),

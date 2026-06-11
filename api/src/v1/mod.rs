@@ -6,7 +6,7 @@ pub mod location;
 pub mod metrics;
 pub mod stream;
 
-use s2_common::types::{self, resources::RequestToken};
+use s2_common::resources::RequestToken;
 
 #[rustfmt::skip]
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub struct S2RequestTokenHeader {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct AccessTokenIdPathSegment {
     /// Access token ID.
-    pub id: types::access::AccessTokenId,
+    pub id: s2_common::access::AccessTokenId,
 }
 
 #[rustfmt::skip]
@@ -33,7 +33,7 @@ pub struct AccessTokenIdPathSegment {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct BasinNamePathSegment {
     /// Basin name.
-    pub basin: types::basin::BasinName,
+    pub basin: s2_common::basin::BasinName,
 }
 
 #[rustfmt::skip]
@@ -42,13 +42,13 @@ pub struct BasinNamePathSegment {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
 pub struct StreamNamePathSegment {
     /// Stream name.
-    pub stream: types::stream::StreamName,
+    pub stream: s2_common::stream::StreamName,
 }
 
 macro_rules! impl_list_request_conversions {
     ($name:ident, $prefix:ty, $start_after:ty) => {
-        impl TryFrom<$name> for types::resources::ListItemsRequest<$prefix, $start_after> {
-            type Error = types::ValidationError;
+        impl TryFrom<$name> for s2_common::resources::ListItemsRequest<$prefix, $start_after> {
+            type Error = s2_common::ValidationError;
 
             fn try_from(value: $name) -> Result<Self, Self::Error> {
                 let $name {

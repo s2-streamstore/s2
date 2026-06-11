@@ -1,16 +1,14 @@
 use std::time::Duration;
 
 use s2_common::{
-    maybe::Maybe,
-    types::{
-        basin::{BasinNamePrefix, BasinNameStartAfter, ListBasinsRequest},
-        config::{
-            BasinConfig, BasinReconfiguration, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-            RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
-            TimestampingReconfiguration,
-        },
-        resources::{ProvisionMode, ProvisionResult, RequestToken},
+    basin::{BasinNamePrefix, BasinNameStartAfter, ListBasinsRequest},
+    config::{
+        BasinConfig, BasinReconfiguration, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
+        RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
+        TimestampingReconfiguration,
     },
+    maybe::Maybe,
+    resources::{ProvisionMode, ProvisionResult, RequestToken},
 };
 use s2_lite::backend::error::{
     DeleteBasinError, GetBasinConfigError, ProvisionBasinError, ReconfigureBasinError,

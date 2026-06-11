@@ -4,16 +4,13 @@ use std::path::Path;
 
 use colored::Colorize;
 use s2_common::{
-    encryption::EncryptionAlgorithm,
-    types::{
-        basin::BasinName,
-        config::{
-            BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-            OptionalTimestampingConfig, RetentionPolicy, StorageClass, StreamConfig,
-            TimestampingMode,
-        },
-        stream::StreamName,
+    basin::BasinName,
+    config::{
+        BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
+        RetentionPolicy, StorageClass, StreamConfig, TimestampingMode,
     },
+    encryption::EncryptionAlgorithm,
+    stream::StreamName,
 };
 use s2_resource_spec::{
     self as resource_spec, BasinConfigSpec, DeleteOnEmptySpec, ResourcesSpec, RetentionPolicySpec,

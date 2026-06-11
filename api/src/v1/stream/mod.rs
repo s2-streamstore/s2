@@ -13,10 +13,7 @@ use itertools::Itertools as _;
 use s2_common::{
     encryption::EncryptionKey,
     record,
-    types::{
-        self,
-        stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
-    },
+    stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -40,8 +37,8 @@ pub struct StreamInfo {
     pub cipher: Option<EncryptionAlgorithm>,
 }
 
-impl From<types::stream::StreamInfo> for StreamInfo {
-    fn from(value: types::stream::StreamInfo) -> Self {
+impl From<s2_common::stream::StreamInfo> for StreamInfo {
+    fn from(value: s2_common::stream::StreamInfo) -> Self {
         Self {
             name: value.name,
             created_at: value.created_at,
@@ -69,8 +66,8 @@ pub struct ListStreamsRequest {
 
 super::impl_list_request_conversions!(
     ListStreamsRequest,
-    types::stream::StreamNamePrefix,
-    types::stream::StreamNameStartAfter
+    s2_common::stream::StreamNamePrefix,
+    s2_common::stream::StreamNameStartAfter
 );
 
 #[rustfmt::skip]
@@ -153,17 +150,17 @@ pub struct ReadStart {
     pub clamp: Option<bool>,
 }
 
-impl TryFrom<ReadStart> for types::stream::ReadStart {
-    type Error = types::ValidationError;
+impl TryFrom<ReadStart> for s2_common::stream::ReadStart {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: ReadStart) -> Result<Self, Self::Error> {
         let from = match (value.seq_num, value.timestamp, value.tail_offset) {
-            (Some(seq_num), None, None) => types::stream::ReadFrom::SeqNum(seq_num),
-            (None, Some(timestamp), None) => types::stream::ReadFrom::Timestamp(timestamp),
-            (None, None, Some(tail_offset)) => types::stream::ReadFrom::TailOffset(tail_offset),
-            (None, None, None) => types::stream::ReadFrom::TailOffset(0),
+            (Some(seq_num), None, None) => s2_common::stream::ReadFrom::SeqNum(seq_num),
+            (None, Some(timestamp), None) => s2_common::stream::ReadFrom::Timestamp(timestamp),
+            (None, None, Some(tail_offset)) => s2_common::stream::ReadFrom::TailOffset(tail_offset),
+            (None, None, None) => s2_common::stream::ReadFrom::TailOffset(0),
             _ => {
-                return Err(types::ValidationError(
+                return Err(s2_common::ValidationError(
                     "only one of seq_num, timestamp, or tail_offset can be provided".to_owned(),
                 ));
             }
@@ -197,7 +194,7 @@ pub struct ReadEnd {
     pub wait: Option<u32>,
 }
 
-impl From<ReadEnd> for types::stream::ReadEnd {
+impl From<ReadEnd> for s2_common::stream::ReadEnd {
     fn from(value: ReadEnd) -> Self {
         Self {
             limit: s2_common::read_extent::ReadLimit::from_count_and_bytes(
@@ -235,13 +232,13 @@ pub enum AppendRequest {
     /// Unary
     Unary {
         encryption_key: Option<EncryptionKey>,
-        input: types::stream::AppendInput,
+        input: s2_common::stream::AppendInput,
         response_mime: JsonOrProto,
     },
     /// S2S bi-directional streaming
     S2s {
         encryption_key: Option<EncryptionKey>,
-        inputs: BoxStream<'static, Result<types::stream::AppendInput, AppendInputStreamError>>,
+        inputs: BoxStream<'static, Result<s2_common::stream::AppendInput, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,
     },
 }
@@ -277,7 +274,7 @@ pub enum AppendInputStreamError {
     #[error("Failed to decode S2S frame: {0}")]
     FrameDecode(#[from] std::io::Error),
     #[error(transparent)]
-    Validation(#[from] types::ValidationError),
+    Validation(#[from] s2_common::ValidationError),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,12 +339,12 @@ impl AppendRecord {
     pub fn decode(
         self,
         format: Format,
-    ) -> Result<types::stream::AppendRecord, types::ValidationError> {
+    ) -> Result<s2_common::stream::AppendRecord, s2_common::ValidationError> {
         let headers = self
             .headers
             .into_iter()
             .map(|Header(name, value)| {
-                Ok::<record::Header, types::ValidationError>(record::Header {
+                Ok::<record::Header, s2_common::ValidationError>(record::Header {
                     name: format.decode(name)?,
                     value: format.decode(value)?,
                 })
@@ -360,13 +357,13 @@ impl AppendRecord {
             .map_err(|e| e.to_string())?
             .into();
 
-        let parts = types::stream::AppendRecordParts {
+        let parts = s2_common::stream::AppendRecordParts {
             timestamp: self.timestamp,
             record,
         };
 
-        types::stream::AppendRecord::try_from(parts)
-            .map_err(|e| types::ValidationError(e.to_string()))
+        s2_common::stream::AppendRecord::try_from(parts)
+            .map_err(|e| s2_common::ValidationError(e.to_string()))
     }
 }
 
@@ -388,15 +385,15 @@ impl AppendInput {
     pub fn decode(
         self,
         format: Format,
-    ) -> Result<types::stream::AppendInput, types::ValidationError> {
-        let records: Vec<types::stream::AppendRecord> = self
+    ) -> Result<s2_common::stream::AppendInput, s2_common::ValidationError> {
+        let records: Vec<s2_common::stream::AppendRecord> = self
             .records
             .into_iter()
             .map(|record| record.decode(format))
             .try_collect()?;
 
-        Ok(types::stream::AppendInput {
-            records: types::stream::AppendRecordBatch::try_from(records)?,
+        Ok(s2_common::stream::AppendInput {
+            records: s2_common::stream::AppendRecordBatch::try_from(records)?,
             match_seq_num: self.match_seq_num,
             fencing_token: self.fencing_token,
         })
@@ -418,8 +415,8 @@ pub struct AppendAck {
     pub tail: StreamPosition,
 }
 
-impl From<types::stream::AppendAck> for AppendAck {
-    fn from(ack: types::stream::AppendAck) -> Self {
+impl From<s2_common::stream::AppendAck> for AppendAck {
+    fn from(ack: s2_common::stream::AppendAck) -> Self {
         Self {
             start: ack.start.into(),
             end: ack.end.into(),
@@ -458,7 +455,7 @@ pub struct ReadBatch {
 }
 
 impl ReadBatch {
-    pub fn encode(format: Format, batch: types::stream::ReadBatch) -> Self {
+    pub fn encode(format: Format, batch: s2_common::stream::ReadBatch) -> Self {
         Self {
             records: batch
                 .records

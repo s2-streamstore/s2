@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use s2_common::types::{
+use s2_common::{
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
     config::BasinConfig,
 };
@@ -41,7 +41,7 @@ impl From<BasinMeta> for BasinMetaSerde {
 }
 
 impl TryFrom<BasinMetaSerde> for BasinMeta {
-    type Error = s2_common::types::ValidationError;
+    type Error = s2_common::ValidationError;
 
     fn try_from(serde: BasinMetaSerde) -> Result<Self, Self::Error> {
         let config = match serde.config {
@@ -117,7 +117,7 @@ mod tests {
 
     use bytes::Bytes;
     use proptest::prelude::*;
-    use s2_common::types::{
+    use s2_common::{
         basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
         config::{BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig},
     };

@@ -2,13 +2,11 @@ use std::{pin::Pin, task::Poll, time::Duration};
 
 use futures::StreamExt;
 use s2_common::{
+    basin::BasinName,
     encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
     record::{Record, SequencedRecord},
-    types::{
-        basin::BasinName,
-        stream::{ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
-    },
+    stream::{ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
 };
 use s2_lite::backend::{Backend, error::ReadError};
 

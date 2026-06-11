@@ -2,7 +2,7 @@ pub mod stream {
     use s2_common::{
         encryption::EncryptionSpec,
         record::{Metered, MeteredExt as _, Record, Sequenced},
-        types::stream::{
+        stream::{
             AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch,
             ReadSessionOutput,
         },

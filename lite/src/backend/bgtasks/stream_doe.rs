@@ -3,7 +3,7 @@ use std::time::Duration;
 use futures::{StreamExt, stream};
 use indexmap::IndexMap;
 use itertools::Itertools;
-use s2_common::types::resources::Page;
+use s2_common::resources::Page;
 use slatedb::{
     WriteBatch,
     config::{DurabilityLevel, ScanOptions},
@@ -180,16 +180,14 @@ mod tests {
     use std::{str::FromStr, time::Duration};
 
     use s2_common::{
+        basin::BasinName,
+        config::{
+            BasinConfig, DeleteOnEmptyReconfiguration, OptionalStreamConfig, RetentionPolicy,
+            StreamReconfiguration,
+        },
         maybe::Maybe,
         record::StreamPosition,
-        types::{
-            basin::BasinName,
-            config::{
-                BasinConfig, DeleteOnEmptyReconfiguration, OptionalStreamConfig, RetentionPolicy,
-                StreamReconfiguration,
-            },
-            stream::StreamName,
-        },
+        stream::StreamName,
     };
     use slatedb::config::{DurabilityLevel, ScanOptions};
     use time::OffsetDateTime;

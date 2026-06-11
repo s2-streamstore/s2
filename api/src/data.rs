@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use base64ct::{Base64, Encoding as _};
 use bytes::Bytes;
-use s2_common::types::ValidationError;
+use s2_common::ValidationError;
 
 #[derive(Debug)]
 pub struct Json<T>(pub T);

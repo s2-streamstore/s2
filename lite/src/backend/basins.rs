@@ -1,4 +1,4 @@
-use s2_common::types::{
+use s2_common::{
     basin::{BasinInfo, BasinName, ListBasinsRequest},
     config::{BasinConfig, BasinReconfiguration},
     resources::{Page, ProvisionMode, ProvisionResult, RequestToken},

@@ -1,11 +1,9 @@
 use s2_common::{
+    basin::BasinName,
+    config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
     record::StreamPosition,
-    types::{
-        basin::BasinName,
-        config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
-        resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
-        stream::{ListStreamsRequest, StreamInfo, StreamName},
-    },
+    resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
+    stream::{ListStreamsRequest, StreamInfo, StreamName},
 };
 use s2_storage::bash::Bash;
 use slatedb::{

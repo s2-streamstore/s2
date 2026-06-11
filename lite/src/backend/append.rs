@@ -6,12 +6,10 @@ use std::{
 
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
+    basin::BasinName,
     encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
-    types::{
-        basin::BasinName,
-        stream::{AppendAck, AppendInput, StreamName},
-    },
+    stream::{AppendAck, AppendInput, StreamName},
 };
 use s2_storage::types::stream::AppendInputStorageExt;
 use tokio::sync::oneshot;

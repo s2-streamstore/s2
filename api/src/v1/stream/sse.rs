@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use s2_common::{http::ParseableHeader, types};
+use s2_common::http::ParseableHeader;
 use serde::Serialize;
 
 use super::ReadBatch;
@@ -41,7 +41,7 @@ impl std::fmt::Display for LastEventId {
 }
 
 impl FromStr for LastEventId {
-    type Err = types::ValidationError;
+    type Err = s2_common::ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut iter = s.splitn(3, ",");
@@ -49,7 +49,7 @@ impl FromStr for LastEventId {
         fn get_next<T>(
             iter: &mut std::str::SplitN<&str>,
             field: &str,
-        ) -> Result<T, types::ValidationError>
+        ) -> Result<T, s2_common::ValidationError>
         where
             T: FromStr,
             <T as FromStr>::Err: std::fmt::Display,
@@ -136,7 +136,7 @@ fn elapsed_since_epoch() -> std::time::Duration {
 #[cfg(feature = "axum")]
 pub fn read_batch_event(
     format: crate::data::Format,
-    batch: &types::stream::ReadBatch,
+    batch: &s2_common::stream::ReadBatch,
     id: LastEventId,
 ) -> Result<axum::response::sse::Event, axum::Error> {
     axum::response::sse::Event::default()

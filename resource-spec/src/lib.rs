@@ -3,15 +3,13 @@
 use std::{borrow::Cow, time::Duration};
 
 use s2_common::{
-    encryption::EncryptionAlgorithm,
-    types::{
-        basin::BasinName,
-        config::{
-            BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-            OptionalTimestampingConfig, RetentionPolicy, StorageClass, TimestampingMode,
-        },
-        stream::StreamName,
+    basin::BasinName,
+    config::{
+        BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
+        RetentionPolicy, StorageClass, TimestampingMode,
     },
+    encryption::EncryptionAlgorithm,
+    stream::StreamName,
 };
 use serde::{Deserialize, Serialize};
 

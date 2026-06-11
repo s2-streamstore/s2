@@ -14,9 +14,7 @@ use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::{
-    caps::MIN_BASIN_NAME_LEN,
-    record::StreamPosition,
-    types::{basin::BasinName, stream::StreamName},
+    basin::BasinName, caps::MIN_BASIN_NAME_LEN, record::StreamPosition, stream::StreamName,
 };
 use strum::FromRepr;
 use thiserror::Error;
@@ -282,7 +280,7 @@ mod proptest_strategies {
     use std::str::FromStr;
 
     use proptest::prelude::*;
-    use s2_common::types::{basin::BasinName, stream::StreamName};
+    use s2_common::{basin::BasinName, stream::StreamName};
 
     pub(super) fn basin_name_strategy() -> impl Strategy<Value = BasinName> {
         "[a-z][a-z0-9-]{6,46}[a-z0-9]".prop_map(|s| BasinName::from_str(&s).unwrap())

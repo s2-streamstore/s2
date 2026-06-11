@@ -1,5 +1,4 @@
 use compact_str::CompactString;
-use s2_common::types;
 use serde::{Deserialize, Serialize};
 
 #[rustfmt::skip]
@@ -12,22 +11,22 @@ pub enum TimeseriesInterval {
     Day,
 }
 
-impl From<TimeseriesInterval> for types::metrics::TimeseriesInterval {
+impl From<TimeseriesInterval> for s2_common::metrics::TimeseriesInterval {
     fn from(value: TimeseriesInterval) -> Self {
         match value {
-            TimeseriesInterval::Minute => types::metrics::TimeseriesInterval::Minute,
-            TimeseriesInterval::Hour => types::metrics::TimeseriesInterval::Hour,
-            TimeseriesInterval::Day => types::metrics::TimeseriesInterval::Day,
+            TimeseriesInterval::Minute => s2_common::metrics::TimeseriesInterval::Minute,
+            TimeseriesInterval::Hour => s2_common::metrics::TimeseriesInterval::Hour,
+            TimeseriesInterval::Day => s2_common::metrics::TimeseriesInterval::Day,
         }
     }
 }
 
-impl From<types::metrics::TimeseriesInterval> for TimeseriesInterval {
-    fn from(value: types::metrics::TimeseriesInterval) -> Self {
+impl From<s2_common::metrics::TimeseriesInterval> for TimeseriesInterval {
+    fn from(value: s2_common::metrics::TimeseriesInterval) -> Self {
         match value {
-            types::metrics::TimeseriesInterval::Minute => Self::Minute,
-            types::metrics::TimeseriesInterval::Hour => Self::Hour,
-            types::metrics::TimeseriesInterval::Day => Self::Day,
+            s2_common::metrics::TimeseriesInterval::Minute => Self::Minute,
+            s2_common::metrics::TimeseriesInterval::Hour => Self::Hour,
+            s2_common::metrics::TimeseriesInterval::Day => Self::Day,
         }
     }
 }
@@ -47,12 +46,14 @@ pub struct AccountMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-impl From<AccountMetricSetRequest> for types::metrics::AccountMetricsRequest {
+impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest {
     fn from(value: AccountMetricSetRequest) -> Self {
         Self {
             set: match value.set {
-                AccountMetricSet::ActiveBasins => types::metrics::AccountMetricSet::ActiveBasins,
-                AccountMetricSet::AccountOps => types::metrics::AccountMetricSet::AccountOps,
+                AccountMetricSet::ActiveBasins => {
+                    s2_common::metrics::AccountMetricSet::ActiveBasins
+                }
+                AccountMetricSet::AccountOps => s2_common::metrics::AccountMetricSet::AccountOps,
             },
             start: value.start,
             end: value.end,
@@ -87,18 +88,20 @@ pub struct BasinMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-impl From<BasinMetricSetRequest> for types::metrics::BasinMetricsRequest {
+impl From<BasinMetricSetRequest> for s2_common::metrics::BasinMetricsRequest {
     fn from(value: BasinMetricSetRequest) -> Self {
         Self {
             set: match value.set {
-                BasinMetricSet::AppendOps => types::metrics::BasinMetricSet::AppendOps,
+                BasinMetricSet::AppendOps => s2_common::metrics::BasinMetricSet::AppendOps,
                 BasinMetricSet::AppendThroughput => {
-                    types::metrics::BasinMetricSet::AppendThroughput
+                    s2_common::metrics::BasinMetricSet::AppendThroughput
                 }
-                BasinMetricSet::BasinOps => types::metrics::BasinMetricSet::BasinOps,
-                BasinMetricSet::ReadOps => types::metrics::BasinMetricSet::ReadOps,
-                BasinMetricSet::ReadThroughput => types::metrics::BasinMetricSet::ReadThroughput,
-                BasinMetricSet::Storage => types::metrics::BasinMetricSet::Storage,
+                BasinMetricSet::BasinOps => s2_common::metrics::BasinMetricSet::BasinOps,
+                BasinMetricSet::ReadOps => s2_common::metrics::BasinMetricSet::ReadOps,
+                BasinMetricSet::ReadThroughput => {
+                    s2_common::metrics::BasinMetricSet::ReadThroughput
+                }
+                BasinMetricSet::Storage => s2_common::metrics::BasinMetricSet::Storage,
             },
             start: value.start,
             end: value.end,
@@ -141,11 +144,11 @@ pub struct StreamMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-impl From<StreamMetricSetRequest> for types::metrics::StreamMetricsRequest {
+impl From<StreamMetricSetRequest> for s2_common::metrics::StreamMetricsRequest {
     fn from(value: StreamMetricSetRequest) -> Self {
         Self {
             set: match value.set {
-                StreamMetricSet::Storage => types::metrics::StreamMetricSet::Storage,
+                StreamMetricSet::Storage => s2_common::metrics::StreamMetricSet::Storage,
             },
             start: value.start,
             end: value.end,
@@ -172,11 +175,11 @@ pub enum MetricUnit {
     Operations,
 }
 
-impl From<types::metrics::MetricUnit> for MetricUnit {
-    fn from(value: types::metrics::MetricUnit) -> Self {
+impl From<s2_common::metrics::MetricUnit> for MetricUnit {
+    fn from(value: s2_common::metrics::MetricUnit) -> Self {
         match value {
-            types::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
-            types::metrics::MetricUnit::Operations => MetricUnit::Operations,
+            s2_common::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
+            s2_common::metrics::MetricUnit::Operations => MetricUnit::Operations,
         }
     }
 }
@@ -194,8 +197,8 @@ pub struct ScalarMetric {
     pub value: f64,
 }
 
-impl From<types::metrics::ScalarMetric> for ScalarMetric {
-    fn from(value: types::metrics::ScalarMetric) -> Self {
+impl From<s2_common::metrics::ScalarMetric> for ScalarMetric {
+    fn from(value: s2_common::metrics::ScalarMetric) -> Self {
         Self {
             name: value.name,
             unit: value.unit.into(),
@@ -221,8 +224,8 @@ pub struct AccumulationMetric {
     pub values: Vec<(u32, f64)>,
 }
 
-impl From<types::metrics::AccumulationMetric> for AccumulationMetric {
-    fn from(value: types::metrics::AccumulationMetric) -> Self {
+impl From<s2_common::metrics::AccumulationMetric> for AccumulationMetric {
+    fn from(value: s2_common::metrics::AccumulationMetric) -> Self {
         Self {
             name: value.name,
             unit: value.unit.into(),
@@ -247,8 +250,8 @@ pub struct GaugeMetric {
     pub values: Vec<(u32, f64)>,
 }
 
-impl From<types::metrics::GaugeMetric> for GaugeMetric {
-    fn from(value: types::metrics::GaugeMetric) -> Self {
+impl From<s2_common::metrics::GaugeMetric> for GaugeMetric {
+    fn from(value: s2_common::metrics::GaugeMetric) -> Self {
         Self {
             name: value.name,
             unit: value.unit.into(),
@@ -268,8 +271,8 @@ pub struct LabelMetric {
     pub values: Vec<String>,
 }
 
-impl From<types::metrics::LabelMetric> for LabelMetric {
-    fn from(value: types::metrics::LabelMetric) -> Self {
+impl From<s2_common::metrics::LabelMetric> for LabelMetric {
+    fn from(value: s2_common::metrics::LabelMetric) -> Self {
         Self {
             name: value.name,
             values: value.values,
@@ -292,15 +295,15 @@ pub enum Metric {
     Label(LabelMetric),
 }
 
-impl From<types::metrics::Metric> for Metric {
-    fn from(value: types::metrics::Metric) -> Self {
+impl From<s2_common::metrics::Metric> for Metric {
+    fn from(value: s2_common::metrics::Metric) -> Self {
         match value {
-            types::metrics::Metric::Scalar(scalar) => Metric::Scalar(scalar.into()),
-            types::metrics::Metric::Accumulation(timeseries) => {
+            s2_common::metrics::Metric::Scalar(scalar) => Metric::Scalar(scalar.into()),
+            s2_common::metrics::Metric::Accumulation(timeseries) => {
                 Metric::Accumulation(timeseries.into())
             }
-            types::metrics::Metric::Gauge(timeseries) => Metric::Gauge(timeseries.into()),
-            types::metrics::Metric::Label(label) => Metric::Label(label.into()),
+            s2_common::metrics::Metric::Gauge(timeseries) => Metric::Gauge(timeseries.into()),
+            s2_common::metrics::Metric::Label(label) => Metric::Label(label.into()),
         }
     }
 }
@@ -313,8 +316,8 @@ pub struct MetricSetResponse {
     pub values: Vec<Metric>,
 }
 
-impl From<types::metrics::MetricsResponse> for MetricSetResponse {
-    fn from(value: types::metrics::MetricsResponse) -> Self {
+impl From<s2_common::metrics::MetricsResponse> for MetricSetResponse {
+    fn from(value: s2_common::metrics::MetricsResponse) -> Self {
         Self {
             values: value.values.into_iter().map(Into::into).collect(),
         }

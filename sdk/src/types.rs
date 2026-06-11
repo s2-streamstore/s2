@@ -20,37 +20,37 @@ use http::{
 use rand::RngExt;
 use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 /// Validation error.
-pub use s2_common::types::ValidationError;
+pub use s2_common::ValidationError;
 /// Access token ID.
 ///
 /// **Note:** It must be unique to the account and between 1 and 96 bytes in length.
-pub use s2_common::types::access::AccessTokenId;
+pub use s2_common::access::AccessTokenId;
 /// See [`ListAccessTokensInput::prefix`].
-pub use s2_common::types::access::AccessTokenIdPrefix;
+pub use s2_common::access::AccessTokenIdPrefix;
 /// See [`ListAccessTokensInput::start_after`].
-pub use s2_common::types::access::AccessTokenIdStartAfter;
+pub use s2_common::access::AccessTokenIdStartAfter;
 /// Basin name.
 ///
 /// **Note:** It must be globally unique and between 8 and 48 bytes in length. It can only
 /// comprise lowercase letters, numbers, and hyphens. It cannot begin or end with a hyphen.
-pub use s2_common::types::basin::BasinName;
+pub use s2_common::basin::BasinName;
 /// See [`ListBasinsInput::prefix`].
-pub use s2_common::types::basin::BasinNamePrefix;
+pub use s2_common::basin::BasinNamePrefix;
 /// See [`ListBasinsInput::start_after`].
-pub use s2_common::types::basin::BasinNameStartAfter;
+pub use s2_common::basin::BasinNameStartAfter;
 /// Location name.
 ///
 /// **Note:** It must be between 1 and 64 characters in length and can only comprise ASCII
 /// letters, numbers, colons, hyphens, and periods.
-pub use s2_common::types::location::LocationName;
+pub use s2_common::location::LocationName;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
-pub use s2_common::types::stream::StreamName;
+pub use s2_common::stream::StreamName;
 /// See [`ListStreamsInput::prefix`].
-pub use s2_common::types::stream::StreamNamePrefix;
+pub use s2_common::stream::StreamNamePrefix;
 /// See [`ListStreamsInput::start_after`].
-pub use s2_common::types::stream::StreamNameStartAfter;
+pub use s2_common::stream::StreamNameStartAfter;
 pub use s2_common::{
     caps::RECORD_BATCH_MAX,
     encryption::{EncryptionAlgorithm, EncryptionKey},
@@ -58,9 +58,7 @@ pub use s2_common::{
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
-use s2_common::{
-    maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH, types::resources::ProvisionResult,
-};
+use s2_common::{maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH, resources::ProvisionResult};
 use secrecy::SecretString;
 
 use crate::api::{ApiError, ApiErrorResponse};

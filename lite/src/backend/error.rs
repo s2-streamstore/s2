@@ -1,9 +1,10 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
+    basin::BasinName,
     encryption::EncryptionSpecResolutionError,
     record::{FencingToken, SeqNum, StreamPosition},
-    types::{basin::BasinName, stream::StreamName},
+    stream::StreamName,
 };
 use s2_storage::record::RecordDecryptionError;
 
@@ -319,7 +320,7 @@ pub enum ProvisionStreamError {
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
-    Validation(#[from] s2_common::types::ValidationError),
+    Validation(#[from] s2_common::ValidationError),
 }
 
 impl From<slatedb::Error> for ProvisionStreamError {
@@ -476,7 +477,7 @@ pub enum ReconfigureStreamError {
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
-    Validation(#[from] s2_common::types::ValidationError),
+    Validation(#[from] s2_common::ValidationError),
 }
 
 impl From<slatedb::Error> for ReconfigureStreamError {

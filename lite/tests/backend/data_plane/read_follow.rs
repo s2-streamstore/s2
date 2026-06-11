@@ -4,13 +4,11 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
+    config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
     encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
     record::MeteredSize,
-    types::{
-        config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
-    },
+    stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
 };
 use s2_lite::backend::FOLLOWER_MAX_LAG;
 

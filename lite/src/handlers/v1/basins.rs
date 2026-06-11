@@ -5,12 +5,10 @@ use s2_api::{
     v1 as v1t,
 };
 use s2_common::{
+    basin::{BasinName, ListBasinsRequest},
+    config::{BasinConfig, BasinReconfiguration},
     http::extract::HeaderOpt,
-    types::{
-        basin::{BasinName, ListBasinsRequest},
-        config::{BasinConfig, BasinReconfiguration},
-        resources::{PROVISION_RESULT_HEADER, Page, ProvisionMode, ProvisionResult, RequestToken},
-    },
+    resources::{PROVISION_RESULT_HEADER, Page, ProvisionMode, ProvisionResult, RequestToken},
 };
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};

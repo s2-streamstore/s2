@@ -1,4 +1,4 @@
-use s2_common::types::{basin::BasinName, stream::StreamName};
+use s2_common::{basin::BasinName, stream::StreamName};
 use s2_storage::bash::Bash;
 
 /// Unique identifier for a stream scoped by its basin.

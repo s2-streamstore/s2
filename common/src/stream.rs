@@ -14,7 +14,7 @@ use crate::{
     record::{
         FencingToken, Metered, MeteredSize, Record, SeqNum, Sequenced, StreamPosition, Timestamp,
     },
-    types::resources::ListItemsRequest,
+    resources::ListItemsRequest,
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

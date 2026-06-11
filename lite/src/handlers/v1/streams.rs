@@ -5,13 +5,11 @@ use s2_api::{
     v1 as v1t,
 };
 use s2_common::{
+    basin::BasinName,
+    config::{OptionalStreamConfig, StreamReconfiguration},
     http::extract::{Header, HeaderOpt},
-    types::{
-        basin::BasinName,
-        config::{OptionalStreamConfig, StreamReconfiguration},
-        resources::{PROVISION_RESULT_HEADER, Page, ProvisionMode, ProvisionResult, RequestToken},
-        stream::{ListStreamsRequest, StreamName},
-    },
+    resources::{PROVISION_RESULT_HEADER, Page, ProvisionMode, ProvisionResult, RequestToken},
+    stream::{ListStreamsRequest, StreamName},
 };
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};

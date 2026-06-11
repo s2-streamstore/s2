@@ -14,15 +14,13 @@ use futures::{
 };
 use parking_lot::Mutex;
 use s2_common::{
+    config::{RetentionPolicy, StreamConfig, TimestampingConfig, TimestampingMode},
     encryption::EncryptionAlgorithm,
     record::{
         CommandRecord, FencingToken, Metered, MeteredExt as _, MeteredSize, NonZeroSeqNum, Record,
         SeqNum, StreamPosition, Timestamp,
     },
-    types::{
-        config::{RetentionPolicy, StreamConfig, TimestampingConfig, TimestampingMode},
-        stream::AppendAck,
-    },
+    stream::AppendAck,
 };
 use s2_storage::{
     record::{StoredRecord, StoredSequencedRecord},

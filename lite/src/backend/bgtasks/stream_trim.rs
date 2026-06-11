@@ -1,7 +1,7 @@
 use std::ops::RangeTo;
 
 use futures::{StreamExt, stream};
-use s2_common::{record::NonZeroSeqNum, types::resources::Page};
+use s2_common::{record::NonZeroSeqNum, resources::Page};
 use slatedb::{
     WriteBatch,
     config::{DurabilityLevel, ScanOptions},
@@ -155,10 +155,12 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
+        basin::BasinName,
+        config::StreamConfig,
         record::{
             FencingToken, Metered, MeteredExt as _, NonZeroSeqNum, Record, SeqNum, StreamPosition,
         },
-        types::{basin::BasinName, config::StreamConfig, stream::StreamName},
+        stream::StreamName,
     };
     use s2_storage::record::StoredRecord;
     use slatedb::WriteBatch;

@@ -9,7 +9,7 @@ use super::{
     stream::{StreamName, StreamNamePrefix},
     strings::{IdProps, PrefixProps, StartAfterProps, StrProps},
 };
-use crate::{caps, types::resources::ListItemsRequest};
+use crate::{caps, resources::ListItemsRequest};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
