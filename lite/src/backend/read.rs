@@ -11,7 +11,7 @@ use s2_common::{
 };
 use s2_storage::{
     record::StoredSequencedRecord,
-    types::stream::{StoredReadBatch, StoredReadSessionOutput, StoredReadSessionOutputExt},
+    stream::{StoredReadBatch, StoredReadSessionOutput, StoredReadSessionOutputExt},
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};

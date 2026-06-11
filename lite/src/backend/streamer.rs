@@ -24,7 +24,7 @@ use s2_common::{
 };
 use s2_storage::{
     record::{StoredRecord, StoredSequencedRecord},
-    types::stream::{
+    stream::{
         StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
     },
 };
@@ -1082,7 +1082,7 @@ mod tests {
     };
     use s2_storage::{
         record::{StoredRecord, encrypt_record},
-        types::stream::{
+        stream::{
             StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
         },
     };

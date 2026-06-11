@@ -2,4 +2,4 @@
 
 pub mod bash;
 pub mod record;
-pub mod types;
+pub mod stream;
