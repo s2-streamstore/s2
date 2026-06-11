@@ -71,6 +71,8 @@ impl_deep_size_prim!(bool, u64, usize, std::num::NonZeroU64);
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -80,33 +82,6 @@ mod tests {
         assert_eq!(0usize.deep_size(), size_of::<usize>());
         let nz = std::num::NonZeroU64::new(1).unwrap();
         assert_eq!(nz.deep_size(), size_of::<std::num::NonZeroU64>());
-    }
-
-    #[test]
-    fn string_deep_size() {
-        let s = String::from("hello");
-        assert_eq!(s.deep_size(), 5);
-        assert_eq!(String::new().deep_size(), 0);
-    }
-
-    #[test]
-    fn bytes_deep_size() {
-        let b = bytes::Bytes::from("world");
-        assert_eq!(b.deep_size(), 5);
-        assert_eq!(bytes::Bytes::new().deep_size(), 0);
-    }
-
-    #[test]
-    fn vec_deep_size() {
-        let v: Vec<u64> = vec![1, 2, 3];
-        assert_eq!(v.deep_size(), 3 * size_of::<u64>());
-    }
-
-    #[test]
-    fn slice_deep_size() {
-        let v: Vec<u64> = vec![10, 20];
-        let s: &[u64] = &v;
-        assert_eq!(s.deep_size(), 2 * size_of::<u64>());
     }
 
     #[test]
@@ -145,9 +120,31 @@ mod tests {
         assert_eq!(b.deep_size(), 1);
     }
 
-    #[test]
-    fn nested_vec_of_strings() {
-        let v = vec![String::from("ab"), String::from("cde")];
-        assert_eq!(v.deep_size(), 2 + 3);
+    proptest! {
+        #[test]
+        fn string_deep_size_matches_byte_len(s in ".{0,256}") {
+            prop_assert_eq!(s.deep_size(), s.len());
+        }
+
+        #[test]
+        fn bytes_deep_size_matches_len(bytes in prop::collection::vec(any::<u8>(), 0..=1024)) {
+            let bytes = bytes::Bytes::from(bytes);
+            prop_assert_eq!(bytes.deep_size(), bytes.len());
+        }
+
+        #[test]
+        fn vec_and_slice_deep_size_sum_elements(values in prop::collection::vec(any::<u64>(), 0..=256)) {
+            let expected = values.len() * size_of::<u64>();
+            prop_assert_eq!(values.deep_size(), expected);
+            prop_assert_eq!(values.as_slice().deep_size(), expected);
+        }
+
+        #[test]
+        fn nested_vec_of_strings_sums_string_lengths(
+            values in prop::collection::vec(proptest::string::string_regex(".{0,64}").unwrap(), 0..=32),
+        ) {
+            let expected = values.iter().map(String::len).sum::<usize>();
+            prop_assert_eq!(values.deep_size(), expected);
+        }
     }
 }

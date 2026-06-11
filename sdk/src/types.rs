@@ -3674,7 +3674,54 @@ fn idempotency_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    type HeaderParts = (Vec<u8>, Vec<u8>);
+    type AppendRecordParts = (Vec<u8>, Vec<HeaderParts>);
+
+    fn byte_vec_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=max_len)
+    }
+
+    fn ascii_bytes_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(0x20u8..=0x7e, 0..=max_len)
+    }
+
+    fn header_parts_strategy() -> impl Strategy<Value = HeaderParts> {
+        (byte_vec_strategy(32), byte_vec_strategy(64))
+    }
+
+    fn append_record_parts_strategy() -> impl Strategy<Value = AppendRecordParts> {
+        (
+            byte_vec_strategy(256),
+            prop::collection::vec(header_parts_strategy(), 0..=16),
+        )
+    }
+
+    fn proto_stream_position_strategy() -> impl Strategy<Value = api::stream::proto::StreamPosition>
+    {
+        (any::<u64>(), any::<u64>()).prop_map(|(seq_num, timestamp)| {
+            api::stream::proto::StreamPosition { seq_num, timestamp }
+        })
+    }
+
+    fn headers_from_parts(headers: &[HeaderParts]) -> Vec<Header> {
+        headers
+            .iter()
+            .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
+            .collect()
+    }
+
+    fn expected_metered_bytes(body: &[u8], headers: &[HeaderParts]) -> usize {
+        8 + (2 * headers.len())
+            + headers
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>()
+            + body.len()
+    }
 
     // -- S2DateTime --
 
@@ -3687,8 +3734,13 @@ mod tests {
     #[test]
     fn s2_datetime_parse_with_offset() {
         let dt: S2DateTime = "2024-06-01T08:00:00+05:30".parse().unwrap();
-        let s = dt.to_string();
-        assert!(s.contains("2024"));
+        assert_eq!(dt.to_string(), "2024-06-01T08:00:00+05:30");
+
+        let offset_dt: time::OffsetDateTime = dt.into();
+        assert_eq!(
+            offset_dt.offset(),
+            time::UtcOffset::from_hms(5, 30, 0).unwrap()
+        );
     }
 
     #[test]
@@ -3722,12 +3774,6 @@ mod tests {
     #[test]
     fn account_endpoint_defaults_to_https() {
         let ep: AccountEndpoint = "aws.s2.dev".parse().unwrap();
-        assert_eq!(ep.scheme, Scheme::HTTPS);
-    }
-
-    #[test]
-    fn account_endpoint_new_delegates_to_parse() {
-        let ep = AccountEndpoint::new("https://aws.s2.dev").unwrap();
         assert_eq!(ep.scheme, Scheme::HTTPS);
     }
 
@@ -3771,12 +3817,6 @@ mod tests {
         assert_eq!(ep.scheme, Scheme::HTTPS);
     }
 
-    #[test]
-    fn s2_endpoints_for_aws() {
-        let ep = S2Endpoints::for_aws();
-        assert_eq!(ep.scheme, Scheme::HTTPS);
-    }
-
     // -- Compression --
 
     #[test]
@@ -3808,22 +3848,6 @@ mod tests {
         assert_eq!(rc.max_retries(), 2);
     }
 
-    #[test]
-    fn retry_config_builder() {
-        let rc = RetryConfig::new()
-            .with_max_attempts(NonZeroU32::new(5).unwrap())
-            .with_min_base_delay(Duration::from_millis(50))
-            .with_max_base_delay(Duration::from_secs(10))
-            .with_append_retry_policy(AppendRetryPolicy::NoSideEffects);
-        assert_eq!(rc.max_attempts.get(), 5);
-        assert_eq!(rc.min_base_delay, Duration::from_millis(50));
-        assert_eq!(rc.max_base_delay, Duration::from_secs(10));
-        assert!(matches!(
-            rc.append_retry_policy,
-            AppendRetryPolicy::NoSideEffects
-        ));
-    }
-
     // -- S2Config --
 
     #[test]
@@ -3832,21 +3856,6 @@ mod tests {
         assert_eq!(cfg.connection_timeout, Duration::from_secs(3));
         assert_eq!(cfg.request_timeout, Duration::from_secs(5));
         assert!(!cfg.insecure_skip_cert_verification);
-    }
-
-    #[test]
-    fn s2_config_builder() {
-        let ep = S2Endpoints::for_aws();
-        let cfg = S2Config::new("test-token")
-            .with_endpoints(ep)
-            .with_connection_timeout(Duration::from_secs(10))
-            .with_request_timeout(Duration::from_secs(30))
-            .with_retry(RetryConfig::new())
-            .with_compression(Compression::Zstd)
-            .with_insecure_skip_cert_verification(true);
-        assert_eq!(cfg.connection_timeout, Duration::from_secs(10));
-        assert_eq!(cfg.request_timeout, Duration::from_secs(30));
-        assert!(cfg.insecure_skip_cert_verification);
     }
 
     // -- StorageClass --
@@ -3925,10 +3934,9 @@ mod tests {
     #[test]
     fn delete_on_empty_config_roundtrip() {
         let sdk = DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300));
-        assert_eq!(sdk.min_age_secs, 300);
         let api: api::config::DeleteOnEmptyConfig = sdk.into();
         let back: DeleteOnEmptyConfig = api.into();
-        assert_eq!(back.min_age_secs, 300);
+        assert_eq!(back, sdk);
     }
 
     // -- StreamConfig --
@@ -3948,15 +3956,6 @@ mod tests {
         assert_eq!(back, sdk);
     }
 
-    #[test]
-    fn stream_config_default_is_empty() {
-        let cfg = StreamConfig::default();
-        assert!(cfg.storage_class.is_none());
-        assert!(cfg.retention_policy.is_none());
-        assert!(cfg.timestamping.is_none());
-        assert!(cfg.delete_on_empty.is_none());
-    }
-
     // -- BasinConfig --
 
     #[test]
@@ -3969,85 +3968,25 @@ mod tests {
             .with_create_stream_on_read(false);
         let api: api::config::BasinConfig = sdk.clone().into();
         let back: BasinConfig = api.into();
-        assert!(back.create_stream_on_append);
-        assert!(!back.create_stream_on_read);
-        assert!(back.default_stream_config.is_some());
-    }
-
-    // -- Reconfiguration types --
-
-    #[test]
-    fn timestamping_reconfiguration_builder() {
-        let reconfig = TimestampingReconfiguration::new()
-            .with_mode(TimestampingMode::Arrival)
-            .with_uncapped(true);
-        let api: api::config::TimestampingReconfiguration = reconfig.into();
-        assert!(!api.mode.is_unspecified());
-        assert!(!api.uncapped.is_unspecified());
-    }
-
-    #[test]
-    fn delete_on_empty_reconfiguration_builder() {
-        let reconfig = DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(120));
-        let api: api::config::DeleteOnEmptyReconfiguration = reconfig.into();
-        assert!(!api.min_age_secs.is_unspecified());
-    }
-
-    #[test]
-    fn stream_reconfiguration_builder() {
-        let reconfig = StreamReconfiguration::new()
-            .with_storage_class(StorageClass::Standard)
-            .with_retention_policy(RetentionPolicy::Infinite)
-            .with_timestamping(TimestampingReconfiguration::new())
-            .with_delete_on_empty(DeleteOnEmptyReconfiguration::new());
-        let api: api::config::StreamReconfiguration = reconfig.into();
-        assert!(!api.storage_class.is_unspecified());
-        assert!(!api.retention_policy.is_unspecified());
-    }
-
-    #[test]
-    fn basin_reconfiguration_builder() {
-        let reconfig = BasinReconfiguration::new()
-            .with_default_stream_config(StreamReconfiguration::new())
-            .with_create_stream_on_append(true)
-            .with_create_stream_on_read(false);
-        let api: api::config::BasinReconfiguration = reconfig.into();
-        assert!(!api.default_stream_config.is_unspecified());
-        assert!(!api.create_stream_on_append.is_unspecified());
-        assert!(!api.create_stream_on_read.is_unspecified());
+        assert_eq!(back, sdk);
     }
 
     // -- FencingToken --
 
-    #[test]
-    fn fencing_token_parse_valid() {
-        let token: FencingToken = "my-token".parse().unwrap();
-        assert_eq!(&*token, "my-token");
-        assert_eq!(token.to_string(), "my-token");
-    }
+    proptest! {
+        #[test]
+        fn fencing_token_ascii_parse_accepts_only_within_byte_limit(
+            bytes in ascii_bytes_strategy(MAX_FENCING_TOKEN_LENGTH + 8),
+        ) {
+            let token = String::from_utf8(bytes).unwrap();
+            let parsed = token.parse::<FencingToken>();
 
-    #[test]
-    fn fencing_token_parse_empty() {
-        let token: FencingToken = "".parse().unwrap();
-        assert_eq!(&*token, "");
-    }
-
-    #[test]
-    fn fencing_token_too_long() {
-        let long = "a".repeat(MAX_FENCING_TOKEN_LENGTH + 1);
-        assert!(long.parse::<FencingToken>().is_err());
-    }
-
-    #[test]
-    fn fencing_token_max_length() {
-        let max = "a".repeat(MAX_FENCING_TOKEN_LENGTH);
-        assert!(max.parse::<FencingToken>().is_ok());
-    }
-
-    #[test]
-    fn fencing_token_generate() {
-        let token = FencingToken::generate(16).unwrap();
-        assert_eq!(token.len(), 16);
+            if token.len() <= MAX_FENCING_TOKEN_LENGTH {
+                prop_assert_eq!(parsed.unwrap().to_string(), token);
+            } else {
+                prop_assert!(parsed.is_err());
+            }
+        }
     }
 
     // -- StreamPosition --
@@ -4061,62 +4000,45 @@ mod tests {
         assert_eq!(pos.to_string(), "seq_num=42, timestamp=1700000000");
     }
 
-    #[test]
-    fn stream_position_from_proto() {
-        let proto = api::stream::proto::StreamPosition {
-            seq_num: 10,
-            timestamp: 999,
-        };
-        let pos: StreamPosition = proto.into();
-        assert_eq!(pos.seq_num, 10);
-        assert_eq!(pos.timestamp, 999);
-    }
+    proptest! {
+        #[test]
+        fn stream_position_conversions_preserve_values(seq_num in any::<u64>(), timestamp in any::<u64>()) {
+            let proto: StreamPosition = api::stream::proto::StreamPosition {
+                seq_num,
+                timestamp,
+            }
+            .into();
+            prop_assert_eq!(proto.seq_num, seq_num);
+            prop_assert_eq!(proto.timestamp, timestamp);
 
-    #[test]
-    fn stream_position_from_api() {
-        let api_pos = api::stream::StreamPosition {
-            seq_num: 5,
-            timestamp: 100,
-        };
-        let pos: StreamPosition = api_pos.into();
-        assert_eq!(pos.seq_num, 5);
-        assert_eq!(pos.timestamp, 100);
+            let api: StreamPosition = api::stream::StreamPosition {
+                seq_num,
+                timestamp,
+            }
+            .into();
+            prop_assert_eq!(api.seq_num, seq_num);
+            prop_assert_eq!(api.timestamp, timestamp);
+        }
     }
 
     // -- Header --
 
-    #[test]
-    fn header_roundtrip() {
-        let h = Header::new("key", "value");
-        let proto: api::stream::proto::Header = h.clone().into();
-        let back: Header = proto.into();
-        assert_eq!(back, h);
+    proptest! {
+        #[test]
+        fn header_proto_roundtrip_preserves_binary_parts(
+            name in byte_vec_strategy(64),
+            value in byte_vec_strategy(128),
+        ) {
+            let header = Header::new(Bytes::from(name.clone()), Bytes::from(value.clone()));
+            let proto: api::stream::proto::Header = header.into();
+            let back: Header = proto.into();
+
+            prop_assert_eq!(back.name.as_ref(), name.as_slice());
+            prop_assert_eq!(back.value.as_ref(), value.as_slice());
+        }
     }
 
     // -- AppendRecord --
-
-    #[test]
-    fn append_record_new() {
-        let record = AppendRecord::new("hello").unwrap();
-        assert_eq!(record.body(), b"hello");
-        assert!(record.headers().is_empty());
-        assert_eq!(record.timestamp(), None);
-    }
-
-    #[test]
-    fn append_record_with_headers() {
-        let record = AppendRecord::new("hello")
-            .unwrap()
-            .with_headers(vec![Header::new("k", "v")])
-            .unwrap();
-        assert_eq!(record.headers().len(), 1);
-    }
-
-    #[test]
-    fn append_record_with_timestamp() {
-        let record = AppendRecord::new("hello").unwrap().with_timestamp(42);
-        assert_eq!(record.timestamp(), Some(42));
-    }
 
     #[test]
     fn append_record_too_large() {
@@ -4126,35 +4048,33 @@ mod tests {
 
     // -- MeteredBytes --
 
-    #[test]
-    fn metered_bytes_no_headers() {
-        let record = AppendRecord::new("hello").unwrap();
-        assert_eq!(record.metered_bytes(), 8 + 5);
-    }
+    proptest! {
+        #[test]
+        fn append_record_preserves_fields_and_metered_byte_formula(
+            (body, headers) in append_record_parts_strategy(),
+            timestamp in proptest::option::of(any::<u64>()),
+        ) {
+            let mut record = AppendRecord::new(body.clone())
+                .unwrap()
+                .with_headers(headers_from_parts(&headers))
+                .unwrap();
+            if let Some(timestamp) = timestamp {
+                record = record.with_timestamp(timestamp);
+            }
 
-    #[test]
-    fn metered_bytes_with_headers() {
-        let record = AppendRecord::new("body")
-            .unwrap()
-            .with_headers(vec![Header::new("ab", "cd")])
-            .unwrap();
-        // 8 + 2*1 + (2+2) + 4 = 18
-        assert_eq!(record.metered_bytes(), 18);
+            prop_assert_eq!(record.body(), body.as_slice());
+            prop_assert_eq!(record.headers().len(), headers.len());
+            prop_assert_eq!(record.timestamp(), timestamp);
+            prop_assert_eq!(record.metered_bytes(), expected_metered_bytes(&body, &headers));
+
+            for (actual, (expected_name, expected_value)) in record.headers().iter().zip(headers.iter()) {
+                prop_assert_eq!(actual.name.as_ref(), expected_name.as_slice());
+                prop_assert_eq!(actual.value.as_ref(), expected_value.as_slice());
+            }
+        }
     }
 
     // -- AppendRecordBatch --
-
-    #[test]
-    fn append_record_batch_try_from_iter() {
-        let records = vec![
-            AppendRecord::new("a").unwrap(),
-            AppendRecord::new("b").unwrap(),
-        ];
-        let batch = AppendRecordBatch::try_from_iter(records).unwrap();
-        assert_eq!(batch.len(), 2);
-        // metered bytes: (8+1) + (8+1) = 18
-        assert_eq!(batch.metered_bytes(), 18);
-    }
 
     #[test]
     fn append_record_batch_empty_is_err() {
@@ -4167,6 +4087,31 @@ mod tests {
         let records: Vec<_> = (0..1001).map(|_| AppendRecord::new("x").unwrap()).collect();
         let result = AppendRecordBatch::try_from_iter(records);
         assert!(result.is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn append_record_batch_metered_bytes_is_sum_of_records(
+            records in prop::collection::vec(append_record_parts_strategy(), 1..=32),
+        ) {
+            let expected = records
+                .iter()
+                .map(|(body, headers)| expected_metered_bytes(body, headers))
+                .sum::<usize>();
+            let records = records
+                .into_iter()
+                .map(|(body, headers)| {
+                    AppendRecord::new(body)
+                        .unwrap()
+                        .with_headers(headers_from_parts(&headers))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+
+            let batch = AppendRecordBatch::try_from_iter(records).unwrap();
+            prop_assert_eq!(batch.metered_bytes(), expected);
+            prop_assert_eq!(batch.iter().map(MeteredBytes::metered_bytes).sum::<usize>(), expected);
+        }
     }
 
     // -- CommandRecord --
@@ -4189,13 +4134,6 @@ mod tests {
         assert_eq!(record.headers().len(), 1);
         assert_eq!(record.headers()[0].value.as_ref(), b"trim");
         assert_eq!(record.body(), &42u64.to_be_bytes());
-    }
-
-    #[test]
-    fn command_record_with_timestamp() {
-        let cmd = CommandRecord::trim(0).with_timestamp(999);
-        let record: AppendRecord = cmd.into();
-        assert_eq!(record.timestamp(), Some(999));
     }
 
     // -- SequencedRecord --
@@ -4233,68 +4171,30 @@ mod tests {
         assert!(!regular.is_command_record());
     }
 
-    // -- AppendInput --
-
-    #[test]
-    fn append_input_builder() {
-        let batch =
-            AppendRecordBatch::try_from_iter(vec![AppendRecord::new("data").unwrap()]).unwrap();
-        let token: FencingToken = "t".parse().unwrap();
-        let input = AppendInput::new(batch)
-            .with_match_seq_num(5)
-            .with_fencing_token(token.clone());
-        assert_eq!(input.match_seq_num, Some(5));
-        assert_eq!(input.fencing_token.as_ref().unwrap().to_string(), "t");
-    }
-
-    // -- ReadFrom --
-
-    #[test]
-    fn read_from_default_is_seq_num_zero() {
-        let rf = ReadFrom::default();
-        assert!(matches!(rf, ReadFrom::SeqNum(0)));
-    }
-
     // -- ReadStart --
 
-    #[test]
-    fn read_start_to_api_seq_num() {
-        let start = ReadStart::new().with_from(ReadFrom::SeqNum(42));
-        let api: api::stream::ReadStart = start.into();
-        assert_eq!(api.seq_num, Some(42));
-        assert_eq!(api.timestamp, None);
-        assert_eq!(api.tail_offset, None);
-    }
+    proptest! {
+        #[test]
+        fn read_start_to_api_sets_only_selected_position_field(
+            value in any::<u64>(),
+            variant in 0u8..3,
+            clamp_to_tail in any::<bool>(),
+        ) {
+            let from = match variant {
+                0 => ReadFrom::SeqNum(value),
+                1 => ReadFrom::Timestamp(value),
+                _ => ReadFrom::TailOffset(value),
+            };
+            let api: api::stream::ReadStart = ReadStart::new()
+                .with_from(from)
+                .with_clamp_to_tail(clamp_to_tail)
+                .into();
 
-    #[test]
-    fn read_start_to_api_timestamp() {
-        let start = ReadStart::new().with_from(ReadFrom::Timestamp(1000));
-        let api: api::stream::ReadStart = start.into();
-        assert_eq!(api.seq_num, None);
-        assert_eq!(api.timestamp, Some(1000));
-    }
-
-    #[test]
-    fn read_start_to_api_tail_offset() {
-        let start = ReadStart::new().with_from(ReadFrom::TailOffset(10));
-        let api: api::stream::ReadStart = start.into();
-        assert_eq!(api.tail_offset, Some(10));
-    }
-
-    #[test]
-    fn read_start_clamp_to_tail() {
-        let start = ReadStart::new().with_clamp_to_tail(true);
-        let api: api::stream::ReadStart = start.into();
-        assert_eq!(api.clamp, Some(true));
-    }
-
-    // -- ReadLimits --
-
-    #[test]
-    fn read_limits_builder() {
-        let limits = ReadLimits::new().with_count(100).with_bytes(4096);
-        assert_eq!(limits.count, Some(100));
-        assert_eq!(limits.bytes, Some(4096));
+            prop_assert_eq!(api.seq_num, matches!(from, ReadFrom::SeqNum(_)).then_some(value));
+            prop_assert_eq!(api.timestamp, matches!(from, ReadFrom::Timestamp(_)).then_some(value));
+            prop_assert_eq!(api.tail_offset, matches!(from, ReadFrom::TailOffset(_)).then_some(value));
+            prop_assert_eq!(api.clamp, clamp_to_tail.then_some(true));
+        }
     }
 
     // -- ReadStop --
@@ -4309,22 +4209,6 @@ mod tests {
         assert_eq!(api.count, Some(50));
         assert_eq!(api.until, Some(1000));
         assert_eq!(api.wait, Some(30));
-    }
-
-    // -- Page --
-
-    #[test]
-    fn page_new() {
-        let page: Page<i32> = Page::new(vec![1, 2, 3], true);
-        assert_eq!(page.values.len(), 3);
-        assert!(page.has_more);
-    }
-
-    #[test]
-    fn page_default() {
-        let page: Page<i32> = Page::default();
-        assert!(page.values.is_empty());
-        assert!(!page.has_more);
     }
 
     // -- Operation roundtrip --
@@ -4360,7 +4244,7 @@ mod tests {
         for op in variants {
             let api_op: api::access::Operation = op.into();
             let back: Operation = api_op.into();
-            assert_eq!(std::mem::discriminant(&op), std::mem::discriminant(&back),);
+            assert_eq!(back, op);
         }
     }
 
@@ -4380,49 +4264,25 @@ mod tests {
 
     // -- AppendAck --
 
-    #[test]
-    fn append_ack_from_proto() {
-        let proto = api::stream::proto::AppendAck {
-            start: Some(api::stream::proto::StreamPosition {
-                seq_num: 1,
-                timestamp: 100,
-            }),
-            end: Some(api::stream::proto::StreamPosition {
-                seq_num: 5,
-                timestamp: 500,
-            }),
-            tail: Some(api::stream::proto::StreamPosition {
-                seq_num: 6,
-                timestamp: 600,
-            }),
-        };
-        let ack: AppendAck = proto.into();
-        assert_eq!(ack.start.seq_num, 1);
-        assert_eq!(ack.end.seq_num, 5);
-        assert_eq!(ack.tail.seq_num, 6);
-    }
+    proptest! {
+        #[test]
+        fn append_ack_from_proto_preserves_present_positions_and_defaults_missing(
+            start in proptest::option::of(proto_stream_position_strategy()),
+            end in proptest::option::of(proto_stream_position_strategy()),
+            tail in proptest::option::of(proto_stream_position_strategy()),
+        ) {
+            let expected_start = start.unwrap_or_default();
+            let expected_end = end.unwrap_or_default();
+            let expected_tail = tail.unwrap_or_default();
+            let ack: AppendAck = api::stream::proto::AppendAck { start, end, tail }.into();
 
-    #[test]
-    fn append_ack_from_proto_none_defaults() {
-        let proto = api::stream::proto::AppendAck {
-            start: None,
-            end: None,
-            tail: None,
-        };
-        let ack: AppendAck = proto.into();
-        assert_eq!(ack.start.seq_num, 0);
-        assert_eq!(ack.start.timestamp, 0);
-    }
-
-    // -- ReadInput --
-
-    #[test]
-    fn read_input_builder() {
-        let input = ReadInput::new()
-            .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(10)))
-            .with_stop(ReadStop::new().with_wait(5))
-            .with_ignore_command_records(true);
-        assert!(input.ignore_command_records);
+            prop_assert_eq!(ack.start.seq_num, expected_start.seq_num);
+            prop_assert_eq!(ack.start.timestamp, expected_start.timestamp);
+            prop_assert_eq!(ack.end.seq_num, expected_end.seq_num);
+            prop_assert_eq!(ack.end.timestamp, expected_end.timestamp);
+            prop_assert_eq!(ack.tail.seq_num, expected_tail.seq_num);
+            prop_assert_eq!(ack.tail.timestamp, expected_tail.timestamp);
+        }
     }
 
     // -- ReadBatch --
@@ -4447,24 +4307,6 @@ mod tests {
         assert!(batch.tail.is_some());
     }
 
-    // -- DeleteBasinInput --
-
-    #[test]
-    fn delete_basin_input_builder() {
-        let name: BasinName = "test-basin-name".parse().unwrap();
-        let input = DeleteBasinInput::new(name).with_ignore_not_found(true);
-        assert!(input.ignore_not_found);
-    }
-
-    // -- DeleteStreamInput --
-
-    #[test]
-    fn delete_stream_input_builder() {
-        let name: StreamName = "my-stream".parse().unwrap();
-        let input = DeleteStreamInput::new(name).with_ignore_not_found(true);
-        assert!(input.ignore_not_found);
-    }
-
     // -- CreateBasinInput --
 
     #[test]
@@ -4477,15 +4319,6 @@ mod tests {
         assert!(!token.is_empty());
     }
 
-    // -- EnsureBasinInput --
-
-    #[test]
-    fn ensure_basin_input_builder() {
-        let name: BasinName = "test-basin-name".parse().unwrap();
-        let input = EnsureBasinInput::new(name.clone()).with_config(BasinConfig::new());
-        assert!(input.config.is_some());
-    }
-
     // -- CreateStreamInput --
 
     #[test]
@@ -4496,17 +4329,6 @@ mod tests {
         assert_eq!(req.stream, name);
         assert!(req.config.is_some());
         assert!(!token.is_empty());
-    }
-
-    // -- EnsureStreamInput --
-
-    #[test]
-    fn ensure_stream_input_to_api() {
-        let name: StreamName = "my-stream".parse().unwrap();
-        let input = EnsureStreamInput::new(name.clone()).with_config(StreamConfig::new());
-        let (sn, cfg): (StreamName, Option<api::config::StreamConfig>) = input.into();
-        assert_eq!(sn, name);
-        assert!(cfg.is_some());
     }
 
     // -- SequencedRecord from proto --

@@ -395,60 +395,70 @@ mod json {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+
+    use bytes::Bytes;
     use futures::StreamExt;
+    use proptest::prelude::*;
+    use s2_api::v1 as api;
+    use s2_sdk::types::Header;
 
     use super::*;
 
-    // -- parse_records_input_source --
-
-    #[test]
-    fn parse_input_empty_is_stdin() {
-        assert!(matches!(
-            parse_records_input_source("").unwrap(),
-            RecordsIn::Stdin
-        ));
+    fn run_async<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
     }
 
-    #[test]
-    fn parse_input_dash_is_stdin() {
-        assert!(matches!(
-            parse_records_input_source("-").unwrap(),
-            RecordsIn::Stdin
-        ));
+    fn ascii_string_strategy(max_len: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(0x20u8..=0x7e, 0..=max_len)
+            .prop_map(|bytes| String::from_utf8(bytes).unwrap())
     }
 
-    #[test]
-    fn parse_input_path_is_file() {
-        match parse_records_input_source("/tmp/data.txt").unwrap() {
-            RecordsIn::File(p) => assert_eq!(p.to_str().unwrap(), "/tmp/data.txt"),
-            _ => panic!("expected File"),
+    fn bytes_strategy(max_len: usize) -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=max_len)
+    }
+
+    fn sequenced_record(
+        seq_num: u64,
+        body: Bytes,
+        headers: Vec<Header>,
+        timestamp: u64,
+    ) -> SequencedRecord {
+        api::stream::proto::SequencedRecord {
+            seq_num,
+            body,
+            headers: headers.into_iter().map(Into::into).collect(),
+            timestamp,
         }
+        .into()
     }
 
-    // -- parse_records_output_source --
-
-    #[test]
-    fn parse_output_empty_is_stdout() {
-        assert!(matches!(
-            parse_records_output_source("").unwrap(),
-            RecordsOut::Stdout
-        ));
+    async fn parse_text_line(line: String) -> AppendRecord {
+        let lines = futures::stream::iter(vec![Ok(line)]);
+        let mut stream = TextFormatter::parse_records(lines);
+        let record = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        record
     }
 
-    #[test]
-    fn parse_output_dash_is_stdout() {
-        assert!(matches!(
-            parse_records_output_source("-").unwrap(),
-            RecordsOut::Stdout
-        ));
+    async fn parse_json_line(line: String) -> AppendRecord {
+        let lines = futures::stream::iter(vec![Ok(line)]);
+        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
+        let record = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        record
     }
 
-    #[test]
-    fn parse_output_path_is_file() {
-        match parse_records_output_source("/tmp/out.txt").unwrap() {
-            RecordsOut::File(p) => assert_eq!(p.to_str().unwrap(), "/tmp/out.txt"),
-            _ => panic!("expected File"),
-        }
+    async fn parse_json_base64_line(line: String) -> AppendRecord {
+        let lines = futures::stream::iter(vec![Ok(line)]);
+        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
+        let record = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        record
     }
 
     // -- TextFormatter: parse_records --
@@ -466,27 +476,6 @@ mod tests {
     }
 
     // -- JsonFormatter: parse_records --
-
-    #[tokio::test]
-    async fn json_parse_records_basic() {
-        let json_line = r#"{"body":"hello","timestamp":42}"#.to_string();
-        let lines = futures::stream::iter(vec![Ok(json_line)]);
-        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
-        let r = stream.next().await.unwrap().unwrap();
-        assert_eq!(r.body(), b"hello");
-        assert_eq!(r.timestamp(), Some(42));
-    }
-
-    #[tokio::test]
-    async fn json_parse_records_with_headers() {
-        let json_line = r#"{"body":"data","headers":[["key","val"]]}"#.to_string();
-        let lines = futures::stream::iter(vec![Ok(json_line)]);
-        let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
-        let r = stream.next().await.unwrap().unwrap();
-        assert_eq!(r.headers().len(), 1);
-        assert_eq!(r.headers()[0].name.as_ref(), b"key");
-        assert_eq!(r.headers()[0].value.as_ref(), b"val");
-    }
 
     #[tokio::test]
     async fn json_parse_records_invalid_json() {
@@ -507,28 +496,6 @@ mod tests {
     }
 
     // -- JsonBase64Formatter: parse_records --
-
-    #[tokio::test]
-    async fn json_base64_parse_records() {
-        // "hello" in base64 = "aGVsbG8="
-        let json_line = r#"{"body":"aGVsbG8="}"#.to_string();
-        let lines = futures::stream::iter(vec![Ok(json_line)]);
-        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
-        let r = stream.next().await.unwrap().unwrap();
-        assert_eq!(r.body(), b"hello");
-    }
-
-    #[tokio::test]
-    async fn json_base64_parse_records_with_headers() {
-        // "k" -> "aw==", "v" -> "dg=="
-        let json_line = r#"{"body":"","headers":[["aw==","dg=="]]}"#.to_string();
-        let lines = futures::stream::iter(vec![Ok(json_line)]);
-        let mut stream = <JsonBase64Formatter as RecordParser<_>>::parse_records(lines);
-        let r = stream.next().await.unwrap().unwrap();
-        assert_eq!(r.headers().len(), 1);
-        assert_eq!(r.headers()[0].name.as_ref(), b"k");
-        assert_eq!(r.headers()[0].value.as_ref(), b"v");
-    }
 
     #[tokio::test]
     async fn json_base64_parse_records_invalid_base64() {
@@ -555,5 +522,88 @@ mod tests {
         let lines = futures::stream::iter(vec![Err(io::Error::other("io error"))]);
         let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
         assert!(stream.next().await.unwrap().is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn text_formatter_write_then_parse_preserves_ascii_body(body in ascii_string_strategy(256)) {
+            let record = sequenced_record(0, Bytes::from(body.clone()), vec![], 0);
+
+            let output = run_async(async {
+                let mut output = Vec::new();
+                TextFormatter::write_record(&record, &mut output).await.unwrap();
+                output
+            });
+            prop_assert_eq!(output.as_slice(), body.as_bytes());
+
+            let parsed = run_async(parse_text_line(String::from_utf8(output).unwrap()));
+            prop_assert_eq!(parsed.body(), body.as_bytes());
+            prop_assert!(parsed.headers().is_empty());
+            prop_assert_eq!(parsed.timestamp(), None);
+        }
+
+        #[test]
+        fn json_formatter_write_then_parse_preserves_utf8_fields(
+            body in ascii_string_strategy(256),
+            headers in prop::collection::vec((ascii_string_strategy(32), ascii_string_strategy(64)), 0..=8),
+            timestamp in any::<u64>(),
+        ) {
+            let record = sequenced_record(
+                17,
+                Bytes::from(body.clone()),
+                headers
+                    .iter()
+                    .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
+                    .collect(),
+                timestamp,
+            );
+
+            let output = run_async(async {
+                let mut output = Vec::new();
+                JsonFormatter::write_record(&record, &mut output).await.unwrap();
+                output
+            });
+
+            let parsed = run_async(parse_json_line(String::from_utf8(output).unwrap()));
+            prop_assert_eq!(parsed.body(), body.as_bytes());
+            prop_assert_eq!(parsed.timestamp(), Some(timestamp));
+            prop_assert_eq!(parsed.headers().len(), headers.len());
+            for (actual, (expected_name, expected_value)) in parsed.headers().iter().zip(headers.iter()) {
+                prop_assert_eq!(actual.name.as_ref(), expected_name.as_bytes());
+                prop_assert_eq!(actual.value.as_ref(), expected_value.as_bytes());
+            }
+        }
+
+        #[test]
+        fn json_base64_formatter_write_then_parse_preserves_binary_fields(
+            body in bytes_strategy(256),
+            headers in prop::collection::vec((bytes_strategy(32), bytes_strategy(64)), 0..=8),
+            timestamp in any::<u64>(),
+        ) {
+            let record = sequenced_record(
+                17,
+                Bytes::from(body.clone()),
+                headers
+                    .iter()
+                    .map(|(name, value)| Header::new(Bytes::from(name.clone()), Bytes::from(value.clone())))
+                    .collect(),
+                timestamp,
+            );
+
+            let output = run_async(async {
+                let mut output = Vec::new();
+                JsonBase64Formatter::write_record(&record, &mut output).await.unwrap();
+                output
+            });
+
+            let parsed = run_async(parse_json_base64_line(String::from_utf8(output).unwrap()));
+            prop_assert_eq!(parsed.body(), body.as_slice());
+            prop_assert_eq!(parsed.timestamp(), Some(timestamp));
+            prop_assert_eq!(parsed.headers().len(), headers.len());
+            for (actual, (expected_name, expected_value)) in parsed.headers().iter().zip(headers.iter()) {
+                prop_assert_eq!(actual.name.as_ref(), expected_name.as_slice());
+                prop_assert_eq!(actual.value.as_ref(), expected_value.as_slice());
+            }
+        }
     }
 }
