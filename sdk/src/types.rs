@@ -3527,6 +3527,17 @@ pub struct SequencedRecord {
 }
 
 impl SequencedRecord {
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub fn new(seq_num: u64, body: impl Into<Bytes>, headers: Vec<Header>, timestamp: u64) -> Self {
+        Self {
+            seq_num,
+            body: body.into(),
+            headers,
+            timestamp,
+        }
+    }
+
     /// Whether this is a command record.
     pub fn is_command_record(&self) -> bool {
         self.headers.len() == 1 && *self.headers[0].name == *b""

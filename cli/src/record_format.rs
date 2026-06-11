@@ -400,7 +400,6 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
     use proptest::prelude::*;
-    use s2_api::v1 as api;
     use s2_sdk::types::Header;
 
     use super::*;
@@ -428,13 +427,7 @@ mod tests {
         headers: Vec<Header>,
         timestamp: u64,
     ) -> SequencedRecord {
-        api::stream::proto::SequencedRecord {
-            seq_num,
-            body,
-            headers: headers.into_iter().map(Into::into).collect(),
-            timestamp,
-        }
-        .into()
+        SequencedRecord::new(seq_num, body, headers, timestamp)
     }
 
     async fn parse_text_line(line: String) -> AppendRecord {
