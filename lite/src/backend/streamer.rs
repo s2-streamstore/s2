@@ -22,11 +22,9 @@ use s2_common::{
     },
     stream::AppendAck,
 };
-use s2_storage::{
-    record::{StoredRecord, StoredSequencedRecord},
-    stream::{
-        StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
-    },
+use s2_storage::record::{
+    StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
+    StoredRecord, StoredSequencedRecord,
 };
 use slatedb::{
     IterationOrder, WriteBatch,
@@ -1080,11 +1078,9 @@ mod tests {
         encryption::EncryptionSpec,
         record::{EnvelopeRecord, MeteredExt as _, Record},
     };
-    use s2_storage::{
-        record::{StoredRecord, encrypt_record},
-        stream::{
-            StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
-        },
+    use s2_storage::record::{
+        StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
+        StoredRecord, encrypt_record,
     };
     use slatedb::object_store::memory::InMemory;
     use tokio::sync::{broadcast, mpsc, oneshot};

@@ -7,7 +7,7 @@ use s2_common::{
     },
 };
 
-use crate::record::{RecordDecryptionError, StoredRecord, decrypt_stored_record, encrypt_record};
+use super::{RecordDecryptionError, StoredRecord, decrypt_stored_record, encrypt_record};
 
 pub type StoredAppendRecord = AppendRecord<StoredRecord>;
 pub type StoredAppendRecordParts = AppendRecordParts<StoredRecord>;

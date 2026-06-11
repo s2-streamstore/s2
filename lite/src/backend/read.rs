@@ -9,9 +9,8 @@ use s2_common::{
     record::{Metered, MeteredSize as _, SeqNum, StreamPosition, Timestamp},
     stream::{ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
 };
-use s2_storage::{
-    record::StoredSequencedRecord,
-    stream::{StoredReadBatch, StoredReadSessionOutput, StoredReadSessionOutputExt},
+use s2_storage::record::{
+    StoredReadBatch, StoredReadSessionOutput, StoredReadSessionOutputExt, StoredSequencedRecord,
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};

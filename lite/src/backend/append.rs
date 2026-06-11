@@ -11,7 +11,7 @@ use s2_common::{
     record::{SeqNum, StreamPosition},
     stream::{AppendAck, AppendInput, StreamName},
 };
-use s2_storage::stream::AppendInputStorageExt;
+use s2_storage::record::AppendInputStorageExt;
 use tokio::sync::oneshot;
 
 use super::{Backend, StreamHandle};

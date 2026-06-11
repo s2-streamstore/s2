@@ -2,6 +2,7 @@ mod batcher;
 mod encoding;
 mod encryption;
 mod iterator;
+mod stream_payload;
 
 pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -16,6 +17,11 @@ use s2_common::{
     deep_size::DeepSize,
     encryption::EncryptionAlgorithm,
     record::{CommandRecord, Metered, MeteredSize, Record, SeqNum, Sequenced},
+};
+pub use stream_payload::{
+    AppendInputStorageExt, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
+    StoredAppendRecordParts, StoredReadBatch, StoredReadBatchExt, StoredReadSessionOutput,
+    StoredReadSessionOutputExt,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
