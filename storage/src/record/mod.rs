@@ -2,7 +2,6 @@ mod batcher;
 mod encoding;
 mod encryption;
 mod iterator;
-mod stored_payload;
 
 pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -10,18 +9,26 @@ pub(crate) use encoding::Encodable;
 pub use encoding::StoredRecordDecodeError;
 use encoding::{decode_command_record, decode_envelope_record};
 pub use encryption::{
-    EncryptedRecord, RecordDecryptionError, decrypt_stored_record, encrypt_record,
+    EncryptedRecord, RecordDecryptionError, decrypt_read_session_output, decrypt_stored_record,
+    encrypt_append_input, encrypt_record,
 };
 pub use iterator::StoredRecordIterator;
 use s2_common::{
     deep_size::DeepSize,
     encryption::EncryptionAlgorithm,
     record::{CommandRecord, Metered, MeteredSize, Record, SeqNum, Sequenced},
+    stream::{
+        AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch,
+        ReadSessionOutput,
+    },
 };
-pub use stored_payload::{
-    StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
-    StoredReadBatch, StoredReadSessionOutput, decrypt_read_session_output, encrypt_append_input,
-};
+
+pub type StoredAppendRecord = AppendRecord<StoredRecord>;
+pub type StoredAppendRecordParts = AppendRecordParts<StoredRecord>;
+pub type StoredAppendRecordBatch = AppendRecordBatch<StoredRecord>;
+pub type StoredAppendInput = AppendInput<StoredRecord>;
+pub type StoredReadBatch = ReadBatch<StoredRecord>;
+pub type StoredReadSessionOutput = ReadSessionOutput<StoredRecord>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
