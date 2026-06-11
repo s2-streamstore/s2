@@ -245,25 +245,28 @@ pub fn decode_stored_record(mut buf: Bytes) -> Result<Metered<StoredRecord>, Rec
         .try_get_uint(magic_byte.metered_size_varlen as usize)
         .map_err(|_| RecordDecodeError::Truncated("MeteredSize"))? as usize;
 
-    Ok(Metered::with_size(
-        metered_size,
-        match magic_byte.record_type {
-            RecordType::Command => {
-                StoredRecord::Plaintext(Record::Command(CommandRecord::try_from(buf.as_ref())?))
-            }
-            RecordType::Envelope => {
-                StoredRecord::Plaintext(Record::Envelope(EnvelopeRecord::try_from(buf)?))
-            }
-            RecordType::EncryptedEnvelope => {
-                StoredRecord::encrypted(EncryptedRecord::try_from(buf)?, metered_size)
-            }
-        },
-    ))
+    let record = match magic_byte.record_type {
+        RecordType::Command => {
+            StoredRecord::Plaintext(Record::Command(CommandRecord::try_from(buf.as_ref())?))
+        }
+        RecordType::Envelope => {
+            StoredRecord::Plaintext(Record::Envelope(EnvelopeRecord::try_from(buf)?))
+        }
+        RecordType::EncryptedEnvelope => {
+            StoredRecord::encrypted(EncryptedRecord::try_from(buf)?, metered_size)
+        }
+    };
+    if record.metered_size() != metered_size {
+        return Err(RecordDecodeError::InvalidValue(
+            "MeteredSize",
+            "metered size mismatch",
+        ));
+    }
+    Ok(record.metered())
 }
 
 pub fn decode_record(buf: Bytes) -> Result<Metered<Record>, RecordDecodeError> {
     let stored = decode_stored_record(buf)?;
-    let size = stored.metered_size();
     match stored.into_inner() {
         StoredRecord::Plaintext(record) => Ok(record),
         StoredRecord::Encrypted { .. } => Err(RecordDecodeError::InvalidValue(
@@ -271,7 +274,7 @@ pub fn decode_record(buf: Bytes) -> Result<Metered<Record>, RecordDecodeError> {
             "encrypted envelope requires decryption",
         )),
     }
-    .map(|record| Metered::with_size(size, record))
+    .map(Metered::from)
 }
 
 #[cfg(test)]
