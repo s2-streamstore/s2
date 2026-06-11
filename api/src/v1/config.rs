@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use s2_common::{encryption, maybe::Maybe};
+use s2_common::maybe::Maybe;
 use serde::{Deserialize, Serialize};
 
 #[rustfmt::skip]
@@ -278,7 +278,7 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
-impl From<EncryptionAlgorithm> for encryption::EncryptionAlgorithm {
+impl From<EncryptionAlgorithm> for s2_common::encryption::EncryptionAlgorithm {
     fn from(value: EncryptionAlgorithm) -> Self {
         match value {
             EncryptionAlgorithm::Aegis256 => Self::Aegis256,
@@ -287,11 +287,11 @@ impl From<EncryptionAlgorithm> for encryption::EncryptionAlgorithm {
     }
 }
 
-impl From<encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
-    fn from(value: encryption::EncryptionAlgorithm) -> Self {
+impl From<s2_common::encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
+    fn from(value: s2_common::encryption::EncryptionAlgorithm) -> Self {
         match value {
-            encryption::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
-            encryption::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
+            s2_common::encryption::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            s2_common::encryption::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
