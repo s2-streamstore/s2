@@ -5,10 +5,6 @@ use crate::deep_size::DeepSize;
 
 const MAX_HEADER_COUNT: usize = 0xFF_FFFF;
 const MAX_HEADER_NAME_OR_VALUE_LEN: usize = u32::MAX as usize;
-const HEADER_TOTAL_BYTES_BITS: u32 = 60;
-const HEADER_TOTAL_BYTES_MASK: u64 = (1 << HEADER_TOTAL_BYTES_BITS) - 1;
-const HEADER_NAME_LENGTH_WIDTH_SHIFT: u32 = 62;
-const HEADER_VALUE_LENGTH_WIDTH_SHIFT: u32 = 60;
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum HeaderValidationError {
@@ -31,28 +27,32 @@ pub struct EnvelopeRecord {
 struct HeaderSummary(u64);
 
 impl HeaderSummary {
+    const TOTAL_BYTES_MASK: u64 = (1 << 60) - 1;
+    const NAME_LENGTH_WIDTH_SHIFT: u32 = 62;
+    const VALUE_LENGTH_WIDTH_SHIFT: u32 = 60;
+
     fn new(total_bytes: usize, name_length_width: u8, value_length_width: u8) -> Self {
-        debug_assert!(total_bytes as u64 <= HEADER_TOTAL_BYTES_MASK);
+        debug_assert!(total_bytes as u64 <= Self::TOTAL_BYTES_MASK);
         debug_assert!((1..=4).contains(&name_length_width));
         debug_assert!((1..=4).contains(&value_length_width));
 
         Self(
             total_bytes as u64
-                | (u64::from(name_length_width - 1) << HEADER_NAME_LENGTH_WIDTH_SHIFT)
-                | (u64::from(value_length_width - 1) << HEADER_VALUE_LENGTH_WIDTH_SHIFT),
+                | (u64::from(name_length_width - 1) << Self::NAME_LENGTH_WIDTH_SHIFT)
+                | (u64::from(value_length_width - 1) << Self::VALUE_LENGTH_WIDTH_SHIFT),
         )
     }
 
     fn total_bytes(self) -> usize {
-        (self.0 & HEADER_TOTAL_BYTES_MASK) as usize
+        (self.0 & Self::TOTAL_BYTES_MASK) as usize
     }
 
     fn name_length_width_bytes(self) -> usize {
-        (((self.0 >> HEADER_NAME_LENGTH_WIDTH_SHIFT) & 0b11) + 1) as usize
+        (((self.0 >> Self::NAME_LENGTH_WIDTH_SHIFT) & 0b11) + 1) as usize
     }
 
     fn value_length_width_bytes(self) -> usize {
-        (((self.0 >> HEADER_VALUE_LENGTH_WIDTH_SHIFT) & 0b11) + 1) as usize
+        (((self.0 >> Self::VALUE_LENGTH_WIDTH_SHIFT) & 0b11) + 1) as usize
     }
 }
 
@@ -136,7 +136,7 @@ fn validate_headers(headers: &[Header]) -> Result<HeaderSummary, HeaderValidatio
                 .checked_add(name.len())
                 .and_then(|total| total.checked_add(value.len()))
                 .ok_or(HeaderValidationError::TooLong)?;
-            if total_bytes as u64 > HEADER_TOTAL_BYTES_MASK {
+            if total_bytes as u64 > HeaderSummary::TOTAL_BYTES_MASK {
                 return Err(HeaderValidationError::TooLong);
             }
 
@@ -172,8 +172,8 @@ mod test {
     use proptest::prelude::*;
 
     use super::{
-        EnvelopeRecord, HEADER_TOTAL_BYTES_MASK, Header, HeaderSummary, HeaderValidationError,
-        MeteredSize, RecordPartsError, length_width_bytes,
+        EnvelopeRecord, Header, HeaderSummary, HeaderValidationError, MeteredSize,
+        RecordPartsError, length_width_bytes,
     };
 
     fn assert_parts_preserved(headers: Vec<Header>, body: Bytes) {
@@ -303,7 +303,7 @@ mod test {
     proptest! {
         #[test]
         fn header_summary_pack_roundtrips(
-            total_bytes in 0usize..=HEADER_TOTAL_BYTES_MASK as usize,
+            total_bytes in 0usize..=HeaderSummary::TOTAL_BYTES_MASK as usize,
             name_length_width in 1u8..=4,
             value_length_width in 1u8..=4,
         ) {
