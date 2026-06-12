@@ -87,6 +87,11 @@ impl From<MagicByte> for u8 {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum StoredRecord {
     Plaintext(Record),
+    /// Encrypted envelope record bytes plus the logical plaintext metered size.
+    ///
+    /// The stored `metered_size` must match the decrypted envelope record's
+    /// metered size. Decoding preserves the encoded prefix, and decryption
+    /// validates it before returning a logical record.
     Encrypted {
         metered_size: usize,
         record: EncryptedRecord,
