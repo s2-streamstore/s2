@@ -11,9 +11,9 @@ Release new versions of changed packages.
 
 This project uses [release-plz](https://release-plz.dev/) for automated releases. Version is determined by conventional commits (`fix:` → patch, `feat:` → minor, `feat!:` → major).
 
-Each package has its own version and changelog. release-plz opens a PR only for packages with changes since their last release. `s2-cli` and `s2-lite` are in the same `version_group` (released together). `s2-api` and `s2-common` are library packages for internal use (published to crates.io but no GitHub releases).
+Each package has its own version and changelog. release-plz opens a PR only for packages with changes since their last release. `s2-cli` and `s2-lite` are in the same `version_group` (released together). `s2-api`, `s2-common`, `s2-storage`, and `s2-resource-spec` are library packages for internal use (published to crates.io but no GitHub releases).
 
-Tags are per-package: `s2-cli-v{version}`, `s2-lite-v{version}`, `s2-api-v{version}`, `s2-common-v{version}`.
+Tags are per-package: `s2-cli-v{version}`, `s2-lite-v{version}`, `s2-api-v{version}`, `s2-common-v{version}`, `s2-storage-v{version}`, `s2-resource-spec-v{version}`.
 
 ## Usage
 
@@ -33,7 +33,7 @@ Tags are per-package: `s2-cli-v{version}`, `s2-lite-v{version}`, `s2-api-v{versi
      ```bash
      gh pr diff <PR_NUMBER> --name-only
      ```
-   - Look for version bumps in `cli/Cargo.toml`, `lite/Cargo.toml`, `api/Cargo.toml`, `common/Cargo.toml`
+   - Look for version bumps in `cli/Cargo.toml`, `lite/Cargo.toml`, `api/Cargo.toml`, `common/Cargo.toml`, `storage/Cargo.toml`, `resource-spec/Cargo.toml`
 
 3. **For each package being released, verify its changelog**
    - Get the PR diff and review the changelog sections:
