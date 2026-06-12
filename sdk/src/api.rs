@@ -616,8 +616,8 @@ pub enum ApiError {
     ProtoDecode(#[from] prost::DecodeError),
     #[error(transparent)]
     S2STerminalDecode(#[from] S2STerminalDecodeError),
-    #[error(transparent)]
-    InvalidHeaderValue(#[from] InvalidHeaderValue),
+    #[error("malformed access token: {0}")]
+    MalformedAccessToken(#[from] InvalidHeaderValue),
     #[error(transparent)]
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
