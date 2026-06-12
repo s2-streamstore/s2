@@ -93,7 +93,7 @@ impl CliError {
                 CliError::OperationWithTokenSource(kind, source, token_source)
             }
             (CliError::SdkInit(source), Some(token_source))
-                if matches!(source, S2Error::InvalidAccessToken(_)) =>
+                if matches!(source, S2Error::MalformedAccessToken(_)) =>
             {
                 CliError::SdkInitWithTokenSource(source, token_source)
             }
