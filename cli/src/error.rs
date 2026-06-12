@@ -44,7 +44,7 @@ pub enum CliError {
          Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`.\n\n{}",
         HELP
     ))]
-    SdkInitWithTokenSource(#[source] S2Error, TokenSource),
+    MalformedAccessToken(#[source] S2Error, TokenSource),
 
     #[error(transparent)]
     #[diagnostic(help("{}", BUG_HELP))]
@@ -71,7 +71,7 @@ pub enum CliError {
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
          Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`."
     ))]
-    OperationWithTokenSource(OpKind, #[source] S2Error, TokenSource),
+    UnauthorizedAccessToken(OpKind, #[source] S2Error, TokenSource),
 
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
@@ -90,12 +90,12 @@ impl CliError {
     pub fn with_token_source(self, token_source: Option<TokenSource>) -> Self {
         match (self, token_source) {
             (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
-                CliError::OperationWithTokenSource(kind, source, token_source)
+                CliError::UnauthorizedAccessToken(kind, source, token_source)
             }
             (CliError::SdkInit(source), Some(token_source))
                 if matches!(source, S2Error::MalformedAccessToken(_)) =>
             {
-                CliError::SdkInitWithTokenSource(source, token_source)
+                CliError::MalformedAccessToken(source, token_source)
             }
             (err, _) => err,
         }
