@@ -145,6 +145,11 @@ const EMPTY_HEADER_FLAG: HeaderFlag = HeaderFlag {
     value_length_bytes: NonZeroU8::new(1).unwrap(),
 };
 
+/// A compact per-envelope header layout byte.
+///
+/// Header count width can be zero, which means there are no headers and no
+/// encoded count follows. Name and value length widths are stored as width - 1
+/// because valid header length fields are always 1-4 bytes.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 struct HeaderFlag {
     num_headers_length_bytes: u8,
@@ -152,10 +157,19 @@ struct HeaderFlag {
     value_length_bytes: NonZeroU8,
 }
 
+impl HeaderFlag {
+    const RESERVED_MASK: u8 = 0b1100_0000;
+    const NUM_HEADERS_LENGTH_MASK: u8 = 0b0011_0000;
+    const NUM_HEADERS_LENGTH_SHIFT: u8 = 4;
+    const NAME_LENGTH_MASK: u8 = 0b0000_1100;
+    const NAME_LENGTH_SHIFT: u8 = 2;
+    const VALUE_LENGTH_MASK: u8 = 0b0000_0011;
+}
+
 impl From<HeaderFlag> for u8 {
     fn from(value: HeaderFlag) -> Self {
-        (value.num_headers_length_bytes << 4)
-            | ((value.name_length_bytes.get() - 1) << 2)
+        (value.num_headers_length_bytes << HeaderFlag::NUM_HEADERS_LENGTH_SHIFT)
+            | ((value.name_length_bytes.get() - 1) << HeaderFlag::NAME_LENGTH_SHIFT)
             | (value.value_length_bytes.get() - 1)
     }
 }
@@ -164,13 +178,18 @@ impl TryFrom<u8> for HeaderFlag {
     type Error = &'static str;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if (value & (0b11u8 << 6)) != 0u8 {
+        if (value & HeaderFlag::RESERVED_MASK) != 0 {
             return Err("reserved bit set");
         }
         Ok(Self {
-            num_headers_length_bytes: (0b110000 & value) >> 4,
-            name_length_bytes: NonZeroU8::new(((0b1100 & value) >> 2) + 1).unwrap(),
-            value_length_bytes: NonZeroU8::new((0b11 & value) + 1).unwrap(),
+            num_headers_length_bytes: (value & HeaderFlag::NUM_HEADERS_LENGTH_MASK)
+                >> HeaderFlag::NUM_HEADERS_LENGTH_SHIFT,
+            name_length_bytes: NonZeroU8::new(
+                ((value & HeaderFlag::NAME_LENGTH_MASK) >> HeaderFlag::NAME_LENGTH_SHIFT) + 1,
+            )
+            .unwrap(),
+            value_length_bytes: NonZeroU8::new((value & HeaderFlag::VALUE_LENGTH_MASK) + 1)
+                .unwrap(),
         })
     }
 }
