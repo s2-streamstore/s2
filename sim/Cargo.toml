@@ -1,0 +1,54 @@
+[package]
+name = "s2-sim"
+version = "0.0.0"
+description = "Deterministic simulation testing for s2-lite using turmoil"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "sim"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+bytesize = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+eyre = { workspace = true }
+fastrand = "2"
+futures = { workspace = true }
+http = { workspace = true }
+http-body-util = "0.1"
+hyper = { version = "1.9", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = [
+    "client-legacy",
+    "http1",
+    "http2",
+    "server",
+    "server-auto",
+    "service",
+    "tokio",
+] }
+mad-turmoil = "0.2.1"
+rand = { workspace = true }
+s2-lite = { workspace = true }
+s2-sdk = { workspace = true, features = ["_hidden"] }
+# The Go checker built in CI must be pinned to the same rev (see the
+# S2_VERIFICATION_REV env in .github/workflows/ci.yml).
+s2-verification = { git = "https://github.com/s2-streamstore/s2-verification", rev = "394929f199480fd3a2d49ec1992779a9772e77fe" }
+s3s = "0.13"
+serde_json = { workspace = true }
+slatedb = { workspace = true, features = ["lz4", "zstd"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util"] }
+tower = "0.5"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+turmoil = "0.7.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }

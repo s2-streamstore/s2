@@ -63,3 +63,10 @@ clean:
 # Run s2-lite
 lite *args:
     cargo run --release -p s2-cli -- lite {{args}}
+
+# Run the s2-lite deterministic simulation (e.g. `just sim smoke --seed 42`,
+# `just sim linearizable --seed 42 --clients 3 --ops-per-client 100`)
+# tokio_unstable is required so turmoil can seed tokio's internal RNG; note the
+# changed RUSTFLAGS means this does not share build artifacts with normal builds.
+sim *args:
+    RUSTFLAGS="--cfg tokio_unstable" cargo run -p s2-sim -- {{args}}

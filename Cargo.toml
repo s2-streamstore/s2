@@ -7,6 +7,20 @@ members = [
     "lite",
     "resource-spec",
     "sdk",
+    "sim",
+    "storage",
+    "testcontainers",
+]
+# sim (deterministic simulation testing) is excluded from default builds so
+# its dependencies (turmoil, mad-turmoil, ...) are only compiled when explicitly
+# requested, e.g. `just sim` or `cargo build -p s2-sim`.
+default-members = [
+    "api",
+    "cli",
+    "common",
+    "lite",
+    "resource-spec",
+    "sdk",
     "storage",
     "testcontainers",
 ]
@@ -94,6 +108,9 @@ zstd = "0.13"
 
 [patch.crates-io]
 utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac0a50551ebe1995a4d73e8685890d6" }
+# Unifies s2-verification's crates.io s2-sdk dependency with the workspace sdk,
+# so the sim crate can hand workspace S2Stream values to its workflow clients.
+s2-sdk = { path = "sdk" }
 
 [profile.dev]
 panic = "abort"

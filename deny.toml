@@ -41,4 +41,5 @@ unknown-git = "deny"
 allow-git = [
     "https://github.com/slatedb/slatedb",
     "https://github.com/infiniteregrets/utoipa",
+    "https://github.com/s2-streamstore/s2-verification",
 ]
