@@ -42,7 +42,9 @@ rand = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true, features = ["axum"] }
-s2-common = { workspace = true, features = ["clap", "resource_spec"] }
+s2-common = { workspace = true, features = ["clap"] }
+s2-resource-spec = { workspace = true }
+s2-storage = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "zstd"] }

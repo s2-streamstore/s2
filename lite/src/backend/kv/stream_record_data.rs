@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use s2_common::record::{Encodable, Metered, StoredRecord, StreamPosition};
+use s2_common::record::{Metered, StreamPosition};
+use s2_storage::record::{StoredRecord, decode_stored_record, encode_stored_record};
 
 use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
 use crate::stream_id::StreamId;
@@ -33,11 +34,11 @@ pub fn deser_key(mut bytes: Bytes) -> Result<(StreamId, StreamPosition), Deseria
 }
 
 pub fn ser_value(record: Metered<&StoredRecord>) -> Bytes {
-    record.to_bytes()
+    encode_stored_record(record)
 }
 
 pub fn deser_value(bytes: Bytes) -> Result<Metered<StoredRecord>, DeserializationError> {
-    Metered::try_from(bytes).map_err(|e| invalid_value_err("record", e))
+    decode_stored_record(bytes).map_err(|e| invalid_value_err("record", e))
 }
 
 #[cfg(test)]
@@ -78,7 +79,8 @@ mod tests {
             header_value in prop::collection::vec(any::<u8>(), 0..50),
             body in prop::collection::vec(any::<u8>(), 0..200),
         ) {
-            use s2_common::record::{Header, MeteredSize, Record, StoredRecord};
+            use s2_common::record::{Header, MeteredExt as _, MeteredSize, Record};
+            use s2_storage::record::{StoredRecord, decode_record};
 
             let header_name = Bytes::from(header_name);
             let header_value = Bytes::from(header_value);
@@ -93,11 +95,10 @@ mod tests {
             let metered_record: Metered<Record> = record.into();
             let original_size = metered_record.metered_size();
 
-            let bytes = super::ser_value(
-                Metered::from(StoredRecord::from(metered_record.into_inner())).as_ref()
-            );
+            let bytes =
+                super::ser_value(StoredRecord::from(metered_record.into_inner()).metered().as_ref());
             let decoded = super::deser_value(bytes).unwrap();
-            let decoded: Metered<Record> = super::ser_value(decoded.as_ref()).try_into().unwrap();
+            let decoded = decode_record(super::ser_value(decoded.as_ref())).unwrap();
 
             prop_assert_eq!(original_size, decoded.metered_size());
             let (decoded_headers, decoded_body) = decoded.into_inner().into_parts();

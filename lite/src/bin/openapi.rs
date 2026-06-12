@@ -2,7 +2,7 @@ use s2_api::{
     data::Format,
     v1::metrics::{AccountMetricSet, BasinMetricSet, StreamMetricSet},
 };
-use s2_common::types::resources::RequestToken;
+use s2_common::resources::RequestToken;
 use s2_lite::handlers::v1::{
     access_tokens::{
         __path_issue_access_token, __path_list_access_tokens, __path_revoke_access_token,

@@ -1,7 +1,9 @@
 use std::iter::FusedIterator;
 
+use s2_common::record::Metered;
+
 use super::{
-    Metered, RecordDecodeError, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+    StoredRecordDecodeError, StoredSequencedBytes, StoredSequencedRecord, decode_stored_record,
 };
 
 pub struct StoredRecordIterator<I> {
@@ -17,14 +19,14 @@ impl<I> StoredRecordIterator<I> {
 impl<I, E> Iterator for StoredRecordIterator<I>
 where
     I: Iterator<Item = Result<StoredSequencedBytes, E>>,
-    E: std::fmt::Debug + Into<RecordDecodeError>,
+    E: std::fmt::Debug + Into<StoredRecordDecodeError>,
 {
-    type Item = Result<Metered<StoredSequencedRecord>, RecordDecodeError>;
+    type Item = Result<Metered<StoredSequencedRecord>, StoredRecordDecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|result| {
             let (position, bytes) = result.map_err(Into::into)?.into_parts();
-            let record: Metered<StoredRecord> = bytes.try_into()?;
+            let record = decode_stored_record(bytes)?;
             Ok(record.sequenced(position))
         })
     }
@@ -33,19 +35,22 @@ where
 impl<I, E> FusedIterator for StoredRecordIterator<I>
 where
     I: FusedIterator<Item = Result<StoredSequencedBytes, E>>,
-    E: std::fmt::Debug + Into<RecordDecodeError>,
+    E: std::fmt::Debug + Into<StoredRecordDecodeError>,
 {
 }
 
 #[cfg(test)]
 mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
+    use s2_common::record::{
+        EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum, Sequenced,
+        StreamPosition, Timestamp,
+    };
 
     use super::*;
     use crate::record::{
-        Encodable, EncryptedRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record,
-        SeqNum, Sequenced, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
-        StreamPosition, Timestamp,
+        EncryptedRecord, StoredRecord, StoredSequencedBytes, StoredSequencedRecord,
+        encode_stored_record,
     };
 
     fn test_stored_plaintext_record(
@@ -86,12 +91,12 @@ mod tests {
 
     fn to_stored_bytes_iter(
         records: Vec<Metered<StoredSequencedRecord>>,
-    ) -> impl Iterator<Item = Result<StoredSequencedBytes, RecordDecodeError>> {
+    ) -> impl Iterator<Item = Result<StoredSequencedBytes, StoredRecordDecodeError>> {
         records
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
-                Sequenced::new(position, record.as_ref().to_bytes())
+                Sequenced::new(position, encode_stored_record(record.as_ref()))
             })
             .map(Ok)
     }
@@ -130,24 +135,8 @@ mod tests {
             Bytes::new(),
         );
         let mut iter = StoredRecordIterator::new(std::iter::once::<
-            Result<StoredSequencedBytes, RecordDecodeError>,
+            Result<StoredSequencedBytes, StoredRecordDecodeError>,
         >(Ok(invalid_data)));
-
-        let error = iter
-            .next()
-            .expect("error expected")
-            .expect_err("expected error");
-        assert!(matches!(error, RecordDecodeError::Truncated("MagicByte")));
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn stored_iterator_preserves_source_errors() {
-        let mut iter = StoredRecordIterator::new(std::iter::once::<
-            Result<StoredSequencedBytes, RecordDecodeError>,
-        >(Err(RecordDecodeError::InvalidValue(
-            "test", "boom",
-        ))));
 
         let error = iter
             .next()
@@ -155,7 +144,26 @@ mod tests {
             .expect_err("expected error");
         assert!(matches!(
             error,
-            RecordDecodeError::InvalidValue("test", "boom")
+            StoredRecordDecodeError::Truncated("MagicByte")
+        ));
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn stored_iterator_preserves_source_errors() {
+        let mut iter = StoredRecordIterator::new(std::iter::once::<
+            Result<StoredSequencedBytes, StoredRecordDecodeError>,
+        >(Err(
+            StoredRecordDecodeError::InvalidValue("test", "boom"),
+        )));
+
+        let error = iter
+            .next()
+            .expect("error expected")
+            .expect_err("expected error");
+        assert!(matches!(
+            error,
+            StoredRecordDecodeError::InvalidValue("test", "boom")
         ));
     }
 }

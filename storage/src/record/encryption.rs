@@ -22,7 +22,7 @@
 //! Encrypted envelope records are stored as `StoredRecord::Encrypted`. Their
 //! outer record type is `RecordType::EncryptedEnvelope`, and the encoded body is
 //! an [`EncryptedRecord`] containing encrypted bytes for the byte-for-byte
-//! plaintext [`EnvelopeRecord`](super::EnvelopeRecord) encoding.
+//! plaintext [`EnvelopeRecord`](s2_common::record::EnvelopeRecord) encoding.
 //!
 //! The stored `metered_size` remains the logical plaintext metered size rather
 //! than the encoded encrypted record size, so protection does not change
@@ -32,12 +32,20 @@ use aegis::aegis256::Aegis256;
 use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
-
-use super::{Encodable, Metered, MeteredSize, Record, RecordDecodeError, SeqNum, StoredRecord};
-use crate::{
+use s2_common::{
     deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionSpec},
-    record::MeteredExt as _,
+    record::{EnvelopeRecord, Metered, MeteredExt as _, MeteredSize, Record, SeqNum, Sequenced},
+    stream::{
+        AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch,
+        ReadSessionOutput,
+    },
+};
+use secrecy::ExposeSecret as _;
+
+use super::{
+    StoredAppendInput, StoredReadBatch, StoredReadSessionOutput, StoredRecord,
+    StoredRecordDecodeError, WireEncode, codec::decode_envelope_record,
 };
 
 const FORMAT_ID_LEN: usize = 1;
@@ -52,11 +60,11 @@ pub(crate) enum EncryptedRecordFormat {
 }
 
 impl EncryptedRecordFormat {
-    const fn try_from_format_id(format_id: u8) -> Result<Self, RecordDecodeError> {
+    const fn try_from_format_id(format_id: u8) -> Result<Self, StoredRecordDecodeError> {
         match format_id {
             FORMAT_ID_AEGIS256_V1 => Ok(Self::Aegis256V1),
             FORMAT_ID_AES256GCM_V1 => Ok(Self::Aes256GcmV1),
-            _ => Err(RecordDecodeError::InvalidValue(
+            _ => Err(StoredRecordDecodeError::InvalidValue(
                 "EncryptedRecord",
                 "invalid encrypted record format id",
             )),
@@ -120,7 +128,7 @@ pub enum RecordDecryptionError {
     #[error("decrypted record metered size mismatch: stored {stored}, actual {actual}")]
     MeteredSizeMismatch { stored: usize, actual: usize },
     #[error("malformed decrypted record: {0}")]
-    MalformedDecryptedRecord(#[from] RecordDecodeError),
+    MalformedDecryptedRecord(#[from] StoredRecordDecodeError),
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -189,7 +197,7 @@ impl DeepSize for EncryptedRecord {
     }
 }
 
-impl Encodable for EncryptedRecord {
+impl WireEncode for EncryptedRecord {
     fn encoded_size(&self) -> usize {
         self.encoded.len()
     }
@@ -236,11 +244,41 @@ pub fn encrypt_record(
             StoredRecord::encrypted(encrypted, metered_size)
         }
     };
-    Metered::with_size(metered_size, record)
+    record.metered()
+}
+
+pub fn encrypt_append_input(
+    input: AppendInput,
+    encryption: &EncryptionSpec,
+    aad: &[u8],
+) -> StoredAppendInput {
+    let AppendInput {
+        records,
+        match_seq_num,
+        fencing_token,
+    } = input;
+    let records = records
+        .into_iter()
+        .map(|record| {
+            let AppendRecordParts { timestamp, record } = record.into_parts();
+            AppendRecord::try_from(AppendRecordParts {
+                timestamp,
+                record: encrypt_record(record, encryption, aad),
+            })
+            .expect("record encryption preserves append record limits")
+        })
+        .collect::<Vec<_>>();
+
+    AppendInput {
+        records: AppendRecordBatch::try_from(records)
+            .expect("record encryption preserves append batch limits"),
+        match_seq_num,
+        fencing_token,
+    }
 }
 
 fn prep_encryption_buffer(
-    envelope: &super::EnvelopeRecord,
+    envelope: &EnvelopeRecord,
     format: EncryptedRecordFormat,
 ) -> (BytesMut, usize) {
     let payload_start = FORMAT_ID_LEN + format.nonce_len();
@@ -253,18 +291,20 @@ fn prep_encryption_buffer(
 }
 
 impl TryFrom<Bytes> for EncryptedRecord {
-    type Error = RecordDecodeError;
+    type Error = StoredRecordDecodeError;
 
     fn try_from(encoded: Bytes) -> Result<Self, Self::Error> {
         if encoded.len() < FORMAT_ID_LEN {
-            return Err(RecordDecodeError::Truncated("EncryptedRecordFormatId"));
+            return Err(StoredRecordDecodeError::Truncated(
+                "EncryptedRecordFormatId",
+            ));
         }
 
         let format = EncryptedRecordFormat::try_from_format_id(encoded[0])?;
         let nonce_len = format.nonce_len();
         let tag_len = format.tag_len();
         if encoded.len() < FORMAT_ID_LEN + nonce_len + tag_len {
-            return Err(RecordDecodeError::Truncated("EncryptedRecordFrame"));
+            return Err(StoredRecordDecodeError::Truncated("EncryptedRecordFrame"));
         }
 
         Ok(Self::new(encoded, format))
@@ -294,7 +334,7 @@ pub fn decrypt_stored_record(
             record: encrypted,
         } => {
             let plaintext = decrypt_payload(encrypted, encryption, aad)?;
-            let record = Record::Envelope(plaintext.try_into()?);
+            let record = Record::Envelope(decode_envelope_record(plaintext)?);
             let actual_metered_size = record.metered_size();
             if metered_size != actual_metered_size {
                 return Err(RecordDecryptionError::MeteredSizeMismatch {
@@ -302,9 +342,43 @@ pub fn decrypt_stored_record(
                     actual: actual_metered_size,
                 });
             }
-            Ok(Metered::with_size(metered_size, record))
+            Ok(record.metered())
         }
     }
+}
+
+pub fn decrypt_read_session_output(
+    output: StoredReadSessionOutput,
+    encryption: &EncryptionSpec,
+    aad: &[u8],
+) -> Result<ReadSessionOutput, RecordDecryptionError> {
+    match output {
+        ReadSessionOutput::Heartbeat(tail) => Ok(ReadSessionOutput::Heartbeat(tail)),
+        ReadSessionOutput::Batch(batch) => {
+            decrypt_read_batch(batch, encryption, aad).map(ReadSessionOutput::Batch)
+        }
+    }
+}
+
+fn decrypt_read_batch(
+    batch: StoredReadBatch,
+    encryption: &EncryptionSpec,
+    aad: &[u8],
+) -> Result<ReadBatch, RecordDecryptionError> {
+    let records: Result<Metered<Vec<Sequenced<Record>>>, RecordDecryptionError> = batch
+        .records
+        .into_inner()
+        .into_iter()
+        .map(|record| {
+            let (position, record) = record.into_parts();
+            decrypt_stored_record(record, encryption, aad).map(|record| record.sequenced(position))
+        })
+        .collect();
+
+    Ok(ReadBatch {
+        records: records?,
+        tail: batch.tail,
+    })
 }
 
 fn decrypt_payload(
@@ -347,7 +421,6 @@ fn decrypt_payload(
             })
         }
         (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Aes256Gcm(key)) => {
-            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()));
             let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
             let nonce: &[u8; 12] = prefix
                 .get(FORMAT_ID_LEN..)
@@ -361,6 +434,7 @@ fn decrypt_payload(
                 .try_into()
                 .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
             let tag = aes_gcm::Tag::from_slice(tag);
+            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()));
             cipher
                 .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
                 .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
@@ -407,9 +481,9 @@ fn decryption_finish(mut encoded: BytesMut, payload_start: usize, plaintext_len:
 mod tests {
     use bytes::Bytes;
     use rstest::rstest;
+    use s2_common::record::{CommandRecord, EnvelopeRecord, FencingToken, Header, MeteredExt};
 
     use super::*;
-    use crate::record::{CommandRecord, EnvelopeRecord, Header, MeteredExt};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
     const OTHER_TEST_KEY: [u8; 32] = [0x99; 32];
@@ -524,7 +598,7 @@ mod tests {
             encrypted_record
         };
         let decrypted = decrypt_payload(encrypted_record, &encryption, &aad).unwrap();
-        let (out_headers, out_body) = EnvelopeRecord::try_from(decrypted).unwrap().into_parts();
+        let (out_headers, out_body) = decode_envelope_record(decrypted).unwrap().into_parts();
 
         assert_eq!(out_headers, headers);
         assert_eq!(out_body, body);
@@ -549,7 +623,9 @@ mod tests {
         let result = EncryptedRecord::try_from(Bytes::new());
         assert!(matches!(
             result,
-            Err(RecordDecodeError::Truncated("EncryptedRecordFormatId"))
+            Err(StoredRecordDecodeError::Truncated(
+                "EncryptedRecordFormatId"
+            ))
         ));
     }
 
@@ -651,7 +727,7 @@ mod tests {
         let err = EncryptedRecord::try_from(Bytes::from_static(b"\xFFpayload")).unwrap_err();
         assert_eq!(
             err,
-            RecordDecodeError::InvalidValue(
+            StoredRecordDecodeError::InvalidValue(
                 "EncryptedRecord",
                 "invalid encrypted record format id"
             )
@@ -661,7 +737,10 @@ mod tests {
     #[test]
     fn rejects_truncated_layout() {
         let err = EncryptedRecord::try_from(Bytes::from_static(b"\x01tiny")).unwrap_err();
-        assert_eq!(err, RecordDecodeError::Truncated("EncryptedRecordFrame"));
+        assert_eq!(
+            err,
+            StoredRecordDecodeError::Truncated("EncryptedRecordFrame")
+        );
     }
 
     #[test]
@@ -695,7 +774,7 @@ mod tests {
 
     #[test]
     fn decrypt_stored_record_preserves_plaintext_command_records() {
-        let token: crate::record::FencingToken = "fence-test".parse().unwrap();
+        let token: FencingToken = "fence-test".parse().unwrap();
         let record = StoredRecord::Plaintext(Record::Command(CommandRecord::Fence(token.clone())));
 
         let decrypted = decrypt_stored_record(

@@ -4707,6 +4707,7 @@ dependencies = [
  "rustls",
  "s2-common",
  "s2-lite",
+ "s2-resource-spec",
  "s2-sdk",
  "serde",
  "serde_json",
@@ -4729,22 +4730,17 @@ dependencies = [
 name = "s2-common"
 version = "0.38.0"
 dependencies = [
- "aegis",
- "aes-gcm",
  "axum",
  "base64ct",
- "blake3",
  "bytes",
  "clap",
  "compact_str",
  "enumset",
  "http 1.4.2",
- "humantime",
  "proptest",
  "rand 0.10.1",
  "rkyv",
  "rstest",
- "schemars",
  "secrecy",
  "serde",
  "serde_json",
@@ -4783,6 +4779,8 @@ dependencies = [
  "rustls",
  "s2-api",
  "s2-common",
+ "s2-resource-spec",
+ "s2-storage",
  "serde",
  "serde_json",
  "slatedb",
@@ -4798,6 +4796,17 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "s2-resource-spec"
+version = "0.1.0"
+dependencies = [
+ "humantime",
+ "s2-common",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4840,6 +4849,23 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+]
+
+[[package]]
+name = "s2-storage"
+version = "0.1.0"
+dependencies = [
+ "aegis",
+ "aes-gcm",
+ "blake3",
+ "bytes",
+ "proptest",
+ "rand 0.10.1",
+ "rstest",
+ "s2-common",
+ "secrecy",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

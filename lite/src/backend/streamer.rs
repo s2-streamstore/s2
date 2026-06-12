@@ -14,18 +14,17 @@ use futures::{
 };
 use parking_lot::Mutex;
 use s2_common::{
+    config::{RetentionPolicy, StreamConfig, TimestampingConfig, TimestampingMode},
     encryption::EncryptionAlgorithm,
     record::{
-        CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
-        StoredRecord, StoredSequencedRecord, StreamPosition, Timestamp,
+        CommandRecord, FencingToken, Metered, MeteredExt as _, MeteredSize, NonZeroSeqNum, Record,
+        SeqNum, StreamPosition, Timestamp,
     },
-    types::{
-        config::{RetentionPolicy, StreamConfig, TimestampingConfig, TimestampingMode},
-        stream::{
-            AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
-            StoredAppendRecordParts,
-        },
-    },
+    stream::AppendAck,
+};
+use s2_storage::record::{
+    StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
+    StoredRecord, StoredSequencedRecord,
 };
 use slatedb::{
     IterationOrder, WriteBatch,
@@ -873,7 +872,7 @@ fn timestamp_now() -> Timestamp {
 fn terminal_trim_input() -> StoredAppendInput {
     let record: StoredAppendRecord = StoredAppendRecordParts {
         timestamp: Some(Timestamp::MAX),
-        record: Record::Command(CommandRecord::Trim(SeqNum::MAX)).into(),
+        record: StoredRecord::from(Record::Command(CommandRecord::Trim(SeqNum::MAX))).metered(),
     }
     .try_into()
     .expect("valid append record");
@@ -1077,10 +1076,11 @@ mod tests {
     use bytes::Bytes;
     use s2_common::{
         encryption::EncryptionSpec,
-        record::{EnvelopeRecord, Metered, Record, StoredRecord},
-        types::stream::{
-            StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
-        },
+        record::{EnvelopeRecord, MeteredExt as _, Record},
+    };
+    use s2_storage::record::{
+        StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
+        StoredRecord, encrypt_record,
     };
     use slatedb::object_store::memory::InMemory;
     use tokio::sync::{broadcast, mpsc, oneshot};
@@ -1089,7 +1089,7 @@ mod tests {
 
     fn test_record(body: Bytes, timestamp: Option<Timestamp>) -> StoredAppendRecord {
         let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
-        let record = Metered::from(StoredRecord::from(Record::Envelope(envelope)));
+        let record = StoredRecord::from(Record::Envelope(envelope)).metered();
         let parts = StoredAppendRecordParts { timestamp, record };
         parts.try_into().unwrap()
     }
@@ -1098,7 +1098,7 @@ mod tests {
         command: CommandRecord,
         timestamp: Option<Timestamp>,
     ) -> StoredAppendRecord {
-        let record = Metered::from(StoredRecord::from(Record::Command(command)));
+        let record = StoredRecord::from(Record::Command(command)).metered();
         let parts = StoredAppendRecordParts { timestamp, record };
         parts.try_into().unwrap()
     }
@@ -1109,8 +1109,8 @@ mod tests {
         encryption: &EncryptionSpec,
     ) -> StoredAppendRecord {
         let envelope = EnvelopeRecord::try_from_parts(vec![], body).unwrap();
-        let record = s2_common::record::encrypt_record(
-            Metered::from(Record::Envelope(envelope)),
+        let record = encrypt_record(
+            Record::Envelope(envelope).metered(),
             encryption,
             b"test-streamer",
         );

@@ -2,11 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use s2_common::{
+    config::{OptionalStreamConfig, RetentionPolicy, StorageClass, StreamReconfiguration},
     read_extent::{ReadLimit, ReadUntil},
-    types::{
-        config::{OptionalStreamConfig, RetentionPolicy, StorageClass, StreamReconfiguration},
-        stream::{AppendInput, ReadEnd, ReadFrom, ReadStart},
-    },
+    stream::{AppendInput, ReadEnd, ReadFrom, ReadStart},
 };
 use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
 use tokio::sync::Notify;

@@ -1,13 +1,11 @@
 use s2_common::{
-    bash::Bash,
+    basin::BasinName,
+    config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
     record::StreamPosition,
-    types::{
-        basin::BasinName,
-        config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
-        resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
-        stream::{ListStreamsRequest, StreamInfo, StreamName},
-    },
+    resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
+    stream::{ListStreamsRequest, StreamInfo, StreamName},
 };
+use s2_storage::bash::Bash;
 use slatedb::{
     IsolationLevel,
     config::{DurabilityLevel, ScanOptions},

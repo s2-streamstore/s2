@@ -2,12 +2,10 @@ use std::pin::Pin;
 
 use futures::Stream;
 use s2_common::{
+    basin::BasinName,
     encryption::EncryptionSpec,
     record::StreamPosition,
-    types::{
-        basin::BasinName,
-        stream::{AppendAck, AppendInput, StreamName},
-    },
+    stream::{AppendAck, AppendInput, StreamName},
 };
 use s2_lite::backend::{
     Backend,

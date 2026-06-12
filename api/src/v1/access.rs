@@ -1,6 +1,6 @@
-use s2_common::types::{
+use s2_common::{
     self,
-    access::{AccessTokenId, AccessTokenIdPrefix},
+    access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
     basin::{BasinName, BasinNamePrefix},
     stream::{StreamName, StreamNamePrefix},
 };
@@ -99,7 +99,7 @@ pub enum Operation {
     SetDefaultLocation,
 }
 
-impl From<Operation> for types::access::Operation {
+impl From<Operation> for s2_common::access::Operation {
     fn from(value: Operation) -> Self {
         match value {
             Operation::ListBasins => Self::ListBasins,
@@ -130,9 +130,9 @@ impl From<Operation> for types::access::Operation {
     }
 }
 
-impl From<types::access::Operation> for Operation {
-    fn from(value: types::access::Operation) -> Self {
-        use types::access::Operation::*;
+impl From<s2_common::access::Operation> for Operation {
+    fn from(value: s2_common::access::Operation) -> Self {
+        use s2_common::access::Operation::*;
         match value {
             ListBasins => Self::ListBasins,
             CreateBasin => Self::CreateBasin,
@@ -168,7 +168,7 @@ impl From<types::access::Operation> for Operation {
 pub struct AccessTokenInfo {
     /// Access token ID.
     /// It must be unique to the account and between 1 and 96 bytes in length.
-    pub id: types::access::AccessTokenId,
+    pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
     #[serde(default, with = "time::serde::rfc3339::option")]
@@ -181,8 +181,8 @@ pub struct AccessTokenInfo {
     pub scope: AccessTokenScope,
 }
 
-impl TryFrom<AccessTokenInfo> for types::access::IssueAccessTokenRequest {
-    type Error = types::ValidationError;
+impl TryFrom<AccessTokenInfo> for s2_common::access::IssueAccessTokenRequest {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: AccessTokenInfo) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -194,8 +194,8 @@ impl TryFrom<AccessTokenInfo> for types::access::IssueAccessTokenRequest {
     }
 }
 
-impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
-    fn from(value: types::access::AccessTokenInfo) -> Self {
+impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
+    fn from(value: s2_common::access::AccessTokenInfo) -> Self {
         Self {
             id: value.id,
             expires_at: Some(value.expires_at),
@@ -205,8 +205,8 @@ impl From<types::access::AccessTokenInfo> for AccessTokenInfo {
     }
 }
 
-impl From<types::access::IssueAccessTokenRequest> for AccessTokenInfo {
-    fn from(value: types::access::IssueAccessTokenRequest) -> Self {
+impl From<s2_common::access::IssueAccessTokenRequest> for AccessTokenInfo {
+    fn from(value: s2_common::access::IssueAccessTokenRequest) -> Self {
         Self {
             id: value.id,
             expires_at: value.expires_at,
@@ -234,8 +234,8 @@ pub struct AccessTokenScope {
     pub ops: Option<Vec<Operation>>,
 }
 
-impl TryFrom<AccessTokenScope> for types::access::AccessTokenScope {
-    type Error = types::ValidationError;
+impl TryFrom<AccessTokenScope> for s2_common::access::AccessTokenScope {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: AccessTokenScope) -> Result<Self, Self::Error> {
         let AccessTokenScope {
@@ -252,15 +252,19 @@ impl TryFrom<AccessTokenScope> for types::access::AccessTokenScope {
             access_tokens: access_tokens.map(Into::into).unwrap_or_default(),
             op_groups: op_groups.map(Into::into).unwrap_or_default(),
             ops: ops
-                .map(|o| o.into_iter().map(types::access::Operation::from).collect())
+                .map(|o| {
+                    o.into_iter()
+                        .map(s2_common::access::Operation::from)
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
 }
 
-impl From<types::access::AccessTokenScope> for AccessTokenScope {
-    fn from(value: types::access::AccessTokenScope) -> Self {
-        let types::access::AccessTokenScope {
+impl From<s2_common::access::AccessTokenScope> for AccessTokenScope {
+    fn from(value: s2_common::access::AccessTokenScope) -> Self {
+        let s2_common::access::AccessTokenScope {
             basins,
             streams,
             access_tokens,
@@ -294,18 +298,18 @@ pub enum ResourceSet<E, P> {
 }
 
 impl<E, P> ResourceSet<MaybeEmpty<E>, P> {
-    pub fn to_opt(rs: types::access::ResourceSet<E, P>) -> Option<Self> {
+    pub fn to_opt(rs: s2_common::access::ResourceSet<E, P>) -> Option<Self> {
         match rs {
-            types::access::ResourceSet::None => None,
-            types::access::ResourceSet::Exact(e) => {
+            s2_common::access::ResourceSet::None => None,
+            s2_common::access::ResourceSet::Exact(e) => {
                 Some(ResourceSet::Exact(MaybeEmpty::NonEmpty(e)))
             }
-            types::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p)),
+            s2_common::access::ResourceSet::Prefix(p) => Some(ResourceSet::Prefix(p)),
         }
     }
 }
 
-impl<E, P> From<ResourceSet<MaybeEmpty<E>, P>> for types::access::ResourceSet<E, P> {
+impl<E, P> From<ResourceSet<MaybeEmpty<E>, P>> for s2_common::access::ResourceSet<E, P> {
     fn from(value: ResourceSet<MaybeEmpty<E>, P>) -> Self {
         match value {
             ResourceSet::Exact(MaybeEmpty::Empty) => Self::None,
@@ -327,7 +331,7 @@ pub struct PermittedOperationGroups {
     pub stream: Option<ReadWritePermissions>,
 }
 
-impl From<PermittedOperationGroups> for types::access::PermittedOperationGroups {
+impl From<PermittedOperationGroups> for s2_common::access::PermittedOperationGroups {
     fn from(value: PermittedOperationGroups) -> Self {
         let PermittedOperationGroups {
             account,
@@ -343,9 +347,9 @@ impl From<PermittedOperationGroups> for types::access::PermittedOperationGroups 
     }
 }
 
-impl From<types::access::PermittedOperationGroups> for PermittedOperationGroups {
-    fn from(value: types::access::PermittedOperationGroups) -> Self {
-        let types::access::PermittedOperationGroups {
+impl From<s2_common::access::PermittedOperationGroups> for PermittedOperationGroups {
+    fn from(value: s2_common::access::PermittedOperationGroups) -> Self {
+        let s2_common::access::PermittedOperationGroups {
             account,
             basin,
             stream,
@@ -371,7 +375,7 @@ pub struct ReadWritePermissions {
     pub write: Option<bool>,
 }
 
-impl From<ReadWritePermissions> for types::access::ReadWritePermissions {
+impl From<ReadWritePermissions> for s2_common::access::ReadWritePermissions {
     fn from(value: ReadWritePermissions) -> Self {
         let ReadWritePermissions { read, write } = value;
 
@@ -382,9 +386,9 @@ impl From<ReadWritePermissions> for types::access::ReadWritePermissions {
     }
 }
 
-impl From<types::access::ReadWritePermissions> for ReadWritePermissions {
-    fn from(value: types::access::ReadWritePermissions) -> Self {
-        let types::access::ReadWritePermissions { read, write } = value;
+impl From<s2_common::access::ReadWritePermissions> for ReadWritePermissions {
+    fn from(value: s2_common::access::ReadWritePermissions) -> Self {
+        let s2_common::access::ReadWritePermissions { read, write } = value;
 
         Self {
             read: Some(read),
@@ -400,10 +404,10 @@ impl From<types::access::ReadWritePermissions> for ReadWritePermissions {
 pub struct ListAccessTokensRequest {
     /// Filter to access tokens whose IDs begin with this prefix.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
-    pub prefix: Option<types::access::AccessTokenIdPrefix>,
+    pub prefix: Option<AccessTokenIdPrefix>,
     /// Filter to access tokens whose IDs lexicographically start after this string.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
-    pub start_after: Option<types::access::AccessTokenIdStartAfter>,
+    pub start_after: Option<AccessTokenIdStartAfter>,
     /// Number of results, up to a maximum of 1000.
     #[cfg_attr(feature = "utoipa", param(value_type = usize, maximum = 1000, default = 1000, required = false))]
     pub limit: Option<usize>,
@@ -411,8 +415,8 @@ pub struct ListAccessTokensRequest {
 
 super::impl_list_request_conversions!(
     ListAccessTokensRequest,
-    types::access::AccessTokenIdPrefix,
-    types::access::AccessTokenIdStartAfter
+    AccessTokenIdPrefix,
+    AccessTokenIdStartAfter
 );
 
 #[rustfmt::skip]
@@ -481,7 +485,7 @@ mod tests {
         #[test]
         fn access_token_info_roundtrip(json in random_access_token_info()) {
             let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
-            let internal: types::access::IssueAccessTokenRequest = parsed.clone().try_into().unwrap();
+            let internal: s2_common::access::IssueAccessTokenRequest = parsed.clone().try_into().unwrap();
             let back: AccessTokenInfo = internal.into();
             prop_assert_eq!(parsed.id, back.id);
         }
@@ -499,19 +503,19 @@ mod tests {
         });
 
         let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
-        let internal: types::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
+        let internal: s2_common::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
 
         assert!(matches!(
             internal.scope.streams,
-            types::access::ResourceSet::None
+            s2_common::access::ResourceSet::None
         ));
         assert!(matches!(
             internal.scope.basins,
-            types::access::ResourceSet::None
+            s2_common::access::ResourceSet::None
         ));
         assert!(matches!(
             internal.scope.access_tokens,
-            types::access::ResourceSet::None
+            s2_common::access::ResourceSet::None
         ));
     }
 
@@ -523,19 +527,19 @@ mod tests {
         });
 
         let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
-        let internal: types::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
+        let internal: s2_common::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
 
         assert!(matches!(
             internal.scope.streams,
-            types::access::ResourceSet::None
+            s2_common::access::ResourceSet::None
         ));
         assert!(matches!(
             internal.scope.basins,
-            types::access::ResourceSet::None
+            s2_common::access::ResourceSet::None
         ));
         assert!(matches!(
             internal.scope.access_tokens,
-            types::access::ResourceSet::None
+            s2_common::access::ResourceSet::None
         ));
     }
 }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use s2_common::{encryption, maybe::Maybe, types};
+use s2_common::maybe::Maybe;
 use serde::{Deserialize, Serialize};
 
 #[rustfmt::skip]
@@ -14,7 +14,7 @@ pub enum StorageClass {
     Express,
 }
 
-impl From<StorageClass> for types::config::StorageClass {
+impl From<StorageClass> for s2_common::config::StorageClass {
     fn from(value: StorageClass) -> Self {
         match value {
             StorageClass::Express => Self::Express,
@@ -23,11 +23,11 @@ impl From<StorageClass> for types::config::StorageClass {
     }
 }
 
-impl From<types::config::StorageClass> for StorageClass {
-    fn from(value: types::config::StorageClass) -> Self {
+impl From<s2_common::config::StorageClass> for StorageClass {
+    fn from(value: s2_common::config::StorageClass) -> Self {
         match value {
-            types::config::StorageClass::Express => Self::Express,
-            types::config::StorageClass::Standard => Self::Standard,
+            s2_common::config::StorageClass::Express => Self::Express,
+            s2_common::config::StorageClass::Standard => Self::Standard,
         }
     }
 }
@@ -49,12 +49,12 @@ pub enum RetentionPolicy {
 #[serde(rename_all = "kebab-case")]
 pub struct InfiniteRetention {}
 
-impl TryFrom<RetentionPolicy> for types::config::RetentionPolicy {
-    type Error = types::ValidationError;
+impl TryFrom<RetentionPolicy> for s2_common::config::RetentionPolicy {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: RetentionPolicy) -> Result<Self, Self::Error> {
         match value {
-            RetentionPolicy::Age(0) => Err(types::ValidationError(
+            RetentionPolicy::Age(0) => Err(s2_common::ValidationError(
                 "age must be greater than 0 seconds".to_string(),
             )),
             RetentionPolicy::Age(age) => Ok(Self::Age(Duration::from_secs(age))),
@@ -63,11 +63,11 @@ impl TryFrom<RetentionPolicy> for types::config::RetentionPolicy {
     }
 }
 
-impl From<types::config::RetentionPolicy> for RetentionPolicy {
-    fn from(value: types::config::RetentionPolicy) -> Self {
+impl From<s2_common::config::RetentionPolicy> for RetentionPolicy {
+    fn from(value: s2_common::config::RetentionPolicy) -> Self {
         match value {
-            types::config::RetentionPolicy::Age(age) => Self::Age(age.as_secs()),
-            types::config::RetentionPolicy::Infinite() => Self::Infinite(InfiniteRetention {}),
+            s2_common::config::RetentionPolicy::Age(age) => Self::Age(age.as_secs()),
+            s2_common::config::RetentionPolicy::Infinite() => Self::Infinite(InfiniteRetention {}),
         }
     }
 }
@@ -86,7 +86,7 @@ pub enum TimestampingMode {
     Arrival,
 }
 
-impl From<TimestampingMode> for types::config::TimestampingMode {
+impl From<TimestampingMode> for s2_common::config::TimestampingMode {
     fn from(value: TimestampingMode) -> Self {
         match value {
             TimestampingMode::ClientPrefer => Self::ClientPrefer,
@@ -96,12 +96,12 @@ impl From<TimestampingMode> for types::config::TimestampingMode {
     }
 }
 
-impl From<types::config::TimestampingMode> for TimestampingMode {
-    fn from(value: types::config::TimestampingMode) -> Self {
+impl From<s2_common::config::TimestampingMode> for TimestampingMode {
+    fn from(value: s2_common::config::TimestampingMode) -> Self {
         match value {
-            types::config::TimestampingMode::ClientPrefer => Self::ClientPrefer,
-            types::config::TimestampingMode::ClientRequire => Self::ClientRequire,
-            types::config::TimestampingMode::Arrival => Self::Arrival,
+            s2_common::config::TimestampingMode::ClientPrefer => Self::ClientPrefer,
+            s2_common::config::TimestampingMode::ClientRequire => Self::ClientRequire,
+            s2_common::config::TimestampingMode::Arrival => Self::Arrival,
         }
     }
 }
@@ -118,7 +118,7 @@ pub struct TimestampingConfig {
 }
 
 impl TimestampingConfig {
-    pub fn to_opt(config: types::config::OptionalTimestampingConfig) -> Option<Self> {
+    pub fn to_opt(config: s2_common::config::OptionalTimestampingConfig) -> Option<Self> {
         let config = TimestampingConfig {
             mode: config.mode.map(Into::into),
             uncapped: config.uncapped,
@@ -131,8 +131,8 @@ impl TimestampingConfig {
     }
 }
 
-impl From<types::config::TimestampingConfig> for TimestampingConfig {
-    fn from(value: types::config::TimestampingConfig) -> Self {
+impl From<s2_common::config::TimestampingConfig> for TimestampingConfig {
+    fn from(value: s2_common::config::TimestampingConfig) -> Self {
         Self {
             mode: Some(value.mode.into()),
             uncapped: Some(value.uncapped),
@@ -140,8 +140,8 @@ impl From<types::config::TimestampingConfig> for TimestampingConfig {
     }
 }
 
-impl From<types::config::OptionalTimestampingConfig> for TimestampingConfig {
-    fn from(value: types::config::OptionalTimestampingConfig) -> Self {
+impl From<s2_common::config::OptionalTimestampingConfig> for TimestampingConfig {
+    fn from(value: s2_common::config::OptionalTimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
             uncapped: value.uncapped,
@@ -149,7 +149,7 @@ impl From<types::config::OptionalTimestampingConfig> for TimestampingConfig {
     }
 }
 
-impl From<TimestampingConfig> for types::config::OptionalTimestampingConfig {
+impl From<TimestampingConfig> for s2_common::config::OptionalTimestampingConfig {
     fn from(value: TimestampingConfig) -> Self {
         Self {
             mode: value.mode.map(Into::into),
@@ -172,7 +172,7 @@ pub struct TimestampingReconfiguration {
     pub uncapped: Maybe<Option<bool>>,
 }
 
-impl From<TimestampingReconfiguration> for types::config::TimestampingReconfiguration {
+impl From<TimestampingReconfiguration> for s2_common::config::TimestampingReconfiguration {
     fn from(value: TimestampingReconfiguration) -> Self {
         Self {
             mode: value.mode.map_opt(Into::into),
@@ -181,8 +181,8 @@ impl From<TimestampingReconfiguration> for types::config::TimestampingReconfigur
     }
 }
 
-impl From<types::config::TimestampingReconfiguration> for TimestampingReconfiguration {
-    fn from(value: types::config::TimestampingReconfiguration) -> Self {
+impl From<s2_common::config::TimestampingReconfiguration> for TimestampingReconfiguration {
+    fn from(value: s2_common::config::TimestampingReconfiguration) -> Self {
         Self {
             mode: value.mode.map_opt(Into::into),
             uncapped: value.uncapped,
@@ -201,30 +201,30 @@ pub struct DeleteOnEmptyConfig {
 }
 
 impl DeleteOnEmptyConfig {
-    pub fn to_opt(config: types::config::OptionalDeleteOnEmptyConfig) -> Option<Self> {
+    pub fn to_opt(config: s2_common::config::OptionalDeleteOnEmptyConfig) -> Option<Self> {
         config.min_age.map(|min_age| DeleteOnEmptyConfig {
             min_age_secs: min_age.as_secs(),
         })
     }
 }
 
-impl From<types::config::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
-    fn from(value: types::config::DeleteOnEmptyConfig) -> Self {
+impl From<s2_common::config::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
+    fn from(value: s2_common::config::DeleteOnEmptyConfig) -> Self {
         Self {
             min_age_secs: value.min_age.as_secs(),
         }
     }
 }
 
-impl From<types::config::OptionalDeleteOnEmptyConfig> for DeleteOnEmptyConfig {
-    fn from(value: types::config::OptionalDeleteOnEmptyConfig) -> Self {
+impl From<s2_common::config::OptionalDeleteOnEmptyConfig> for DeleteOnEmptyConfig {
+    fn from(value: s2_common::config::OptionalDeleteOnEmptyConfig) -> Self {
         Self {
             min_age_secs: value.min_age.unwrap_or_default().as_secs(),
         }
     }
 }
 
-impl From<DeleteOnEmptyConfig> for types::config::DeleteOnEmptyConfig {
+impl From<DeleteOnEmptyConfig> for s2_common::config::DeleteOnEmptyConfig {
     fn from(value: DeleteOnEmptyConfig) -> Self {
         Self {
             min_age: Duration::from_secs(value.min_age_secs),
@@ -232,7 +232,7 @@ impl From<DeleteOnEmptyConfig> for types::config::DeleteOnEmptyConfig {
     }
 }
 
-impl From<DeleteOnEmptyConfig> for types::config::OptionalDeleteOnEmptyConfig {
+impl From<DeleteOnEmptyConfig> for s2_common::config::OptionalDeleteOnEmptyConfig {
     fn from(value: DeleteOnEmptyConfig) -> Self {
         Self {
             min_age: Some(Duration::from_secs(value.min_age_secs)),
@@ -251,7 +251,7 @@ pub struct DeleteOnEmptyReconfiguration {
     pub min_age_secs: Maybe<Option<u64>>,
 }
 
-impl From<DeleteOnEmptyReconfiguration> for types::config::DeleteOnEmptyReconfiguration {
+impl From<DeleteOnEmptyReconfiguration> for s2_common::config::DeleteOnEmptyReconfiguration {
     fn from(value: DeleteOnEmptyReconfiguration) -> Self {
         Self {
             min_age: value.min_age_secs.map_opt(Duration::from_secs),
@@ -259,8 +259,8 @@ impl From<DeleteOnEmptyReconfiguration> for types::config::DeleteOnEmptyReconfig
     }
 }
 
-impl From<types::config::DeleteOnEmptyReconfiguration> for DeleteOnEmptyReconfiguration {
-    fn from(value: types::config::DeleteOnEmptyReconfiguration) -> Self {
+impl From<s2_common::config::DeleteOnEmptyReconfiguration> for DeleteOnEmptyReconfiguration {
+    fn from(value: s2_common::config::DeleteOnEmptyReconfiguration) -> Self {
         Self {
             min_age_secs: value.min_age.map_opt(|d| d.as_secs()),
         }
@@ -278,7 +278,7 @@ pub enum EncryptionAlgorithm {
     Aes256Gcm,
 }
 
-impl From<EncryptionAlgorithm> for encryption::EncryptionAlgorithm {
+impl From<EncryptionAlgorithm> for s2_common::encryption::EncryptionAlgorithm {
     fn from(value: EncryptionAlgorithm) -> Self {
         match value {
             EncryptionAlgorithm::Aegis256 => Self::Aegis256,
@@ -287,11 +287,11 @@ impl From<EncryptionAlgorithm> for encryption::EncryptionAlgorithm {
     }
 }
 
-impl From<encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
-    fn from(value: encryption::EncryptionAlgorithm) -> Self {
+impl From<s2_common::encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
+    fn from(value: s2_common::encryption::EncryptionAlgorithm) -> Self {
         match value {
-            encryption::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
-            encryption::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
+            s2_common::encryption::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            s2_common::encryption::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
@@ -313,8 +313,8 @@ pub struct StreamConfig {
 }
 
 impl StreamConfig {
-    pub fn to_opt(config: types::config::OptionalStreamConfig) -> Option<Self> {
-        let types::config::OptionalStreamConfig {
+    pub fn to_opt(config: s2_common::config::OptionalStreamConfig) -> Option<Self> {
+        let s2_common::config::OptionalStreamConfig {
             storage_class,
             retention_policy,
             timestamping,
@@ -335,9 +335,9 @@ impl StreamConfig {
     }
 }
 
-impl From<types::config::StreamConfig> for StreamConfig {
-    fn from(value: types::config::StreamConfig) -> Self {
-        let types::config::StreamConfig {
+impl From<s2_common::config::StreamConfig> for StreamConfig {
+    fn from(value: s2_common::config::StreamConfig) -> Self {
+        let s2_common::config::StreamConfig {
             storage_class,
             retention_policy,
             timestamping,
@@ -353,9 +353,9 @@ impl From<types::config::StreamConfig> for StreamConfig {
     }
 }
 
-impl From<types::config::OptionalStreamConfig> for StreamConfig {
-    fn from(value: types::config::OptionalStreamConfig) -> Self {
-        let types::config::OptionalStreamConfig {
+impl From<s2_common::config::OptionalStreamConfig> for StreamConfig {
+    fn from(value: s2_common::config::OptionalStreamConfig) -> Self {
+        let s2_common::config::OptionalStreamConfig {
             storage_class,
             retention_policy,
             timestamping,
@@ -375,8 +375,8 @@ impl From<types::config::OptionalStreamConfig> for StreamConfig {
     }
 }
 
-impl TryFrom<StreamConfig> for types::config::OptionalStreamConfig {
-    type Error = types::ValidationError;
+impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: StreamConfig) -> Result<Self, Self::Error> {
         let StreamConfig {
@@ -423,8 +423,8 @@ pub struct StreamReconfiguration {
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
 }
 
-impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
-    type Error = types::ValidationError;
+impl TryFrom<StreamReconfiguration> for s2_common::config::StreamReconfiguration {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: StreamReconfiguration) -> Result<Self, Self::Error> {
         let StreamReconfiguration {
@@ -443,9 +443,9 @@ impl TryFrom<StreamReconfiguration> for types::config::StreamReconfiguration {
     }
 }
 
-impl From<types::config::StreamReconfiguration> for StreamReconfiguration {
-    fn from(value: types::config::StreamReconfiguration) -> Self {
-        let types::config::StreamReconfiguration {
+impl From<s2_common::config::StreamReconfiguration> for StreamReconfiguration {
+    fn from(value: s2_common::config::StreamReconfiguration) -> Self {
+        let s2_common::config::StreamReconfiguration {
             storage_class,
             retention_policy,
             timestamping,
@@ -479,8 +479,8 @@ pub struct BasinConfig {
     pub create_stream_on_read: bool,
 }
 
-impl TryFrom<BasinConfig> for types::config::BasinConfig {
-    type Error = types::ValidationError;
+impl TryFrom<BasinConfig> for s2_common::config::BasinConfig {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: BasinConfig) -> Result<Self, Self::Error> {
         let BasinConfig {
@@ -502,9 +502,9 @@ impl TryFrom<BasinConfig> for types::config::BasinConfig {
     }
 }
 
-impl From<types::config::BasinConfig> for BasinConfig {
-    fn from(value: types::config::BasinConfig) -> Self {
-        let types::config::BasinConfig {
+impl From<s2_common::config::BasinConfig> for BasinConfig {
+    fn from(value: s2_common::config::BasinConfig) -> Self {
+        let s2_common::config::BasinConfig {
             default_stream_config,
             stream_cipher,
             create_stream_on_append,
@@ -542,8 +542,8 @@ pub struct BasinReconfiguration {
     pub create_stream_on_read: Maybe<bool>,
 }
 
-impl TryFrom<BasinReconfiguration> for types::config::BasinReconfiguration {
-    type Error = types::ValidationError;
+impl TryFrom<BasinReconfiguration> for s2_common::config::BasinReconfiguration {
+    type Error = s2_common::ValidationError;
 
     fn try_from(value: BasinReconfiguration) -> Result<Self, Self::Error> {
         let BasinReconfiguration {
@@ -562,9 +562,9 @@ impl TryFrom<BasinReconfiguration> for types::config::BasinReconfiguration {
     }
 }
 
-impl From<types::config::BasinReconfiguration> for BasinReconfiguration {
-    fn from(value: types::config::BasinReconfiguration) -> Self {
-        let types::config::BasinReconfiguration {
+impl From<s2_common::config::BasinReconfiguration> for BasinReconfiguration {
+    fn from(value: s2_common::config::BasinReconfiguration) -> Self {
+        let s2_common::config::BasinReconfiguration {
             default_stream_config,
             stream_cipher,
             create_stream_on_append,
@@ -734,7 +734,7 @@ mod tests {
     }
 
     fn gen_internal_optional_stream_config()
-    -> impl Strategy<Value = types::config::OptionalStreamConfig> {
+    -> impl Strategy<Value = s2_common::config::OptionalStreamConfig> {
         (
             proptest::option::of(gen_storage_class()),
             proptest::option::of(gen_retention_policy()),
@@ -743,19 +743,21 @@ mod tests {
             proptest::option::of(any::<u64>()),
         )
             .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe)| {
-                types::config::OptionalStreamConfig {
+                s2_common::config::OptionalStreamConfig {
                     storage_class: sc.map(Into::into),
                     retention_policy: rp.map(|rp| match rp {
                         RetentionPolicy::Age(secs) => {
-                            types::config::RetentionPolicy::Age(Duration::from_secs(secs))
+                            s2_common::config::RetentionPolicy::Age(Duration::from_secs(secs))
                         }
-                        RetentionPolicy::Infinite(_) => types::config::RetentionPolicy::Infinite(),
+                        RetentionPolicy::Infinite(_) => {
+                            s2_common::config::RetentionPolicy::Infinite()
+                        }
                     }),
-                    timestamping: types::config::OptionalTimestampingConfig {
+                    timestamping: s2_common::config::OptionalTimestampingConfig {
                         mode: ts_mode.map(Into::into),
                         uncapped: ts_uncapped,
                     },
-                    delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+                    delete_on_empty: s2_common::config::OptionalDeleteOnEmptyConfig {
                         min_age: doe.map(Duration::from_secs),
                     },
                 }
@@ -766,7 +768,7 @@ mod tests {
         #[test]
         fn stream_config_conversion_validates(config in gen_stream_config()) {
             let has_zero_age = matches!(config.retention_policy, Some(RetentionPolicy::Age(0)));
-            let result: Result<types::config::OptionalStreamConfig, _> = config.try_into();
+            let result: Result<s2_common::config::OptionalStreamConfig, _> = config.try_into();
 
             if has_zero_age {
                 prop_assert!(result.is_err());
@@ -781,7 +783,7 @@ mod tests {
                 matches!(sc.retention_policy, Some(RetentionPolicy::Age(0)))
             });
 
-            let result: Result<types::config::BasinConfig, _> = config.try_into();
+            let result: Result<s2_common::config::BasinConfig, _> = config.try_into();
 
             if has_invalid_config {
                 prop_assert!(result.is_err());
@@ -796,7 +798,7 @@ mod tests {
                 reconfig.retention_policy,
                 Maybe::Specified(Some(RetentionPolicy::Age(0)))
             );
-            let result: Result<types::config::StreamReconfiguration, _> = reconfig.try_into();
+            let result: Result<s2_common::config::StreamReconfiguration, _> = reconfig.try_into();
 
             if has_zero_age {
                 prop_assert!(result.is_err());
@@ -836,7 +838,7 @@ mod tests {
 
         #[test]
         fn reconfigure_unspecified_preserves_base(base in gen_internal_optional_stream_config()) {
-            let reconfig = types::config::StreamReconfiguration::default();
+            let reconfig = s2_common::config::StreamReconfiguration::default();
             let result = base.clone().reconfigure(reconfig);
 
             prop_assert_eq!(result.storage_class, base.storage_class);
@@ -848,7 +850,7 @@ mod tests {
 
         #[test]
         fn reconfigure_specified_none_clears(base in gen_internal_optional_stream_config()) {
-            let reconfig = types::config::StreamReconfiguration {
+            let reconfig = s2_common::config::StreamReconfiguration {
                 storage_class: Maybe::Specified(None),
                 retention_policy: Maybe::Specified(None),
                 timestamping: Maybe::Specified(None),
@@ -869,10 +871,10 @@ mod tests {
             new_sc in gen_storage_class(),
             new_rp_secs in 1u64..u64::MAX,
         ) {
-            let reconfig = types::config::StreamReconfiguration {
+            let reconfig = s2_common::config::StreamReconfiguration {
                 storage_class: Maybe::Specified(Some(new_sc.into())),
                 retention_policy: Maybe::Specified(Some(
-                    types::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs))
+                    s2_common::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs))
                 )),
                 ..Default::default()
             };
@@ -881,7 +883,7 @@ mod tests {
             prop_assert_eq!(result.storage_class, Some(new_sc.into()));
             prop_assert_eq!(
                 result.retention_policy,
-                Some(types::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs)))
+                Some(s2_common::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs)))
             );
         }
 
@@ -892,14 +894,14 @@ mod tests {
             ts_mode in gen_timestamping_mode(),
         ) {
             // non-default storage class -> Some
-            let internal = types::config::OptionalStreamConfig {
+            let internal = s2_common::config::OptionalStreamConfig {
                 storage_class: Some(sc.into()),
                 ..Default::default()
             };
             prop_assert!(StreamConfig::to_opt(internal).is_some());
 
             // non-zero delete_on_empty -> Some
-            let internal = types::config::OptionalDeleteOnEmptyConfig {
+            let internal = s2_common::config::OptionalDeleteOnEmptyConfig {
                 min_age: Some(Duration::from_secs(doe_secs)),
             };
             let api = DeleteOnEmptyConfig::to_opt(internal);
@@ -907,7 +909,7 @@ mod tests {
             prop_assert_eq!(api.unwrap().min_age_secs, doe_secs);
 
             // non-default timestamping -> Some
-            let internal = types::config::OptionalTimestampingConfig {
+            let internal = s2_common::config::OptionalTimestampingConfig {
                 mode: Some(ts_mode.into()),
                 uncapped: None,
             };
@@ -923,7 +925,7 @@ mod tests {
                     Maybe::Specified(Some(RetentionPolicy::Age(0)))
                 )
             );
-            let result: Result<types::config::BasinReconfiguration, _> = reconfig.try_into();
+            let result: Result<s2_common::config::BasinReconfiguration, _> = reconfig.try_into();
 
             if has_zero_age {
                 prop_assert!(result.is_err());
@@ -939,8 +941,8 @@ mod tests {
             base_on_append in any::<bool>(),
             base_on_read in any::<bool>(),
         ) {
-            let base = types::config::BasinConfig {
-                default_stream_config: types::config::OptionalStreamConfig {
+            let base = s2_common::config::BasinConfig {
+                default_stream_config: s2_common::config::OptionalStreamConfig {
                     storage_class: base_sc.map(Into::into),
                     ..Default::default()
                 },
@@ -949,7 +951,7 @@ mod tests {
                 create_stream_on_read: base_on_read,
             };
 
-            let reconfig = types::config::BasinReconfiguration::default();
+            let reconfig = s2_common::config::BasinReconfiguration::default();
             let result = base.clone().reconfigure(reconfig);
 
             prop_assert_eq!(result.default_stream_config.storage_class, base.default_stream_config.storage_class);
@@ -965,13 +967,13 @@ mod tests {
             new_sc in gen_storage_class(),
             new_algorithm in gen_encryption_algorithm(),
         ) {
-            let base = types::config::BasinConfig {
+            let base = s2_common::config::BasinConfig {
                 create_stream_on_append: base_on_append,
                 ..Default::default()
             };
 
-            let reconfig = types::config::BasinReconfiguration {
-                default_stream_config: Maybe::Specified(Some(types::config::StreamReconfiguration {
+            let reconfig = s2_common::config::BasinReconfiguration {
+                default_stream_config: Maybe::Specified(Some(s2_common::config::StreamReconfiguration {
                     storage_class: Maybe::Specified(Some(new_sc.into())),
                     ..Default::default()
                 })),
@@ -992,18 +994,18 @@ mod tests {
             base_uncapped in any::<bool>(),
             new_mode in gen_timestamping_mode(),
         ) {
-            let base = types::config::OptionalStreamConfig {
-                timestamping: types::config::OptionalTimestampingConfig {
+            let base = s2_common::config::OptionalStreamConfig {
+                timestamping: s2_common::config::OptionalTimestampingConfig {
                     mode: Some(base_mode.into()),
                     uncapped: Some(base_uncapped),
                 },
                 ..Default::default()
             };
 
-            let expected_mode: types::config::TimestampingMode = new_mode.into();
+            let expected_mode: s2_common::config::TimestampingMode = new_mode.into();
 
-            let reconfig = types::config::StreamReconfiguration {
-                timestamping: Maybe::Specified(Some(types::config::TimestampingReconfiguration {
+            let reconfig = s2_common::config::StreamReconfiguration {
+                timestamping: Maybe::Specified(Some(s2_common::config::TimestampingReconfiguration {
                     mode: Maybe::Specified(Some(expected_mode)),
                     uncapped: Maybe::Unspecified,
                 })),
@@ -1019,23 +1021,23 @@ mod tests {
     #[test]
     fn to_opt_returns_none_for_defaults() {
         // default stream config -> None
-        assert!(StreamConfig::to_opt(types::config::OptionalStreamConfig::default()).is_none());
+        assert!(StreamConfig::to_opt(s2_common::config::OptionalStreamConfig::default()).is_none());
 
         // delete_on_empty: None -> None
-        let doe_none = types::config::OptionalDeleteOnEmptyConfig { min_age: None };
+        let doe_none = s2_common::config::OptionalDeleteOnEmptyConfig { min_age: None };
         assert!(DeleteOnEmptyConfig::to_opt(doe_none).is_none());
 
         // default timestamping -> None
         assert!(
-            TimestampingConfig::to_opt(types::config::OptionalTimestampingConfig::default())
+            TimestampingConfig::to_opt(s2_common::config::OptionalTimestampingConfig::default())
                 .is_none()
         );
     }
 
     #[test]
     fn optional_stream_config_into_api_preserves_explicit_zero_delete_on_empty() {
-        let api: StreamConfig = types::config::OptionalStreamConfig {
-            delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+        let api: StreamConfig = s2_common::config::OptionalStreamConfig {
+            delete_on_empty: s2_common::config::OptionalDeleteOnEmptyConfig {
                 min_age: Some(Duration::ZERO),
             },
             ..Default::default()
@@ -1050,8 +1052,8 @@ mod tests {
 
     #[test]
     fn optional_stream_config_to_opt_preserves_explicit_zero_delete_on_empty() {
-        let api = StreamConfig::to_opt(types::config::OptionalStreamConfig {
-            delete_on_empty: types::config::OptionalDeleteOnEmptyConfig {
+        let api = StreamConfig::to_opt(s2_common::config::OptionalStreamConfig {
+            delete_on_empty: s2_common::config::OptionalDeleteOnEmptyConfig {
                 min_age: Some(Duration::ZERO),
             },
             ..Default::default()
@@ -1066,9 +1068,9 @@ mod tests {
 
     #[test]
     fn optional_stream_config_into_api_preserves_nested_timestamping_omission() {
-        let api: StreamConfig = types::config::OptionalStreamConfig {
-            timestamping: types::config::OptionalTimestampingConfig {
-                mode: Some(types::config::TimestampingMode::Arrival),
+        let api: StreamConfig = s2_common::config::OptionalStreamConfig {
+            timestamping: s2_common::config::OptionalTimestampingConfig {
+                mode: Some(s2_common::config::TimestampingMode::Arrival),
                 uncapped: None,
             },
             ..Default::default()
@@ -1088,7 +1090,7 @@ mod tests {
     fn empty_json_converts_to_all_none() {
         let json = serde_json::json!({});
         let parsed: StreamConfig = serde_json::from_value(json).unwrap();
-        let internal: types::config::OptionalStreamConfig = parsed.try_into().unwrap();
+        let internal: s2_common::config::OptionalStreamConfig = parsed.try_into().unwrap();
 
         assert!(
             internal.storage_class.is_none(),

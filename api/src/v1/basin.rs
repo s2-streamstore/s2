@@ -1,4 +1,4 @@
-use s2_common::types::{
+use s2_common::{
     self,
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
     location::LocationName,
@@ -24,11 +24,7 @@ pub struct ListBasinsRequest {
     pub limit: Option<usize>,
 }
 
-super::impl_list_request_conversions!(
-    ListBasinsRequest,
-    types::basin::BasinNamePrefix,
-    types::basin::BasinNameStartAfter
-);
+super::impl_list_request_conversions!(ListBasinsRequest, BasinNamePrefix, BasinNameStartAfter);
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,9 +56,9 @@ pub struct BasinInfo {
     pub state: BasinState,
 }
 
-impl From<types::basin::BasinInfo> for BasinInfo {
-    fn from(value: types::basin::BasinInfo) -> Self {
-        let types::basin::BasinInfo {
+impl From<s2_common::basin::BasinInfo> for BasinInfo {
+    fn from(value: s2_common::basin::BasinInfo) -> Self {
+        let s2_common::basin::BasinInfo {
             name,
             location,
             created_at,

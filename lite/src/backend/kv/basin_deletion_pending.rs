@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use s2_common::types::{basin::BasinName, stream::StreamNameStartAfter};
+use s2_common::{basin::BasinName, stream::StreamNameStartAfter};
 
 use super::{DeserializationError, KeyType, invalid_value_err};
 
@@ -30,7 +30,7 @@ pub fn deser_value(bytes: Bytes) -> Result<StreamNameStartAfter, Deserialization
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use s2_common::types::stream::StreamNameStartAfter;
+    use s2_common::stream::StreamNameStartAfter;
 
     use crate::backend::kv::proptest_strategies::{basin_name_strategy, stream_name_strategy};
 

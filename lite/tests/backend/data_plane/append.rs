@@ -4,13 +4,11 @@ use bytes::Bytes;
 use futures::StreamExt;
 use rstest::rstest;
 use s2_common::{
+    basin::BasinName,
+    config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
     encryption::EncryptionSpec,
     record::FencingToken,
-    types::{
-        basin::BasinName,
-        config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, AppendRecordBatch, StreamName},
-    },
+    stream::{AppendAck, AppendInput, AppendRecordBatch, StreamName},
 };
 use s2_lite::backend::{
     Backend,
@@ -80,7 +78,7 @@ async fn append_with_optional_encryption(
     stream: &StreamName,
     input: AppendInput,
     encryption: Option<&EncryptionSpec>,
-) -> Result<s2_common::types::stream::AppendAck, AppendError> {
+) -> Result<AppendAck, AppendError> {
     append(backend, basin.clone(), stream.clone(), input, encryption).await
 }
 
@@ -98,7 +96,7 @@ async fn issue_fencing_command(
     new_token: &FencingToken,
     encryption: Option<&EncryptionSpec>,
     bootstrap: FencingBootstrap,
-) -> s2_common::types::stream::AppendAck {
+) -> AppendAck {
     let command_match_seq_num = match bootstrap {
         FencingBootstrap::SeedWithData => {
             let matching_input = AppendInput {

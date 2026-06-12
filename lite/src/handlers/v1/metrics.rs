@@ -1,6 +1,6 @@
 use axum::extract::{FromRequest, Path, Query, State};
 use s2_api::{data::Json, v1 as v1t};
-use s2_common::types::{basin::BasinName, stream::StreamName};
+use s2_common::{basin::BasinName, stream::StreamName};
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 

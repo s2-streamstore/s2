@@ -1,17 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ResourcesSpec",
+  "title": "Resources",
   "type": "object",
   "properties": {
     "basins": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/BasinSpec"
+        "$ref": "#/$defs/Basin"
       }
     }
   },
   "$defs": {
-    "BasinSpec": {
+    "Basin": {
       "type": "object",
       "properties": {
         "name": {
@@ -20,7 +20,7 @@
         "config": {
           "anyOf": [
             {
-              "$ref": "#/$defs/BasinConfigSpec"
+              "$ref": "#/$defs/BasinConfig"
             },
             {
               "type": "null"
@@ -30,7 +30,7 @@
         "streams": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/StreamSpec"
+            "$ref": "#/$defs/Stream"
           }
         }
       },
@@ -39,13 +39,13 @@
         "name"
       ]
     },
-    "BasinConfigSpec": {
+    "BasinConfig": {
       "type": "object",
       "properties": {
         "default_stream_config": {
           "anyOf": [
             {
-              "$ref": "#/$defs/StreamConfigSpec"
+              "$ref": "#/$defs/StreamConfig"
             },
             {
               "type": "null"
@@ -56,7 +56,7 @@
           "description": "Encryption algorithm to apply to newly created streams in the basin.",
           "anyOf": [
             {
-              "$ref": "#/$defs/EncryptionAlgorithmSpec"
+              "$ref": "#/$defs/EncryptionAlgorithm"
             },
             {
               "type": "null"
@@ -83,14 +83,14 @@
       },
       "additionalProperties": false
     },
-    "StreamConfigSpec": {
+    "StreamConfig": {
       "type": "object",
       "properties": {
         "storage_class": {
           "description": "Storage class for recent writes.",
           "anyOf": [
             {
-              "$ref": "#/$defs/StorageClassSpec"
+              "$ref": "#/$defs/StorageClass"
             },
             {
               "type": "null"
@@ -102,7 +102,7 @@
           "description": "Retention policy for the stream. If unspecified, the default is to retain records for 7\ndays.",
           "anyOf": [
             {
-              "$ref": "#/$defs/RetentionPolicySpec"
+              "$ref": "#/$defs/RetentionPolicy"
             },
             {
               "type": "null"
@@ -113,7 +113,7 @@
           "description": "Timestamping behavior.",
           "anyOf": [
             {
-              "$ref": "#/$defs/TimestampingSpec"
+              "$ref": "#/$defs/Timestamping"
             },
             {
               "type": "null"
@@ -124,7 +124,7 @@
           "description": "Delete-on-empty configuration.",
           "anyOf": [
             {
-              "$ref": "#/$defs/DeleteOnEmptySpec"
+              "$ref": "#/$defs/DeleteOnEmpty"
             },
             {
               "type": "null"
@@ -134,7 +134,7 @@
       },
       "additionalProperties": false
     },
-    "StorageClassSpec": {
+    "StorageClass": {
       "description": "Storage class for recent writes.",
       "type": "string",
       "enum": [
@@ -142,7 +142,7 @@
         "express"
       ]
     },
-    "RetentionPolicySpec": {
+    "RetentionPolicy": {
       "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically trim records older than the given duration (e.g. \"7days\", \"1week\").",
       "type": "string",
       "examples": [
@@ -151,14 +151,14 @@
         "1week"
       ]
     },
-    "TimestampingSpec": {
+    "Timestamping": {
       "type": "object",
       "properties": {
         "mode": {
           "description": "Timestamping mode for appends that influences how timestamps are handled.",
           "anyOf": [
             {
-              "$ref": "#/$defs/TimestampingModeSpec"
+              "$ref": "#/$defs/TimestampingMode"
             },
             {
               "type": "null"
@@ -177,7 +177,7 @@
       },
       "additionalProperties": false
     },
-    "TimestampingModeSpec": {
+    "TimestampingMode": {
       "description": "Timestamping mode for appends that influences how timestamps are handled.",
       "type": "string",
       "enum": [
@@ -186,7 +186,7 @@
         "arrival"
       ]
     },
-    "DeleteOnEmptySpec": {
+    "DeleteOnEmpty": {
       "type": "object",
       "properties": {
         "min_age": {
@@ -211,7 +211,7 @@
         "2h 30m"
       ]
     },
-    "EncryptionAlgorithmSpec": {
+    "EncryptionAlgorithm": {
       "description": "Encryption algorithm to apply to newly created streams in the basin.",
       "type": "string",
       "enum": [
@@ -219,7 +219,7 @@
         "aes-256-gcm"
       ]
     },
-    "StreamSpec": {
+    "Stream": {
       "type": "object",
       "properties": {
         "name": {
@@ -228,7 +228,7 @@
         "config": {
           "anyOf": [
             {
-              "$ref": "#/$defs/StreamConfigSpec"
+              "$ref": "#/$defs/StreamConfig"
             },
             {
               "type": "null"

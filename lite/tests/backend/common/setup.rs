@@ -3,13 +3,13 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use s2_common::{
+    basin::BasinName,
+    config::{BasinConfig, OptionalStreamConfig},
     encryption::{EncryptionAlgorithm, EncryptionKey, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
-    types::{
-        basin::BasinName,
-        config::{BasinConfig, OptionalStreamConfig},
-        resources::ProvisionMode,
-        stream::{AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName},
+    resources::ProvisionMode,
+    stream::{
+        AppendAck, AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, StreamName,
     },
 };
 use s2_lite::backend::Backend;
@@ -215,7 +215,7 @@ pub async fn append_payloads(
     basin: &BasinName,
     stream: &StreamName,
     payloads: &[&[u8]],
-) -> s2_common::types::stream::AppendAck {
+) -> AppendAck {
     let encryption = EncryptionSpec::Plain;
     append_payloads_with_encryption(backend, basin, stream, payloads, &encryption).await
 }
@@ -226,7 +226,7 @@ pub async fn append_payloads_with_encryption(
     stream: &StreamName,
     payloads: &[&[u8]],
     encryption: &EncryptionSpec,
-) -> s2_common::types::stream::AppendAck {
+) -> AppendAck {
     let bodies = payloads
         .iter()
         .map(|bytes| Bytes::copy_from_slice(bytes))
@@ -250,7 +250,7 @@ pub async fn append_timestamped_payloads(
     basin: &BasinName,
     stream: &StreamName,
     payloads: Vec<(Bytes, Timestamp)>,
-) -> s2_common::types::stream::AppendAck {
+) -> AppendAck {
     let input = AppendInput {
         records: create_test_record_batch_with_timestamps(payloads),
         match_seq_num: None,

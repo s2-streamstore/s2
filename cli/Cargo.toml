@@ -31,8 +31,9 @@ miette = { workspace = true, features = ["fancy"] }
 rand = { workspace = true }
 ratatui = "0.30"
 rustls = { workspace = true, features = ["aws-lc-rs"] }
-s2-common = { workspace = true, features = ["resource_spec"] }
+s2-common = { workspace = true }
 s2-lite = { workspace = true }
+s2-resource-spec = { workspace = true }
 s2-sdk = { workspace = true, features = ["_hidden"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }

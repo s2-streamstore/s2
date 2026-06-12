@@ -6,13 +6,12 @@ use std::{
 
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
+    basin::BasinName,
     encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
-    types::{
-        basin::BasinName,
-        stream::{AppendAck, AppendInput, StreamName},
-    },
+    stream::{AppendAck, AppendInput, StreamName},
 };
+use s2_storage::record::encrypt_append_input;
 use tokio::sync::oneshot;
 
 use super::{Backend, StreamHandle};
@@ -37,7 +36,8 @@ impl Backend {
 
 impl StreamHandle {
     pub async fn append(self, input: AppendInput) -> Result<AppendAck, AppendError> {
-        let input = input.encrypt(&self.encryption, self.client.stream_id().as_bytes());
+        let input =
+            encrypt_append_input(input, &self.encryption, self.client.stream_id().as_bytes());
         let ack = self.client.append_permit(input).await?.submit().await?;
         Ok(ack)
     }
@@ -59,7 +59,7 @@ impl StreamHandle {
                 tokio::select! {
                     Some(input) = inputs.next(), if permit_opt.is_none() => {
                         permit_opt = Some(Box::pin(client.append_permit(
-                            input.encrypt(&encryption, stream_id.as_bytes()),
+                            encrypt_append_input(input, &encryption, stream_id.as_bytes()),
                         )));
                     }
                     Some(res) = OptionFuture::from(permit_opt.as_mut()) => {

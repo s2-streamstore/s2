@@ -13,15 +13,13 @@ use s2_api::{
     v1::{self as v1t, stream::s2s},
 };
 use s2_common::{
+    ValidationError,
+    basin::BasinName,
     caps::RECORD_BATCH_MAX,
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
-    types::{
-        ValidationError,
-        basin::BasinName,
-        stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
-    },
+    stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
 };
 
 use crate::{
@@ -476,17 +474,15 @@ mod tests {
         s2s::{FrameDecoder, SessionMessage},
     };
     use s2_common::{
+        basin::{BASIN_HEADER, BasinName},
+        config::{BasinConfig, OptionalStreamConfig},
         encryption::{EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
-        types::{
-            basin::{BASIN_HEADER, BasinName},
-            config::{BasinConfig, OptionalStreamConfig},
-            resources::ProvisionMode,
-            stream::{
-                AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
-                ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
-            },
+        resources::ProvisionMode,
+        stream::{
+            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ListStreamsRequest,
+            ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
         },
     };
     use slatedb::{Db, config::Settings, object_store::memory::InMemory};

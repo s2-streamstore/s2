@@ -1,7 +1,7 @@
 use axum::extract::{FromRequest, Path, Query, State};
 use http::StatusCode;
 use s2_api::{data::Json, v1 as v1t};
-use s2_common::types::access::AccessTokenId;
+use s2_common::access::AccessTokenId;
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 

@@ -1,4 +1,4 @@
-use s2_common::types::{self, location::LocationName};
+use s2_common::{self, location::LocationName};
 use serde::{Deserialize, Serialize};
 
 #[rustfmt::skip]
@@ -11,9 +11,9 @@ pub struct LocationInfo {
     pub is_private: bool,
 }
 
-impl From<types::location::LocationInfo> for LocationInfo {
-    fn from(value: types::location::LocationInfo) -> Self {
-        let types::location::LocationInfo { name, is_private } = value;
+impl From<s2_common::location::LocationInfo> for LocationInfo {
+    fn from(value: s2_common::location::LocationInfo) -> Self {
+        let s2_common::location::LocationInfo { name, is_private } = value;
 
         Self { name, is_private }
     }

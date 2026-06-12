@@ -2,15 +2,13 @@ use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::{
-    bash::Bash,
+    basin::BasinName,
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
+    config::{OptionalStreamConfig, StreamConfig},
     encryption::EncryptionAlgorithm,
-    types::{
-        basin::BasinName,
-        config::{OptionalStreamConfig, StreamConfig},
-        stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
-    },
+    stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
 };
+use s2_storage::bash::Bash;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -54,7 +52,7 @@ impl From<StreamMeta> for StreamMetaSerde {
 }
 
 impl TryFrom<StreamMetaSerde> for StreamMeta {
-    type Error = s2_common::types::ValidationError;
+    type Error = s2_common::ValidationError;
 
     fn try_from(serde: StreamMetaSerde) -> Result<Self, Self::Error> {
         let config = match serde.config {
@@ -156,16 +154,12 @@ mod tests {
     use bytes::Bytes;
     use proptest::prelude::*;
     use s2_common::{
-        bash::Bash,
+        basin::BasinName,
+        config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass, StreamConfig},
         encryption::EncryptionAlgorithm,
-        types::{
-            basin::BasinName,
-            config::{
-                OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass, StreamConfig,
-            },
-            stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
-        },
+        stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     };
+    use s2_storage::bash::Bash;
     use time::OffsetDateTime;
 
     use crate::backend::kv::proptest_strategies::{basin_name_strategy, stream_name_strategy};

@@ -10,9 +10,8 @@ use s2_api::{
         stream::{AppendInputStreamError, extract::AppendRequestRejection, s2s},
     },
 };
-use s2_common::{
-    http::extract::HeaderRejection, record::RecordDecryptionError, types::ValidationError,
-};
+use s2_common::{ValidationError, http::extract::HeaderRejection};
+use s2_storage::record::RecordDecryptionError;
 
 use crate::backend::error::{
     AppendConditionFailedError, AppendError, CheckTailError, DeleteBasinError, DeleteStreamError,

@@ -2,17 +2,15 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt as _};
 use s2_common::{
+    basin::BasinName,
     caps,
     encryption::{EncryptionKey, EncryptionSpec},
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp},
-    types::{
-        basin::BasinName,
-        stream::{
-            ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StoredReadBatch,
-            StoredReadSessionOutput, StreamName,
-        },
-    },
+    record::{Metered, MeteredSize as _, SeqNum, StreamPosition, Timestamp},
+    stream::{ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
+};
+use s2_storage::record::{
+    StoredReadBatch, StoredReadSessionOutput, StoredSequencedRecord, decrypt_read_session_output,
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
@@ -77,9 +75,10 @@ impl StreamHandle {
             tokio::pin!(session);
             while let Some(output) = session.next().await {
                 let output = match output {
-                    Ok(output) => output
-                        .decrypt(&self.encryption, stream_id.as_bytes())
-                        .map_err(ReadError::from),
+                    Ok(output) => {
+                        decrypt_read_session_output(output, &self.encryption, stream_id.as_bytes())
+                            .map_err(ReadError::from)
+                    }
                     Err(err) => Err(err),
                 };
                 let should_stop = output.is_err();
@@ -255,11 +254,9 @@ async fn read_start_seq_num(
     tail: StreamPosition,
 ) -> Result<SeqNum, ReadError> {
     let mut read_pos = match start.from {
-        s2_common::types::stream::ReadFrom::SeqNum(seq_num) => ReadPosition::SeqNum(seq_num),
-        s2_common::types::stream::ReadFrom::Timestamp(timestamp) => {
-            ReadPosition::Timestamp(timestamp)
-        }
-        s2_common::types::stream::ReadFrom::TailOffset(tail_offset) => {
+        s2_common::stream::ReadFrom::SeqNum(seq_num) => ReadPosition::SeqNum(seq_num),
+        s2_common::stream::ReadFrom::Timestamp(timestamp) => ReadPosition::Timestamp(timestamp),
+        s2_common::stream::ReadFrom::TailOffset(tail_offset) => {
             ReadPosition::SeqNum(tail.seq_num.saturating_sub(tail_offset))
         }
     };
@@ -419,16 +416,14 @@ mod tests {
     use bytesize::ByteSize;
     use futures::StreamExt;
     use s2_common::{
+        basin::BasinName,
+        config::{BasinConfig, OptionalStreamConfig},
         read_extent::{ReadLimit, ReadUntil},
         record::{Metered, Record},
-        types::{
-            basin::BasinName,
-            config::{BasinConfig, OptionalStreamConfig},
-            resources::ProvisionMode,
-            stream::{
-                AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
-                ReadSessionOutput, ReadStart,
-            },
+        resources::ProvisionMode,
+        stream::{
+            AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom,
+            ReadSessionOutput, ReadStart, StreamName,
         },
     };
     use slatedb::{Db, WriteBatch, object_store::memory::InMemory};
@@ -562,7 +557,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -632,7 +627,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -715,7 +710,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -872,7 +867,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -959,7 +954,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stream: s2_common::types::stream::StreamName = "test-stream".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
         backend
             .provision_stream(
                 basin.clone(),

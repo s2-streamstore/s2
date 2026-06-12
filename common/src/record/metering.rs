@@ -38,7 +38,11 @@ pub struct Metered<T> {
 }
 
 impl<T> Metered<T> {
-    pub(super) const fn with_size(size: usize, inner: T) -> Self {
+    /// Construct a value with an already-known metered size.
+    ///
+    /// This is primarily for decoding persisted storage records, where the
+    /// encoded metered-size prefix is authoritative and must be preserved.
+    pub const fn with_size(size: usize, inner: T) -> Self {
         Self { size, inner }
     }
 

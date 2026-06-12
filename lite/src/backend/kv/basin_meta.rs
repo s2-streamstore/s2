@@ -2,12 +2,10 @@ use std::ops::Range;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use s2_common::{
-    bash::Bash,
-    types::{
-        basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
-        config::BasinConfig,
-    },
+    basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
+    config::BasinConfig,
 };
+use s2_storage::bash::Bash;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -43,7 +41,7 @@ impl From<BasinMeta> for BasinMetaSerde {
 }
 
 impl TryFrom<BasinMetaSerde> for BasinMeta {
-    type Error = s2_common::types::ValidationError;
+    type Error = s2_common::ValidationError;
 
     fn try_from(serde: BasinMetaSerde) -> Result<Self, Self::Error> {
         let config = match serde.config {
@@ -120,12 +118,10 @@ mod tests {
     use bytes::Bytes;
     use proptest::prelude::*;
     use s2_common::{
-        bash::Bash,
-        types::{
-            basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
-            config::{BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig},
-        },
+        basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
+        config::{BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig},
     };
+    use s2_storage::bash::Bash;
     use time::OffsetDateTime;
 
     use crate::backend::kv::{

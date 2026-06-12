@@ -1,10 +1,12 @@
 use std::iter::FusedIterator;
 
-use crate::{
+use s2_common::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize, Sequenced, StoredRecord},
+    record::{Metered, MeteredSize, Sequenced},
 };
+
+use super::StoredRecord;
 
 pub struct RecordBatch<T = StoredRecord>
 where
@@ -83,7 +85,7 @@ where
                     if remaining_limit.deny(
                         self.buffered_records.len() + 1,
                         self.buffered_records.metered_size() + record.metered_size(),
-                    ) || self.until.deny(record.position.timestamp)
+                    ) || self.until.deny(record.position().timestamp)
                     {
                         self.read_limit = EvaluatedReadLimit::Exhausted;
                         break;
@@ -169,17 +171,18 @@ where
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-
-    use super::*;
-    use crate::{
+    use s2_common::{
         caps,
         read_extent::{ReadLimit, ReadUntil},
         record::{
-            CommandRecord, Encodable, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record,
-            RecordDecodeError, SeqNum, Sequenced, SequencedRecord, StoredRecord,
-            StoredRecordIterator, StoredSequencedBytes, StoredSequencedRecord, StreamPosition,
-            Timestamp,
+            CommandRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum,
+            Sequenced, SequencedRecord, StreamPosition, Timestamp,
         },
+    };
+
+    use crate::record::{
+        RecordBatch, RecordBatcher, StoredRecord, StoredRecordDecodeError, StoredRecordIterator,
+        StoredSequencedBytes, StoredSequencedRecord, encode_stored_record,
     };
 
     fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
@@ -190,11 +193,10 @@ mod tests {
     }
 
     fn test_record(seq_num: SeqNum, timestamp: Timestamp) -> StoredSequencedRecord {
-        Metered::from(StoredRecord::from(Record::Command(CommandRecord::Trim(
-            seq_num,
-        ))))
-        .sequenced(StreamPosition { seq_num, timestamp })
-        .into_inner()
+        StoredRecord::from(Record::Command(CommandRecord::Trim(seq_num)))
+            .metered()
+            .sequenced(StreamPosition { seq_num, timestamp })
+            .into_inner()
     }
 
     fn test_large_record(
@@ -202,33 +204,34 @@ mod tests {
         timestamp: Timestamp,
         body_len: usize,
     ) -> StoredSequencedRecord {
-        Metered::from(StoredRecord::from(Record::Envelope(
+        StoredRecord::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from(vec![0; body_len])).unwrap(),
-        )))
+        ))
+        .metered()
         .sequenced(StreamPosition { seq_num, timestamp })
         .into_inner()
     }
 
     fn to_iter(
         records: Vec<StoredSequencedRecord>,
-    ) -> impl Iterator<Item = Result<Metered<StoredSequencedRecord>, RecordDecodeError>> {
+    ) -> impl Iterator<Item = Result<Metered<StoredSequencedRecord>, StoredRecordDecodeError>> {
         records.into_iter().map(Metered::from).map(Ok)
     }
 
     fn to_logical_iter(
         records: Vec<SequencedRecord>,
-    ) -> impl Iterator<Item = Result<Metered<SequencedRecord>, RecordDecodeError>> {
+    ) -> impl Iterator<Item = Result<Metered<SequencedRecord>, StoredRecordDecodeError>> {
         records.into_iter().map(Metered::from).map(Ok)
     }
 
     fn to_stored_bytes_iter(
         records: Vec<StoredSequencedRecord>,
-    ) -> impl Iterator<Item = Result<StoredSequencedBytes, RecordDecodeError>> {
+    ) -> impl Iterator<Item = Result<StoredSequencedBytes, StoredRecordDecodeError>> {
         records
             .into_iter()
             .map(|record| {
                 let (position, record) = record.into_parts();
-                Sequenced::new(position, (&record).metered().to_bytes())
+                Sequenced::new(position, encode_stored_record((&record).metered()))
             })
             .map(Ok)
     }
@@ -415,17 +418,20 @@ mod tests {
             .next()
             .expect("error expected")
             .expect_err("expected decode error");
-        assert!(matches!(error, RecordDecodeError::Truncated("MagicByte")));
+        assert!(matches!(
+            error,
+            StoredRecordDecodeError::Truncated("MagicByte")
+        ));
         assert!(batcher.next().is_none());
     }
 
     #[test]
     fn surfaces_iterator_errors_immediately() {
         let iterator = StoredRecordIterator::new(std::iter::once::<
-            Result<StoredSequencedBytes, RecordDecodeError>,
-        >(Err(RecordDecodeError::InvalidValue(
-            "test", "boom",
-        ))));
+            Result<StoredSequencedBytes, StoredRecordDecodeError>,
+        >(Err(
+            StoredRecordDecodeError::InvalidValue("test", "boom"),
+        )));
         let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
 
         let error = batcher
@@ -434,7 +440,7 @@ mod tests {
             .expect_err("expected iterator error");
         assert!(matches!(
             error,
-            RecordDecodeError::InvalidValue("test", "boom")
+            StoredRecordDecodeError::InvalidValue("test", "boom")
         ));
         assert!(batcher.next().is_none());
     }

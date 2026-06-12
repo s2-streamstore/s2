@@ -40,7 +40,7 @@ use s2_api::v1::{
 };
 use s2_common::{
     encryption::S2_ENCRYPTION_KEY_HEADER,
-    types::resources::{PROVISION_RESULT_HEADER, ProvisionResult},
+    resources::{PROVISION_RESULT_HEADER, ProvisionResult},
 };
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
