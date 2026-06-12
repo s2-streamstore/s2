@@ -41,6 +41,7 @@ use s2_common::{
         ReadSessionOutput,
     },
 };
+use secrecy::ExposeSecret as _;
 
 use super::{
     StoredAppendInput, StoredReadBatch, StoredReadSessionOutput, StoredRecord,
@@ -215,35 +216,28 @@ pub fn encrypt_record(
     let record = match (record.into_inner(), encryption) {
         (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
         (record @ Record::Envelope(_), EncryptionSpec::Plain) => StoredRecord::Plaintext(record),
-        (Record::Envelope(envelope), encryption @ EncryptionSpec::Aegis256(_)) => {
+        (Record::Envelope(envelope), EncryptionSpec::Aegis256(key)) => {
             let format = EncryptedRecordFormat::Aegis256V1;
             let (mut encoded, payload_start) = prep_encryption_buffer(&envelope, format);
             let (prefix, payload) = encoded.split_at_mut(payload_start);
             let nonce: &[u8; 32] = prefix[FORMAT_ID_LEN..]
                 .try_into()
                 .expect("AEGIS-256 nonce must be 32 bytes");
-            let tag = encryption
-                .with_aegis256_key(|key| {
-                    Aegis256::<16>::new(key, nonce).encrypt_in_place(payload, aad)
-                })
-                .expect("encryption spec variant should contain AEGIS-256 key material");
+            let tag =
+                Aegis256::<16>::new(key.expose_secret(), nonce).encrypt_in_place(payload, aad);
             encoded.put_slice(tag.as_ref());
 
             let encrypted = EncryptedRecord::new(encoded.freeze(), format);
             StoredRecord::encrypted(encrypted, metered_size)
         }
-        (Record::Envelope(envelope), encryption @ EncryptionSpec::Aes256Gcm(_)) => {
+        (Record::Envelope(envelope), EncryptionSpec::Aes256Gcm(key)) => {
             let format = EncryptedRecordFormat::Aes256GcmV1;
             let (mut encoded, payload_start) = prep_encryption_buffer(&envelope, format);
             let (prefix, payload) = encoded.split_at_mut(payload_start);
             let nonce = aes_gcm::Nonce::from_slice(&prefix[FORMAT_ID_LEN..]);
-            let tag = encryption
-                .with_aes256_gcm_key(|key| {
-                    Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key))
-                        .encrypt_in_place_detached(nonce, aad, payload)
-                        .expect("AES-256-GCM encryption should not fail on size validation")
-                })
-                .expect("encryption spec variant should contain AES-256-GCM key material");
+            let tag = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()))
+                .encrypt_in_place_detached(nonce, aad, payload)
+                .expect("AES-256-GCM encryption should not fail on size validation");
             encoded.put_slice(tag.as_ref());
 
             let encrypted = EncryptedRecord::new(encoded.freeze(), format);
@@ -397,7 +391,7 @@ fn decrypt_payload(
     let plaintext_len = payload_end - payload_start;
 
     match (format, encryption) {
-        (EncryptedRecordFormat::Aegis256V1, encryption @ EncryptionSpec::Aegis256(_)) => {
+        (EncryptedRecordFormat::Aegis256V1, EncryptionSpec::Aegis256(key)) => {
             let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
             let nonce: &[u8; 32] = prefix
                 .get(FORMAT_ID_LEN..)
@@ -409,11 +403,8 @@ fn decrypt_payload(
                 .as_ref()
                 .try_into()
                 .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-            encryption
-                .with_aegis256_key(|key| {
-                    Aegis256::<16>::new(key, nonce).decrypt_in_place(ciphertext, tag, aad)
-                })
-                .expect("encryption spec variant should contain AEGIS-256 key material")
+            Aegis256::<16>::new(key.expose_secret(), nonce)
+                .decrypt_in_place(ciphertext, tag, aad)
                 .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
@@ -429,7 +420,7 @@ fn decrypt_payload(
                 actual: Some(EncryptionAlgorithm::Aegis256),
             })
         }
-        (EncryptedRecordFormat::Aes256GcmV1, encryption @ EncryptionSpec::Aes256Gcm(_)) => {
+        (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Aes256Gcm(key)) => {
             let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
             let nonce: &[u8; 12] = prefix
                 .get(FORMAT_ID_LEN..)
@@ -443,12 +434,9 @@ fn decrypt_payload(
                 .try_into()
                 .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
             let tag = aes_gcm::Tag::from_slice(tag);
-            encryption
-                .with_aes256_gcm_key(|key| {
-                    let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));
-                    cipher.decrypt_in_place_detached(nonce, aad, ciphertext, tag)
-                })
-                .expect("encryption spec variant should contain AES-256-GCM key material")
+            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()));
+            cipher
+                .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
                 .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }

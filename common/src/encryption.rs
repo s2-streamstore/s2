@@ -75,8 +75,10 @@ impl<const N: usize> DecodedEncryptionKey<N> {
     pub fn new(key: [u8; N]) -> Self {
         Self(Arc::new(SecretBox::new(Box::new(key))))
     }
+}
 
-    pub(crate) fn expose_secret(&self) -> &[u8; N] {
+impl<const N: usize> ExposeSecret<[u8; N]> for DecodedEncryptionKey<N> {
+    fn expose_secret(&self) -> &[u8; N] {
         self.0.expose_secret()
     }
 }
@@ -131,22 +133,6 @@ impl EncryptionSpec {
 
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
         Self::Aes256Gcm(DecodedEncryptionKey::new(key))
-    }
-
-    #[doc(hidden)]
-    pub fn with_aegis256_key<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> {
-        match self {
-            Self::Aegis256(key) => Some(f(key.expose_secret())),
-            Self::Plain | Self::Aes256Gcm(_) => None,
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn with_aes256_gcm_key<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> {
-        match self {
-            Self::Aes256Gcm(key) => Some(f(key.expose_secret())),
-            Self::Plain | Self::Aegis256(_) => None,
-        }
     }
 }
 

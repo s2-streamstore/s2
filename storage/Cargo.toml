@@ -15,10 +15,10 @@ blake3 = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 s2-common = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }
-

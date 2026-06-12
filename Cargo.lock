@@ -4863,6 +4863,7 @@ dependencies = [
  "rand 0.10.1",
  "rstest",
  "s2-common",
+ "secrecy",
  "serde",
  "thiserror 2.0.18",
 ]
