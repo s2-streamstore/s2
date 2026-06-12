@@ -1,3 +1,45 @@
+//! Stored record body encoding.
+//!
+//! Outer stored-record framing lives in `framing.rs`; this module encodes and
+//! decodes the bytes that follow the magic byte and metered-size prefix.
+//!
+//! Command body layout:
+//!
+//! ```text
+//! +-----------------+-----------------+
+//! | command_op: u8  | payload: bytes  |
+//! +-----------------+-----------------+
+//! ```
+//!
+//! `command_op` is `0` for fence and `1` for trim. Fence payloads are the
+//! fencing token bytes. Trim payloads are the big-endian `u64` trim point.
+//!
+//! Envelope body layout:
+//!
+//! ```text
+//! +-----------------+------------------------------+-------------------+
+//! | header_flag: u8 | num_headers: N bytes, if any | headers...        |
+//! +-----------------+------------------------------+-------------------+
+//! | body: remaining bytes                                              |
+//! +--------------------------------------------------------------------+
+//!
+//! header_flag:
+//!   bits 7..6: reserved, must be 0
+//!   bits 5..4: num_headers byte width, where 0 means no headers
+//!   bits 3..2: header name length byte width minus 1
+//!   bits 1..0: header value length byte width minus 1
+//!
+//! each header:
+//! +------------------------+------------+-------------------------+-------------+
+//! | name_len: name_width   | name bytes | value_len: value_width  | value bytes |
+//! +------------------------+------------+-------------------------+-------------+
+//! ```
+//!
+//! Variable-width integers are big-endian. Header count uses 1-3 bytes when
+//! present; header name/value lengths use 1-4 bytes. When the header-count
+//! width is 0, the decoder treats the record as having no headers and the
+//! remaining bytes are the body.
+
 use std::num::NonZeroU8;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
