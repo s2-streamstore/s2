@@ -14,6 +14,10 @@ name = "s2-common"
 git_release_enable = false
 
 [[package]]
+name = "s2-storage"
+git_release_enable = false
+
+[[package]]
 name = "s2-cli"
 version_group = "s2"
 
