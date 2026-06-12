@@ -3623,6 +3623,9 @@ pub enum S2Error {
     #[error("{0}")]
     /// Client-side error.
     Client(String),
+    #[error("invalid access token: {0}")]
+    /// Access token could not be used as an HTTP header value.
+    InvalidAccessToken(String),
     #[error(transparent)]
     /// Validation error.
     Validation(#[from] ValidationError),
@@ -3647,6 +3650,7 @@ impl From<ApiError> for S2Error {
                 Self::AppendConditionFailed(condition_failed.into())
             }
             ApiError::Server(_, response) => Self::Server(response.into()),
+            ApiError::InvalidHeaderValue(err) => Self::InvalidAccessToken(err.to_string()),
             other => Self::Client(other.to_string()),
         }
     }

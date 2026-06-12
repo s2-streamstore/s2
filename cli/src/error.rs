@@ -92,7 +92,9 @@ impl CliError {
             (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
                 CliError::OperationWithTokenSource(kind, source, token_source)
             }
-            (CliError::SdkInit(source), Some(token_source)) => {
+            (CliError::SdkInit(source), Some(token_source))
+                if matches!(source, S2Error::InvalidAccessToken(_)) =>
+            {
                 CliError::SdkInitWithTokenSource(source, token_source)
             }
             (err, _) => err,
