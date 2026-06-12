@@ -617,7 +617,7 @@ pub enum ApiError {
     #[error(transparent)]
     S2STerminalDecode(#[from] S2STerminalDecodeError),
     #[error("malformed access token: {0}")]
-    MalformedAccessToken(#[from] InvalidHeaderValue),
+    MalformedAccessToken(InvalidHeaderValue),
     #[error(transparent)]
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
@@ -866,7 +866,8 @@ impl BaseClient {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(
             AUTHORIZATION,
-            format!("Bearer {}", config.access_token.expose_secret()).try_into()?,
+            HeaderValue::try_from(format!("Bearer {}", config.access_token.expose_secret()))
+                .map_err(ApiError::MalformedAccessToken)?,
         );
         default_headers.insert(http::header::USER_AGENT, config.user_agent.clone());
         match config.compression {
