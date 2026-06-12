@@ -149,8 +149,8 @@ impl EncodingInfo {
         Self::from_header_summary(
             record.headers().len(),
             record.headers_total_bytes(),
-            record.max_header_name_bytes(),
-            record.max_header_value_bytes(),
+            record.header_name_length_width_bytes(),
+            record.header_value_length_width_bytes(),
         )
         .expect("envelope record headers should be validated")
     }
@@ -158,8 +158,8 @@ impl EncodingInfo {
     fn from_header_summary(
         header_count: usize,
         headers_total_bytes: usize,
-        max_name_bytes: usize,
-        max_value_bytes: usize,
+        name_length_width_bytes: usize,
+        value_length_width_bytes: usize,
     ) -> Result<Self, HeaderValidationError> {
         fn size_bytes_header_count(count: u64) -> Result<u8, HeaderValidationError> {
             let size = 8 - count.leading_zeros() / 8;
@@ -170,13 +170,10 @@ impl EncodingInfo {
             }
         }
 
-        fn size_bytes_header_part(len: u64) -> Result<NonZeroU8, HeaderValidationError> {
-            if len == 0 {
-                return Ok(NonZeroU8::new(1u8).unwrap());
-            }
-            let size = 8 - (len.leading_zeros() / 8);
-            if size <= 4 {
-                Ok(NonZeroU8::new(size as u8).unwrap())
+        fn header_part_width(width: usize) -> Result<NonZeroU8, HeaderValidationError> {
+            let width = u8::try_from(width).map_err(|_| HeaderValidationError::TooLong)?;
+            if (1..=4).contains(&width) {
+                Ok(NonZeroU8::new(width).expect("header part width should be non-zero"))
             } else {
                 Err(HeaderValidationError::TooLong)
             }
@@ -187,8 +184,8 @@ impl EncodingInfo {
         }
 
         let num_headers_length_bytes = size_bytes_header_count(header_count as u64)?;
-        let name_length_bytes = size_bytes_header_part(max_name_bytes as u64)?;
-        let value_length_bytes = size_bytes_header_part(max_value_bytes as u64)?;
+        let name_length_bytes = header_part_width(name_length_width_bytes)?;
+        let value_length_bytes = header_part_width(value_length_width_bytes)?;
 
         Ok(Self {
             headers_total_bytes,
