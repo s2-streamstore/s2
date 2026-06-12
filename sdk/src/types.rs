@@ -3621,6 +3621,9 @@ pub enum S2Error {
     #[error("{0}")]
     /// Client-side error.
     Client(String),
+    #[error("malformed access token: {0}")]
+    /// Access token could not be used as an HTTP header value.
+    MalformedAccessToken(String),
     #[error(transparent)]
     /// Validation error.
     Validation(#[from] ValidationError),
@@ -3645,6 +3648,7 @@ impl From<ApiError> for S2Error {
                 Self::AppendConditionFailed(condition_failed.into())
             }
             ApiError::Server(_, response) => Self::Server(response.into()),
+            ApiError::MalformedAccessToken(err) => Self::MalformedAccessToken(err),
             other => Self::Client(other.to_string()),
         }
     }

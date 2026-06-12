@@ -15,7 +15,7 @@ use bytes::BytesMut;
 use futures::{Stream, StreamExt};
 use http::{
     HeaderMap, HeaderValue, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, InvalidHeaderValue},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
 };
 use prost::{self, Message};
 use s2_api::v1::{
@@ -616,8 +616,8 @@ pub enum ApiError {
     ProtoDecode(#[from] prost::DecodeError),
     #[error(transparent)]
     S2STerminalDecode(#[from] S2STerminalDecodeError),
-    #[error(transparent)]
-    InvalidHeaderValue(#[from] InvalidHeaderValue),
+    #[error("malformed access token: {0}")]
+    MalformedAccessToken(String),
     #[error(transparent)]
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
@@ -866,7 +866,8 @@ impl BaseClient {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(
             AUTHORIZATION,
-            format!("Bearer {}", config.access_token.expose_secret()).try_into()?,
+            HeaderValue::try_from(format!("Bearer {}", config.access_token.expose_secret()))
+                .map_err(|e| ApiError::MalformedAccessToken(e.to_string()))?,
         );
         default_headers.insert(http::header::USER_AGENT, config.user_agent.clone());
         match config.compression {
