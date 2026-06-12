@@ -120,47 +120,45 @@ fn validate_headers(headers: &[Header]) -> Result<HeaderSummary, HeaderValidatio
         return Err(HeaderValidationError::TooMany);
     }
 
-    headers.iter().try_fold(
-        HeaderSummary::default(),
-        |summary, Header { name, value }| {
-            if name.is_empty() {
-                return Err(HeaderValidationError::NameEmpty);
-            }
-            if name.len() > MAX_HEADER_NAME_OR_VALUE_LEN
-                || value.len() > MAX_HEADER_NAME_OR_VALUE_LEN
-            {
-                return Err(HeaderValidationError::TooLong);
-            }
-            let total_bytes = summary
-                .total_bytes()
-                .checked_add(name.len())
-                .and_then(|total| total.checked_add(value.len()))
-                .ok_or(HeaderValidationError::TooLong)?;
-            if total_bytes as u64 > HeaderSummary::TOTAL_BYTES_MASK {
-                return Err(HeaderValidationError::TooLong);
-            }
+    let mut total_bytes = 0usize;
+    let mut name_length_width_bytes = 1u8;
+    let mut value_length_width_bytes = 1u8;
 
-            Ok(HeaderSummary::new(
-                total_bytes,
-                summary
-                    .name_length_width_bytes()
-                    .max(length_width_bytes(name.len())?) as u8,
-                summary
-                    .value_length_width_bytes()
-                    .max(length_width_bytes(value.len())?) as u8,
-            ))
-        },
-    )
+    for Header { name, value } in headers {
+        if name.is_empty() {
+            return Err(HeaderValidationError::NameEmpty);
+        }
+        if name.len() > MAX_HEADER_NAME_OR_VALUE_LEN || value.len() > MAX_HEADER_NAME_OR_VALUE_LEN {
+            return Err(HeaderValidationError::TooLong);
+        }
+
+        total_bytes = total_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or(HeaderValidationError::TooLong)?;
+        if total_bytes as u64 > HeaderSummary::TOTAL_BYTES_MASK {
+            return Err(HeaderValidationError::TooLong);
+        }
+
+        name_length_width_bytes = name_length_width_bytes.max(length_width_bytes(name.len())?);
+        value_length_width_bytes = value_length_width_bytes.max(length_width_bytes(value.len())?);
+    }
+
+    Ok(HeaderSummary::new(
+        total_bytes,
+        name_length_width_bytes,
+        value_length_width_bytes,
+    ))
 }
 
-fn length_width_bytes(len: usize) -> Result<usize, HeaderValidationError> {
+fn length_width_bytes(len: usize) -> Result<u8, HeaderValidationError> {
     if len == 0 {
         return Ok(1);
     }
 
     let width = 8 - len.leading_zeros() / 8;
     if width <= 4 {
-        Ok(width as usize)
+        Ok(width as u8)
     } else {
         Err(HeaderValidationError::TooLong)
     }
