@@ -169,8 +169,12 @@ fn length_width_bytes(len: usize) -> Result<usize, HeaderValidationError> {
 #[cfg(test)]
 mod test {
     use bytes::Bytes;
+    use proptest::prelude::*;
 
-    use super::{EnvelopeRecord, Header, HeaderValidationError, MeteredSize, RecordPartsError};
+    use super::{
+        EnvelopeRecord, HEADER_TOTAL_BYTES_MASK, Header, HeaderSummary, HeaderValidationError,
+        MeteredSize, RecordPartsError, length_width_bytes,
+    };
 
     fn assert_parts_preserved(headers: Vec<Header>, body: Bytes) {
         let record = EnvelopeRecord::try_from_parts(headers.clone(), body.clone()).unwrap();
@@ -294,5 +298,50 @@ mod test {
         );
         assert_eq!(record.header_name_length_width_bytes(), 2);
         assert_eq!(record.header_value_length_width_bytes(), 3);
+    }
+
+    proptest! {
+        #[test]
+        fn header_summary_pack_roundtrips(
+            total_bytes in 0usize..=HEADER_TOTAL_BYTES_MASK as usize,
+            name_length_width in 1u8..=4,
+            value_length_width in 1u8..=4,
+        ) {
+            let summary = HeaderSummary::new(
+                total_bytes,
+                name_length_width,
+                value_length_width,
+            );
+
+            prop_assert_eq!(summary.total_bytes(), total_bytes);
+            prop_assert_eq!(
+                summary.name_length_width_bytes(),
+                name_length_width as usize,
+            );
+            prop_assert_eq!(
+                summary.value_length_width_bytes(),
+                value_length_width as usize,
+            );
+        }
+    }
+
+    #[test]
+    fn length_width_bytes_covers_encoding_boundaries() {
+        assert_eq!(length_width_bytes(0), Ok(1));
+        assert_eq!(length_width_bytes(1), Ok(1));
+        assert_eq!(length_width_bytes(0xff), Ok(1));
+        assert_eq!(length_width_bytes(0x100), Ok(2));
+        assert_eq!(length_width_bytes(0xffff), Ok(2));
+        assert_eq!(length_width_bytes(0x1_0000), Ok(3));
+        assert_eq!(length_width_bytes(0xff_ffff), Ok(3));
+        assert_eq!(length_width_bytes(0x100_0000), Ok(4));
+        assert_eq!(length_width_bytes(u32::MAX as usize), Ok(4));
+
+        if let Some(too_long) = (u32::MAX as usize).checked_add(1) {
+            assert_eq!(
+                length_width_bytes(too_long),
+                Err(HeaderValidationError::TooLong)
+            );
+        }
     }
 }

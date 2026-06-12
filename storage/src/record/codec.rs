@@ -529,6 +529,55 @@ mod tests {
         assert_eq!(u8_repr, 0b00010000);
     }
 
+    #[rstest]
+    #[case::one_byte_widths(1, 1)]
+    #[case::two_byte_widths(2, 2)]
+    #[case::three_byte_widths(3, 3)]
+    #[case::four_byte_widths(4, 4)]
+    #[case::mixed_widths(2, 4)]
+    fn encoding_info_uses_cached_header_length_widths(
+        #[case] name_length_width_bytes: usize,
+        #[case] value_length_width_bytes: usize,
+    ) {
+        let encoding_info = EncodingInfo::from_header_summary(
+            1,
+            42,
+            name_length_width_bytes,
+            value_length_width_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(encoding_info.headers_total_bytes, 42);
+        assert_eq!(
+            encoding_info.flag,
+            HeaderFlag {
+                num_headers_length_bytes: 1,
+                name_length_bytes: NonZeroU8::new(name_length_width_bytes as u8).unwrap(),
+                value_length_bytes: NonZeroU8::new(value_length_width_bytes as u8).unwrap(),
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::zero_name_width(0, 1)]
+    #[case::too_large_name_width(5, 1)]
+    #[case::zero_value_width(1, 0)]
+    #[case::too_large_value_width(1, 5)]
+    fn encoding_info_rejects_invalid_cached_header_length_widths(
+        #[case] name_length_width_bytes: usize,
+        #[case] value_length_width_bytes: usize,
+    ) {
+        assert_eq!(
+            EncodingInfo::from_header_summary(
+                1,
+                42,
+                name_length_width_bytes,
+                value_length_width_bytes,
+            ),
+            Err(HeaderValidationError::TooLong)
+        );
+    }
+
     #[test]
     fn empty_envelope_size() {
         assert_eq!(
