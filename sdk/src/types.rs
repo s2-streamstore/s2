@@ -3650,7 +3650,7 @@ impl From<ApiError> for S2Error {
                 Self::AppendConditionFailed(condition_failed.into())
             }
             ApiError::Server(_, response) => Self::Server(response.into()),
-            ApiError::MalformedAccessToken(err) => Self::MalformedAccessToken(err.to_string()),
+            ApiError::MalformedAccessToken(err) => Self::MalformedAccessToken(err),
             other => Self::Client(other.to_string()),
         }
     }
