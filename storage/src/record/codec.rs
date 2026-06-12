@@ -11,9 +11,6 @@
 //! +-----------------+-----------------+
 //! ```
 //!
-//! `command_op` is `0` for fence and `1` for trim. Fence payloads are the
-//! fencing token bytes. Trim payloads are the big-endian `u64` trim point.
-//!
 //! Envelope body layout:
 //!
 //! ```text
@@ -70,6 +67,8 @@ pub(crate) trait WireEncode {
     fn encode_into(&self, buf: &mut impl BufMut);
 }
 
+// Stored command ordinals. Fence payloads are fencing token bytes. Trim
+// payloads are the big-endian `u64` trim point.
 const COMMAND_ORDINAL_FENCE: u8 = 0;
 const COMMAND_ORDINAL_TRIM: u8 = 1;
 
