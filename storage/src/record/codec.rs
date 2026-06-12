@@ -2,8 +2,8 @@ use std::num::NonZeroU8;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::record::{
-    CommandOp, CommandPayloadError, CommandRecord, EnvelopeRecord, Header, HeaderValidationError,
-    RecordPartsError,
+    CommandOp, CommandPayloadError, CommandRecord, EnvelopeHeaderMetrics, EnvelopeRecord, Header,
+    HeaderValidationError, RecordPartsError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -144,57 +144,47 @@ struct EncodingInfo {
     flag: HeaderFlag,
 }
 
-impl TryFrom<&[Header]> for EncodingInfo {
-    type Error = HeaderValidationError;
+impl EncodingInfo {
+    fn for_record(record: &EnvelopeRecord) -> Self {
+        Self::from_metrics(record.headers().len(), record.header_metrics())
+            .expect("envelope record headers should be validated")
+    }
 
-    fn try_from(headers: &[Header]) -> Result<Self, Self::Error> {
-        fn size_bytes_headers_len(elems: u64) -> Result<u8, HeaderValidationError> {
-            let size = 8 - elems.leading_zeros() / 8;
-            if size > 3 {
-                Err(HeaderValidationError::TooMany)
-            } else {
+    fn from_metrics(
+        header_count: usize,
+        metrics: EnvelopeHeaderMetrics,
+    ) -> Result<Self, HeaderValidationError> {
+        fn size_bytes_header_count(count: u64) -> Result<u8, HeaderValidationError> {
+            let size = 8 - count.leading_zeros() / 8;
+            if size <= 3 {
                 Ok(size as u8)
+            } else {
+                Err(HeaderValidationError::TooMany)
             }
         }
 
-        fn size_bytes_name_value_len(elems: u64) -> Result<NonZeroU8, HeaderValidationError> {
-            if elems == 0 {
+        fn size_bytes_header_part(len: u64) -> Result<NonZeroU8, HeaderValidationError> {
+            if len == 0 {
                 return Ok(NonZeroU8::new(1u8).unwrap());
             }
-            let size = 8 - (elems.leading_zeros() / 8);
-            if size > 4 {
-                Err(HeaderValidationError::TooLong)
-            } else {
+            let size = 8 - (len.leading_zeros() / 8);
+            if size <= 4 {
                 Ok(NonZeroU8::new(size as u8).unwrap())
+            } else {
+                Err(HeaderValidationError::TooLong)
             }
         }
 
-        if headers.is_empty() {
+        if header_count == 0 {
             return Ok(EMPTY_HEADERS_ENCODING_INFO);
         }
 
-        let (headers_total_bytes, name_max, value_max) = headers.iter().try_fold(
-            (0usize, 0usize, 0usize),
-            |(size_bytes_acc, name_max, value_max), Header { name, value }| {
-                if name.is_empty() {
-                    return Err(HeaderValidationError::NameEmpty);
-                }
-                let name_len = name.len();
-                let value_len = value.len();
-                Ok((
-                    size_bytes_acc + name_len + value_len,
-                    name_max.max(name_len),
-                    value_max.max(value_len),
-                ))
-            },
-        )?;
-
-        let num_headers_length_bytes = size_bytes_headers_len(headers.len() as u64)?;
-        let name_length_bytes = size_bytes_name_value_len(name_max as u64)?;
-        let value_length_bytes = size_bytes_name_value_len(value_max as u64)?;
+        let num_headers_length_bytes = size_bytes_header_count(header_count as u64)?;
+        let name_length_bytes = size_bytes_header_part(metrics.max_name_bytes() as u64)?;
+        let value_length_bytes = size_bytes_header_part(metrics.max_value_bytes() as u64)?;
 
         Ok(Self {
-            headers_total_bytes,
+            headers_total_bytes: metrics.total_bytes(),
             flag: HeaderFlag {
                 num_headers_length_bytes,
                 name_length_bytes,
@@ -206,8 +196,7 @@ impl TryFrom<&[Header]> for EncodingInfo {
 
 impl WireEncode for EnvelopeRecord {
     fn encoded_size(&self) -> usize {
-        let encoding_info = EncodingInfo::try_from(self.headers())
-            .expect("envelope record headers should be validated");
+        let encoding_info = EncodingInfo::for_record(self);
         1 + encoding_info.flag.num_headers_length_bytes as usize
             + self.headers().len()
                 * (encoding_info.flag.name_length_bytes.get() as usize
@@ -217,8 +206,7 @@ impl WireEncode for EnvelopeRecord {
     }
 
     fn encode_into(&self, buf: &mut impl BufMut) {
-        let encoding_info = EncodingInfo::try_from(self.headers())
-            .expect("envelope record headers should be validated");
+        let encoding_info = EncodingInfo::for_record(self);
         buf.put_u8(encoding_info.flag.into());
         buf.put_uint(
             self.headers().len() as u64,
