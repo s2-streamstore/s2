@@ -1,7 +1,7 @@
 [package]
 name = "s2-storage"
 version = "0.1.0"
-description = "Storage/backend shared code for S2"
+description = "Storage-layer internals shared by S2 server implementations"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
