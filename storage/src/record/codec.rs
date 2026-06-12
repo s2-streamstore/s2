@@ -2,8 +2,8 @@ use std::num::NonZeroU8;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use s2_common::record::{
-    CommandOp, CommandPayloadError, CommandRecord, EnvelopeHeaderMetrics, EnvelopeRecord, Header,
-    HeaderValidationError, RecordPartsError,
+    CommandOp, CommandPayloadError, CommandRecord, EnvelopeRecord, Header, HeaderValidationError,
+    RecordPartsError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -146,13 +146,20 @@ struct EncodingInfo {
 
 impl EncodingInfo {
     fn for_record(record: &EnvelopeRecord) -> Self {
-        Self::from_metrics(record.headers().len(), record.header_metrics())
-            .expect("envelope record headers should be validated")
+        Self::from_header_summary(
+            record.headers().len(),
+            record.headers_total_bytes(),
+            record.max_header_name_bytes(),
+            record.max_header_value_bytes(),
+        )
+        .expect("envelope record headers should be validated")
     }
 
-    fn from_metrics(
+    fn from_header_summary(
         header_count: usize,
-        metrics: EnvelopeHeaderMetrics,
+        headers_total_bytes: usize,
+        max_name_bytes: usize,
+        max_value_bytes: usize,
     ) -> Result<Self, HeaderValidationError> {
         fn size_bytes_header_count(count: u64) -> Result<u8, HeaderValidationError> {
             let size = 8 - count.leading_zeros() / 8;
@@ -180,11 +187,11 @@ impl EncodingInfo {
         }
 
         let num_headers_length_bytes = size_bytes_header_count(header_count as u64)?;
-        let name_length_bytes = size_bytes_header_part(metrics.max_name_bytes() as u64)?;
-        let value_length_bytes = size_bytes_header_part(metrics.max_value_bytes() as u64)?;
+        let name_length_bytes = size_bytes_header_part(max_name_bytes as u64)?;
+        let value_length_bytes = size_bytes_header_part(max_value_bytes as u64)?;
 
         Ok(Self {
-            headers_total_bytes: metrics.total_bytes(),
+            headers_total_bytes,
             flag: HeaderFlag {
                 num_headers_length_bytes,
                 name_length_bytes,

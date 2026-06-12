@@ -5,7 +5,7 @@ mod metering;
 
 use bytes::Bytes;
 pub use command::{CommandOp, CommandPayloadError, CommandRecord};
-pub use envelope::{EnvelopeHeaderMetrics, EnvelopeRecord, HeaderValidationError};
+pub use envelope::{EnvelopeRecord, HeaderValidationError};
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
 pub use metering::{Metered, MeteredExt, MeteredSize};
 

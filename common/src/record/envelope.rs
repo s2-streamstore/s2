@@ -20,35 +20,14 @@ pub enum HeaderValidationError {
 pub struct EnvelopeRecord {
     headers: Vec<Header>,
     body: Bytes,
-    header_metrics: EnvelopeHeaderMetrics,
+    header_summary: HeaderSummary,
 }
 
-/// Cached metrics for validated envelope headers.
-///
-/// These values describe the logical header collection. Storage codecs may use
-/// them to derive wire framing, but the metrics themselves are not a wire format.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-pub struct EnvelopeHeaderMetrics {
+struct HeaderSummary {
     total_bytes: usize,
-    max_name_bytes: usize,
-    max_value_bytes: usize,
-}
-
-impl EnvelopeHeaderMetrics {
-    /// Total bytes across all header names and values.
-    pub fn total_bytes(self) -> usize {
-        self.total_bytes
-    }
-
-    /// Length of the longest header name.
-    pub fn max_name_bytes(self) -> usize {
-        self.max_name_bytes
-    }
-
-    /// Length of the longest header value.
-    pub fn max_value_bytes(self) -> usize {
-        self.max_value_bytes
-    }
+    max_name_bytes: u32,
+    max_value_bytes: u32,
 }
 
 impl std::fmt::Debug for EnvelopeRecord {
@@ -68,7 +47,7 @@ impl DeepSize for EnvelopeRecord {
 
 impl MeteredSize for EnvelopeRecord {
     fn metered_size(&self) -> usize {
-        8 + (2 * self.headers.len()) + self.header_metrics.total_bytes + self.body.len()
+        8 + (2 * self.headers.len()) + self.header_summary.total_bytes + self.body.len()
     }
 }
 
@@ -81,9 +60,19 @@ impl EnvelopeRecord {
         &self.body
     }
 
-    /// Cached metrics for the validated header collection.
-    pub fn header_metrics(&self) -> EnvelopeHeaderMetrics {
-        self.header_metrics
+    /// Total bytes across all header names and values.
+    pub fn headers_total_bytes(&self) -> usize {
+        self.header_summary.total_bytes
+    }
+
+    /// Length of the longest header name.
+    pub fn max_header_name_bytes(&self) -> usize {
+        self.header_summary.max_name_bytes as usize
+    }
+
+    /// Length of the longest header value.
+    pub fn max_header_value_bytes(&self) -> usize {
+        self.header_summary.max_value_bytes as usize
     }
 
     pub fn into_parts(self) -> (Vec<Header>, Bytes) {
@@ -91,23 +80,23 @@ impl EnvelopeRecord {
     }
 
     pub fn try_from_parts(headers: Vec<Header>, body: Bytes) -> Result<Self, RecordPartsError> {
-        let header_metrics = validate_headers(&headers)?;
+        let header_summary = validate_headers(&headers)?;
         Ok(Self {
             headers,
             body,
-            header_metrics,
+            header_summary,
         })
     }
 }
 
-fn validate_headers(headers: &[Header]) -> Result<EnvelopeHeaderMetrics, HeaderValidationError> {
+fn validate_headers(headers: &[Header]) -> Result<HeaderSummary, HeaderValidationError> {
     if headers.len() > MAX_HEADER_COUNT {
         return Err(HeaderValidationError::TooMany);
     }
 
     headers.iter().try_fold(
-        EnvelopeHeaderMetrics::default(),
-        |metrics, Header { name, value }| {
+        HeaderSummary::default(),
+        |summary, Header { name, value }| {
             if name.is_empty() {
                 return Err(HeaderValidationError::NameEmpty);
             }
@@ -116,10 +105,10 @@ fn validate_headers(headers: &[Header]) -> Result<EnvelopeHeaderMetrics, HeaderV
             {
                 return Err(HeaderValidationError::TooLong);
             }
-            Ok(EnvelopeHeaderMetrics {
-                total_bytes: metrics.total_bytes + name.len() + value.len(),
-                max_name_bytes: metrics.max_name_bytes.max(name.len()),
-                max_value_bytes: metrics.max_value_bytes.max(value.len()),
+            Ok(HeaderSummary {
+                total_bytes: summary.total_bytes + name.len() + value.len(),
+                max_name_bytes: summary.max_name_bytes.max(name.len() as u32),
+                max_value_bytes: summary.max_value_bytes.max(value.len() as u32),
             })
         },
     )
@@ -129,10 +118,7 @@ fn validate_headers(headers: &[Header]) -> Result<EnvelopeHeaderMetrics, HeaderV
 mod test {
     use bytes::Bytes;
 
-    use super::{
-        EnvelopeHeaderMetrics, EnvelopeRecord, Header, HeaderValidationError, MeteredSize,
-        RecordPartsError,
-    };
+    use super::{EnvelopeRecord, Header, HeaderValidationError, MeteredSize, RecordPartsError};
 
     fn assert_parts_preserved(headers: Vec<Header>, body: Bytes) {
         let record = EnvelopeRecord::try_from_parts(headers.clone(), body.clone()).unwrap();
@@ -232,7 +218,7 @@ mod test {
     }
 
     #[test]
-    fn header_metrics_are_cached_from_validated_headers() {
+    fn header_summary_is_cached_from_validated_headers() {
         let record = EnvelopeRecord::try_from_parts(
             vec![
                 Header {
@@ -249,12 +235,10 @@ mod test {
         .unwrap();
 
         assert_eq!(
-            record.header_metrics(),
-            EnvelopeHeaderMetrics {
-                total_bytes: "a".len() + "value".len() + "long-name".len() + "x".len(),
-                max_name_bytes: "long-name".len(),
-                max_value_bytes: "value".len(),
-            }
+            record.headers_total_bytes(),
+            "a".len() + "value".len() + "long-name".len() + "x".len()
         );
+        assert_eq!(record.max_header_name_bytes(), "long-name".len());
+        assert_eq!(record.max_header_value_bytes(), "value".len());
     }
 }
