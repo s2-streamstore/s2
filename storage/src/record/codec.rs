@@ -146,7 +146,7 @@ struct EncodingInfo {
 
 impl EncodingInfo {
     fn for_record(record: &EnvelopeRecord) -> Self {
-        Self::from_header_summary(
+        Self::from_header_sizing(
             record.headers().len(),
             record.headers_total_bytes(),
             record.header_name_length_width_bytes(),
@@ -155,7 +155,7 @@ impl EncodingInfo {
         .expect("envelope record headers should be validated")
     }
 
-    fn from_header_summary(
+    fn from_header_sizing(
         header_count: usize,
         headers_total_bytes: usize,
         name_length_width_bytes: usize,
@@ -539,7 +539,7 @@ mod tests {
         #[case] name_length_width_bytes: usize,
         #[case] value_length_width_bytes: usize,
     ) {
-        let encoding_info = EncodingInfo::from_header_summary(
+        let encoding_info = EncodingInfo::from_header_sizing(
             1,
             42,
             name_length_width_bytes,
@@ -568,7 +568,7 @@ mod tests {
         #[case] value_length_width_bytes: usize,
     ) {
         assert_eq!(
-            EncodingInfo::from_header_summary(
+            EncodingInfo::from_header_sizing(
                 1,
                 42,
                 name_length_width_bytes,

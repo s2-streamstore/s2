@@ -20,13 +20,13 @@ pub enum HeaderValidationError {
 pub struct EnvelopeRecord {
     headers: Vec<Header>,
     body: Bytes,
-    header_summary: HeaderSummary,
+    header_sizing: HeaderSizing,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-struct HeaderSummary(u64);
+struct HeaderSizing(u64);
 
-impl HeaderSummary {
+impl HeaderSizing {
     const TOTAL_BYTES_MASK: u64 = (1 << 60) - 1;
     const NAME_LENGTH_WIDTH_SHIFT: u32 = 62;
     const VALUE_LENGTH_WIDTH_SHIFT: u32 = 60;
@@ -73,7 +73,7 @@ impl DeepSize for EnvelopeRecord {
 
 impl MeteredSize for EnvelopeRecord {
     fn metered_size(&self) -> usize {
-        8 + (2 * self.headers.len()) + self.header_summary.total_bytes() + self.body.len()
+        8 + (2 * self.headers.len()) + self.header_sizing.total_bytes() + self.body.len()
     }
 }
 
@@ -88,17 +88,17 @@ impl EnvelopeRecord {
 
     /// Total bytes across all header names and values.
     pub fn headers_total_bytes(&self) -> usize {
-        self.header_summary.total_bytes()
+        self.header_sizing.total_bytes()
     }
 
     #[doc(hidden)]
     pub fn header_name_length_width_bytes(&self) -> usize {
-        self.header_summary.name_length_width_bytes()
+        self.header_sizing.name_length_width_bytes()
     }
 
     #[doc(hidden)]
     pub fn header_value_length_width_bytes(&self) -> usize {
-        self.header_summary.value_length_width_bytes()
+        self.header_sizing.value_length_width_bytes()
     }
 
     pub fn into_parts(self) -> (Vec<Header>, Bytes) {
@@ -106,16 +106,16 @@ impl EnvelopeRecord {
     }
 
     pub fn try_from_parts(headers: Vec<Header>, body: Bytes) -> Result<Self, RecordPartsError> {
-        let header_summary = validate_headers(&headers)?;
+        let header_sizing = validate_headers(&headers)?;
         Ok(Self {
             headers,
             body,
-            header_summary,
+            header_sizing,
         })
     }
 }
 
-fn validate_headers(headers: &[Header]) -> Result<HeaderSummary, HeaderValidationError> {
+fn validate_headers(headers: &[Header]) -> Result<HeaderSizing, HeaderValidationError> {
     if headers.len() > MAX_HEADER_COUNT {
         return Err(HeaderValidationError::TooMany);
     }
@@ -136,7 +136,7 @@ fn validate_headers(headers: &[Header]) -> Result<HeaderSummary, HeaderValidatio
             .checked_add(name.len())
             .and_then(|total| total.checked_add(value.len()))
             .ok_or(HeaderValidationError::TooLong)?;
-        if total_bytes as u64 > HeaderSummary::TOTAL_BYTES_MASK {
+        if total_bytes as u64 > HeaderSizing::TOTAL_BYTES_MASK {
             return Err(HeaderValidationError::TooLong);
         }
 
@@ -144,7 +144,7 @@ fn validate_headers(headers: &[Header]) -> Result<HeaderSummary, HeaderValidatio
         value_length_width_bytes = value_length_width_bytes.max(length_width_bytes(value.len())?);
     }
 
-    Ok(HeaderSummary::new(
+    Ok(HeaderSizing::new(
         total_bytes,
         name_length_width_bytes,
         value_length_width_bytes,
@@ -170,8 +170,8 @@ mod test {
     use proptest::prelude::*;
 
     use super::{
-        EnvelopeRecord, Header, HeaderSummary, HeaderValidationError, MeteredSize,
-        RecordPartsError, length_width_bytes,
+        EnvelopeRecord, Header, HeaderSizing, HeaderValidationError, MeteredSize, RecordPartsError,
+        length_width_bytes,
     };
 
     fn assert_parts_preserved(headers: Vec<Header>, body: Bytes) {
@@ -272,7 +272,7 @@ mod test {
     }
 
     #[test]
-    fn header_summary_is_cached_from_validated_headers() {
+    fn header_sizing_is_cached_from_validated_headers() {
         let long_name = Bytes::from(vec![b'n'; 256]);
         let long_value = Bytes::from(vec![b'v'; 65_536]);
         let record = EnvelopeRecord::try_from_parts(
@@ -300,12 +300,12 @@ mod test {
 
     proptest! {
         #[test]
-        fn header_summary_pack_roundtrips(
-            total_bytes in 0usize..=HeaderSummary::TOTAL_BYTES_MASK as usize,
+        fn header_sizing_pack_roundtrips(
+            total_bytes in 0usize..=HeaderSizing::TOTAL_BYTES_MASK as usize,
             name_length_width in 1u8..=4,
             value_length_width in 1u8..=4,
         ) {
-            let summary = HeaderSummary::new(
+            let summary = HeaderSizing::new(
                 total_bytes,
                 name_length_width,
                 value_length_width,
