@@ -3,6 +3,8 @@ mod codec;
 mod encryption;
 mod framing;
 mod iterator;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_util;
 
 pub use batcher::{RecordBatch, RecordBatcher};
 pub use codec::StoredRecordDecodeError;
