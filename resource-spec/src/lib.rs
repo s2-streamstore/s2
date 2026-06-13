@@ -357,13 +357,9 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
 }
 
 fn validate_stream_config(config: &StreamConfig, context: &str, errors: &mut Vec<String>) {
-    if matches!(
-        config.retention_policy.as_ref().and_then(|rp| rp.0.age()),
-        Some(duration) if duration == Duration::ZERO
-    ) {
-        errors.push(format!(
-            "{context} retention_policy age must be greater than 0 seconds"
-        ));
+    let config = s2_common::config::OptionalStreamConfig::from(config.clone());
+    if let Err(err) = config.validate() {
+        errors.push(format!("{context} {err}"));
     }
 }
 

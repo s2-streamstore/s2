@@ -53,13 +53,11 @@ impl TryFrom<RetentionPolicy> for s2_common::config::RetentionPolicy {
     type Error = s2_common::ValidationError;
 
     fn try_from(value: RetentionPolicy) -> Result<Self, Self::Error> {
-        match value {
-            RetentionPolicy::Age(0) => Err(s2_common::ValidationError(
-                "age must be greater than 0 seconds".to_string(),
-            )),
-            RetentionPolicy::Age(age) => Ok(Self::Age(Duration::from_secs(age))),
-            RetentionPolicy::Infinite(_) => Ok(Self::Infinite()),
-        }
+        let policy = match value {
+            RetentionPolicy::Age(age) => Self::Age(Duration::from_secs(age)),
+            RetentionPolicy::Infinite(_) => Self::Infinite(),
+        };
+        policy.validate()
     }
 }
 
@@ -391,12 +389,14 @@ impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
             Some(policy) => Some(policy.try_into()?),
         };
 
-        Ok(Self {
+        let config = Self {
             storage_class: storage_class.map(Into::into),
             retention_policy,
             timestamping: timestamping.map(Into::into).unwrap_or_default(),
             delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -490,7 +490,7 @@ impl TryFrom<BasinConfig> for s2_common::config::BasinConfig {
             create_stream_on_read,
         } = value;
 
-        Ok(Self {
+        let config = Self {
             default_stream_config: match default_stream_config {
                 Some(config) => config.try_into()?,
                 None => Default::default(),
@@ -498,7 +498,9 @@ impl TryFrom<BasinConfig> for s2_common::config::BasinConfig {
             stream_cipher: stream_cipher.map(Into::into),
             create_stream_on_append,
             create_stream_on_read,
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 

@@ -25,7 +25,7 @@
 
 use std::time::Duration;
 
-use crate::{encryption::EncryptionAlgorithm, maybe::Maybe};
+use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
 
 #[derive(
     Debug,
@@ -62,6 +62,15 @@ impl RetentionPolicy {
         match self {
             Self::Age(duration) => Some(*duration),
             Self::Infinite() => None,
+        }
+    }
+
+    pub fn validate(self) -> Result<Self, ValidationError> {
+        match self {
+            Self::Age(duration) if duration.is_zero() => Err(ValidationError(
+                "age must be greater than 0 seconds".to_string(),
+            )),
+            policy => Ok(policy),
         }
     }
 }
@@ -232,6 +241,13 @@ pub struct OptionalStreamConfig {
 }
 
 impl OptionalStreamConfig {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(retention_policy) = self.retention_policy {
+            retention_policy.validate()?;
+        }
+        Ok(())
+    }
+
     pub fn reconfigure(mut self, reconfiguration: StreamReconfiguration) -> Self {
         let StreamReconfiguration {
             storage_class,
@@ -345,6 +361,10 @@ pub struct BasinConfig {
 }
 
 impl BasinConfig {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.default_stream_config.validate()
+    }
+
     pub fn reconfigure(mut self, reconfiguration: BasinReconfiguration) -> Self {
         let BasinReconfiguration {
             default_stream_config,
