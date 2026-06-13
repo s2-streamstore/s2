@@ -167,7 +167,8 @@ impl schemars::JsonSchema for RetentionPolicy {
         schemars::json_schema!({
             "type": "string",
             "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically \
-                trim records older than the given duration (e.g. \"7days\", \"1week\").",
+                trim records older than the given duration (e.g. \"7days\", \"1week\"). \
+                Age durations must be greater than 0 seconds.",
             "examples": ["infinite", "7days", "1week"]
         })
     }
@@ -313,6 +314,18 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
             errors.push(format!("duplicate basin name {:?}", basin_spec.name));
         }
 
+        if let Some(default_stream_config) = basin_spec
+            .config
+            .as_ref()
+            .and_then(|config| config.default_stream_config.as_ref())
+        {
+            validate_stream_config(
+                default_stream_config,
+                &format!("basin {:?} default_stream_config", basin_spec.name.as_ref()),
+                &mut errors,
+            );
+        }
+
         let mut seen_streams = std::collections::HashSet::new();
         for stream_spec in &basin_spec.streams {
             if !seen_streams.insert(stream_spec.name.clone()) {
@@ -321,6 +334,18 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
                     stream_spec.name, basin_spec.name
                 ));
             }
+
+            if let Some(config) = stream_spec.config.as_ref() {
+                validate_stream_config(
+                    config,
+                    &format!(
+                        "stream {:?} in basin {:?}",
+                        stream_spec.name.as_ref(),
+                        basin_spec.name.as_ref()
+                    ),
+                    &mut errors,
+                );
+            }
         }
     }
 
@@ -328,6 +353,17 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
         Ok(())
     } else {
         Err(errors.join("\n"))
+    }
+}
+
+fn validate_stream_config(config: &StreamConfig, context: &str, errors: &mut Vec<String>) {
+    if matches!(
+        config.retention_policy.as_ref().and_then(|rp| rp.0.age()),
+        Some(duration) if duration == Duration::ZERO
+    ) {
+        errors.push(format!(
+            "{context} retention_policy age must be greater than 0 seconds"
+        ));
     }
 }
 
@@ -483,6 +519,26 @@ mod tests {
             r#"{"basins":[{"name":"my-basin","streams":[{"name":"events"},{"name":"logs"}]}]}"#,
         );
         assert!(validate(&spec).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_retention_policy_in_basin_default_stream_config() {
+        let spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","config":{"default_stream_config":{"retention_policy":"0s"}}}]}"#,
+        );
+        let err = validate(&spec).unwrap_err();
+        assert!(err.contains("basin \"my-basin\" default_stream_config"));
+        assert!(err.contains("age must be greater than 0 seconds"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_retention_policy_in_stream_config() {
+        let spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","streams":[{"name":"events","config":{"retention_policy":"0s"}}]}]}"#,
+        );
+        let err = validate(&spec).unwrap_err();
+        assert!(err.contains("stream \"events\" in basin \"my-basin\""));
+        assert!(err.contains("age must be greater than 0 seconds"));
     }
 
     #[test]
