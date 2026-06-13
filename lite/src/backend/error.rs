@@ -139,8 +139,6 @@ pub enum CheckTailError {
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
-    BasinDeletionPending(#[from] BasinDeletionPendingError),
-    #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
 }
 
@@ -257,8 +255,6 @@ pub enum ReadError {
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
-    #[error(transparent)]
-    BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]

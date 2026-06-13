@@ -219,9 +219,6 @@ impl ServiceError {
                 CheckTailError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
-                CheckTailError::BasinDeletionPending(e) => {
-                    standard(ErrorCode::BasinDeletionPending, e.to_string())
-                }
                 CheckTailError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
@@ -287,9 +284,6 @@ impl ServiceError {
                 }
                 ReadError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),
                 ReadError::StreamNotFound(e) => standard(ErrorCode::StreamNotFound, e.to_string()),
-                ReadError::BasinDeletionPending(e) => {
-                    standard(ErrorCode::BasinDeletionPending, e.to_string())
-                }
                 ReadError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }

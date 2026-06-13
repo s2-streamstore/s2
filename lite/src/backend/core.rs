@@ -21,8 +21,8 @@ use super::{
     StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
-        BasinDeletionPendingError, BasinNotFoundError, GetBasinConfigError, ProvisionStreamError,
-        StorageError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
+        BasinNotFoundError, GetBasinConfigError, ProvisionStreamError, StorageError,
+        StreamDeletionPendingError, StreamNotFoundError, StreamerError,
         StreamerMissingInActionError, TransactionConflictError,
     },
     kv,
@@ -319,7 +319,6 @@ impl Backend {
             + From<StorageError>
             + From<BasinNotFoundError>
             + From<TransactionConflictError>
-            + From<BasinDeletionPendingError>
             + From<StreamDeletionPendingError>
             + From<StreamNotFoundError>,
     {
@@ -350,7 +349,9 @@ impl Backend {
                         match e {
                             ProvisionStreamError::Storage(e) => Err(e)?,
                             ProvisionStreamError::TransactionConflict(e) => Err(e)?,
-                            ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
+                            ProvisionStreamError::BasinDeletionPending(e) => {
+                                Err(BasinNotFoundError { basin: e.basin })?
+                            }
                             ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
                             ProvisionStreamError::BasinNotFound(e) => Err(e)?,
                             ProvisionStreamError::StreamAlreadyExists(_) => {}
