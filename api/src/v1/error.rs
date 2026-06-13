@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 // Keep this alphabetized.
 pub enum ErrorCode {
     AccessTokenNotFound,
+    Authn,
     BadFrame,
     BadHeader,
     BadJson,
@@ -48,6 +49,7 @@ pub enum ErrorCode {
 impl ErrorCode {
     pub fn status(self) -> http::StatusCode {
         match self {
+            Self::Authn => http::StatusCode::UNAUTHORIZED,
             Self::DecryptionFailed
             | Self::BadFrame
             | Self::BadHeader
@@ -86,6 +88,11 @@ mod tests {
             ErrorCode::NotImplemented.status(),
             http::StatusCode::NOT_IMPLEMENTED
         );
+    }
+
+    #[test]
+    fn authn_uses_401_status() {
+        assert_eq!(ErrorCode::Authn.status(), http::StatusCode::UNAUTHORIZED);
     }
 }
 

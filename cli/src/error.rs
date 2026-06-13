@@ -187,7 +187,10 @@ fn is_auth_error(err: &S2Error) -> bool {
 }
 
 fn is_auth_error_code(code: &str) -> bool {
-    matches!(code, "permission_denied" | "access_token_not_found")
+    matches!(
+        code,
+        "authn" | "permission_denied" | "access_token_not_found"
+    )
 }
 
 #[cfg(test)]
@@ -201,9 +204,9 @@ mod tests {
 
     #[test]
     fn permission_errors_still_use_token_guidance() {
+        assert!(is_auth_error_code("authn"));
         assert!(is_auth_error_code("permission_denied"));
         assert!(is_auth_error_code("access_token_not_found"));
-        assert!(!is_auth_error_code("authn"));
     }
 }
 
