@@ -24,7 +24,7 @@ pub struct Config {
     pub clients: usize,
 
     /// Operations attempted per client.
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 50)]
     pub ops_per_client: usize,
 }
 

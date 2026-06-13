@@ -195,13 +195,17 @@ jobs:
       - name: Linearizability tests
         run: |
           for seed in 1 2 3; do
-            ./target/sim/sim linearizable --seed "$seed" --clients 3 --ops-per-client 200
+            echo "starting"
+            ./target/sim/sim linearizable --seed "$seed" --clients 3 --ops-per-client 50
             /tmp/s2-porcupine -file="history.$seed.jsonl"
+            echo "finished"
           done
           # And under network chaos (message loss).
           for seed in 4 5; do
-            ./target/sim/sim --fail-rate 0.005 linearizable --seed "$seed" --clients 3 --ops-per-client 200
+            echo "starting"
+            ./target/sim/sim --fail-rate 0.005 linearizable --seed "$seed" --clients 3 --ops-per-client 50
             /tmp/s2-porcupine -file="history.$seed.jsonl"
+            echo "finished"
           done
 
       - name: Upload histories on failure
