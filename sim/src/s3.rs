@@ -54,16 +54,23 @@ struct StoredObject {
     data: Bytes,
     etag: ETag,
     last_modified: Timestamp,
+    /// User metadata (`x-amz-meta-*`). Load-bearing: slatedb stamps each write
+    /// with a `slatedbputid` ULID and, after a put whose response was lost,
+    /// re-reads the object to check whether that write was in fact its own
+    /// (vs. a competing writer). Dropping metadata makes slatedb misread its
+    /// own retried write as a fence and shut down permanently.
+    metadata: Option<dto::Metadata>,
 }
 
 impl StoredObject {
-    fn new(data: Bytes) -> Self {
+    fn new(data: Bytes, metadata: Option<dto::Metadata>) -> Self {
         Self {
             etag: ETag::Strong(blake3::hash(&data).to_hex().to_string()),
             // SystemTime is shadowed by mad-turmoil, so this is simulated
             // (deterministic) time.
             last_modified: SystemTime::now().into(),
             data,
+            metadata,
         }
     }
 }
@@ -127,7 +134,7 @@ impl S3 for InMemoryS3 {
         }
 
         let size = data.len() as i64;
-        let object = StoredObject::new(data);
+        let object = StoredObject::new(data, input.metadata);
         let etag = object.etag.clone();
         objects.insert(input.key, object);
 
@@ -183,6 +190,7 @@ impl S3 for InMemoryS3 {
             e_tag: Some(object.etag.clone()),
             last_modified: Some(object.last_modified.clone()),
             accept_ranges: Some("bytes".to_owned()),
+            metadata: object.metadata.clone(),
             ..Default::default()
         }))
     }
@@ -204,6 +212,7 @@ impl S3 for InMemoryS3 {
             e_tag: Some(object.etag.clone()),
             last_modified: Some(object.last_modified.clone()),
             accept_ranges: Some("bytes".to_owned()),
+            metadata: object.metadata.clone(),
             ..Default::default()
         }))
     }
