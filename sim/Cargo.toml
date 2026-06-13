@@ -22,6 +22,8 @@ clap = { workspace = true, features = ["derive", "env"] }
 eyre = { workspace = true }
 fastrand = "2"
 futures = { workspace = true }
+# Activates determinism on Linux in the patched getrandom (see root Cargo.toml).
+getrandom = { version = "0.2", features = ["deterministic-simulation"] }
 http = { workspace = true }
 http-body-util = "0.1"
 hyper = { version = "1.9", features = ["client", "server", "http1", "http2"] }

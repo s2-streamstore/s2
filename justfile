@@ -69,4 +69,4 @@ lite *args:
 # tokio_unstable is required so turmoil can seed tokio's internal RNG; note the
 # changed RUSTFLAGS means this does not share build artifacts with normal builds.
 sim *args:
-    RUSTFLAGS="--cfg tokio_unstable" cargo run -p s2-sim -- {{args}}
+    RUSTFLAGS="--cfg tokio_unstable" cargo run -p s2-sim --profile sim -- {{args}}

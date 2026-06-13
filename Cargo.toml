@@ -111,9 +111,24 @@ utoipa = { git = "https://github.com/infiniteregrets/utoipa", rev = "9cd181d40ac
 # Unifies s2-verification's crates.io s2-sdk dependency with the workspace sdk,
 # so the sim crate can hand workspace S2Stream values to its workflow clients.
 s2-sdk = { path = "sdk" }
+# On Linux, upstream getrandom 0.2 invokes the raw SYS_getrandom syscall, which
+# bypasses mad-turmoil's libc interposition and injects real entropy into
+# deterministic simulations. The fork's `deterministic-simulation` feature
+# (enabled by the s2-sim crate) routes through the interposable libc wrapper
+# instead; without the feature it behaves identically to upstream.
+getrandom = { git = "https://github.com/s2-streamstore/getrandom", rev = "9634f379845b3d4ea4a9f2d20b9fca28b1476e0c" }
 
 [profile.dev]
 panic = "abort"
+
+# Optimized profile for the deterministic simulator (sim/): release-grade
+# runtime without the release profile's LTO link tax, with assertions kept on
+# since the simulator exists to catch bugs.
+[profile.sim]
+inherits = "release"
+lto = false
+debug-assertions = true
+overflow-checks = true
 
 [profile.release]
 panic = "abort"
