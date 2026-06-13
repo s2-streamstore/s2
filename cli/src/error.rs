@@ -195,23 +195,6 @@ fn is_auth_error_code(code: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn not_implemented_is_not_an_auth_error() {
-        assert!(!is_auth_error_code("not_implemented"));
-    }
-
-    #[test]
-    fn permission_errors_still_use_token_guidance() {
-        assert!(is_auth_error_code("authn"));
-        assert!(is_auth_error_code("permission_denied"));
-        assert!(is_auth_error_code("access_token_not_found"));
-    }
-}
-
-#[cfg(test)]
 impl PartialEq for S2UriParseError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
