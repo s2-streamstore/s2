@@ -298,7 +298,7 @@ impl ServiceError {
                 }),
             },
             ServiceError::NotImplemented => {
-                standard(ErrorCode::PermissionDenied, "Not implemented".to_string())
+                standard(ErrorCode::NotImplemented, "Not implemented".to_string())
             }
         }
     }
@@ -328,4 +328,19 @@ fn standard(code: ErrorCode, message: impl Into<String>) -> ErrorResponse {
             message: message.into(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_implemented_response_uses_distinct_code_and_status() {
+        let (status, body) = ServiceError::NotImplemented.to_response().to_parts();
+        let info: serde_json::Value = serde_json::from_str(&body).expect("error response");
+
+        assert_eq!(status, http::StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(info["code"], "not_implemented");
+        assert_eq!(info["message"], "Not implemented");
+    }
 }

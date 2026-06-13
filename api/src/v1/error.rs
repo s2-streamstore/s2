@@ -30,6 +30,7 @@ pub enum ErrorCode {
     DecryptionFailed,
     HotServer,
     Invalid,
+    NotImplemented,
     Other,
     PermissionDenied,
     QuotaExhausted,
@@ -64,6 +65,7 @@ impl ErrorCode {
             | Self::StreamDeletionPending
             | Self::TransactionConflict => http::StatusCode::CONFLICT,
             Self::Invalid => http::StatusCode::UNPROCESSABLE_ENTITY,
+            Self::NotImplemented => http::StatusCode::NOT_IMPLEMENTED,
             Self::RateLimited => http::StatusCode::TOO_MANY_REQUESTS,
             Self::ClientHangup => http::StatusCode::from_u16(499).expect("valid status code"),
             Self::Other | Self::Storage => http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -71,6 +73,19 @@ impl ErrorCode {
             Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
             Self::UpstreamTimeout => http::StatusCode::GATEWAY_TIMEOUT,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_implemented_uses_501_status() {
+        assert_eq!(
+            ErrorCode::NotImplemented.status(),
+            http::StatusCode::NOT_IMPLEMENTED
+        );
     }
 }
 

@@ -181,13 +181,29 @@ impl std::fmt::Display for TokenSource {
 
 fn is_auth_error(err: &S2Error) -> bool {
     match err {
-        S2Error::Server(response) => {
-            matches!(
-                response.code.as_str(),
-                "authn" | "permission_denied" | "access_token_not_found"
-            )
-        }
+        S2Error::Server(response) => is_auth_error_code(&response.code),
         _ => false,
+    }
+}
+
+fn is_auth_error_code(code: &str) -> bool {
+    matches!(code, "permission_denied" | "access_token_not_found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_implemented_is_not_an_auth_error() {
+        assert!(!is_auth_error_code("not_implemented"));
+    }
+
+    #[test]
+    fn permission_errors_still_use_token_guidance() {
+        assert!(is_auth_error_code("permission_denied"));
+        assert!(is_auth_error_code("access_token_not_found"));
+        assert!(!is_auth_error_code("authn"));
     }
 }
 
