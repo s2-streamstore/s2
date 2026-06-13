@@ -125,7 +125,11 @@ fn init_sim(seed: u64, fail_rate: f64) -> turmoil::Sim<'static> {
     let mut builder = turmoil::Builder::new();
     builder
         .rng_seed(seed)
-        .simulation_duration(Duration::MAX)
+        // Backstop: a wedged system (e.g. a server stuck erroring forever
+        // while clients still have ops to attempt) should fail the simulation
+        // deterministically instead of running unbounded. Scenarios complete
+        // in simulated minutes; leave generous headroom for fault backoffs.
+        .simulation_duration(Duration::from_secs(4 * 60 * 60))
         .min_message_latency(Duration::from_millis(2))
         .max_message_latency(Duration::from_millis(30))
         .tcp_capacity(10_000)
