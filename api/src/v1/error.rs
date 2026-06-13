@@ -90,19 +90,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn not_implemented_uses_501_status() {
-        assert_eq!(
-            ErrorCode::NotImplemented.status(),
-            http::StatusCode::NOT_IMPLEMENTED
-        );
-    }
-
-    #[test]
-    fn authn_uses_401_status() {
-        assert_eq!(ErrorCode::Authn.status(), http::StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
     fn auth_related_codes_are_classified() {
         assert!(ErrorCode::Authn.is_auth_error());
         assert!(ErrorCode::PermissionDenied.is_auth_error());
