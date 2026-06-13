@@ -47,6 +47,13 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    pub fn is_auth_error(self) -> bool {
+        matches!(
+            self,
+            Self::Authn | Self::PermissionDenied | Self::AccessTokenNotFound
+        )
+    }
+
     pub fn status(self) -> http::StatusCode {
         match self {
             Self::Authn => http::StatusCode::UNAUTHORIZED,
@@ -93,6 +100,14 @@ mod tests {
     #[test]
     fn authn_uses_401_status() {
         assert_eq!(ErrorCode::Authn.status(), http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn auth_related_codes_are_classified() {
+        assert!(ErrorCode::Authn.is_auth_error());
+        assert!(ErrorCode::PermissionDenied.is_auth_error());
+        assert!(ErrorCode::AccessTokenNotFound.is_auth_error());
+        assert!(!ErrorCode::NotImplemented.is_auth_error());
     }
 }
 

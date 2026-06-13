@@ -31,6 +31,7 @@ miette = { workspace = true, features = ["fancy"] }
 rand = { workspace = true }
 ratatui = "0.30"
 rustls = { workspace = true, features = ["aws-lc-rs"] }
+s2-api = { workspace = true }
 s2-common = { workspace = true }
 s2-lite = { workspace = true }
 s2-resource-spec = { workspace = true }

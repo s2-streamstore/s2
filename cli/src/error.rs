@@ -1,4 +1,5 @@
 use miette::Diagnostic;
+use s2_api::v1::error::ErrorCode;
 use s2_sdk::types::S2Error;
 use thiserror::Error;
 
@@ -187,10 +188,10 @@ fn is_auth_error(err: &S2Error) -> bool {
 }
 
 fn is_auth_error_code(code: &str) -> bool {
-    matches!(
-        code,
-        "authn" | "permission_denied" | "access_token_not_found"
-    )
+    match code.parse::<ErrorCode>() {
+        Ok(code) => code.is_auth_error(),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
