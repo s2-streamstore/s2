@@ -103,6 +103,7 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -113,7 +114,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --all-features -E 'not (package(s2-cli) & binary(integration)) - package(s2-sdk) - package(s2-testcontainers)'
+      - run: cargo nextest run --workspace --all-features --exclude s2-sim --exclude s2-sdk --exclude s2-testcontainers -E 'not (package(s2-cli) & binary(integration))'
 
   testcontainers:
     name: Testcontainers

@@ -34,9 +34,9 @@ fmt: _ensure-nightly
 _ensure-nextest:
     @cargo nextest --version > /dev/null 2>&1 || cargo install cargo-nextest
 
-# Run tests with nextest (excludes live integration tests that need a server or credentials)
+# Run tests with nextest (excludes simulator, Docker-backed, and live integration tests)
 test *args: sync _ensure-nextest
-    cargo nextest run --workspace --all-features -E 'not ((package(s2-cli) & binary(integration)) or (package(s2-sdk) & (binary(account_ops) or binary(basin_ops) or binary(metrics_ops) or binary(stream_ops))))' {{args}}
+    cargo nextest run --workspace --all-features --exclude s2-sim --exclude s2-testcontainers -E 'not ((package(s2-cli) & binary(integration)) or (package(s2-sdk) & (binary(account_ops) or binary(basin_ops) or binary(metrics_ops) or binary(stream_ops))))' {{args}}
 
 # Run CLI integration tests (requires s2 lite server running)
 test-cli-integration: sync _ensure-nextest
