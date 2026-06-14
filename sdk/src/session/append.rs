@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use futures::StreamExt;
+use futures_util::StreamExt;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::Instant,

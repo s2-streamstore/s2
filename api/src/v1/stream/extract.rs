@@ -2,7 +2,7 @@ use axum::{
     extract::{FromRequest, FromRequestParts, Request},
     response::{IntoResponse, Response},
 };
-use futures::StreamExt as _;
+use futures_util::StreamExt as _;
 use http::{StatusCode, request::Parts};
 use s2_common::{
     encryption::EncryptionKey,
@@ -67,7 +67,7 @@ where
 
             let framed = FramedRead::new(body_reader, s2s::FrameDecoder);
 
-            let inputs = futures::stream::try_unfold(framed, |mut framed| async move {
+            let inputs = futures_util::stream::try_unfold(framed, |mut framed| async move {
                 let Some(msg) = framed.next().await else {
                     return Ok(None);
                 };

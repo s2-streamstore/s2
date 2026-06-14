@@ -3,7 +3,8 @@ use std::{ops::Deref, pin::Pin, sync::Arc, time::Duration};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use bytes::BytesMut;
-use futures::{Stream, StreamExt};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use http::{
     HeaderMap, HeaderValue, StatusCode, Uri,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},

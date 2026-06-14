@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example docs_account_and_basins
 
-use futures::StreamExt;
+use futures_util::StreamExt;
 use s2_sdk::{
     S2,
     types::{

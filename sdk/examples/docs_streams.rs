@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures_util::StreamExt;
 use s2_sdk::{
     S2,
     append_session::AppendSessionConfig,

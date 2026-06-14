@@ -17,7 +17,8 @@ use async_compression::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use http::{
     HeaderMap, Method, StatusCode, Uri,
     header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderName, HeaderValue},

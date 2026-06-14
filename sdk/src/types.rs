@@ -3588,8 +3588,8 @@ impl ReadBatch {
     }
 }
 
-/// A [`Stream`](futures::Stream) of values of type `Result<T, S2Error>`.
-pub type Streaming<T> = Pin<Box<dyn Send + futures::Stream<Item = Result<T, S2Error>>>>;
+/// A [`Stream`](futures_core::Stream) of values of type `Result<T, S2Error>`.
+pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, S2Error>>>>;
 
 #[derive(Debug, Clone, thiserror::Error)]
 /// Why an append condition check failed.
