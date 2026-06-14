@@ -3684,6 +3684,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::api::ClientError;
 
     type HeaderParts = (Vec<u8>, Vec<u8>);
     type AppendRecordParts = (Vec<u8>, Vec<HeaderParts>);
@@ -4336,8 +4337,7 @@ mod tests {
 
     #[test]
     fn s2_error_from_api_error_client() {
-        let url_err = url::Url::parse("not a url").unwrap_err();
-        let err = ApiError::Url(url_err);
+        let err = ApiError::Client(ClientError::Others("client error".to_owned()));
         let s2_err: S2Error = err.into();
         assert!(matches!(s2_err, S2Error::Client(_)));
     }

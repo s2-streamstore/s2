@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use http::{
-    HeaderMap, Method, StatusCode,
+    HeaderMap, Method, StatusCode, Uri,
     header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderName, HeaderValue},
 };
 use http_body_util::{BodyExt, Empty, Full, StreamBody, combinators::UnsyncBoxBody};
@@ -37,7 +37,6 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::task::AbortOnDropHandle;
-use url::Url;
 
 use crate::frame_signal::{FrameSignal, RequestFrameMonitorBody};
 
@@ -152,7 +151,7 @@ impl From<Vec<u8>> for Body {
 
 pub struct Request {
     method: Method,
-    url: Url,
+    uri: Uri,
     headers: HeaderMap,
     body: Body,
     timeout: Option<Duration>,
@@ -186,7 +185,7 @@ impl Request {
     }
 
     pub fn authority(&self) -> &str {
-        self.url.authority()
+        self.uri.authority().map(|a| a.as_str()).unwrap_or("")
     }
 
     pub fn try_clone(&self) -> Option<Self> {
@@ -198,7 +197,7 @@ impl Request {
 
         Some(Self {
             method: self.method.clone(),
-            url: self.url.clone(),
+            uri: self.uri.clone(),
             headers: self.headers.clone(),
             body,
             timeout: self.timeout,
@@ -209,7 +208,7 @@ impl Request {
 
 pub struct RequestBuilder {
     method: Method,
-    url: Url,
+    uri: Uri,
     headers: HeaderMap,
     body: Option<Body>,
     timeout: Option<Duration>,
@@ -218,10 +217,10 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
-    pub fn new(method: Method, url: Url) -> Self {
+    pub fn new(method: Method, uri: Uri) -> Self {
         Self {
             method,
-            url,
+            uri,
             headers: HeaderMap::new(),
             body: None,
             timeout: None,
@@ -230,24 +229,24 @@ impl RequestBuilder {
         }
     }
 
-    pub fn get(url: Url) -> Self {
-        Self::new(Method::GET, url)
+    pub fn get(uri: Uri) -> Self {
+        Self::new(Method::GET, uri)
     }
 
-    pub fn post(url: Url) -> Self {
-        Self::new(Method::POST, url)
+    pub fn post(uri: Uri) -> Self {
+        Self::new(Method::POST, uri)
     }
 
-    pub fn patch(url: Url) -> Self {
-        Self::new(Method::PATCH, url)
+    pub fn patch(uri: Uri) -> Self {
+        Self::new(Method::PATCH, uri)
     }
 
-    pub fn put(url: Url) -> Self {
-        Self::new(Method::PUT, url)
+    pub fn put(uri: Uri) -> Self {
+        Self::new(Method::PUT, uri)
     }
 
-    pub fn delete(url: Url) -> Self {
-        Self::new(Method::DELETE, url)
+    pub fn delete(uri: Uri) -> Self {
+        Self::new(Method::DELETE, uri)
     }
 
     pub fn query<T: Serialize + ?Sized>(mut self, query: &T) -> Self {
@@ -258,13 +257,13 @@ impl RequestBuilder {
         match serde_urlencoded::to_string(query) {
             Ok(query_string) => {
                 if !query_string.is_empty() {
-                    let existing = self.url.query().unwrap_or("");
-                    if existing.is_empty() {
-                        self.url.set_query(Some(&query_string));
-                    } else {
-                        self.url
-                            .set_query(Some(&format!("{existing}&{query_string}")));
-                    }
+                    self.uri = match uri_with_query(&self.uri, &query_string) {
+                        Ok(uri) => uri,
+                        Err(e) => {
+                            self.error = Some(Error::Http(e.into()));
+                            return self;
+                        }
+                    };
                 }
             }
             Err(e) => self.error = Some(Error::UrlEncoded(e)),
@@ -333,7 +332,7 @@ impl RequestBuilder {
 
         Ok(Request {
             method: self.method,
-            url: self.url,
+            uri: self.uri,
             headers: self.headers,
             body: self.body.unwrap_or_default(),
             timeout: self.timeout,
@@ -502,17 +501,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 
 fn build_http_request(
     method: Method,
-    url: &Url,
+    uri: &Uri,
     headers: HeaderMap,
     body: BoxBody,
     content_encoding: Option<HeaderValue>,
 ) -> Result<http::Request<BoxBody>, Error> {
-    let uri: http::Uri = url
-        .as_str()
-        .parse()
-        .map_err(|e: http::uri::InvalidUri| Error::Http(e.into()))?;
-
-    let mut builder = http::Request::builder().method(method).uri(uri);
+    let mut builder = http::Request::builder().method(method).uri(uri.clone());
 
     if let Some(req_headers) = builder.headers_mut() {
         for (key, value) in headers {
@@ -541,7 +535,7 @@ where
 
     let http_request = build_http_request(
         request.method,
-        &request.url,
+        &request.uri,
         request.headers,
         body.into_http_body(),
         content_encoding,
@@ -584,7 +578,7 @@ where
 
     let http_request = build_http_request(
         request.method,
-        &request.url,
+        &request.uri,
         request.headers,
         request.body.into_http_body(),
         None,
@@ -609,6 +603,30 @@ where
     } else {
         operation.await
     }
+}
+
+pub(crate) fn uri_with_path(base: &Uri, path: impl AsRef<str>) -> Uri {
+    let path = path.as_ref().trim_start_matches('/');
+    uri_with_path_and_query(base, &format!("/{path}")).expect("SDK-generated path is a valid URI")
+}
+
+fn uri_with_query(uri: &Uri, query: &str) -> Result<Uri, http::uri::InvalidUri> {
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let (path, existing_query) = path_and_query
+        .split_once('?')
+        .map_or((path_and_query, ""), |(path, query)| (path, query));
+    let path_and_query = if existing_query.is_empty() {
+        format!("{path}?{query}")
+    } else {
+        format!("{path}?{existing_query}&{query}")
+    };
+    uri_with_path_and_query(uri, &path_and_query)
+}
+
+fn uri_with_path_and_query(uri: &Uri, path_and_query: &str) -> Result<Uri, http::uri::InvalidUri> {
+    let scheme = uri.scheme_str().unwrap_or("https");
+    let authority = uri.authority().map(|a| a.as_str()).unwrap_or("");
+    format!("{scheme}://{authority}{path_and_query}").parse()
 }
 
 async fn compress_body(
@@ -893,6 +911,37 @@ mod tests {
 
     fn test_pool() -> Pool<HttpConnector> {
         Pool::new(HttpConnector::new())
+    }
+
+    #[test]
+    fn uri_with_path_percent_encoded_segment() {
+        let base: Uri = "https://example.com".parse().unwrap();
+
+        let uri = uri_with_path(
+            &base,
+            format!("v1/access-tokens/{}", urlencoding::encode("a/b?c d")),
+        );
+
+        assert_eq!(uri, "https://example.com/v1/access-tokens/a%2Fb%3Fc%20d");
+    }
+
+    #[test]
+    fn query_appends_to_existing_query() {
+        #[derive(serde::Serialize)]
+        struct Params<'a> {
+            prefix: &'a str,
+        }
+
+        let uri: Uri = "https://example.com/v1/streams?limit=1".parse().unwrap();
+        let request = RequestBuilder::get(uri)
+            .query(&Params { prefix: "a/b c" })
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.uri,
+            "https://example.com/v1/streams?limit=1&prefix=a%2Fb+c"
+        );
     }
 
     async fn host_client_count(pool: &Pool<HttpConnector>, host: &str) -> usize {
