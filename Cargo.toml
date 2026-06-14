@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["api", "cli", "common", "lite", "resource-spec", "sdk", "storage"]
+members = [
+    "api",
+    "cli",
+    "common",
+    "lite",
+    "resource-spec",
+    "sdk",
+    "storage",
+    "testcontainers",
+]
 
 [workspace.package]
 edition = "2024"

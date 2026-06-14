@@ -28,6 +28,7 @@ This repository contains:
 - **[s2-cli](cli/)** - The official S2 command-line interface
 - **[s2-lite](lite/)** - An open source, self-hostable server implementation of the [S2 API](https://s2.dev/docs/api)
 - **[s2-sdk](sdk/)** - The official Rust SDK for S2
+- **[s2-testcontainers](testcontainers/)** - Rust Testcontainers helpers for running s2-lite in integration tests
 
 ## Installation
 
@@ -147,6 +148,10 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 ### Kubernetes Deployment
 
 Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite-helm/README.md) for installation instructions and configuration options.
+
+### Rust Integration Tests
+
+Use [`s2-testcontainers`](testcontainers/) to start s2-lite from Rust integration tests and get an SDK client/config without manual Docker port allocation, endpoint plumbing, or health polling.
 
 ### Monitoring
 

@@ -10,6 +10,7 @@ RUN --mount=type=bind,source=api,target=/build/api \
     --mount=type=bind,source=resource-spec,target=/build/resource-spec \
     --mount=type=bind,source=sdk,target=/build/sdk \
     --mount=type=bind,source=storage,target=/build/storage \
+    --mount=type=bind,source=testcontainers,target=/build/testcontainers \
     --mount=type=bind,source=cli,target=/build/cli \
     --mount=type=bind,source=Cargo.toml,target=/build/Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=/build/Cargo.lock \
@@ -37,8 +38,8 @@ COPY --from=builder /output/s2 /app/s2
 
 ENTRYPOINT ["./s2"]
 
-# Production runtime (default) - minimal distroless image running as non-root (UID 65532)
-FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
+# Runtime base - minimal distroless image running as non-root (UID 65532)
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime-base
 
 LABEL org.opencontainers.image.source="https://github.com/s2-streamstore/s2"
 LABEL org.opencontainers.image.documentation="https://github.com/s2-streamstore/s2/releases"
@@ -48,3 +49,16 @@ WORKDIR /app
 COPY --from=builder /output/s2 /app/s2
 
 ENTRYPOINT ["./s2"]
+
+# s2-lite runtime for Testcontainers-based integration tests
+FROM runtime-base AS s2-lite
+
+LABEL org.opencontainers.image.title="s2-lite"
+LABEL org.opencontainers.image.description="S2 Lite image with defaults for Testcontainers-based integration tests"
+
+EXPOSE 80
+
+CMD ["lite"]
+
+# Production runtime (default)
+FROM runtime-base AS runtime

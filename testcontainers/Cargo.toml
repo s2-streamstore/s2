@@ -1,0 +1,22 @@
+[package]
+name = "s2-testcontainers"
+version = "0.36.7"
+description = "Testcontainers helpers for running s2-lite in Rust integration tests"
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/s2-streamstore/s2/tree/main/testcontainers"
+homepage.workspace = true
+documentation = "https://docs.rs/s2-testcontainers/latest/s2_testcontainers/"
+keywords = ["s2", "testcontainers", "integration-testing", "streams"]
+categories = ["development-tools::testing", "database"]
+readme = "README.md"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+s2-sdk = { workspace = true }
+testcontainers = "0.27"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

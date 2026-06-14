@@ -12,7 +12,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: s2-streamstore/s2
 
 jobs:
   update_helm_chart:
@@ -174,7 +173,7 @@ jobs:
 
   build_images:
     needs: build_binaries
-    name: Build ${{ matrix.arch }} Docker image
+    name: Build ${{ matrix.image_name }} ${{ matrix.arch }} Docker image
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
@@ -182,8 +181,20 @@ jobs:
         include:
           - arch: x86-64
             runner: ubuntu-latest
+            image_name: s2-streamstore/s2
+            docker_target: runtime
+          - arch: x86-64
+            runner: ubuntu-latest
+            image_name: s2-streamstore/s2-lite
+            docker_target: s2-lite
           - arch: arm64
             runner: ubuntu-24.04-arm
+            image_name: s2-streamstore/s2
+            docker_target: runtime
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            image_name: s2-streamstore/s2-lite
+            docker_target: s2-lite
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -212,16 +223,22 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          target: runtime
+          target: ${{ matrix.docker_target }}
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-${{ matrix.arch }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ steps.version.outputs.value }}-${{ matrix.arch }}
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:latest-${{ matrix.arch }}
 
   create_manifest:
-    name: Create multi-arch Docker manifest
+    name: Create ${{ matrix.image_name }} multi-arch Docker manifest
     needs: build_images
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        image_name:
+          - s2-streamstore/s2
+          - s2-streamstore/s2-lite
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -245,15 +262,15 @@ jobs:
 
       - name: Create and push versioned manifest
         run: |
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }} \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-x86-64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-arm64
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ steps.version.outputs.value }} \
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ steps.version.outputs.value }}-x86-64 \
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ steps.version.outputs.value }}-arm64
 
       - name: Create and push latest manifest
         run: |
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-x86-64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ matrix.image_name }}:latest \
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:latest-x86-64 \
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:latest-arm64
 
   upload_release_artifacts:
     needs: [build_binaries, create_manifest]

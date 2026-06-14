@@ -28,3 +28,7 @@ version_group = "s2"
 [[package]]
 name = "s2-lite"
 version_group = "s2"
+
+[[package]]
+name = "s2-testcontainers"
+version_group = "s2"
