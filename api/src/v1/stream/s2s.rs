@@ -456,16 +456,12 @@ mod test {
     }
 
     fn compression_algorithms() -> Vec<CompressionAlgorithm> {
-        let algorithms = vec![CompressionAlgorithm::None];
-        #[cfg(any(feature = "gzip", feature = "zstd"))]
-        let algorithms = {
-            let mut algorithms = algorithms;
-            #[cfg(feature = "gzip")]
-            algorithms.push(CompressionAlgorithm::Gzip);
-            #[cfg(feature = "zstd")]
-            algorithms.push(CompressionAlgorithm::Zstd);
-            algorithms
-        };
+        let mut algorithms = Vec::new();
+        algorithms.push(CompressionAlgorithm::None);
+        #[cfg(feature = "gzip")]
+        algorithms.push(CompressionAlgorithm::Gzip);
+        #[cfg(feature = "zstd")]
+        algorithms.push(CompressionAlgorithm::Zstd);
         algorithms
     }
 

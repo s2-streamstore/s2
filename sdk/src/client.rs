@@ -37,7 +37,10 @@ use tokio::{sync::RwLock, time::timeout};
 use tokio_util::task::AbortOnDropHandle;
 use url::Url;
 
-use crate::frame_signal::{FrameSignal, RequestFrameMonitorBody};
+use crate::{
+    frame_signal::{FrameSignal, RequestFrameMonitorBody},
+    types::Compression,
+};
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 90;
@@ -46,28 +49,6 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxBody = UnsyncBoxBody<Bytes, BoxError>;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub enum Compression {
-    #[default]
-    None,
-    #[cfg(feature = "gzip")]
-    Gzip,
-    #[cfg(feature = "zstd")]
-    Zstd,
-}
-
-impl From<crate::types::Compression> for Compression {
-    fn from(c: crate::types::Compression) -> Self {
-        match c {
-            crate::types::Compression::None => Compression::None,
-            #[cfg(feature = "gzip")]
-            crate::types::Compression::Gzip => Compression::Gzip,
-            #[cfg(feature = "zstd")]
-            crate::types::Compression::Zstd => Compression::Zstd,
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
