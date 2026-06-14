@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use assert_matches::assert_matches;
 use common::{S2Basin, SharedS2Basin, unique_stream_name, uuid};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use s2_sdk::types::*;
 use test_context::test_context;
 

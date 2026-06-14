@@ -16,7 +16,8 @@ use async_compression::tokio::{bufread::GzipDecoder, write::GzipEncoder};
 use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use http::{
     HeaderMap, Method, StatusCode,
     header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderName, HeaderValue},

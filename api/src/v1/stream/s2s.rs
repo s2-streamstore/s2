@@ -10,7 +10,7 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 #[cfg(feature = "gzip")]
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use futures::Stream;
+use futures_core::Stream;
 use strum::FromRepr;
 
 /*

@@ -27,7 +27,8 @@ async-compression = { version = "0.4", default-features = false, optional = true
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-futures = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
 http = { workspace = true }
 http-body = "1"
 http-body-util = "0.1"

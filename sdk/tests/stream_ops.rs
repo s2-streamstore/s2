@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use assert_matches::assert_matches;
 use common::{S2Stream, SharedS2Basin, s2_config, unique_basin_name, unique_stream_name};
-use futures::StreamExt;
+use futures_util::StreamExt;
 #[cfg(any(feature = "gzip", feature = "zstd"))]
 use rstest::rstest;
 use s2_sdk::{

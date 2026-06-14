@@ -1,18 +1,10 @@
 use std::{ops::Deref, pin::Pin, sync::Arc, time::Duration};
 
-use crate::{
-    client::{self, StreamingResponse, UnaryResponse},
-    frame_signal::FrameSignal,
-    retry::{RetryBackoff, RetryBackoffBuilder},
-    types::{
-        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
-        RetryConfig, S2Config, S2Endpoints, LocationName, StreamName,
-    },
-};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use bytes::BytesMut;
-use futures::{Stream, StreamExt};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use http::{
     HeaderMap, HeaderValue, StatusCode,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
@@ -27,10 +19,10 @@ use s2_api::v1::{
         BasinInfo, CreateBasinRequest, EnsureBasinRequest, ListBasinsRequest, ListBasinsResponse,
     },
     config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration},
+    location::LocationInfo,
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
     },
-    location::LocationInfo,
     stream::{
         AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
         ReadEnd, ReadStart, StreamInfo, TailResponse,
@@ -46,6 +38,16 @@ use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 use url::Url;
+
+use crate::{
+    client::{self, StreamingResponse, UnaryResponse},
+    frame_signal::FrameSignal,
+    retry::{RetryBackoff, RetryBackoffBuilder},
+    types::{
+        AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
+        LocationName, RetryConfig, S2Config, S2Endpoints, StreamName,
+    },
+};
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
 const ACCEPT_PROTO: &str = "application/protobuf";

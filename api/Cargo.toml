@@ -30,7 +30,8 @@ base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }
 flate2 = { workspace = true, optional = true }
-futures = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
 http = { workspace = true }
 itertools = { workspace = true }
 mime = { workspace = true }
@@ -50,5 +51,6 @@ zstd = { workspace = true, optional = true }
 prost-build = { workspace = true, optional = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }

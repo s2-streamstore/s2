@@ -1,4 +1,4 @@
-use futures::StreamExt;
+use futures_util::StreamExt;
 
 #[cfg(feature = "_hidden")]
 use crate::client::Connect;
