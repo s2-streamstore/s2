@@ -10,7 +10,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use s2_common::caps::RECORD_BATCH_MAX;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;

@@ -6,7 +6,8 @@ use std::{
     time::Duration,
 };
 
-use futures::{Stream, StreamExt};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use s2_common::{caps::RECORD_BATCH_MAX, read_extent::CountOrBytes};
 use tokio::time::Instant;
 
@@ -267,14 +268,14 @@ fn append_record_batches(
 #[cfg(test)]
 mod tests {
     use assert_matches::assert_matches;
-    use futures::TryStreamExt;
+    use futures_util::TryStreamExt;
 
     use super::*;
 
     #[tokio::test]
     async fn batches_should_be_empty_when_record_stream_is_empty() {
         let batches: Vec<_> = AppendRecordBatches::new(
-            futures::stream::iter::<Vec<AppendRecord>>(vec![]),
+            futures_util::stream::iter::<Vec<AppendRecord>>(vec![]),
             BatchingConfig::default(),
         )
         .collect()
@@ -288,7 +289,7 @@ mod tests {
             .map(|i| AppendRecord::new(format!("record{i}")))
             .collect::<Result<_, _>>()?;
         let config = BatchingConfig::default().with_max_batch_records(3)?;
-        let batches: Vec<_> = AppendRecordBatches::new(futures::stream::iter(records), config)
+        let batches: Vec<_> = AppendRecordBatches::new(futures_util::stream::iter(records), config)
             .try_collect()
             .await?;
 
@@ -310,7 +311,7 @@ mod tests {
         let max_batch_bytes = single_record_bytes * 3;
 
         let config = BatchingConfig::default().with_max_batch_bytes(max_batch_bytes)?;
-        let batches: Vec<_> = AppendRecordBatches::new(futures::stream::iter(records), config)
+        let batches: Vec<_> = AppendRecordBatches::new(futures_util::stream::iter(records), config)
             .try_collect()
             .await?;
 
@@ -330,9 +331,10 @@ mod tests {
         let max_batch_bytes = 10;
 
         let config = BatchingConfig::default().with_max_batch_bytes(max_batch_bytes)?;
-        let results: Vec<_> = AppendRecordBatches::new(futures::stream::iter(vec![record]), config)
-            .collect()
-            .await;
+        let results: Vec<_> =
+            AppendRecordBatches::new(futures_util::stream::iter(vec![record]), config)
+                .collect()
+                .await;
 
         assert_eq!(results.len(), 1);
         assert_matches!(&results[0], Err(err) => {

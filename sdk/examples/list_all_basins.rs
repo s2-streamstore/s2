@@ -1,4 +1,4 @@
-use futures::{StreamExt, TryStreamExt};
+use futures_util::{StreamExt, TryStreamExt};
 use s2_sdk::{
     S2,
     types::{ListAllBasinsInput, S2Config},
