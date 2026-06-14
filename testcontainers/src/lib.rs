@@ -31,7 +31,7 @@ use testcontainers::{
     ContainerAsync, GenericImage, TestcontainersError, core::IntoContainerPort,
     runners::AsyncRunner,
 };
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 
 /// Image repository for the s2-lite Testcontainers image.
 pub const IMAGE: &str = "ghcr.io/s2-streamstore/s2-lite";
@@ -44,6 +44,7 @@ pub const DEFAULT_ACCESS_TOKEN: &str = "ignored";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Result type for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -170,19 +171,28 @@ async fn wait_until_healthy(endpoint: &str) -> Result<()> {
     let deadline = Instant::now() + HEALTH_TIMEOUT;
 
     loop {
-        if let Ok(response) = client.get(&health_url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return Err(Error::NotHealthy {
                 endpoint: endpoint.to_string(),
             });
         }
 
-        sleep(HEALTH_POLL_INTERVAL).await;
+        let request_timeout = HEALTH_REQUEST_TIMEOUT.min(deadline - now);
+        if let Ok(Ok(response)) = timeout(request_timeout, client.get(&health_url).send()).await
+            && response.status().is_success()
+        {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(Error::NotHealthy {
+                endpoint: endpoint.to_string(),
+            });
+        }
+
+        sleep(HEALTH_POLL_INTERVAL.min(deadline - now)).await;
     }
 }
 

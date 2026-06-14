@@ -58,7 +58,7 @@ LABEL org.opencontainers.image.description="S2 Lite image with defaults for Test
 
 EXPOSE 80
 
-CMD ["lite"]
+ENTRYPOINT ["./s2", "lite"]
 
 # Production runtime (default)
 FROM runtime-base AS runtime
