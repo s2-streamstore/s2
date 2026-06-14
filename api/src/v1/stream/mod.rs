@@ -8,7 +8,7 @@ pub mod sse;
 
 use std::time::Duration;
 
-use futures::stream::BoxStream;
+use futures_core::stream::BoxStream;
 use itertools::Itertools as _;
 use s2_common::{
     encryption::EncryptionKey,

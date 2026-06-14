@@ -1,7 +1,7 @@
 use std::{pin::Pin, time::Duration};
 
 use async_stream::{stream, try_stream};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use s2_api::v1::stream::{ReadEnd, ReadStart};
 use tokio::time::{Instant, timeout};
 use tracing::debug;
@@ -38,7 +38,8 @@ impl From<ReadSessionError> for S2Error {
     }
 }
 
-pub type Streaming<R> = Pin<Box<dyn Send + futures::Stream<Item = Result<R, ReadSessionError>>>>;
+pub type Streaming<R> =
+    Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionError>>>>;
 
 pub async fn read_session(
     client: BasinClient,

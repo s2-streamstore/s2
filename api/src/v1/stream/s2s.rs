@@ -6,7 +6,7 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use futures::Stream;
+use futures_core::Stream;
 use strum::FromRepr;
 
 /*
