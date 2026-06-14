@@ -606,6 +606,7 @@ where
     }
 }
 
+/// Builds a URI from `base`'s scheme and authority, replacing any path/query.
 pub(crate) fn uri_with_path(base: &Uri, path: impl AsRef<str>) -> Uri {
     let path = path.as_ref().trim_start_matches('/');
     uri_with_path_and_query(base, &format!("/{path}")).expect("SDK-generated path is a valid URI")
