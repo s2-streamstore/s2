@@ -359,7 +359,7 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
 fn validate_stream_config(config: &StreamConfig, context: &str, errors: &mut Vec<String>) {
     let config = s2_common::config::OptionalStreamConfig::from(config.clone());
     if let Err(err) = config.validate() {
-        errors.push(format!("{context} {err}"));
+        errors.push(format!("{context}: {err}"));
     }
 }
 
