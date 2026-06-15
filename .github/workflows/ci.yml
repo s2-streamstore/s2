@@ -117,6 +117,7 @@ jobs:
 
   testcontainers:
     name: Testcontainers
+    needs: [build-server]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -124,10 +125,16 @@ jobs:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Build local S2 Docker image
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: server-binary
+          path: /tmp/s2-bin
+      - name: Build local S2 Docker image from server binary
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' testcontainers/Cargo.toml | head -n1)
-          docker build --target runtime -t "ghcr.io/s2-streamstore/s2:${VERSION}" .
+          chmod +x /tmp/s2-bin/server
+          printf 'FROM gcr.io/distroless/cc-debian13:nonroot\nWORKDIR /app\nCOPY server /app/s2\nENTRYPOINT ["./s2"]\n' > /tmp/s2-bin/Dockerfile
+          docker build -t "ghcr.io/s2-streamstore/s2:${VERSION}" /tmp/s2-bin
       - run: cargo test -p s2-testcontainers
 
   helm-lint:
