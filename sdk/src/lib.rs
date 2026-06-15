@@ -57,6 +57,14 @@ This documentation is generated using
 so you will be able to see snippets from examples right here in the
 documentation.
 
+# Integration tests with s2-lite
+
+Use [`s2-testcontainers`](https://docs.rs/s2-testcontainers/latest/s2_testcontainers/)
+to start `s2-lite` from the S2 Docker image and get an SDK client/config without
+manual Docker port allocation, endpoint plumbing, or health polling. See the
+[`s2_lite` example](https://github.com/s2-streamstore/s2/blob/main/testcontainers/examples/s2_lite.rs)
+for the canonical setup.
+
 # Feedback
 
 We use [Github Issues](https://github.com/s2-streamstore/s2/issues)
