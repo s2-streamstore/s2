@@ -56,7 +56,7 @@ s2-api = { path = "api", version = "0.30", default-features = false }
 s2-common = { path = "common", version = "0.39" }
 s2-lite = { path = "lite", version = "0.36" }
 s2-resource-spec = { path = "resource-spec", version = "0.1" }
-s2-sdk = { path = "sdk", version = "0.31" }
+s2-sdk = { path = "sdk", version = "0.31", default-features = false }
 s2-storage = { path = "storage", version = "0.1" }
 schemars = "1.2"
 secrecy = "0.10.3"
