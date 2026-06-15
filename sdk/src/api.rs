@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
-    HeaderMap, HeaderValue, StatusCode,
+    HeaderMap, HeaderValue, StatusCode, Uri,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
 };
 use prost::{self, Message};
@@ -37,7 +37,6 @@ use s2_common::{
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
-use url::Url;
 
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
@@ -59,7 +58,7 @@ const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
 pub struct AccountClient {
     pub client: BaseClient,
     pub config: Arc<S2Config>,
-    pub base_url: Url,
+    pub base_url: Uri,
 }
 
 impl AccountClient {
@@ -76,11 +75,15 @@ impl AccountClient {
         BasinClient::init(name, self.config.clone(), self.client.clone())
     }
 
+    fn uri(&self, path: impl AsRef<str>) -> Uri {
+        client::uri_with_path(&self.base_url, path)
+    }
+
     pub async fn list_access_tokens(
         &self,
         request: ListAccessTokensRequest,
     ) -> Result<ListAccessTokensResponse, ApiError> {
-        let url = self.base_url.join("v1/access-tokens")?;
+        let url = self.uri("v1/access-tokens");
         let request = self.get(url).query(&request).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<ListAccessTokensResponse>()?)
@@ -90,30 +93,28 @@ impl AccountClient {
         &self,
         info: AccessTokenInfo,
     ) -> Result<IssueAccessTokenResponse, ApiError> {
-        let url = self.base_url.join("v1/access-tokens")?;
+        let url = self.uri("v1/access-tokens");
         let request = self.post(url).json(&info).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<IssueAccessTokenResponse>()?)
     }
 
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/access-tokens/{}", urlencoding::encode(&id)))?;
+        let url = self.uri(format!("v1/access-tokens/{}", urlencoding::encode(&id)));
         let request = self.delete(url).build()?;
         let _response = self.request(request).send().await?;
         Ok(())
     }
 
     pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, ApiError> {
-        let url = self.base_url.join("v1/locations")?;
+        let url = self.uri("v1/locations");
         let request = self.get(url).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<Vec<LocationInfo>>()?)
     }
 
     pub async fn get_default_location(&self) -> Result<LocationInfo, ApiError> {
-        let url = self.base_url.join("v1/locations/default")?;
+        let url = self.uri("v1/locations/default");
         let request = self.get(url).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<LocationInfo>()?)
@@ -123,7 +124,7 @@ impl AccountClient {
         &self,
         location: LocationName,
     ) -> Result<LocationInfo, ApiError> {
-        let url = self.base_url.join("v1/locations/default")?;
+        let url = self.uri("v1/locations/default");
         let request = self.put(url).json(&location).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<LocationInfo>()?)
@@ -133,7 +134,7 @@ impl AccountClient {
         &self,
         request: ListBasinsRequest,
     ) -> Result<ListBasinsResponse, ApiError> {
-        let url = self.base_url.join("v1/basins")?;
+        let url = self.uri("v1/basins");
         let request = self.get(url).query(&request).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<ListBasinsResponse>()?)
@@ -144,7 +145,7 @@ impl AccountClient {
         request: CreateBasinRequest,
         idempotency_token: String,
     ) -> Result<BasinInfo, ApiError> {
-        let url = self.base_url.join("v1/basins")?;
+        let url = self.uri("v1/basins");
         let request = self
             .post(url)
             .header(S2_REQUEST_TOKEN, idempotency_token)
@@ -155,7 +156,7 @@ impl AccountClient {
     }
 
     pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, ApiError> {
-        let url = self.base_url.join(&format!("v1/basins/{name}"))?;
+        let url = self.uri(format!("v1/basins/{name}"));
         let request = self.get(url).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<BasinConfig>()?)
@@ -166,7 +167,7 @@ impl AccountClient {
         name: BasinName,
         config: BasinReconfiguration,
     ) -> Result<BasinConfig, ApiError> {
-        let url = self.base_url.join(&format!("v1/basins/{name}"))?;
+        let url = self.uri(format!("v1/basins/{name}"));
         let request = self.patch(url).json(&config).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<BasinConfig>()?)
@@ -177,7 +178,7 @@ impl AccountClient {
         name: BasinName,
         request: Option<EnsureBasinRequest>,
     ) -> Result<ProvisionResult<BasinInfo>, ApiError> {
-        let url = self.base_url.join(&format!("v1/basins/{name}"))?;
+        let url = self.uri(format!("v1/basins/{name}"));
         let request = match request {
             Some(body) => self.put(url).json(&body).build()?,
             None => self.put(url).build()?,
@@ -198,7 +199,7 @@ impl AccountClient {
         name: BasinName,
         ignore_not_found: bool,
     ) -> Result<(), ApiError> {
-        let url = self.base_url.join(&format!("v1/basins/{name}"))?;
+        let url = self.uri(format!("v1/basins/{name}"));
         let request = self.delete(url).build()?;
         self.request(request)
             .send()
@@ -211,7 +212,7 @@ impl AccountClient {
         &self,
         request: AccountMetricSetRequest,
     ) -> Result<MetricSetResponse, ApiError> {
-        let url = self.base_url.join("v1/metrics")?;
+        let url = self.uri("v1/metrics");
         let request = self.get(url).query(&request).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<MetricSetResponse>()?)
@@ -222,7 +223,7 @@ impl AccountClient {
         name: BasinName,
         request: BasinMetricSetRequest,
     ) -> Result<MetricSetResponse, ApiError> {
-        let url = self.base_url.join(&format!("v1/metrics/{name}"))?;
+        let url = self.uri(format!("v1/metrics/{name}"));
         let request = self.get(url).query(&request).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<MetricSetResponse>()?)
@@ -234,10 +235,10 @@ impl AccountClient {
         stream_name: StreamName,
         request: StreamMetricSetRequest,
     ) -> Result<MetricSetResponse, ApiError> {
-        let url = self.base_url.join(&format!(
+        let url = self.uri(format!(
             "v1/metrics/{basin_name}/{}",
             urlencoding::encode(&stream_name)
-        ))?;
+        ));
         let request = self.get(url).query(&request).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<MetricSetResponse>()?)
@@ -257,7 +258,7 @@ pub struct BasinClient {
     pub name: BasinName,
     pub client: BaseClient,
     pub config: Arc<S2Config>,
-    pub base_url: Url,
+    pub base_url: Uri,
 }
 
 impl BasinClient {
@@ -269,6 +270,10 @@ impl BasinClient {
             config,
             base_url,
         }
+    }
+
+    fn uri(&self, path: impl AsRef<str>) -> Uri {
+        client::uri_with_path(&self.base_url, path)
     }
 
     fn request(&self, mut request: client::Request) -> RequestBuilder<'_> {
@@ -288,7 +293,7 @@ impl BasinClient {
         &self,
         request: ListStreamsRequest,
     ) -> Result<ListStreamsResponse, ApiError> {
-        let url = self.base_url.join("v1/streams")?;
+        let url = self.uri("v1/streams");
         let request = self.get(url).query(&request).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<ListStreamsResponse>()?)
@@ -299,7 +304,7 @@ impl BasinClient {
         request: CreateStreamRequest,
         idempotency_token: String,
     ) -> Result<StreamInfo, ApiError> {
-        let url = self.base_url.join("v1/streams")?;
+        let url = self.uri("v1/streams");
         let request = self
             .post(url)
             .header(S2_REQUEST_TOKEN, idempotency_token)
@@ -310,9 +315,7 @@ impl BasinClient {
     }
 
     pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
+        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         let request = self.get(url).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<StreamConfig>()?)
@@ -323,9 +326,7 @@ impl BasinClient {
         name: StreamName,
         config: StreamReconfiguration,
     ) -> Result<StreamConfig, ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
+        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         let request = self.patch(url).json(&config).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<StreamConfig>()?)
@@ -336,9 +337,7 @@ impl BasinClient {
         name: StreamName,
         config: Option<StreamConfig>,
     ) -> Result<ProvisionResult<StreamInfo>, ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
+        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         let request = match config {
             Some(body) => self.put(url).json(&body).build()?,
             None => self.put(url).build()?,
@@ -359,9 +358,7 @@ impl BasinClient {
         name: StreamName,
         ignore_not_found: bool,
     ) -> Result<(), ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}", urlencoding::encode(&name)))?;
+        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         let request = self.delete(url).build()?;
         self.request(request)
             .send()
@@ -371,10 +368,10 @@ impl BasinClient {
     }
 
     pub async fn check_tail(&self, name: &StreamName) -> Result<TailResponse, ApiError> {
-        let url = self.base_url.join(&format!(
+        let url = self.uri(format!(
             "v1/streams/{}/records/tail",
             urlencoding::encode(name)
-        ))?;
+        ));
         let request = self.get(url).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<TailResponse>()?)
@@ -387,9 +384,7 @@ impl BasinClient {
         encryption: Option<&EncryptionKey>,
         append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}/records", urlencoding::encode(name)))?;
+        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
         let mut request = self
             .post(url)
             .header(CONTENT_TYPE, CONTENT_TYPE_PROTO)
@@ -424,9 +419,7 @@ impl BasinClient {
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
     ) -> Result<ReadBatch, ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}/records", urlencoding::encode(name)))?;
+        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
         let mut builder = self
             .get(url)
             .header(ACCEPT, ACCEPT_PROTO)
@@ -456,9 +449,7 @@ impl BasinClient {
     where
         I: Stream<Item = AppendInput> + Send + 'static,
     {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}/records", urlencoding::encode(name)))?;
+        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
         let compression = self.config.compression.into();
 
@@ -526,9 +517,7 @@ impl BasinClient {
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
-        let url = self
-            .base_url
-            .join(&format!("v1/streams/{}/records", urlencoding::encode(name)))?;
+        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
         let mut request_builder = self
             .client
@@ -612,8 +601,6 @@ pub struct ApiErrorResponse {
 pub enum ApiError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    #[error(transparent)]
-    Url(#[from] url::ParseError),
     #[error(transparent)]
     ProtoDecode(#[from] prost::DecodeError),
     #[error(transparent)]
@@ -901,35 +888,35 @@ impl BaseClient {
         })
     }
 
-    pub fn get(&self, url: Url) -> client::RequestBuilder {
-        client::RequestBuilder::get(url)
+    pub fn get(&self, uri: Uri) -> client::RequestBuilder {
+        client::RequestBuilder::get(uri)
             .timeout(self.request_timeout)
             .headers(&self.default_headers)
     }
 
-    pub fn post(&self, url: Url) -> client::RequestBuilder {
-        client::RequestBuilder::post(url)
-            .timeout(self.request_timeout)
-            .headers(&self.default_headers)
-            .compression(self.compression)
-    }
-
-    pub fn patch(&self, url: Url) -> client::RequestBuilder {
-        client::RequestBuilder::patch(url)
+    pub fn post(&self, uri: Uri) -> client::RequestBuilder {
+        client::RequestBuilder::post(uri)
             .timeout(self.request_timeout)
             .headers(&self.default_headers)
             .compression(self.compression)
     }
 
-    pub fn put(&self, url: Url) -> client::RequestBuilder {
-        client::RequestBuilder::put(url)
+    pub fn patch(&self, uri: Uri) -> client::RequestBuilder {
+        client::RequestBuilder::patch(uri)
             .timeout(self.request_timeout)
             .headers(&self.default_headers)
             .compression(self.compression)
     }
 
-    pub fn delete(&self, url: Url) -> client::RequestBuilder {
-        client::RequestBuilder::delete(url)
+    pub fn put(&self, uri: Uri) -> client::RequestBuilder {
+        client::RequestBuilder::put(uri)
+            .timeout(self.request_timeout)
+            .headers(&self.default_headers)
+            .compression(self.compression)
+    }
+
+    pub fn delete(&self, uri: Uri) -> client::RequestBuilder {
+        client::RequestBuilder::delete(uri)
             .timeout(self.request_timeout)
             .headers(&self.default_headers)
     }
@@ -1134,7 +1121,7 @@ enum ClientKind {
     Basin(BasinName),
 }
 
-fn base_url(endpoints: &S2Endpoints, kind: ClientKind) -> Url {
+fn base_url(endpoints: &S2Endpoints, kind: ClientKind) -> Uri {
     let authority = match kind {
         ClientKind::Account => endpoints.account_authority.clone(),
         ClientKind::Basin(basin) => match &endpoints.basin_authority {
@@ -1145,7 +1132,9 @@ fn base_url(endpoints: &S2Endpoints, kind: ClientKind) -> Url {
         },
     };
     let scheme = &endpoints.scheme;
-    Url::parse(&format!("{scheme}://{authority}")).expect("valid url")
+    format!("{scheme}://{authority}")
+        .parse()
+        .expect("valid URI")
 }
 
 trait UnaryResult {
@@ -1351,7 +1340,7 @@ mod tests {
             .with_insecure_skip_cert_verification(true);
         let client = BaseClient::init(&config).expect("client init");
         let url = "https://no-such-basin.invalid/v1/streams"
-            .parse::<url::Url>()
+            .parse::<Uri>()
             .unwrap();
         let request = client.get(url).build().unwrap();
         let err: ApiError = match client.request(request).send().await {
