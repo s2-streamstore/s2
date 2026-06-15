@@ -5,10 +5,7 @@ use std::time::Duration;
 
 use s2_sdk::{
     S2,
-    types::{
-        AccountEndpoint, BasinEndpoint, BasinName, EnsureBasinInput, EnsureStreamInput, S2Config,
-        S2Endpoints, S2Error, StreamName, ValidationError,
-    },
+    types::{AccountEndpoint, BasinEndpoint, S2Config, S2Endpoints, S2Error, ValidationError},
 };
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
@@ -99,29 +96,6 @@ impl S2Lite {
         Ok(self.client.clone())
     }
 
-    /// Ensure a basin exists and return its validated name.
-    pub async fn ensure_basin(&self, name: impl AsRef<str>) -> Result<BasinName> {
-        let name = name.as_ref().parse::<BasinName>()?;
-        self.client
-            .ensure_basin(EnsureBasinInput::new(name.clone()))
-            .await?;
-        Ok(name)
-    }
-
-    /// Ensure a stream exists in a basin and return its validated name.
-    pub async fn ensure_stream(
-        &self,
-        basin: &BasinName,
-        name: impl AsRef<str>,
-    ) -> Result<StreamName> {
-        let name = name.as_ref().parse::<StreamName>()?;
-        self.client
-            .basin(basin.clone())
-            .ensure_stream(EnsureStreamInput::new(name.clone()))
-            .await?;
-        Ok(name)
-    }
-
     /// Return the underlying Testcontainers container.
     pub fn container(&self) -> &ContainerAsync<GenericImage> {
         &self.container
@@ -197,6 +171,7 @@ async fn wait_until_healthy(endpoint: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use s2_sdk::types::{BasinName, EnsureBasinInput, EnsureStreamInput, StreamName};
     use testcontainers::Image;
 
     use super::*;
@@ -231,11 +206,21 @@ mod tests {
     async fn starts_s2_lite_and_ensures_resources() {
         let s2 = S2Lite::start().await.unwrap();
 
-        let _client = s2.client().unwrap();
-        let basin = s2.ensure_basin("test-basin").await.unwrap();
-        let stream = s2.ensure_stream(&basin, "test-stream").await.unwrap();
+        let client = s2.client().unwrap();
+        let basin_name = "test-basin".parse::<BasinName>().unwrap();
+        client
+            .ensure_basin(EnsureBasinInput::new(basin_name.clone()))
+            .await
+            .unwrap();
 
-        assert_eq!(basin.as_ref(), "test-basin");
-        assert_eq!(stream.as_ref(), "test-stream");
+        let basin = client.basin(basin_name.clone());
+        let stream_name = "test-stream".parse::<StreamName>().unwrap();
+        basin
+            .ensure_stream(EnsureStreamInput::new(stream_name.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(basin_name.as_ref(), "test-basin");
+        assert_eq!(stream_name.as_ref(), "test-stream");
     }
 }
