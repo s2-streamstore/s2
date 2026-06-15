@@ -53,11 +53,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build s2-lite
-        run: cargo build --release -p s2-lite
+        run: cargo build --profile ci -p s2-lite
 
       - name: Upload binary
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ inputs.artifact-name }}
-          path: target/release/${{ inputs.binary-name }}
+          path: target/ci/${{ inputs.binary-name }}
           retention-days: ${{ inputs.retention-days }}

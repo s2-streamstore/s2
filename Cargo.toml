@@ -101,3 +101,7 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 lto = true
+
+[profile.ci]
+inherits = "release"
+lto = false
