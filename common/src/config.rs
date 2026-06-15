@@ -249,7 +249,10 @@ pub struct OptionalStreamConfig {
 
 impl OptionalStreamConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        StreamConfig::from(self.clone()).validate()
+        if let Some(retention_policy) = self.retention_policy {
+            retention_policy.validate()?;
+        }
+        Ok(())
     }
 
     pub fn reconfigure(mut self, reconfiguration: StreamReconfiguration) -> Self {
