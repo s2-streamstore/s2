@@ -245,7 +245,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker and the S2 Docker image"]
     async fn starts_s2_lite_and_ensures_resources() {
         let s2 = S2Lite::start().await.unwrap();
 
