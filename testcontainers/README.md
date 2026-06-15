@@ -1,6 +1,6 @@
 # s2-testcontainers
 
-Testcontainers helpers for the existing S2 CLI image, with a paved path for running `s2-lite` in Rust integration tests.
+Testcontainers helpers for the existing S2 CLI image, with a paved path for `s2-lite` integration tests.
 
 ```rust
 use s2_testcontainers::S2Lite;

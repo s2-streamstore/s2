@@ -1,4 +1,4 @@
-//! Testcontainers helpers for running s2-lite in Rust integration tests.
+//! Testcontainers helpers for the S2 CLI image, with a paved path for s2-lite.
 //!
 //! ```no_run
 //! use s2_testcontainers::S2Lite;
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker and the s2-lite image"]
+    #[ignore = "requires Docker and the S2 CLI image"]
     async fn starts_s2_lite_and_ensures_resources() {
         let s2 = S2Lite::start().await.unwrap();
 
