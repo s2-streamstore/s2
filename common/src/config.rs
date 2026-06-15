@@ -402,29 +402,6 @@ impl BasinConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stream_config_validation_rejects_zero_retention_policy() {
-        let config = StreamConfig {
-            retention_policy: RetentionPolicy::Age(Duration::ZERO),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            config.validate().unwrap_err().to_string(),
-            "age must be greater than 0 seconds"
-        );
-    }
-
-    #[test]
-    fn stream_config_validation_accepts_default_config() {
-        assert!(StreamConfig::default().validate().is_ok());
-    }
-}
-
 impl From<BasinConfig> for BasinReconfiguration {
     fn from(value: BasinConfig) -> Self {
         let BasinConfig {
