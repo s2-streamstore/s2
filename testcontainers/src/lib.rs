@@ -1,21 +1,4 @@
-//! Testcontainers helpers for the S2 Docker image, with a paved path for s2-lite.
-//!
-//! ```no_run
-//! use s2_testcontainers::S2Lite;
-//!
-//! #[tokio::test]
-//! async fn test_with_s2_lite() -> s2_testcontainers::Result<()> {
-//!     let s2 = S2Lite::start().await?;
-//!
-//!     let client = s2.client()?;
-//!     let basin = s2.ensure_basin("test-basin").await?;
-//!     let stream = s2.ensure_stream(&basin, "test-stream").await?;
-//!
-//!     // Use `client`, `basin`, `stream`, and `s2.endpoint()`.
-//!     Ok(())
-//! }
-//! ```
-
+#![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
 use std::time::Duration;

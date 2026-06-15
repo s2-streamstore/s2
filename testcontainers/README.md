@@ -2,7 +2,7 @@
 
 Testcontainers helpers for the S2 Docker image, with a paved path for `s2-lite` integration tests.
 
-```rust
+```rust,no_run
 use s2_testcontainers::S2Lite;
 
 #[tokio::test]

@@ -81,20 +81,8 @@ Rust integration tests can use [`s2-testcontainers`](../testcontainers) to start
 `s2-lite` from the S2 Docker image and get an SDK client/config without manual
 Docker port allocation, endpoint plumbing, or health polling.
 
-```rust
-use s2_testcontainers::S2Lite;
-
-#[tokio::test]
-async fn test_with_s2_lite() -> s2_testcontainers::Result<()> {
-    let s2 = S2Lite::start().await?;
-    let client = s2.client()?;
-
-    let basin = s2.ensure_basin("test-basin").await?;
-    let stream = s2.ensure_stream(&basin, "test-stream").await?;
-
-    Ok(())
-}
-```
+See the [`s2-testcontainers` README](../testcontainers) for the canonical
+example.
 
 ## SDK Docs and Reference
 
