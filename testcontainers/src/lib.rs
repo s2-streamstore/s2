@@ -1,4 +1,4 @@
-//! Testcontainers helpers for the S2 CLI image, with a paved path for s2-lite.
+//! Testcontainers helpers for the S2 Docker image, with a paved path for s2-lite.
 //!
 //! ```no_run
 //! use s2_testcontainers::S2Lite;
@@ -33,7 +33,7 @@ use testcontainers::{
 };
 use tokio::time::{Instant, sleep, timeout};
 
-/// Image repository for the S2 CLI image that embeds s2-lite.
+/// Image repository for the S2 Docker image.
 pub const IMAGE: &str = "ghcr.io/s2-streamstore/s2";
 /// Default S2 image tag.
 pub const DEFAULT_TAG: &str = env!("CARGO_PKG_VERSION");
@@ -141,22 +141,22 @@ impl S2Lite {
     }
 }
 
-/// Return the default S2 CLI [`GenericImage`].
+/// Return the default S2 Docker [`GenericImage`].
 pub fn s2_image() -> GenericImage {
     s2_image_with_tag(DEFAULT_TAG)
 }
 
-/// Return an S2 CLI [`GenericImage`] with a specific tag.
+/// Return an S2 Docker [`GenericImage`] with a specific tag.
 pub fn s2_image_with_tag(tag: impl Into<String>) -> GenericImage {
     GenericImage::new(IMAGE.to_string(), tag.into())
 }
 
-/// Return the default S2 CLI [`ContainerRequest`] configured to run `s2 lite`.
+/// Return the default S2 Docker [`ContainerRequest`] configured to run `s2 lite`.
 pub fn s2_lite_image() -> ContainerRequest<GenericImage> {
     s2_lite_image_with_tag(DEFAULT_TAG)
 }
 
-/// Return an S2 CLI [`ContainerRequest`] with a specific tag configured to run `s2 lite`.
+/// Return an S2 Docker [`ContainerRequest`] with a specific tag configured to run `s2 lite`.
 pub fn s2_lite_image_with_tag(tag: impl Into<String>) -> ContainerRequest<GenericImage> {
     s2_image_with_tag(tag)
         .with_exposed_port(PORT.tcp())
@@ -215,7 +215,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s2_image_defaults_to_versioned_cli_image() {
+    fn s2_image_defaults_to_versioned_docker_image() {
         let image = s2_image_with_tag("test-tag");
 
         assert_eq!(image.name(), IMAGE);
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker and the S2 CLI image"]
+    #[ignore = "requires Docker and the S2 Docker image"]
     async fn starts_s2_lite_and_ensures_resources() {
         let s2 = S2Lite::start().await.unwrap();
 

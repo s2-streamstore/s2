@@ -78,7 +78,7 @@ cargo run --example <example_name>
 ## Integration tests with s2-lite
 
 Rust integration tests can use [`s2-testcontainers`](../testcontainers) to start
-`s2-lite` from the S2 CLI image and get an SDK client/config without manual
+`s2-lite` from the S2 Docker image and get an SDK client/config without manual
 Docker port allocation, endpoint plumbing, or health polling.
 
 ```rust

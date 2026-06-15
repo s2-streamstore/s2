@@ -1,6 +1,6 @@
 # s2-testcontainers
 
-Testcontainers helpers for the existing S2 CLI image, with a paved path for `s2-lite` integration tests.
+Testcontainers helpers for the S2 Docker image, with a paved path for `s2-lite` integration tests.
 
 ```rust
 use s2_testcontainers::S2Lite;
@@ -18,7 +18,7 @@ async fn test_with_s2_lite() -> s2_testcontainers::Result<()> {
 }
 ```
 
-For lower-level composition with `testcontainers`, use `s2_image()` for the raw S2 CLI image or `s2_lite_image()` for a container request with the `lite` subcommand configured:
+For lower-level composition with `testcontainers`, use `s2_image()` for the raw S2 Docker image or `s2_lite_image()` for a container request with the `lite` subcommand configured:
 
 ```rust
 use s2_testcontainers::{s2_config_for_endpoint, s2_image, s2_lite_image};
