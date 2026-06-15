@@ -116,6 +116,13 @@ pub struct StreamConfig {
     pub delete_on_empty: DeleteOnEmptyConfig,
 }
 
+impl StreamConfig {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.retention_policy.validate()?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TimestampingReconfiguration {
     pub mode: Maybe<Option<TimestampingMode>>,
@@ -392,6 +399,29 @@ impl BasinConfig {
         }
 
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_config_validation_rejects_zero_retention_policy() {
+        let config = StreamConfig {
+            retention_policy: RetentionPolicy::Age(Duration::ZERO),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "age must be greater than 0 seconds"
+        );
+    }
+
+    #[test]
+    fn stream_config_validation_accepts_default_config() {
+        assert!(StreamConfig::default().validate().is_ok());
     }
 }
 
