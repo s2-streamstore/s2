@@ -116,13 +116,6 @@ pub struct StreamConfig {
     pub delete_on_empty: DeleteOnEmptyConfig,
 }
 
-impl StreamConfig {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        self.retention_policy.validate()?;
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct TimestampingReconfiguration {
     pub mode: Maybe<Option<TimestampingMode>>,
