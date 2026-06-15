@@ -2,6 +2,17 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
 struct TestEnv {
     home: TempDir,
 }
@@ -103,6 +114,20 @@ fn config_set_and_get() {
         .args(["config", "unset", "compression"])
         .assert()
         .success();
+}
+
+#[cfg(unix)]
+#[test]
+fn config_set_writes_private_config() {
+    let env = TestEnv::new();
+    env.s2()
+        .args(["config", "set", "access_token", "secret"])
+        .assert()
+        .success();
+
+    let config_dir = env.home.path().join(".config/s2");
+    assert_eq!(mode(&config_dir), 0o700);
+    assert_eq!(mode(&config_dir.join("config.toml")), 0o600);
 }
 
 #[test]

@@ -1,4 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use config::{Config, FileFormat};
 use s2_sdk::{
@@ -143,12 +146,47 @@ pub fn save_cli_config(config: &CliConfig) -> Result<PathBuf, CliConfigError> {
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(CliConfigError::Write)?;
+        secure_config_dir(parent).map_err(CliConfigError::Write)?;
     }
 
     let toml = toml::to_string(config).map_err(CliConfigError::Serialize)?;
-    std::fs::write(&path, toml).map_err(CliConfigError::Write)?;
+    write_config_file(&path, &toml).map_err(CliConfigError::Write)?;
 
     Ok(path)
+}
+
+#[cfg(unix)]
+fn secure_config_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn secure_config_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_config_file(path: &Path, toml: &str) -> std::io::Result<()> {
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(toml.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_config_file(path: &Path, toml: &str) -> std::io::Result<()> {
+    std::fs::write(path, toml)
 }
 
 pub fn set_config_value(key: ConfigKey, value: String) -> Result<PathBuf, CliConfigError> {
