@@ -74,6 +74,7 @@ pub enum Error {
 pub struct S2Lite {
     container: ContainerAsync<GenericImage>,
     endpoint: String,
+    client: S2,
 }
 
 impl S2Lite {
@@ -91,9 +92,12 @@ impl S2Lite {
 
         wait_until_healthy(&endpoint).await?;
 
+        let client = S2::new(s2_config_for_endpoint(&endpoint, DEFAULT_ACCESS_TOKEN)?)?;
+
         Ok(Self {
             container,
             endpoint,
+            client,
         })
     }
 
@@ -109,13 +113,13 @@ impl S2Lite {
 
     /// Build an [`S2`] client for this s2-lite instance.
     pub fn client(&self) -> Result<S2> {
-        Ok(S2::new(self.config(DEFAULT_ACCESS_TOKEN)?)?)
+        Ok(self.client.clone())
     }
 
     /// Ensure a basin exists and return its validated name.
     pub async fn ensure_basin(&self, name: impl AsRef<str>) -> Result<BasinName> {
         let name = name.as_ref().parse::<BasinName>()?;
-        self.client()?
+        self.client
             .ensure_basin(EnsureBasinInput::new(name.clone()))
             .await?;
         Ok(name)
@@ -128,7 +132,7 @@ impl S2Lite {
         name: impl AsRef<str>,
     ) -> Result<StreamName> {
         let name = name.as_ref().parse::<StreamName>()?;
-        self.client()?
+        self.client
             .basin(basin.clone())
             .ensure_stream(EnsureStreamInput::new(name.clone()))
             .await?;

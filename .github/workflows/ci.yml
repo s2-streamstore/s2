@@ -114,6 +114,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features -E 'not (package(s2-cli) & binary(integration)) - package(s2-sdk)'
+      - name: Test s2-testcontainers against local Docker image
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' testcontainers/Cargo.toml | head -n1)
+          docker build --target runtime -t "ghcr.io/s2-streamstore/s2:${VERSION}" .
+          cargo test -p s2-testcontainers starts_s2_lite_and_ensures_resources -- --ignored
 
   helm-lint:
     name: Helm Chart Lint & Test

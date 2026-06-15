@@ -12,9 +12,9 @@ categories = ["development-tools::testing", "database"]
 readme = "README.md"
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { workspace = true }
 s2-sdk = { workspace = true }
-testcontainers = "0.27"
+testcontainers = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 
