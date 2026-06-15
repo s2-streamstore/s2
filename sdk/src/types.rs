@@ -463,7 +463,9 @@ impl S2Config {
         Self { retry, ..self }
     }
 
-    /// Set the compression algorithm for requests and responses.
+    /// Set the compression algorithm for request bodies and enable compressed responses.
+    ///
+    /// Responses advertise all enabled compression codecs, preferring zstd.
     ///
     /// Defaults to no compression.
     pub fn with_compression(self, compression: Compression) -> Self {

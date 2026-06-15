@@ -7,7 +7,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
     HeaderMap, HeaderValue, StatusCode, Uri,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
+    header::{ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE},
 };
 use prost::{self, Message};
 use s2_api::v1::{
@@ -859,22 +859,8 @@ impl BaseClient {
                 .map_err(|e| ApiError::MalformedAccessToken(e.to_string()))?,
         );
         default_headers.insert(http::header::USER_AGENT, config.user_agent.clone());
-        match config.compression {
-            #[cfg(feature = "gzip")]
-            Compression::Gzip => {
-                default_headers.insert(
-                    http::header::ACCEPT_ENCODING,
-                    HeaderValue::from_static("gzip"),
-                );
-            }
-            #[cfg(feature = "zstd")]
-            Compression::Zstd => {
-                default_headers.insert(
-                    http::header::ACCEPT_ENCODING,
-                    HeaderValue::from_static("zstd"),
-                );
-            }
-            Compression::None => {}
+        if let Some(accept_encoding) = accept_encoding_header_value(config.compression) {
+            default_headers.insert(ACCEPT_ENCODING, accept_encoding);
         }
 
         let client = client::Pool::new(connector);
@@ -953,6 +939,18 @@ fn set_encryption_header(request: &mut client::Request, encryption: Option<&Encr
             S2_ENCRYPTION_KEY_HEADER.clone(),
             encryption.to_header_value(),
         );
+    }
+}
+
+fn accept_encoding_header_value(compression: Compression) -> Option<HeaderValue> {
+    match compression {
+        Compression::None => None,
+        #[cfg(all(feature = "gzip", feature = "zstd"))]
+        _ => Some(HeaderValue::from_static("zstd, gzip")),
+        #[cfg(all(feature = "gzip", not(feature = "zstd")))]
+        Compression::Gzip => Some(HeaderValue::from_static("gzip")),
+        #[cfg(all(feature = "zstd", not(feature = "gzip")))]
+        Compression::Zstd => Some(HeaderValue::from_static("zstd")),
     }
 }
 
@@ -1279,6 +1277,54 @@ mod tests {
         assert!(!ClientError::ConnectionReset("test".into()).has_no_side_effects());
         assert!(!ClientError::ConnectionAborted("test".into()).has_no_side_effects());
         assert!(!ClientError::Others("test".into()).has_no_side_effects());
+    }
+
+    #[test]
+    fn accept_encoding_is_not_set_without_compression() {
+        assert!(accept_encoding_header_value(Compression::None).is_none());
+    }
+
+    #[cfg(all(feature = "gzip", feature = "zstd"))]
+    #[test]
+    fn accept_encoding_prefers_zstd_when_all_codecs_are_enabled() {
+        assert_eq!(
+            accept_encoding_header_value(Compression::Gzip)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "zstd, gzip"
+        );
+        assert_eq!(
+            accept_encoding_header_value(Compression::Zstd)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "zstd, gzip"
+        );
+    }
+
+    #[cfg(all(feature = "gzip", not(feature = "zstd")))]
+    #[test]
+    fn accept_encoding_uses_gzip_when_it_is_the_only_codec_enabled() {
+        assert_eq!(
+            accept_encoding_header_value(Compression::Gzip)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "gzip"
+        );
+    }
+
+    #[cfg(all(feature = "zstd", not(feature = "gzip")))]
+    #[test]
+    fn accept_encoding_uses_zstd_when_it_is_the_only_codec_enabled() {
+        assert_eq!(
+            accept_encoding_header_value(Compression::Zstd)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "zstd"
+        );
     }
 
     #[test]
