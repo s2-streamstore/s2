@@ -456,13 +456,13 @@ mod test {
     }
 
     fn compression_algorithms() -> Vec<CompressionAlgorithm> {
-        let mut algorithms = Vec::new();
-        algorithms.push(CompressionAlgorithm::None);
-        #[cfg(feature = "gzip")]
-        algorithms.push(CompressionAlgorithm::Gzip);
-        #[cfg(feature = "zstd")]
-        algorithms.push(CompressionAlgorithm::Zstd);
-        algorithms
+        vec![
+            CompressionAlgorithm::None,
+            #[cfg(feature = "gzip")]
+            CompressionAlgorithm::Gzip,
+            #[cfg(feature = "zstd")]
+            CompressionAlgorithm::Zstd,
+        ]
     }
 
     fn compression_strategy() -> impl proptest::strategy::Strategy<Value = CompressionAlgorithm> {
