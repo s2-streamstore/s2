@@ -1,4 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use config::{Config, FileFormat};
 use s2_sdk::{
@@ -140,15 +143,54 @@ impl CliConfig {
 
 pub fn save_cli_config(config: &CliConfig) -> Result<PathBuf, CliConfigError> {
     let path = config_path()?;
+    save_cli_config_to_path(config, &path)?;
+    Ok(path)
+}
 
+fn save_cli_config_to_path(config: &CliConfig, path: &Path) -> Result<(), CliConfigError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(CliConfigError::Write)?;
+        secure_config_dir(parent).map_err(CliConfigError::Write)?;
     }
 
     let toml = toml::to_string(config).map_err(CliConfigError::Serialize)?;
-    std::fs::write(&path, toml).map_err(CliConfigError::Write)?;
+    write_config_file(path, &toml).map_err(CliConfigError::Write)?;
 
-    Ok(path)
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_config_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn secure_config_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_config_file(path: &Path, toml: &str) -> std::io::Result<()> {
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(toml.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_config_file(path: &Path, toml: &str) -> std::io::Result<()> {
+    std::fs::write(path, toml)
 }
 
 pub fn set_config_value(key: ConfigKey, value: String) -> Result<PathBuf, CliConfigError> {
@@ -227,5 +269,62 @@ pub fn access_token_source(config: &CliConfig) -> Option<TokenSource> {
         Some(TokenSource::ConfigFile)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_cli_config_creates_config_with_private_permissions() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join(".config/s2/config.toml");
+        let config = CliConfig {
+            access_token: Some("secret".to_owned()),
+            ..Default::default()
+        };
+
+        save_cli_config_to_path(&config, &path).expect("save config");
+
+        assert_eq!(mode(path.parent().expect("parent")), 0o700);
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_cli_config_tightens_existing_config_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let parent = temp_dir.path().join(".config/s2");
+        let path = parent.join("config.toml");
+        std::fs::create_dir_all(&parent).expect("create parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("set parent permissions");
+        std::fs::write(&path, "access_token = \"old\"").expect("write existing config");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("set file permissions");
+        let config = CliConfig {
+            access_token: Some("new".to_owned()),
+            ..Default::default()
+        };
+
+        save_cli_config_to_path(&config, &path).expect("save config");
+
+        assert_eq!(mode(&parent), 0o700);
+        assert_eq!(mode(&path), 0o600);
     }
 }
