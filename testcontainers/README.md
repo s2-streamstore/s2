@@ -1,6 +1,6 @@
 # s2-testcontainers
 
-Testcontainers helpers for running `s2-lite` in Rust integration tests.
+Testcontainers helpers for running `s2-lite` from the existing S2 CLI image in Rust integration tests.
 
 ```rust
 use s2_testcontainers::S2Lite;
@@ -18,11 +18,11 @@ async fn test_with_s2_lite() -> s2_testcontainers::Result<()> {
 }
 ```
 
-For lower-level composition with `testcontainers`:
+For lower-level composition with `testcontainers`, `s2_lite_image()` returns a container request for `ghcr.io/s2-streamstore/s2` with the `lite` subcommand configured:
 
 ```rust
 use s2_testcontainers::{s2_config_for_endpoint, s2_lite_image};
 
-let image = s2_lite_image();
+let request = s2_lite_image();
 let config = s2_config_for_endpoint("http://localhost:8080", "ignored").unwrap();
 ```

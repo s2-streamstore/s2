@@ -28,16 +28,16 @@ use s2_sdk::{
     },
 };
 use testcontainers::{
-    ContainerAsync, GenericImage, TestcontainersError, core::IntoContainerPort,
-    runners::AsyncRunner,
+    ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
+    core::IntoContainerPort, runners::AsyncRunner,
 };
 use tokio::time::{Instant, sleep, timeout};
 
-/// Image repository for the s2-lite Testcontainers image.
-pub const IMAGE: &str = "ghcr.io/s2-streamstore/s2-lite";
-/// Default s2-lite image tag.
+/// Image repository for the S2 CLI image that embeds s2-lite.
+pub const IMAGE: &str = "ghcr.io/s2-streamstore/s2";
+/// Default S2 image tag.
 pub const DEFAULT_TAG: &str = env!("CARGO_PKG_VERSION");
-/// Port exposed by the s2-lite Testcontainers image.
+/// Port exposed by s2-lite.
 pub const PORT: u16 = 80;
 /// Default access token used by [`S2Lite::client`].
 pub const DEFAULT_ACCESS_TOKEN: &str = "ignored";
@@ -141,14 +141,16 @@ impl S2Lite {
     }
 }
 
-/// Return the default s2-lite [`GenericImage`].
-pub fn s2_lite_image() -> GenericImage {
+/// Return the default s2-lite [`ContainerRequest`].
+pub fn s2_lite_image() -> ContainerRequest<GenericImage> {
     s2_lite_image_with_tag(DEFAULT_TAG)
 }
 
-/// Return an s2-lite [`GenericImage`] with a specific tag.
-pub fn s2_lite_image_with_tag(tag: impl Into<String>) -> GenericImage {
-    GenericImage::new(IMAGE.to_string(), tag.into()).with_exposed_port(PORT.tcp())
+/// Return an s2-lite [`ContainerRequest`] with a specific S2 image tag.
+pub fn s2_lite_image_with_tag(tag: impl Into<String>) -> ContainerRequest<GenericImage> {
+    GenericImage::new(IMAGE.to_string(), tag.into())
+        .with_exposed_port(PORT.tcp())
+        .with_cmd(["lite"])
 }
 
 /// Build an [`S2Config`] wired to use an endpoint for both account and basin APIs.
@@ -203,12 +205,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_defaults_to_versioned_s2_lite() {
-        let image = s2_lite_image_with_tag("test-tag");
+    fn image_defaults_to_versioned_s2_lite_command() {
+        let request = s2_lite_image_with_tag("test-tag");
 
-        assert_eq!(image.name(), IMAGE);
-        assert_eq!(image.tag(), "test-tag");
-        assert_eq!(image.expose_ports(), &[PORT.tcp()]);
+        assert_eq!(request.image().name(), IMAGE);
+        assert_eq!(request.image().tag(), "test-tag");
+        assert_eq!(request.image().expose_ports(), &[PORT.tcp()]);
+        assert_eq!(request.cmd().collect::<Vec<_>>(), ["lite"]);
     }
 
     #[tokio::test]

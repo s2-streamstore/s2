@@ -38,8 +38,8 @@ COPY --from=builder /output/s2 /app/s2
 
 ENTRYPOINT ["./s2"]
 
-# Runtime base - minimal distroless image running as non-root (UID 65532)
-FROM gcr.io/distroless/cc-debian13:nonroot AS runtime-base
+# Production runtime (default) - minimal distroless image running as non-root (UID 65532)
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/s2-streamstore/s2"
 LABEL org.opencontainers.image.documentation="https://github.com/s2-streamstore/s2/releases"
@@ -49,16 +49,3 @@ WORKDIR /app
 COPY --from=builder /output/s2 /app/s2
 
 ENTRYPOINT ["./s2"]
-
-# s2-lite runtime for Testcontainers-based integration tests
-FROM runtime-base AS s2-lite
-
-LABEL org.opencontainers.image.title="s2-lite"
-LABEL org.opencontainers.image.description="S2 Lite image with defaults for Testcontainers-based integration tests"
-
-EXPOSE 80
-
-ENTRYPOINT ["./s2", "lite"]
-
-# Production runtime (default)
-FROM runtime-base AS runtime
