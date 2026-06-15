@@ -141,14 +141,24 @@ impl S2Lite {
     }
 }
 
-/// Return the default s2-lite [`ContainerRequest`].
+/// Return the default S2 CLI [`GenericImage`].
+pub fn s2_image() -> GenericImage {
+    s2_image_with_tag(DEFAULT_TAG)
+}
+
+/// Return an S2 CLI [`GenericImage`] with a specific tag.
+pub fn s2_image_with_tag(tag: impl Into<String>) -> GenericImage {
+    GenericImage::new(IMAGE.to_string(), tag.into())
+}
+
+/// Return the default S2 CLI [`ContainerRequest`] configured to run `s2 lite`.
 pub fn s2_lite_image() -> ContainerRequest<GenericImage> {
     s2_lite_image_with_tag(DEFAULT_TAG)
 }
 
-/// Return an s2-lite [`ContainerRequest`] with a specific S2 image tag.
+/// Return an S2 CLI [`ContainerRequest`] with a specific tag configured to run `s2 lite`.
 pub fn s2_lite_image_with_tag(tag: impl Into<String>) -> ContainerRequest<GenericImage> {
-    GenericImage::new(IMAGE.to_string(), tag.into())
+    s2_image_with_tag(tag)
         .with_exposed_port(PORT.tcp())
         .with_cmd(["lite"])
 }
@@ -205,7 +215,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_defaults_to_versioned_s2_lite_command() {
+    fn s2_image_defaults_to_versioned_cli_image() {
+        let image = s2_image_with_tag("test-tag");
+
+        assert_eq!(image.name(), IMAGE);
+        assert_eq!(image.tag(), "test-tag");
+        assert!(image.expose_ports().is_empty());
+    }
+
+    #[test]
+    fn s2_lite_image_defaults_to_lite_command() {
         let request = s2_lite_image_with_tag("test-tag");
 
         assert_eq!(request.image().name(), IMAGE);
