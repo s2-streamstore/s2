@@ -75,15 +75,6 @@ export S2_STREAM="<YOUR_STREAM_NAME>"
 cargo run --example <example_name>
 ```
 
-## Integration tests with s2-lite
-
-Rust integration tests can use [`s2-testcontainers`](../testcontainers) to start
-`s2-lite` from the S2 Docker image and get an SDK client/config without manual
-Docker port allocation, endpoint plumbing, or health polling.
-
-See [`s2-testcontainers`](../testcontainers) and its
-[`s2_lite` example](../testcontainers/examples/s2_lite.rs).
-
 ## SDK Docs and Reference
 
 Head over to [docs.rs](https://docs.rs/s2-sdk/latest/s2_sdk/) for
