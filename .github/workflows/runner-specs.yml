@@ -1,0 +1,44 @@
+name: Runner Specs
+
+# Throwaway diagnostic: prints CPU / memory / arch for the hosted runner labels
+# this repo uses, to confirm the public-repo 4-core / 16 GB tier. Not for merge.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  specs:
+    name: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - windows-latest
+          - macos-latest
+    steps:
+      - name: Show CPU / memory / arch
+        shell: bash
+        run: |
+          echo "label       : ${{ matrix.runner }}"
+          echo "RUNNER_OS   : $RUNNER_OS"
+          echo "RUNNER_ARCH : $RUNNER_ARCH"
+          echo "uname -m    : $(uname -m)"
+          case "$RUNNER_OS" in
+            Linux)
+              echo "cpu count   : $(nproc)"
+              free -h
+              ;;
+            macOS)
+              echo "cpu count   : $(sysctl -n hw.logicalcpu)"
+              echo "memory      : $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB"
+              ;;
+            Windows)
+              echo "cpu count   : $NUMBER_OF_PROCESSORS"
+              echo "memory      : $(powershell -NoProfile -Command '[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,1)') GiB"
+              ;;
+          esac
