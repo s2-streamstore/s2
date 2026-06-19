@@ -38,8 +38,8 @@ const HASH_HEADER_NAME: &[u8] = b"hash";
 const HEADER_VALUE_LEN: usize = 8;
 const RECORD_OVERHEAD_BYTES: usize = 8 + 2 + HASH_HEADER_NAME.len() + HEADER_VALUE_LEN;
 const WRITE_DONE_SENTINEL: u64 = u64::MAX;
-const LIVE_UI_REFRESH_MS: u64 = 50;
 const LIVE_UI_REFRESH_HZ: u8 = 20;
+const LIVE_UI_REFRESH_MS: u64 = 1000 / LIVE_UI_REFRESH_HZ as u64;
 
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
@@ -106,19 +106,19 @@ impl BenchSample for BenchReadSample {
 }
 
 #[derive(Debug, Default)]
-struct StreamingLatencyStats {
+pub(crate) struct StreamingLatencyStats {
     count: u64,
     samples: BTreeMap<u64, u64>,
 }
 
 #[derive(Debug, Clone)]
-struct LiveLatencySnapshot {
-    count: u64,
-    stats: LatencyStats,
+pub(crate) struct LiveLatencySnapshot {
+    pub(crate) count: u64,
+    pub(crate) stats: LatencyStats,
 }
 
 impl StreamingLatencyStats {
-    fn extend(&mut self, samples: impl IntoIterator<Item = Duration>) {
+    pub(crate) fn extend(&mut self, samples: impl IntoIterator<Item = Duration>) {
         for sample in samples {
             self.record(sample);
         }
@@ -129,13 +129,13 @@ impl StreamingLatencyStats {
         *self.samples.entry(duration_nanos(sample)).or_default() += 1;
     }
 
-    fn snapshot(&self) -> Option<LiveLatencySnapshot> {
+    pub(crate) fn snapshot(&self) -> Option<LiveLatencySnapshot> {
         if self.count == 0 {
             return None;
         }
 
-        let min = duration_from_nanos(*self.samples.keys().next()?);
-        let max = duration_from_nanos(*self.samples.keys().next_back()?);
+        let min = Duration::from_nanos(*self.samples.keys().next()?);
+        let max = Duration::from_nanos(*self.samples.keys().next_back()?);
         let p50_rank = Self::percentile_rank(self.count, 0.50);
         let p90_rank = Self::percentile_rank(self.count, 0.90);
         let p99_rank = Self::percentile_rank(self.count, 0.99);
@@ -148,13 +148,13 @@ impl StreamingLatencyStats {
         for (nanos, sample_count) in &self.samples {
             seen += *sample_count;
             if p50.is_none() && seen >= p50_rank {
-                p50 = Some(duration_from_nanos(*nanos));
+                p50 = Some(Duration::from_nanos(*nanos));
             }
             if p90.is_none() && seen >= p90_rank {
-                p90 = Some(duration_from_nanos(*nanos));
+                p90 = Some(Duration::from_nanos(*nanos));
             }
             if p99.is_none() && seen >= p99_rank {
-                p99 = Some(duration_from_nanos(*nanos));
+                p99 = Some(Duration::from_nanos(*nanos));
                 break;
             }
         }
@@ -178,10 +178,6 @@ impl StreamingLatencyStats {
 
 fn duration_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-}
-
-fn duration_from_nanos(nanos: u64) -> Duration {
-    Duration::from_nanos(nanos)
 }
 
 fn format_latency_duration(duration: Duration) -> String {
@@ -668,6 +664,7 @@ pub async fn run(
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_live_bars(
         write_bar: &ProgressBar,
         read_bar: &ProgressBar,

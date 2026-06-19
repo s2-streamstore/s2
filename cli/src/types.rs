@@ -853,32 +853,6 @@ pub struct LatencyStats {
 }
 
 impl LatencyStats {
-    pub fn compute(mut data: Vec<std::time::Duration>) -> Self {
-        data.sort_unstable();
-
-        let n = data.len();
-
-        if n == 0 {
-            return Self {
-                min: std::time::Duration::ZERO,
-                p50: std::time::Duration::ZERO,
-                p90: std::time::Duration::ZERO,
-                p99: std::time::Duration::ZERO,
-                max: std::time::Duration::ZERO,
-            };
-        }
-
-        let p_idx = |p: f64| ((n as f64) * p).ceil() as usize - 1;
-
-        Self {
-            min: data[0],
-            p50: data[p_idx(0.50)],
-            p90: data[p_idx(0.90)],
-            p99: data[p_idx(0.99)],
-            max: data[n - 1],
-        }
-    }
-
     pub fn into_vec(self) -> Vec<(String, std::time::Duration)> {
         vec![
             ("min".to_owned(), self.min),
