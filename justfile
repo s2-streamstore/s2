@@ -14,6 +14,10 @@ build *args: sync
 clippy *args: sync
     cargo clippy --workspace --all-features --all-targets {{args}} -- -D warnings --allow deprecated
 
+# Run clippy on the simulator (separate workspace)
+sim-clippy *args:
+    RUSTFLAGS="--cfg tokio_unstable" cargo clippy --manifest-path sim/Cargo.toml --all-targets {{args}} -- -D warnings --allow deprecated
+
 # Ensure cargo-deny is installed
 _ensure-deny:
     @cargo deny --version > /dev/null 2>&1 || cargo install cargo-deny
@@ -29,14 +33,15 @@ _ensure-nightly:
 # Format code with rustfmt
 fmt: _ensure-nightly
     cargo +nightly fmt
+    cargo +nightly fmt --manifest-path sim/Cargo.toml
 
 # Ensure cargo-nextest is installed
 _ensure-nextest:
     @cargo nextest --version > /dev/null 2>&1 || cargo install cargo-nextest
 
-# Run tests with nextest (excludes simulator, Docker-backed, and live integration tests)
+# Run tests with nextest (excludes Docker-backed and live integration tests)
 test *args: sync _ensure-nextest
-    cargo nextest run --workspace --all-features --exclude s2-sim --exclude s2-testcontainers -E 'not ((package(s2-cli) & binary(integration)) or (package(s2-sdk) & (binary(account_ops) or binary(basin_ops) or binary(metrics_ops) or binary(stream_ops))))' {{args}}
+    cargo nextest run --workspace --all-features --exclude s2-testcontainers -E 'not ((package(s2-cli) & binary(integration)) or (package(s2-sdk) & (binary(account_ops) or binary(basin_ops) or binary(metrics_ops) or binary(stream_ops))))' {{args}}
 
 # Run CLI integration tests (requires s2 lite server running)
 test-cli-integration: sync _ensure-nextest
@@ -66,7 +71,8 @@ lite *args:
 
 # Run the s2-lite deterministic simulation (e.g. `just sim smoke --seed 42`,
 # `just sim linearizable --seed 42 --clients 3 --ops-per-client 100`)
-# tokio_unstable is required so turmoil can seed tokio's internal RNG; note the
-# changed RUSTFLAGS means this does not share build artifacts with normal builds.
+# The simulator lives in its own workspace (sim/) to isolate its patched
+# dependencies (getrandom fork, etc.) from the main workspace.
+# tokio_unstable is required so turmoil can seed tokio's internal RNG.
 sim *args:
-    RUSTFLAGS="--cfg tokio_unstable" cargo run -p s2-sim --profile sim -- {{args}}
+    RUSTFLAGS="--cfg tokio_unstable" cargo run --manifest-path sim/Cargo.toml --profile sim -- {{args}}

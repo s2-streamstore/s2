@@ -1,30 +1,33 @@
+[workspace]
+resolver = "2"
+
 [package]
 name = "s2-sim"
 version = "0.0.0"
 description = "Deterministic simulation testing for s2-lite using turmoil"
 publish = false
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/s2-streamstore/s2"
+homepage = "https://s2.dev"
 
 [[bin]]
 name = "sim"
 path = "src/main.rs"
 
 [dependencies]
-async-trait = { workspace = true }
-axum = { workspace = true }
-blake3 = { workspace = true }
-bytes = { workspace = true }
-bytesize = { workspace = true }
-clap = { workspace = true, features = ["derive", "env"] }
-eyre = { workspace = true }
+async-trait = "0.1"
+axum = "0.8"
+blake3 = "1.8"
+bytes = "1.11"
+bytesize = "2.3"
+clap = { version = "4.6", features = ["derive", "env"] }
+eyre = "0.6"
 fastrand = "2"
-futures = { workspace = true }
-# Activates determinism on Linux in the patched getrandom (see root Cargo.toml).
+futures = "0.3"
+# Activates determinism on Linux in the patched getrandom (see [patch.crates-io]).
 getrandom = { version = "0.2", features = ["deterministic-simulation"] }
-http = { workspace = true }
+http = "1.4"
 http-body-util = "0.1"
 hyper = { version = "1.9", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = [
@@ -37,20 +40,42 @@ hyper-util = { version = "0.1", features = [
     "tokio",
 ] }
 mad-turmoil = "0.2.1"
-rand = { workspace = true }
-s2-lite = { workspace = true }
-s2-sdk = { workspace = true, features = ["_hidden"] }
+rand = "0.10"
+s2-lite = { path = "../lite" }
+s2-sdk = { path = "../sdk", features = ["_hidden"] }
 # The Go checker built in CI must be pinned to the same rev (see the
 # S2_VERIFICATION_REV env in .github/workflows/ci.yml).
 s2-verification = { git = "https://github.com/s2-streamstore/s2-verification", rev = "394929f199480fd3a2d49ec1992779a9772e77fe" }
 s3s = "0.13"
-serde_json = { workspace = true }
-slatedb = { workspace = true, features = ["lz4", "zstd"] }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util"] }
+serde_json = "1.0"
+slatedb = { version = "0.13.1", features = ["lz4", "zstd"] }
+tokio = { version = "1.52", features = ["macros", "rt", "sync", "time", "io-util"] }
 tower = "0.5"
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 turmoil = "0.7.2"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+
+[patch.crates-io]
+# Unifies s2-verification's crates.io s2-sdk dependency with the local sdk,
+# so the sim crate can hand local S2Stream values to verification's workflow
+# clients.
+s2-sdk = { path = "../sdk" }
+# On Linux, upstream getrandom 0.2 invokes the raw SYS_getrandom syscall, which
+# bypasses mad-turmoil's libc interposition and injects real entropy into
+# deterministic simulations. The fork's `deterministic-simulation` feature
+# routes through the interposable libc wrapper instead; without the feature it
+# behaves identically to upstream. Scoped to this workspace so it does not
+# affect the main workspace's dependency tree.
+getrandom = { git = "https://github.com/s2-streamstore/getrandom", rev = "9634f379845b3d4ea4a9f2d20b9fca28b1476e0c" }
+
+# Optimized profile for the deterministic simulator: release-grade runtime
+# without the release profile's LTO link tax, with assertions kept on since
+# the simulator exists to catch bugs.
+[profile.sim]
+inherits = "release"
+lto = false
+debug-assertions = true
+overflow-checks = true

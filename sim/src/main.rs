@@ -7,8 +7,8 @@
 //!
 //! Determinism relies on `mad-turmoil` (shadowed clocks and entropy via libc
 //! interposition, a global seeded RNG) plus `--cfg tokio_unstable` so turmoil
-//! can seed tokio's internal RNG. A determinism "meta test" (same seed, twice,
-//! identical output) is planned but not wired up yet.
+//! can seed tokio's internal RNG. A determinism "meta test" (`sim meta`) runs
+//! the same seed twice and requires byte-identical output.
 
 mod history;
 mod lite_host;
