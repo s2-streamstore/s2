@@ -40,6 +40,10 @@ const RECORD_OVERHEAD_BYTES: usize = 8 + 2 + HASH_HEADER_NAME.len() + HEADER_VAL
 const WRITE_DONE_SENTINEL: u64 = u64::MAX;
 const LIVE_UI_REFRESH_HZ: u8 = 20;
 const LIVE_UI_REFRESH_MS: u64 = 1000 / LIVE_UI_REFRESH_HZ as u64;
+const LATENCY_TABLE_COLUMN_WIDTH: usize = 44;
+const LATENCY_TABLE_GAP: &str = "    ";
+const LATENCY_TABLE_SIDE_BY_SIDE_WIDTH: usize =
+    LATENCY_TABLE_COLUMN_WIDTH * 2 + LATENCY_TABLE_GAP.len();
 
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
@@ -193,85 +197,149 @@ fn format_latency_duration(duration: Duration) -> String {
     }
 }
 
-fn format_latency_stat_row(key: &str, value: Duration) -> String {
-    format!("{key:7}: {:>9}", format_latency_duration(value))
+fn format_latency_stat_row(key: &str, value: Option<Duration>) -> String {
+    match value {
+        Some(value) => format!("{key:7}: {:>9}", format_latency_duration(value)),
+        None => format!("{key:7}: {:>9}", "-"),
+    }
 }
 
-#[derive(Debug, Clone)]
-struct LiveLatencyBars {
-    title: String,
-    header: ProgressBar,
-    min: ProgressBar,
-    p50: ProgressBar,
-    p90: ProgressBar,
-    p99: ProgressBar,
-    max: ProgressBar,
+#[derive(Debug, Clone, Copy)]
+enum LatencyTableLayout {
+    SideBySide,
+    Stacked,
 }
 
-impl LiveLatencyBars {
-    fn new(multi: &MultiProgress, title: &str) -> Self {
-        fn line(multi: &MultiProgress) -> ProgressBar {
-            multi.add(
-                ProgressBar::no_length().with_style(
-                    ProgressStyle::default_bar()
-                        .template("{msg}")
-                        .expect("valid template"),
-                ),
-            )
+fn latency_table_layout() -> LatencyTableLayout {
+    let width = crossterm::terminal::size()
+        .ok()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(usize::MAX);
+
+    if width >= LATENCY_TABLE_SIDE_BY_SIDE_WIDTH {
+        LatencyTableLayout::SideBySide
+    } else {
+        LatencyTableLayout::Stacked
+    }
+}
+
+fn latency_header(title: &str, snapshot: Option<&LiveLatencySnapshot>) -> String {
+    format!(
+        "{title} (n={})",
+        snapshot.map_or(0, |snapshot| snapshot.count)
+    )
+}
+
+fn latency_table_rows(snapshot: Option<&LiveLatencySnapshot>) -> Vec<String> {
+    let stats = snapshot.map(|snapshot| &snapshot.stats);
+
+    vec![
+        format_latency_stat_row("min", stats.map(|stats| stats.min)),
+        format_latency_stat_row("p50", stats.map(|stats| stats.p50)),
+        format_latency_stat_row("p90", stats.map(|stats| stats.p90)),
+        format_latency_stat_row("p99", stats.map(|stats| stats.p99)),
+        format_latency_stat_row("max", stats.map(|stats| stats.max)),
+    ]
+}
+
+fn format_latency_header(line: String) -> String {
+    line.yellow().bold().to_string()
+}
+
+fn format_latency_header_cell(line: String) -> String {
+    format!("{line:<LATENCY_TABLE_COLUMN_WIDTH$}")
+        .yellow()
+        .bold()
+        .to_string()
+}
+
+fn format_latency_plain_cell(line: String) -> String {
+    format!("{line:<LATENCY_TABLE_COLUMN_WIDTH$}")
+}
+
+fn format_latency_tables(
+    ack: Option<&LiveLatencySnapshot>,
+    e2e: Option<&LiveLatencySnapshot>,
+    layout: LatencyTableLayout,
+) -> Vec<String> {
+    let ack_header = latency_header("Ack Latency Statistics", ack);
+    let e2e_header = latency_header("End-to-End Latency Statistics", e2e);
+    let ack_rows = latency_table_rows(ack);
+    let e2e_rows = latency_table_rows(e2e);
+
+    match layout {
+        LatencyTableLayout::SideBySide => {
+            let mut lines = Vec::with_capacity(6);
+            lines.push(format!(
+                "{}{LATENCY_TABLE_GAP}{}",
+                format_latency_header_cell(ack_header),
+                format_latency_header(e2e_header)
+            ));
+
+            for (ack_row, e2e_row) in ack_rows.into_iter().zip(e2e_rows) {
+                lines.push(format!(
+                    "{}{LATENCY_TABLE_GAP}{}",
+                    format_latency_plain_cell(ack_row),
+                    e2e_row
+                ));
+            }
+
+            lines
         }
+        LatencyTableLayout::Stacked => {
+            let mut lines = Vec::with_capacity(13);
+            lines.push(format_latency_header(ack_header));
+            lines.extend(ack_rows);
+            lines.push(String::new());
+            lines.push(format_latency_header(e2e_header));
+            lines.extend(e2e_rows);
+            lines
+        }
+    }
+}
 
-        let bars = Self {
-            title: title.to_owned(),
-            header: line(multi),
-            min: line(multi),
-            p50: line(multi),
-            p90: line(multi),
-            p99: line(multi),
-            max: line(multi),
+struct LiveLatencyTables {
+    layout: LatencyTableLayout,
+    lines: Vec<ProgressBar>,
+}
+
+impl LiveLatencyTables {
+    fn new(multi: &MultiProgress, layout: LatencyTableLayout) -> Self {
+        let line_count = match layout {
+            LatencyTableLayout::SideBySide => 6,
+            LatencyTableLayout::Stacked => 13,
         };
-        bars.header
-            .set_message(format!("{title} ").yellow().bold().to_string());
-        bars.set_pending();
-        bars
+        let lines = (0..line_count)
+            .map(|_| {
+                multi.add(
+                    ProgressBar::no_length().with_style(
+                        ProgressStyle::default_bar()
+                            .template("{msg}")
+                            .expect("valid template"),
+                    ),
+                )
+            })
+            .collect();
+
+        let tables = Self { layout, lines };
+        tables.update(None, None);
+        tables
     }
 
-    fn set_pending(&self) {
-        self.min.set_message("min    :         -");
-        self.p50.set_message("p50    :         -");
-        self.p90.set_message("p90    :         -");
-        self.p99.set_message("p99    :         -");
-        self.max.set_message("max    :         -");
-    }
-
-    fn update(&self, snapshot: &LiveLatencySnapshot) {
-        self.header.set_message(
-            format!("{} (n={}) ", self.title, snapshot.count)
-                .yellow()
-                .bold()
-                .to_string(),
-        );
-        let LatencyStats {
-            min,
-            p50,
-            p90,
-            p99,
-            max,
-        } = snapshot.stats;
-
-        self.min.set_message(format_latency_stat_row("min", min));
-        self.p50.set_message(format_latency_stat_row("p50", p50));
-        self.p90.set_message(format_latency_stat_row("p90", p90));
-        self.p99.set_message(format_latency_stat_row("p99", p99));
-        self.max.set_message(format_latency_stat_row("max", max));
+    fn update(&self, ack: Option<&LiveLatencySnapshot>, e2e: Option<&LiveLatencySnapshot>) {
+        for (bar, line) in self
+            .lines
+            .iter()
+            .zip(format_latency_tables(ack, e2e, self.layout))
+        {
+            bar.set_message(line);
+        }
     }
 
     fn finish_and_clear(&self) {
-        self.header.finish_and_clear();
-        self.min.finish_and_clear();
-        self.p50.finish_and_clear();
-        self.p90.finish_and_clear();
-        self.p99.finish_and_clear();
-        self.max.finish_and_clear();
+        for line in &self.lines {
+            line.finish_and_clear();
+        }
     }
 }
 
@@ -635,10 +703,8 @@ pub async fn run(
         )
     }
 
-    let ack_gap = blank_bar(&multi);
-    let ack_latency_bars = LiveLatencyBars::new(&multi, "Ack Latency Statistics");
-    let e2e_gap = blank_bar(&multi);
-    let e2e_latency_bars = LiveLatencyBars::new(&multi, "End-to-End Latency Statistics");
+    let latency_gap = blank_bar(&multi);
+    let latency_tables = LiveLatencyTables::new(&multi, latency_table_layout());
 
     fn update_bench_bar<T: BenchSample>(
         bar: &ProgressBar,
@@ -655,21 +721,18 @@ pub async fn run(
         ));
     }
 
-    fn finish_live_bars(bars: &[&ProgressBar], latency_bars: &[&LiveLatencyBars]) {
+    fn finish_live_bars(bars: &[&ProgressBar], latency_tables: &LiveLatencyTables) {
         for bar in bars {
             bar.finish_and_clear();
         }
-        for latency_bar in latency_bars {
-            latency_bar.finish_and_clear();
-        }
+        latency_tables.finish_and_clear();
     }
 
     #[allow(clippy::too_many_arguments)]
     fn update_live_bars(
         write_bar: &ProgressBar,
         read_bar: &ProgressBar,
-        ack_latency_bars: &LiveLatencyBars,
-        e2e_latency_bars: &LiveLatencyBars,
+        latency_tables: &LiveLatencyTables,
         write_sample: Option<&BenchWriteSample>,
         read_sample: Option<&BenchReadSample>,
         ack_latency_stats: &StreamingLatencyStats,
@@ -681,12 +744,9 @@ pub async fn run(
         if let Some(sample) = read_sample {
             update_bench_bar(read_bar, "Read".bold().green(), sample);
         }
-        if let Some(snapshot) = ack_latency_stats.snapshot() {
-            ack_latency_bars.update(&snapshot);
-        }
-        if let Some(snapshot) = e2e_latency_stats.snapshot() {
-            e2e_latency_bars.update(&snapshot);
-        }
+        let ack_snapshot = ack_latency_stats.snapshot();
+        let e2e_snapshot = e2e_latency_stats.snapshot();
+        latency_tables.update(ack_snapshot.as_ref(), e2e_snapshot.as_ref());
     }
 
     let mut write_sample: Option<BenchWriteSample> = None;
@@ -759,8 +819,7 @@ pub async fn run(
                 update_live_bars(
                     &write_bar,
                     &read_bar,
-                    &ack_latency_bars,
-                    &e2e_latency_bars,
+                    &latency_tables,
                     write_sample.as_ref(),
                     read_sample.as_ref(),
                     &ack_latency_stats,
@@ -788,8 +847,8 @@ pub async fn run(
                     }
                     Some(BenchEvent::Write(Err(e))) => {
                         finish_live_bars(
-                            &[&write_bar, &read_bar, &ack_gap, &e2e_gap],
-                            &[&ack_latency_bars, &e2e_latency_bars],
+                            &[&write_bar, &read_bar, &latency_gap],
+                            &latency_tables,
                         );
                         stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
@@ -808,8 +867,8 @@ pub async fn run(
                     }
                     Some(BenchEvent::Read(Err(e))) => {
                         finish_live_bars(
-                            &[&write_bar, &read_bar, &ack_gap, &e2e_gap],
-                            &[&ack_latency_bars, &e2e_latency_bars],
+                            &[&write_bar, &read_bar, &latency_gap],
+                            &latency_tables,
                         );
                         stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
@@ -829,10 +888,7 @@ pub async fn run(
     let _ = write_handle.await;
     let _ = read_handle.await;
 
-    finish_live_bars(
-        &[&write_bar, &read_bar, &ack_gap, &e2e_gap],
-        &[&ack_latency_bars, &e2e_latency_bars],
-    );
+    finish_live_bars(&[&write_bar, &read_bar, &latency_gap], &latency_tables);
 
     if interrupted {
         eprintln!();
@@ -866,13 +922,15 @@ pub async fn run(
         );
     }
 
-    if let Some(snapshot) = ack_latency_stats.snapshot() {
+    let ack_latency_snapshot = ack_latency_stats.snapshot();
+    let e2e_latency_snapshot = e2e_latency_stats.snapshot();
+    if ack_latency_snapshot.is_some() || e2e_latency_snapshot.is_some() {
         eprintln!();
-        print_latency_stats(snapshot.stats, "Ack");
-    }
-    if let Some(snapshot) = e2e_latency_stats.snapshot() {
-        eprintln!();
-        print_latency_stats(snapshot.stats, "End-to-End");
+        print_latency_stats(
+            ack_latency_snapshot.as_ref(),
+            e2e_latency_snapshot.as_ref(),
+            latency_tables.layout,
+        );
     }
 
     if interrupted {
@@ -992,19 +1050,13 @@ pub async fn run(
     Ok(())
 }
 
-fn print_latency_stats(stats: LatencyStats, name: &str) {
-    eprintln!("{}", format!("{name} Latency Statistics ").yellow().bold());
-
-    fn stat_duration(key: &str, val: Duration) {
-        eprintln!(
-            "{:7}: {:>9}",
-            key,
-            format_latency_duration(val).green().bold(),
-        );
-    }
-
-    for (name, val) in stats.into_vec() {
-        stat_duration(&name, val);
+fn print_latency_stats(
+    ack: Option<&LiveLatencySnapshot>,
+    e2e: Option<&LiveLatencySnapshot>,
+    layout: LatencyTableLayout,
+) {
+    for line in format_latency_tables(ack, e2e, layout) {
+        eprintln!("{line}");
     }
 }
 
@@ -1012,7 +1064,7 @@ fn print_latency_stats(stats: LatencyStats, name: &str) {
 mod tests {
     use std::time::Duration;
 
-    use super::StreamingLatencyStats;
+    use super::{LatencyTableLayout, StreamingLatencyStats, format_latency_tables};
 
     #[test]
     fn streaming_latency_stats_tracks_percentiles() {
@@ -1045,5 +1097,25 @@ mod tests {
         assert_eq!(snapshot.stats.p50, Duration::from_millis(5));
         assert_eq!(snapshot.stats.p90, Duration::from_millis(10));
         assert_eq!(snapshot.stats.p99, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn latency_tables_can_render_side_by_side() {
+        let mut ack_stats = StreamingLatencyStats::default();
+        ack_stats.extend((1..=10).map(Duration::from_millis));
+        let ack = ack_stats.snapshot().expect("ack stats available");
+
+        let mut e2e_stats = StreamingLatencyStats::default();
+        e2e_stats.extend((11..=20).map(Duration::from_millis));
+        let e2e = e2e_stats.snapshot().expect("e2e stats available");
+
+        let lines = format_latency_tables(Some(&ack), Some(&e2e), LatencyTableLayout::SideBySide);
+
+        assert_eq!(lines.len(), 6);
+        assert!(lines[0].contains("Ack Latency Statistics (n=10)"));
+        assert!(lines[0].contains("End-to-End Latency Statistics (n=10)"));
+        assert!(lines[1].contains("min"));
+        assert!(lines[1].contains("1.00ms"));
+        assert!(lines[1].contains("11.00ms"));
     }
 }
