@@ -846,49 +846,17 @@ impl From<Interval> for TimeseriesInterval {
 #[derive(Debug, Clone)]
 pub struct LatencyStats {
     pub min: std::time::Duration,
-    pub median: std::time::Duration,
+    pub p50: std::time::Duration,
     pub p90: std::time::Duration,
     pub p99: std::time::Duration,
     pub max: std::time::Duration,
 }
 
 impl LatencyStats {
-    pub fn compute(mut data: Vec<std::time::Duration>) -> Self {
-        data.sort_unstable();
-
-        let n = data.len();
-
-        if n == 0 {
-            return Self {
-                min: std::time::Duration::ZERO,
-                median: std::time::Duration::ZERO,
-                p90: std::time::Duration::ZERO,
-                p99: std::time::Duration::ZERO,
-                max: std::time::Duration::ZERO,
-            };
-        }
-
-        let median = if n.is_multiple_of(2) {
-            (data[n / 2 - 1] + data[n / 2]) / 2
-        } else {
-            data[n / 2]
-        };
-
-        let p_idx = |p: f64| ((n as f64) * p).ceil() as usize - 1;
-
-        Self {
-            min: data[0],
-            median,
-            p90: data[p_idx(0.90)],
-            p99: data[p_idx(0.99)],
-            max: data[n - 1],
-        }
-    }
-
     pub fn into_vec(self) -> Vec<(String, std::time::Duration)> {
         vec![
             ("min".to_owned(), self.min),
-            ("median".to_owned(), self.median),
+            ("p50".to_owned(), self.p50),
             ("p90".to_owned(), self.p90),
             ("p99".to_owned(), self.p99),
             ("max".to_owned(), self.max),

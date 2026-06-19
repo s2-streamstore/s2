@@ -7383,7 +7383,7 @@ async fn run_bench_with_events(
     use futures::StreamExt;
     use tokio::time::Instant;
 
-    use crate::{bench::*, types::LatencyStats};
+    use crate::bench::*;
 
     const WRITE_DONE_SENTINEL: u64 = u64::MAX;
 
@@ -7392,12 +7392,8 @@ async fn run_bench_with_events(
     let write_stop = Arc::new(AtomicBool::new(false));
     let write_done_records = Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL));
 
-    // We need to re-implement the bench logic here to send events
-    // For now, let's use a simplified version that calls into bench.rs
-    // and extracts the stats
-
-    let mut all_ack_latencies: Vec<Duration> = Vec::new();
-    let mut all_e2e_latencies: Vec<Duration> = Vec::new();
+    let mut ack_latency_stats = StreamingLatencyStats::default();
+    let mut e2e_latency_stats = StreamingLatencyStats::default();
 
     // Run write and read streams concurrently
     let write_stream = bench_write(
@@ -7467,7 +7463,7 @@ async fn run_bench_with_events(
             event = brx.recv() => {
                 match event {
                     Some(BenchEvent::Write(Ok(sample))) => {
-                        all_ack_latencies.extend(sample.ack_latencies.iter().copied());
+                        ack_latency_stats.extend(sample.ack_latencies.iter().copied());
                         let mibps = sample.bytes as f64 / (1024.0 * 1024.0) / sample.elapsed.as_secs_f64().max(0.001);
                         let recps = sample.records as f64 / sample.elapsed.as_secs_f64().max(0.001);
                         let _ = tx.send(Event::BenchWriteSample(BenchSample {
@@ -7488,7 +7484,7 @@ async fn run_bench_with_events(
                         write_done = true;
                     }
                     Some(BenchEvent::Read(Ok(sample))) => {
-                        all_e2e_latencies.extend(sample.e2e_latencies.iter().copied());
+                        e2e_latency_stats.extend(sample.e2e_latencies.iter().copied());
                         let mibps = sample.bytes as f64 / (1024.0 * 1024.0) / sample.elapsed.as_secs_f64().max(0.001);
                         let recps = sample.records as f64 / sample.elapsed.as_secs_f64().max(0.001);
                         let _ = tx.send(Event::BenchReadSample(BenchSample {
@@ -7524,16 +7520,8 @@ async fn run_bench_with_events(
     // Check if user stopped before starting catchup
     if user_stop.load(Ordering::Relaxed) {
         return Ok(BenchFinalStats {
-            ack_latency: if all_ack_latencies.is_empty() {
-                None
-            } else {
-                Some(LatencyStats::compute(all_ack_latencies))
-            },
-            e2e_latency: if all_e2e_latencies.is_empty() {
-                None
-            } else {
-                Some(LatencyStats::compute(all_e2e_latencies))
-            },
+            ack_latency: ack_latency_stats.snapshot().map(|s| s.stats),
+            e2e_latency: e2e_latency_stats.snapshot().map(|s| s.stats),
         });
     }
 
@@ -7541,16 +7529,8 @@ async fn run_bench_with_events(
     while catchup_wait_start.elapsed() < catchup_delay {
         if user_stop.load(Ordering::Relaxed) {
             return Ok(BenchFinalStats {
-                ack_latency: if all_ack_latencies.is_empty() {
-                    None
-                } else {
-                    Some(LatencyStats::compute(all_ack_latencies))
-                },
-                e2e_latency: if all_e2e_latencies.is_empty() {
-                    None
-                } else {
-                    Some(LatencyStats::compute(all_e2e_latencies))
-                },
+                ack_latency: ack_latency_stats.snapshot().map(|s| s.stats),
+                e2e_latency: e2e_latency_stats.snapshot().map(|s| s.stats),
             });
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -7594,16 +7574,8 @@ async fn run_bench_with_events(
     let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::Catchup));
 
     Ok(BenchFinalStats {
-        ack_latency: if all_ack_latencies.is_empty() {
-            None
-        } else {
-            Some(LatencyStats::compute(all_ack_latencies))
-        },
-        e2e_latency: if all_e2e_latencies.is_empty() {
-            None
-        } else {
-            Some(LatencyStats::compute(all_e2e_latencies))
-        },
+        ack_latency: ack_latency_stats.snapshot().map(|s| s.stats),
+        e2e_latency: e2e_latency_stats.snapshot().map(|s| s.stats),
     })
 }
 

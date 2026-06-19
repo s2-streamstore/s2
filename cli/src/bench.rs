@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     num::NonZeroU64,
     pin::Pin,
@@ -12,7 +13,7 @@ use std::{
 use bytes::Bytes;
 use colored::Colorize;
 use futures::{Stream, StreamExt, stream::FuturesUnordered};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
@@ -22,7 +23,10 @@ use s2_sdk::{
         ReadStop, S2Error, SequencedRecord,
     },
 };
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{
+    sync::mpsc,
+    time::{Instant, MissedTickBehavior},
+};
 use xxhash_rust::xxh3::Xxh3Default;
 
 use crate::{
@@ -34,6 +38,12 @@ const HASH_HEADER_NAME: &[u8] = b"hash";
 const HEADER_VALUE_LEN: usize = 8;
 const RECORD_OVERHEAD_BYTES: usize = 8 + 2 + HASH_HEADER_NAME.len() + HEADER_VALUE_LEN;
 const WRITE_DONE_SENTINEL: u64 = u64::MAX;
+const LIVE_UI_REFRESH_HZ: u8 = 20;
+const LIVE_UI_REFRESH_MS: u64 = 1000 / LIVE_UI_REFRESH_HZ as u64;
+const LATENCY_TABLE_COLUMN_WIDTH: usize = 44;
+const LATENCY_TABLE_GAP: &str = "    ";
+const LATENCY_TABLE_SIDE_BY_SIDE_WIDTH: usize =
+    LATENCY_TABLE_COLUMN_WIDTH * 2 + LATENCY_TABLE_GAP.len();
 
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
@@ -96,6 +106,250 @@ impl BenchSample for BenchReadSample {
     }
     fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StreamingLatencyStats {
+    count: u64,
+    samples: BTreeMap<u64, u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveLatencySnapshot {
+    pub count: u64,
+    pub stats: LatencyStats,
+}
+
+impl StreamingLatencyStats {
+    pub fn extend(&mut self, samples: impl IntoIterator<Item = Duration>) {
+        for sample in samples {
+            self.record(sample);
+        }
+    }
+
+    fn record(&mut self, sample: Duration) {
+        self.count += 1;
+        *self.samples.entry(duration_nanos(sample)).or_default() += 1;
+    }
+
+    pub fn snapshot(&self) -> Option<LiveLatencySnapshot> {
+        if self.count == 0 {
+            return None;
+        }
+
+        let min = Duration::from_nanos(*self.samples.keys().next()?);
+        let max = Duration::from_nanos(*self.samples.keys().next_back()?);
+        let p50_rank = Self::percentile_rank(self.count, 0.50);
+        let p90_rank = Self::percentile_rank(self.count, 0.90);
+        let p99_rank = Self::percentile_rank(self.count, 0.99);
+
+        let mut seen = 0;
+        let mut p50 = None;
+        let mut p90 = None;
+        let mut p99 = None;
+
+        for (nanos, sample_count) in &self.samples {
+            seen += *sample_count;
+            if p50.is_none() && seen >= p50_rank {
+                p50 = Some(Duration::from_nanos(*nanos));
+            }
+            if p90.is_none() && seen >= p90_rank {
+                p90 = Some(Duration::from_nanos(*nanos));
+            }
+            if p99.is_none() && seen >= p99_rank {
+                p99 = Some(Duration::from_nanos(*nanos));
+                break;
+            }
+        }
+
+        Some(LiveLatencySnapshot {
+            count: self.count,
+            stats: LatencyStats {
+                min,
+                p50: p50.unwrap_or(max),
+                p90: p90.unwrap_or(max),
+                p99: p99.unwrap_or(max),
+                max,
+            },
+        })
+    }
+
+    fn percentile_rank(count: u64, percentile: f64) -> u64 {
+        ((count as f64) * percentile).ceil().max(1.0) as u64
+    }
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn format_latency_duration(duration: Duration) -> String {
+    let nanos = duration_nanos(duration);
+    if nanos < 1_000 {
+        format!("{nanos}ns")
+    } else if nanos < 1_000_000 {
+        format!("{:.1}us", nanos as f64 / 1_000.0)
+    } else if nanos < 1_000_000_000 {
+        format!("{:.2}ms", nanos as f64 / 1_000_000.0)
+    } else {
+        format!("{:.2}s", duration.as_secs_f64())
+    }
+}
+
+fn format_latency_stat_row(key: &str, value: Option<Duration>, colored: bool) -> String {
+    match value {
+        Some(value) => {
+            let formatted = format_latency_duration(value);
+            if colored {
+                format!("{key:7}: {:>9}", formatted.green().bold())
+            } else {
+                format!("{key:7}: {:>9}", formatted)
+            }
+        }
+        None => format!("{key:7}: {:>9}", "-"),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LatencyTableLayout {
+    SideBySide,
+    Stacked,
+}
+
+fn latency_table_layout() -> LatencyTableLayout {
+    let width = crossterm::terminal::size()
+        .ok()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(usize::MAX);
+
+    if width >= LATENCY_TABLE_SIDE_BY_SIDE_WIDTH {
+        LatencyTableLayout::SideBySide
+    } else {
+        LatencyTableLayout::Stacked
+    }
+}
+
+fn latency_header(title: &str, snapshot: Option<&LiveLatencySnapshot>) -> String {
+    format!(
+        "{title} (n={})",
+        snapshot.map_or(0, |snapshot| snapshot.count)
+    )
+}
+
+fn latency_table_rows(snapshot: Option<&LiveLatencySnapshot>, colored: bool) -> Vec<String> {
+    let stats = snapshot.map(|snapshot| &snapshot.stats);
+
+    vec![
+        format_latency_stat_row("min", stats.map(|stats| stats.min), colored),
+        format_latency_stat_row("p50", stats.map(|stats| stats.p50), colored),
+        format_latency_stat_row("p90", stats.map(|stats| stats.p90), colored),
+        format_latency_stat_row("p99", stats.map(|stats| stats.p99), colored),
+        format_latency_stat_row("max", stats.map(|stats| stats.max), colored),
+    ]
+}
+
+fn format_latency_header(line: String) -> String {
+    line.yellow().bold().to_string()
+}
+
+fn format_latency_header_cell(line: String) -> String {
+    format!("{line:<LATENCY_TABLE_COLUMN_WIDTH$}")
+        .yellow()
+        .bold()
+        .to_string()
+}
+
+fn format_latency_plain_cell(line: String) -> String {
+    format!("{line:<LATENCY_TABLE_COLUMN_WIDTH$}")
+}
+
+fn format_latency_tables(
+    ack: Option<&LiveLatencySnapshot>,
+    e2e: Option<&LiveLatencySnapshot>,
+    layout: LatencyTableLayout,
+    colored: bool,
+) -> Vec<String> {
+    // Side-by-side layout uses fixed-width padding that ANSI codes would break.
+    let color_values = colored && matches!(layout, LatencyTableLayout::Stacked);
+    let ack_header = latency_header("Ack Latency Statistics", ack);
+    let e2e_header = latency_header("End-to-End Latency Statistics", e2e);
+    let ack_rows = latency_table_rows(ack, color_values);
+    let e2e_rows = latency_table_rows(e2e, color_values);
+
+    match layout {
+        LatencyTableLayout::SideBySide => {
+            let mut lines = Vec::with_capacity(6);
+            lines.push(format!(
+                "{}{LATENCY_TABLE_GAP}{}",
+                format_latency_header_cell(ack_header),
+                format_latency_header(e2e_header)
+            ));
+
+            for (ack_row, e2e_row) in ack_rows.into_iter().zip(e2e_rows) {
+                lines.push(format!(
+                    "{}{LATENCY_TABLE_GAP}{}",
+                    format_latency_plain_cell(ack_row),
+                    e2e_row
+                ));
+            }
+
+            lines
+        }
+        LatencyTableLayout::Stacked => {
+            let mut lines = Vec::with_capacity(13);
+            lines.push(format_latency_header(ack_header));
+            lines.extend(ack_rows);
+            lines.push(String::new());
+            lines.push(format_latency_header(e2e_header));
+            lines.extend(e2e_rows);
+            lines
+        }
+    }
+}
+
+struct LiveLatencyTables {
+    layout: LatencyTableLayout,
+    lines: Vec<ProgressBar>,
+}
+
+impl LiveLatencyTables {
+    fn new(multi: &MultiProgress, layout: LatencyTableLayout) -> Self {
+        let line_count = match layout {
+            LatencyTableLayout::SideBySide => 6,
+            LatencyTableLayout::Stacked => 13,
+        };
+        let lines = (0..line_count)
+            .map(|_| {
+                multi.add(
+                    ProgressBar::no_length().with_style(
+                        ProgressStyle::default_bar()
+                            .template("{msg}")
+                            .expect("valid template"),
+                    ),
+                )
+            })
+            .collect();
+
+        let tables = Self { layout, lines };
+        tables.update(None, None);
+        tables
+    }
+
+    fn update(&self, ack: Option<&LiveLatencySnapshot>, e2e: Option<&LiveLatencySnapshot>) {
+        for (bar, line) in
+            self.lines
+                .iter()
+                .zip(format_latency_tables(ack, e2e, self.layout, false))
+        {
+            bar.set_message(line);
+        }
+    }
+
+    fn finish_and_clear(&self) {
+        for line in &self.lines {
+            line.finish_and_clear();
+        }
     }
 }
 
@@ -432,51 +686,82 @@ pub async fn run(
 
     let bench_start = Instant::now();
 
-    let multi = MultiProgress::new();
-    let prefix_width = 7;
+    let multi =
+        MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(LIVE_UI_REFRESH_HZ));
 
     let write_bar = multi.add(
-        ProgressBar::no_length()
-            .with_prefix(format!("{:width$}", "write", width = prefix_width))
-            .with_style(
-                ProgressStyle::default_bar()
-                    .template("{prefix:.bold.blue} {msg}")
-                    .expect("valid template"),
-            ),
+        ProgressBar::no_length().with_style(
+            ProgressStyle::default_bar()
+                .template("{msg}")
+                .expect("valid template"),
+        ),
     );
     let read_bar = multi.add(
-        ProgressBar::no_length()
-            .with_prefix(format!("{:width$}", "read", width = prefix_width))
-            .with_style(
+        ProgressBar::no_length().with_style(
+            ProgressStyle::default_bar()
+                .template("{msg}")
+                .expect("valid template"),
+        ),
+    );
+    fn blank_bar(multi: &MultiProgress) -> ProgressBar {
+        multi.add(
+            ProgressBar::no_length().with_style(
                 ProgressStyle::default_bar()
-                    .template("{prefix:.bold.green} {msg}")
+                    .template("{msg}")
                     .expect("valid template"),
             ),
-    );
+        )
+    }
 
-    fn update_bench_bar<T: BenchSample>(bar: &ProgressBar, sample: &T) {
-        const MIBPS_WIDTH: usize = 10;
-        const RECPS_WIDTH: usize = 9;
-        const BYTES_WIDTH: usize = 12;
-        const RECORDS_WIDTH: usize = 12;
+    let latency_gap = blank_bar(&multi);
+    let latency_tables = LiveLatencyTables::new(&multi, latency_table_layout());
 
+    fn update_bench_bar<T: BenchSample>(
+        bar: &ProgressBar,
+        label: impl std::fmt::Display,
+        sample: &T,
+    ) {
         bar.set_message(format!(
-            "{:>mibps_width$.2} MiB/s  {:>recps_width$.0} rec/s | {:>bytes_width$} bytes | {:>records_width$} records",
+            "{label}: {:.2} MiB/s, {:.0} records/s ({} bytes, {} records in {:.2}s)",
             sample.mib_per_sec(),
             sample.records_per_sec(),
             sample.bytes(),
             sample.records(),
-            mibps_width = MIBPS_WIDTH,
-            recps_width = RECPS_WIDTH,
-            bytes_width = BYTES_WIDTH,
-            records_width = RECORDS_WIDTH,
+            sample.elapsed().as_secs_f64(),
         ));
+    }
+
+    fn finish_live_bars(bars: &[&ProgressBar], latency_tables: &LiveLatencyTables) {
+        for bar in bars {
+            bar.finish_and_clear();
+        }
+        latency_tables.finish_and_clear();
+    }
+
+    fn update_live_bars(
+        write_bar: &ProgressBar,
+        read_bar: &ProgressBar,
+        latency_tables: &LiveLatencyTables,
+        write_sample: Option<&BenchWriteSample>,
+        read_sample: Option<&BenchReadSample>,
+        ack_latency_stats: &StreamingLatencyStats,
+        e2e_latency_stats: &StreamingLatencyStats,
+    ) {
+        if let Some(sample) = write_sample {
+            update_bench_bar(write_bar, "Write".bold().blue(), sample);
+        }
+        if let Some(sample) = read_sample {
+            update_bench_bar(read_bar, "Read".bold().green(), sample);
+        }
+        let ack_snapshot = ack_latency_stats.snapshot();
+        let e2e_snapshot = e2e_latency_stats.snapshot();
+        latency_tables.update(ack_snapshot.as_ref(), e2e_snapshot.as_ref());
     }
 
     let mut write_sample: Option<BenchWriteSample> = None;
     let mut read_sample: Option<BenchReadSample> = None;
-    let mut all_ack_latencies: Vec<Duration> = Vec::new();
-    let mut all_e2e_latencies: Vec<Duration> = Vec::new();
+    let mut ack_latency_stats = StreamingLatencyStats::default();
+    let mut e2e_latency_stats = StreamingLatencyStats::default();
     let mut write_chain_hash: Option<u64> = None;
     let mut read_chain_hash: Option<u64> = None;
 
@@ -530,31 +815,50 @@ pub async fn run(
     let deadline = bench_start + duration;
     let mut write_done = false;
     let mut read_done = false;
+    let mut interrupted = false;
+    let mut ui_tick = tokio::time::interval(Duration::from_millis(LIVE_UI_REFRESH_MS));
+    ui_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         if write_done && read_done {
             break;
         }
         tokio::select! {
+            _ = ui_tick.tick() => {
+                update_live_bars(
+                    &write_bar,
+                    &read_bar,
+                    &latency_tables,
+                    write_sample.as_ref(),
+                    read_sample.as_ref(),
+                    &ack_latency_stats,
+                    &e2e_latency_stats,
+                );
+            }
             _ = tokio::time::sleep_until(deadline), if !stop.load(Ordering::Relaxed) => {
                 stop.store(true, Ordering::Relaxed);
             }
-            _ = tokio::signal::ctrl_c(), if !stop.load(Ordering::Relaxed) => {
+            _ = tokio::signal::ctrl_c() => {
+                interrupted = true;
                 stop.store(true, Ordering::Relaxed);
+                write_handle.abort();
+                read_handle.abort();
+                break;
             }
             event = rx.recv() => {
                 match event {
                     Some(BenchEvent::Write(Ok(sample))) => {
-                        update_bench_bar(&write_bar, &sample);
-                        all_ack_latencies.extend(sample.ack_latencies.iter().copied());
+                        ack_latency_stats.extend(sample.ack_latencies.iter().copied());
                         if let Some(hash) = sample.chain_hash {
                             write_chain_hash = Some(hash);
                         }
                         write_sample = Some(sample);
                     }
                     Some(BenchEvent::Write(Err(e))) => {
-                        write_bar.finish_and_clear();
-                        read_bar.finish_and_clear();
+                        finish_live_bars(
+                            &[&write_bar, &read_bar, &latency_gap],
+                            &latency_tables,
+                        );
                         stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
@@ -564,16 +868,17 @@ pub async fn run(
                         write_done = true;
                     }
                     Some(BenchEvent::Read(Ok(sample))) => {
-                        update_bench_bar(&read_bar, &sample);
-                        all_e2e_latencies.extend(sample.e2e_latencies.iter().copied());
+                        e2e_latency_stats.extend(sample.e2e_latencies.iter().copied());
                         if let Some(hash) = sample.chain_hash {
                             read_chain_hash = Some(hash);
                         }
                         read_sample = Some(sample);
                     }
                     Some(BenchEvent::Read(Err(e))) => {
-                        write_bar.finish_and_clear();
-                        read_bar.finish_and_clear();
+                        finish_live_bars(
+                            &[&write_bar, &read_bar, &latency_gap],
+                            &latency_tables,
+                        );
                         stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
@@ -592,8 +897,15 @@ pub async fn run(
     let _ = write_handle.await;
     let _ = read_handle.await;
 
-    write_bar.finish_and_clear();
-    read_bar.finish_and_clear();
+    finish_live_bars(&[&write_bar, &read_bar, &latency_gap], &latency_tables);
+
+    if interrupted {
+        eprintln!();
+        eprintln!(
+            "{}",
+            "Interrupted by Ctrl+C; showing partial results.".yellow()
+        );
+    }
 
     eprintln!();
     if let Some(sample) = &write_sample {
@@ -619,13 +931,19 @@ pub async fn run(
         );
     }
 
-    if !all_ack_latencies.is_empty() {
+    let ack_latency_snapshot = ack_latency_stats.snapshot();
+    let e2e_latency_snapshot = e2e_latency_stats.snapshot();
+    if ack_latency_snapshot.is_some() || e2e_latency_snapshot.is_some() {
         eprintln!();
-        print_latency_stats(LatencyStats::compute(all_ack_latencies), "Ack");
+        print_latency_stats(
+            ack_latency_snapshot.as_ref(),
+            e2e_latency_snapshot.as_ref(),
+            latency_tables.layout,
+        );
     }
-    if !all_e2e_latencies.is_empty() {
-        eprintln!();
-        print_latency_stats(LatencyStats::compute(all_e2e_latencies), "End-to-End");
+
+    if interrupted {
+        return Ok(());
     }
 
     if let (Some(write_sample), Some(read_sample)) = (write_sample.as_ref(), read_sample.as_ref())
@@ -652,13 +970,11 @@ pub async fn run(
         _ = tokio::signal::ctrl_c() => return Ok(()),
     }
 
-    let catchup_bar = ProgressBar::no_length()
-        .with_prefix(format!("{:width$}", "catchup", width = prefix_width))
-        .with_style(
-            ProgressStyle::default_bar()
-                .template("{prefix:.bold.cyan} {msg}")
-                .expect("valid template"),
-        );
+    let catchup_bar = ProgressBar::no_length().with_style(
+        ProgressStyle::default_bar()
+            .template("{msg}")
+            .expect("valid template"),
+    );
     let mut catchup_sample: Option<BenchReadSample> = None;
     let mut catchup_chain_hash: Option<u64> = None;
     let catchup_stream = bench_read_catchup(stream.clone(), record_size, bench_start);
@@ -666,24 +982,32 @@ pub async fn run(
     let catchup_timeout = Duration::from_secs(300);
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
     loop {
-        match tokio::time::timeout_at(catchup_deadline, catchup_stream.next()).await {
-            Ok(Some(Ok(sample))) => {
-                update_bench_bar(&catchup_bar, &sample);
-                if let Some(hash) = sample.chain_hash {
-                    catchup_chain_hash = Some(hash);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                catchup_bar.finish_and_clear();
+                return Ok(());
+            }
+            next = tokio::time::timeout_at(catchup_deadline, catchup_stream.next()) => {
+                match next {
+                    Ok(Some(Ok(sample))) => {
+                        update_bench_bar(&catchup_bar, "Catchup".bold().cyan(), &sample);
+                        if let Some(hash) = sample.chain_hash {
+                            catchup_chain_hash = Some(hash);
+                        }
+                        catchup_sample = Some(sample);
+                    }
+                    Ok(Some(Err(e))) => {
+                        catchup_bar.finish_and_clear();
+                        return Err(e);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        catchup_bar.finish_and_clear();
+                        return Err(CliError::BenchVerification(
+                            "catchup read timed out after 5 minutes".to_string(),
+                        ));
+                    }
                 }
-                catchup_sample = Some(sample);
-            }
-            Ok(Some(Err(e))) => {
-                catchup_bar.finish_and_clear();
-                return Err(e);
-            }
-            Ok(None) => break,
-            Err(_) => {
-                catchup_bar.finish_and_clear();
-                return Err(CliError::BenchVerification(
-                    "catchup read timed out after 5 minutes".to_string(),
-                ));
             }
         }
     }
@@ -735,34 +1059,77 @@ pub async fn run(
     Ok(())
 }
 
-fn print_latency_stats(stats: LatencyStats, name: &str) {
-    eprintln!("{}", format!("{name} Latency Statistics ").yellow().bold());
+fn print_latency_stats(
+    ack: Option<&LiveLatencySnapshot>,
+    e2e: Option<&LiveLatencySnapshot>,
+    layout: LatencyTableLayout,
+) {
+    for line in format_latency_tables(ack, e2e, layout, true) {
+        eprintln!("{line}");
+    }
+}
 
-    fn stat_duration(key: &str, val: Duration, scale: f64) {
-        let bar = "⠸".repeat((val.as_millis() as f64 * scale).round() as usize);
-        eprintln!(
-            "{:7}: {:>7} │ {}",
-            key,
-            format!("{} ms", val.as_millis()).green().bold(),
-            bar
-        );
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{LatencyTableLayout, StreamingLatencyStats, format_latency_tables};
+
+    #[test]
+    fn streaming_latency_stats_tracks_percentiles() {
+        let mut stats = StreamingLatencyStats::default();
+        stats.extend((1..=10).map(Duration::from_millis));
+
+        let snapshot = stats.snapshot().expect("stats available");
+
+        assert_eq!(snapshot.count, 10);
+        assert_eq!(snapshot.stats.min, Duration::from_millis(1));
+        assert_eq!(snapshot.stats.p50, Duration::from_millis(5));
+        assert_eq!(snapshot.stats.p90, Duration::from_millis(9));
+        assert_eq!(snapshot.stats.p99, Duration::from_millis(10));
+        assert_eq!(snapshot.stats.max, Duration::from_millis(10));
     }
 
-    let stats = stats.into_vec();
-    let max_val = stats
-        .iter()
-        .map(|(_, val)| val)
-        .max()
-        .unwrap_or(&Duration::ZERO);
+    #[test]
+    fn streaming_latency_stats_counts_duplicate_samples() {
+        let mut stats = StreamingLatencyStats::default();
+        stats.extend([
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+        ]);
 
-    let max_bar_len = 50;
-    let scale = if max_val.as_millis() > max_bar_len {
-        max_bar_len as f64 / max_val.as_millis() as f64
-    } else {
-        1.0
-    };
+        let snapshot = stats.snapshot().expect("stats available");
 
-    for (name, val) in stats {
-        stat_duration(&name, val, scale);
+        assert_eq!(snapshot.count, 4);
+        assert_eq!(snapshot.stats.p50, Duration::from_millis(5));
+        assert_eq!(snapshot.stats.p90, Duration::from_millis(10));
+        assert_eq!(snapshot.stats.p99, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn latency_tables_can_render_side_by_side() {
+        let mut ack_stats = StreamingLatencyStats::default();
+        ack_stats.extend((1..=10).map(Duration::from_millis));
+        let ack = ack_stats.snapshot().expect("ack stats available");
+
+        let mut e2e_stats = StreamingLatencyStats::default();
+        e2e_stats.extend((11..=20).map(Duration::from_millis));
+        let e2e = e2e_stats.snapshot().expect("e2e stats available");
+
+        let lines = format_latency_tables(
+            Some(&ack),
+            Some(&e2e),
+            LatencyTableLayout::SideBySide,
+            false,
+        );
+
+        assert_eq!(lines.len(), 6);
+        assert!(lines[0].contains("Ack Latency Statistics (n=10)"));
+        assert!(lines[0].contains("End-to-End Latency Statistics (n=10)"));
+        assert!(lines[1].contains("min"));
+        assert!(lines[1].contains("1.00ms"));
+        assert!(lines[1].contains("11.00ms"));
     }
 }
