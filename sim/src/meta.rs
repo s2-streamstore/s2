@@ -131,8 +131,7 @@ pub fn run(meta: MetaArgs, seed: u64, fail_rate: f64) -> eyre::Result<()> {
             Ok(())
         }
         Err(err) => {
-            tracing::error!("determinism violated: {err}");
-            fs::remove_dir_all(&base).ok();
+            tracing::error!(artifacts = %base.display(), "determinism violated: {err}");
             result.map(|_| ())
         }
     }
