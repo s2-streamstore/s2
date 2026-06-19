@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     num::NonZeroU64,
     pin::Pin,
@@ -12,7 +13,7 @@ use std::{
 use bytes::Bytes;
 use colored::Colorize;
 use futures::{Stream, StreamExt, stream::FuturesUnordered};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
@@ -22,7 +23,10 @@ use s2_sdk::{
         ReadStop, S2Error, SequencedRecord,
     },
 };
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{
+    sync::mpsc,
+    time::{Instant, MissedTickBehavior},
+};
 use xxhash_rust::xxh3::Xxh3Default;
 
 use crate::{
@@ -34,6 +38,8 @@ const HASH_HEADER_NAME: &[u8] = b"hash";
 const HEADER_VALUE_LEN: usize = 8;
 const RECORD_OVERHEAD_BYTES: usize = 8 + 2 + HASH_HEADER_NAME.len() + HEADER_VALUE_LEN;
 const WRITE_DONE_SENTINEL: u64 = u64::MAX;
+const LIVE_UI_REFRESH_MS: u64 = 50;
+const LIVE_UI_REFRESH_HZ: u8 = 20;
 
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
@@ -96,6 +102,180 @@ impl BenchSample for BenchReadSample {
     }
     fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+}
+
+#[derive(Debug, Default)]
+struct StreamingLatencyStats {
+    count: u64,
+    samples: BTreeMap<u64, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveLatencySnapshot {
+    count: u64,
+    stats: LatencyStats,
+}
+
+impl StreamingLatencyStats {
+    fn extend(&mut self, samples: impl IntoIterator<Item = Duration>) {
+        for sample in samples {
+            self.record(sample);
+        }
+    }
+
+    fn record(&mut self, sample: Duration) {
+        self.count += 1;
+        *self.samples.entry(duration_nanos(sample)).or_default() += 1;
+    }
+
+    fn snapshot(&self) -> Option<LiveLatencySnapshot> {
+        if self.count == 0 {
+            return None;
+        }
+
+        let min = duration_from_nanos(*self.samples.keys().next()?);
+        let max = duration_from_nanos(*self.samples.keys().next_back()?);
+        let p50_rank = Self::percentile_rank(self.count, 0.50);
+        let p90_rank = Self::percentile_rank(self.count, 0.90);
+        let p99_rank = Self::percentile_rank(self.count, 0.99);
+
+        let mut seen = 0;
+        let mut p50 = None;
+        let mut p90 = None;
+        let mut p99 = None;
+
+        for (nanos, sample_count) in &self.samples {
+            seen += *sample_count;
+            if p50.is_none() && seen >= p50_rank {
+                p50 = Some(duration_from_nanos(*nanos));
+            }
+            if p90.is_none() && seen >= p90_rank {
+                p90 = Some(duration_from_nanos(*nanos));
+            }
+            if p99.is_none() && seen >= p99_rank {
+                p99 = Some(duration_from_nanos(*nanos));
+                break;
+            }
+        }
+
+        Some(LiveLatencySnapshot {
+            count: self.count,
+            stats: LatencyStats {
+                min,
+                p50: p50.unwrap_or(max),
+                p90: p90.unwrap_or(max),
+                p99: p99.unwrap_or(max),
+                max,
+            },
+        })
+    }
+
+    fn percentile_rank(count: u64, percentile: f64) -> u64 {
+        ((count as f64) * percentile).ceil().max(1.0) as u64
+    }
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn duration_from_nanos(nanos: u64) -> Duration {
+    Duration::from_nanos(nanos)
+}
+
+fn format_latency_duration(duration: Duration) -> String {
+    let nanos = duration_nanos(duration);
+    if nanos < 1_000 {
+        format!("{nanos}ns")
+    } else if nanos < 1_000_000 {
+        format!("{:.1}us", nanos as f64 / 1_000.0)
+    } else if nanos < 1_000_000_000 {
+        format!("{:.2}ms", nanos as f64 / 1_000_000.0)
+    } else {
+        format!("{:.2}s", duration.as_secs_f64())
+    }
+}
+
+fn format_latency_stat_row(key: &str, value: Duration) -> String {
+    format!("{key:7}: {:>9}", format_latency_duration(value))
+}
+
+#[derive(Debug, Clone)]
+struct LiveLatencyBars {
+    title: String,
+    header: ProgressBar,
+    min: ProgressBar,
+    p50: ProgressBar,
+    p90: ProgressBar,
+    p99: ProgressBar,
+    max: ProgressBar,
+}
+
+impl LiveLatencyBars {
+    fn new(multi: &MultiProgress, title: &str) -> Self {
+        fn line(multi: &MultiProgress) -> ProgressBar {
+            multi.add(
+                ProgressBar::no_length().with_style(
+                    ProgressStyle::default_bar()
+                        .template("{msg}")
+                        .expect("valid template"),
+                ),
+            )
+        }
+
+        let bars = Self {
+            title: title.to_owned(),
+            header: line(multi),
+            min: line(multi),
+            p50: line(multi),
+            p90: line(multi),
+            p99: line(multi),
+            max: line(multi),
+        };
+        bars.header
+            .set_message(format!("{title} ").yellow().bold().to_string());
+        bars.set_pending();
+        bars
+    }
+
+    fn set_pending(&self) {
+        self.min.set_message("min    :         -");
+        self.p50.set_message("p50    :         -");
+        self.p90.set_message("p90    :         -");
+        self.p99.set_message("p99    :         -");
+        self.max.set_message("max    :         -");
+    }
+
+    fn update(&self, snapshot: &LiveLatencySnapshot) {
+        self.header.set_message(
+            format!("{} (n={}) ", self.title, snapshot.count)
+                .yellow()
+                .bold()
+                .to_string(),
+        );
+        let LatencyStats {
+            min,
+            p50,
+            p90,
+            p99,
+            max,
+        } = snapshot.stats;
+
+        self.min.set_message(format_latency_stat_row("min", min));
+        self.p50.set_message(format_latency_stat_row("p50", p50));
+        self.p90.set_message(format_latency_stat_row("p90", p90));
+        self.p99.set_message(format_latency_stat_row("p99", p99));
+        self.max.set_message(format_latency_stat_row("max", max));
+    }
+
+    fn finish_and_clear(&self) {
+        self.header.finish_and_clear();
+        self.min.finish_and_clear();
+        self.p50.finish_and_clear();
+        self.p90.finish_and_clear();
+        self.p99.finish_and_clear();
+        self.max.finish_and_clear();
     }
 }
 
@@ -432,51 +612,90 @@ pub async fn run(
 
     let bench_start = Instant::now();
 
-    let multi = MultiProgress::new();
-    let prefix_width = 7;
+    let multi =
+        MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(LIVE_UI_REFRESH_HZ));
 
     let write_bar = multi.add(
-        ProgressBar::no_length()
-            .with_prefix(format!("{:width$}", "write", width = prefix_width))
-            .with_style(
-                ProgressStyle::default_bar()
-                    .template("{prefix:.bold.blue} {msg}")
-                    .expect("valid template"),
-            ),
+        ProgressBar::no_length().with_style(
+            ProgressStyle::default_bar()
+                .template("{msg}")
+                .expect("valid template"),
+        ),
     );
     let read_bar = multi.add(
-        ProgressBar::no_length()
-            .with_prefix(format!("{:width$}", "read", width = prefix_width))
-            .with_style(
+        ProgressBar::no_length().with_style(
+            ProgressStyle::default_bar()
+                .template("{msg}")
+                .expect("valid template"),
+        ),
+    );
+    fn blank_bar(multi: &MultiProgress) -> ProgressBar {
+        multi.add(
+            ProgressBar::no_length().with_style(
                 ProgressStyle::default_bar()
-                    .template("{prefix:.bold.green} {msg}")
+                    .template("{msg}")
                     .expect("valid template"),
             ),
-    );
+        )
+    }
 
-    fn update_bench_bar<T: BenchSample>(bar: &ProgressBar, sample: &T) {
-        const MIBPS_WIDTH: usize = 10;
-        const RECPS_WIDTH: usize = 9;
-        const BYTES_WIDTH: usize = 12;
-        const RECORDS_WIDTH: usize = 12;
+    let ack_gap = blank_bar(&multi);
+    let ack_latency_bars = LiveLatencyBars::new(&multi, "Ack Latency Statistics");
+    let e2e_gap = blank_bar(&multi);
+    let e2e_latency_bars = LiveLatencyBars::new(&multi, "End-to-End Latency Statistics");
 
+    fn update_bench_bar<T: BenchSample>(
+        bar: &ProgressBar,
+        label: impl std::fmt::Display,
+        sample: &T,
+    ) {
         bar.set_message(format!(
-            "{:>mibps_width$.2} MiB/s  {:>recps_width$.0} rec/s | {:>bytes_width$} bytes | {:>records_width$} records",
+            "{label}: {:.2} MiB/s, {:.0} records/s ({} bytes, {} records in {:.2}s)",
             sample.mib_per_sec(),
             sample.records_per_sec(),
             sample.bytes(),
             sample.records(),
-            mibps_width = MIBPS_WIDTH,
-            recps_width = RECPS_WIDTH,
-            bytes_width = BYTES_WIDTH,
-            records_width = RECORDS_WIDTH,
+            sample.elapsed().as_secs_f64(),
         ));
+    }
+
+    fn finish_live_bars(bars: &[&ProgressBar], latency_bars: &[&LiveLatencyBars]) {
+        for bar in bars {
+            bar.finish_and_clear();
+        }
+        for latency_bar in latency_bars {
+            latency_bar.finish_and_clear();
+        }
+    }
+
+    fn update_live_bars(
+        write_bar: &ProgressBar,
+        read_bar: &ProgressBar,
+        ack_latency_bars: &LiveLatencyBars,
+        e2e_latency_bars: &LiveLatencyBars,
+        write_sample: Option<&BenchWriteSample>,
+        read_sample: Option<&BenchReadSample>,
+        ack_latency_stats: &StreamingLatencyStats,
+        e2e_latency_stats: &StreamingLatencyStats,
+    ) {
+        if let Some(sample) = write_sample {
+            update_bench_bar(write_bar, "Write".bold().blue(), sample);
+        }
+        if let Some(sample) = read_sample {
+            update_bench_bar(read_bar, "Read".bold().green(), sample);
+        }
+        if let Some(snapshot) = ack_latency_stats.snapshot() {
+            ack_latency_bars.update(&snapshot);
+        }
+        if let Some(snapshot) = e2e_latency_stats.snapshot() {
+            e2e_latency_bars.update(&snapshot);
+        }
     }
 
     let mut write_sample: Option<BenchWriteSample> = None;
     let mut read_sample: Option<BenchReadSample> = None;
-    let mut all_ack_latencies: Vec<Duration> = Vec::new();
-    let mut all_e2e_latencies: Vec<Duration> = Vec::new();
+    let mut ack_latency_stats = StreamingLatencyStats::default();
+    let mut e2e_latency_stats = StreamingLatencyStats::default();
     let mut write_chain_hash: Option<u64> = None;
     let mut read_chain_hash: Option<u64> = None;
 
@@ -530,31 +749,51 @@ pub async fn run(
     let deadline = bench_start + duration;
     let mut write_done = false;
     let mut read_done = false;
+    let mut interrupted = false;
+    let mut ui_tick = tokio::time::interval(Duration::from_millis(LIVE_UI_REFRESH_MS));
+    ui_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         if write_done && read_done {
             break;
         }
         tokio::select! {
+            _ = ui_tick.tick() => {
+                update_live_bars(
+                    &write_bar,
+                    &read_bar,
+                    &ack_latency_bars,
+                    &e2e_latency_bars,
+                    write_sample.as_ref(),
+                    read_sample.as_ref(),
+                    &ack_latency_stats,
+                    &e2e_latency_stats,
+                );
+            }
             _ = tokio::time::sleep_until(deadline), if !stop.load(Ordering::Relaxed) => {
                 stop.store(true, Ordering::Relaxed);
             }
-            _ = tokio::signal::ctrl_c(), if !stop.load(Ordering::Relaxed) => {
+            _ = tokio::signal::ctrl_c() => {
+                interrupted = true;
                 stop.store(true, Ordering::Relaxed);
+                write_handle.abort();
+                read_handle.abort();
+                break;
             }
             event = rx.recv() => {
                 match event {
                     Some(BenchEvent::Write(Ok(sample))) => {
-                        update_bench_bar(&write_bar, &sample);
-                        all_ack_latencies.extend(sample.ack_latencies.iter().copied());
+                        ack_latency_stats.extend(sample.ack_latencies.iter().copied());
                         if let Some(hash) = sample.chain_hash {
                             write_chain_hash = Some(hash);
                         }
                         write_sample = Some(sample);
                     }
                     Some(BenchEvent::Write(Err(e))) => {
-                        write_bar.finish_and_clear();
-                        read_bar.finish_and_clear();
+                        finish_live_bars(
+                            &[&write_bar, &read_bar, &ack_gap, &e2e_gap],
+                            &[&ack_latency_bars, &e2e_latency_bars],
+                        );
                         stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
@@ -564,16 +803,17 @@ pub async fn run(
                         write_done = true;
                     }
                     Some(BenchEvent::Read(Ok(sample))) => {
-                        update_bench_bar(&read_bar, &sample);
-                        all_e2e_latencies.extend(sample.e2e_latencies.iter().copied());
+                        e2e_latency_stats.extend(sample.e2e_latencies.iter().copied());
                         if let Some(hash) = sample.chain_hash {
                             read_chain_hash = Some(hash);
                         }
                         read_sample = Some(sample);
                     }
                     Some(BenchEvent::Read(Err(e))) => {
-                        write_bar.finish_and_clear();
-                        read_bar.finish_and_clear();
+                        finish_live_bars(
+                            &[&write_bar, &read_bar, &ack_gap, &e2e_gap],
+                            &[&ack_latency_bars, &e2e_latency_bars],
+                        );
                         stop.store(true, Ordering::Relaxed);
                         write_handle.abort();
                         read_handle.abort();
@@ -592,8 +832,18 @@ pub async fn run(
     let _ = write_handle.await;
     let _ = read_handle.await;
 
-    write_bar.finish_and_clear();
-    read_bar.finish_and_clear();
+    finish_live_bars(
+        &[&write_bar, &read_bar, &ack_gap, &e2e_gap],
+        &[&ack_latency_bars, &e2e_latency_bars],
+    );
+
+    if interrupted {
+        eprintln!();
+        eprintln!(
+            "{}",
+            "Interrupted by Ctrl+C; showing partial results.".yellow()
+        );
+    }
 
     eprintln!();
     if let Some(sample) = &write_sample {
@@ -619,13 +869,17 @@ pub async fn run(
         );
     }
 
-    if !all_ack_latencies.is_empty() {
+    if let Some(snapshot) = ack_latency_stats.snapshot() {
         eprintln!();
-        print_latency_stats(LatencyStats::compute(all_ack_latencies), "Ack");
+        print_latency_stats(snapshot.stats, "Ack");
     }
-    if !all_e2e_latencies.is_empty() {
+    if let Some(snapshot) = e2e_latency_stats.snapshot() {
         eprintln!();
-        print_latency_stats(LatencyStats::compute(all_e2e_latencies), "End-to-End");
+        print_latency_stats(snapshot.stats, "End-to-End");
+    }
+
+    if interrupted {
+        return Ok(());
     }
 
     if let (Some(write_sample), Some(read_sample)) = (write_sample.as_ref(), read_sample.as_ref())
@@ -652,13 +906,11 @@ pub async fn run(
         _ = tokio::signal::ctrl_c() => return Ok(()),
     }
 
-    let catchup_bar = ProgressBar::no_length()
-        .with_prefix(format!("{:width$}", "catchup", width = prefix_width))
-        .with_style(
-            ProgressStyle::default_bar()
-                .template("{prefix:.bold.cyan} {msg}")
-                .expect("valid template"),
-        );
+    let catchup_bar = ProgressBar::no_length().with_style(
+        ProgressStyle::default_bar()
+            .template("{msg}")
+            .expect("valid template"),
+    );
     let mut catchup_sample: Option<BenchReadSample> = None;
     let mut catchup_chain_hash: Option<u64> = None;
     let catchup_stream = bench_read_catchup(stream.clone(), record_size, bench_start);
@@ -666,24 +918,32 @@ pub async fn run(
     let catchup_timeout = Duration::from_secs(300);
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
     loop {
-        match tokio::time::timeout_at(catchup_deadline, catchup_stream.next()).await {
-            Ok(Some(Ok(sample))) => {
-                update_bench_bar(&catchup_bar, &sample);
-                if let Some(hash) = sample.chain_hash {
-                    catchup_chain_hash = Some(hash);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                catchup_bar.finish_and_clear();
+                return Ok(());
+            }
+            next = tokio::time::timeout_at(catchup_deadline, catchup_stream.next()) => {
+                match next {
+                    Ok(Some(Ok(sample))) => {
+                        update_bench_bar(&catchup_bar, "Catchup".bold().cyan(), &sample);
+                        if let Some(hash) = sample.chain_hash {
+                            catchup_chain_hash = Some(hash);
+                        }
+                        catchup_sample = Some(sample);
+                    }
+                    Ok(Some(Err(e))) => {
+                        catchup_bar.finish_and_clear();
+                        return Err(e);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        catchup_bar.finish_and_clear();
+                        return Err(CliError::BenchVerification(
+                            "catchup read timed out after 5 minutes".to_string(),
+                        ));
+                    }
                 }
-                catchup_sample = Some(sample);
-            }
-            Ok(Some(Err(e))) => {
-                catchup_bar.finish_and_clear();
-                return Err(e);
-            }
-            Ok(None) => break,
-            Err(_) => {
-                catchup_bar.finish_and_clear();
-                return Err(CliError::BenchVerification(
-                    "catchup read timed out after 5 minutes".to_string(),
-                ));
             }
         }
     }
@@ -738,31 +998,55 @@ pub async fn run(
 fn print_latency_stats(stats: LatencyStats, name: &str) {
     eprintln!("{}", format!("{name} Latency Statistics ").yellow().bold());
 
-    fn stat_duration(key: &str, val: Duration, scale: f64) {
-        let bar = "⠸".repeat((val.as_millis() as f64 * scale).round() as usize);
+    fn stat_duration(key: &str, val: Duration) {
         eprintln!(
-            "{:7}: {:>7} │ {}",
+            "{:7}: {:>9}",
             key,
-            format!("{} ms", val.as_millis()).green().bold(),
-            bar
+            format_latency_duration(val).green().bold(),
         );
     }
 
-    let stats = stats.into_vec();
-    let max_val = stats
-        .iter()
-        .map(|(_, val)| val)
-        .max()
-        .unwrap_or(&Duration::ZERO);
+    for (name, val) in stats.into_vec() {
+        stat_duration(&name, val);
+    }
+}
 
-    let max_bar_len = 50;
-    let scale = if max_val.as_millis() > max_bar_len {
-        max_bar_len as f64 / max_val.as_millis() as f64
-    } else {
-        1.0
-    };
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
 
-    for (name, val) in stats {
-        stat_duration(&name, val, scale);
+    use super::StreamingLatencyStats;
+
+    #[test]
+    fn streaming_latency_stats_tracks_percentiles() {
+        let mut stats = StreamingLatencyStats::default();
+        stats.extend((1..=10).map(Duration::from_millis));
+
+        let snapshot = stats.snapshot().expect("stats available");
+
+        assert_eq!(snapshot.count, 10);
+        assert_eq!(snapshot.stats.min, Duration::from_millis(1));
+        assert_eq!(snapshot.stats.p50, Duration::from_millis(5));
+        assert_eq!(snapshot.stats.p90, Duration::from_millis(9));
+        assert_eq!(snapshot.stats.p99, Duration::from_millis(10));
+        assert_eq!(snapshot.stats.max, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn streaming_latency_stats_counts_duplicate_samples() {
+        let mut stats = StreamingLatencyStats::default();
+        stats.extend([
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+        ]);
+
+        let snapshot = stats.snapshot().expect("stats available");
+
+        assert_eq!(snapshot.count, 4);
+        assert_eq!(snapshot.stats.p50, Duration::from_millis(5));
+        assert_eq!(snapshot.stats.p90, Duration::from_millis(10));
+        assert_eq!(snapshot.stats.p99, Duration::from_millis(10));
     }
 }
