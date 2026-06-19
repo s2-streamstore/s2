@@ -110,19 +110,19 @@ impl BenchSample for BenchReadSample {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct StreamingLatencyStats {
+pub struct StreamingLatencyStats {
     count: u64,
     samples: BTreeMap<u64, u64>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LiveLatencySnapshot {
-    pub(crate) count: u64,
-    pub(crate) stats: LatencyStats,
+pub struct LiveLatencySnapshot {
+    pub count: u64,
+    pub stats: LatencyStats,
 }
 
 impl StreamingLatencyStats {
-    pub(crate) fn extend(&mut self, samples: impl IntoIterator<Item = Duration>) {
+    pub fn extend(&mut self, samples: impl IntoIterator<Item = Duration>) {
         for sample in samples {
             self.record(sample);
         }
@@ -133,7 +133,7 @@ impl StreamingLatencyStats {
         *self.samples.entry(duration_nanos(sample)).or_default() += 1;
     }
 
-    pub(crate) fn snapshot(&self) -> Option<LiveLatencySnapshot> {
+    pub fn snapshot(&self) -> Option<LiveLatencySnapshot> {
         if self.count == 0 {
             return None;
         }
@@ -197,9 +197,16 @@ fn format_latency_duration(duration: Duration) -> String {
     }
 }
 
-fn format_latency_stat_row(key: &str, value: Option<Duration>) -> String {
+fn format_latency_stat_row(key: &str, value: Option<Duration>, colored: bool) -> String {
     match value {
-        Some(value) => format!("{key:7}: {:>9}", format_latency_duration(value)),
+        Some(value) => {
+            let formatted = format_latency_duration(value);
+            if colored {
+                format!("{key:7}: {:>9}", formatted.green().bold())
+            } else {
+                format!("{key:7}: {:>9}", formatted)
+            }
+        }
         None => format!("{key:7}: {:>9}", "-"),
     }
 }
@@ -230,15 +237,15 @@ fn latency_header(title: &str, snapshot: Option<&LiveLatencySnapshot>) -> String
     )
 }
 
-fn latency_table_rows(snapshot: Option<&LiveLatencySnapshot>) -> Vec<String> {
+fn latency_table_rows(snapshot: Option<&LiveLatencySnapshot>, colored: bool) -> Vec<String> {
     let stats = snapshot.map(|snapshot| &snapshot.stats);
 
     vec![
-        format_latency_stat_row("min", stats.map(|stats| stats.min)),
-        format_latency_stat_row("p50", stats.map(|stats| stats.p50)),
-        format_latency_stat_row("p90", stats.map(|stats| stats.p90)),
-        format_latency_stat_row("p99", stats.map(|stats| stats.p99)),
-        format_latency_stat_row("max", stats.map(|stats| stats.max)),
+        format_latency_stat_row("min", stats.map(|stats| stats.min), colored),
+        format_latency_stat_row("p50", stats.map(|stats| stats.p50), colored),
+        format_latency_stat_row("p90", stats.map(|stats| stats.p90), colored),
+        format_latency_stat_row("p99", stats.map(|stats| stats.p99), colored),
+        format_latency_stat_row("max", stats.map(|stats| stats.max), colored),
     ]
 }
 
@@ -261,11 +268,14 @@ fn format_latency_tables(
     ack: Option<&LiveLatencySnapshot>,
     e2e: Option<&LiveLatencySnapshot>,
     layout: LatencyTableLayout,
+    colored: bool,
 ) -> Vec<String> {
+    // Side-by-side layout uses fixed-width padding that ANSI codes would break.
+    let color_values = colored && matches!(layout, LatencyTableLayout::Stacked);
     let ack_header = latency_header("Ack Latency Statistics", ack);
     let e2e_header = latency_header("End-to-End Latency Statistics", e2e);
-    let ack_rows = latency_table_rows(ack);
-    let e2e_rows = latency_table_rows(e2e);
+    let ack_rows = latency_table_rows(ack, color_values);
+    let e2e_rows = latency_table_rows(e2e, color_values);
 
     match layout {
         LatencyTableLayout::SideBySide => {
@@ -327,10 +337,10 @@ impl LiveLatencyTables {
     }
 
     fn update(&self, ack: Option<&LiveLatencySnapshot>, e2e: Option<&LiveLatencySnapshot>) {
-        for (bar, line) in self
-            .lines
-            .iter()
-            .zip(format_latency_tables(ack, e2e, self.layout))
+        for (bar, line) in
+            self.lines
+                .iter()
+                .zip(format_latency_tables(ack, e2e, self.layout, false))
         {
             bar.set_message(line);
         }
@@ -728,7 +738,6 @@ pub async fn run(
         latency_tables.finish_and_clear();
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn update_live_bars(
         write_bar: &ProgressBar,
         read_bar: &ProgressBar,
@@ -1055,7 +1064,7 @@ fn print_latency_stats(
     e2e: Option<&LiveLatencySnapshot>,
     layout: LatencyTableLayout,
 ) {
-    for line in format_latency_tables(ack, e2e, layout) {
+    for line in format_latency_tables(ack, e2e, layout, true) {
         eprintln!("{line}");
     }
 }
@@ -1109,7 +1118,12 @@ mod tests {
         e2e_stats.extend((11..=20).map(Duration::from_millis));
         let e2e = e2e_stats.snapshot().expect("e2e stats available");
 
-        let lines = format_latency_tables(Some(&ack), Some(&e2e), LatencyTableLayout::SideBySide);
+        let lines = format_latency_tables(
+            Some(&ack),
+            Some(&e2e),
+            LatencyTableLayout::SideBySide,
+            false,
+        );
 
         assert_eq!(lines.len(), 6);
         assert!(lines[0].contains("Ack Latency Statistics (n=10)"));
