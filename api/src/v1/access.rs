@@ -205,7 +205,6 @@ impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
     }
 }
 
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

@@ -351,7 +351,6 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
     }
 }
 
-
 impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
     type Error = s2_common::ValidationError;
 
