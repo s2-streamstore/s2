@@ -1986,37 +1986,6 @@ fn render_area_chart(
     f.render_widget(chart_para, area);
 }
 
-/// Render a sparkline with gradient coloring (unused but kept for reference)
-#[allow(dead_code)]
-fn render_sparkline_gradient(values: &[(u32, f64)], width: usize) -> String {
-    if values.is_empty() {
-        return "-".repeat(width);
-    }
-    let spark_chars = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-    let values_only: Vec<f64> = values.iter().map(|(_, v)| *v).collect();
-    let min_val = values_only.iter().cloned().fold(f64::MAX, f64::min);
-    let max_val = values_only.iter().cloned().fold(f64::MIN, f64::max);
-    let range = max_val - min_val;
-    let step = values_only.len() as f64 / width as f64;
-    let mut sparkline = String::new();
-
-    for i in 0..width {
-        let idx = (i as f64 * step) as usize;
-        let val = values_only.get(idx).cloned().unwrap_or(0.0);
-
-        let normalized = if range > 0.0 {
-            ((val - min_val) / range).clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-
-        let char_idx = (normalized * (spark_chars.len() - 1) as f64) as usize;
-        sparkline.push(spark_chars[char_idx]);
-    }
-
-    sparkline
-}
 /// Format timestamp in short form for bar chart
 fn format_metric_timestamp_short(ts: u32) -> String {
     use std::time::{Duration, UNIX_EPOCH};
