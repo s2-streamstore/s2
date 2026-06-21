@@ -8,7 +8,6 @@ pub mod basins {
     pub const DELETE: &str = "/basins/{basin}";
     pub const GET_CONFIG: &str = "/basins/{basin}";
     pub const RECONFIGURE: &str = "/basins/{basin}";
-    pub const METRICS: &str = "/basins/metrics";
 }
 
 pub mod metrics {
