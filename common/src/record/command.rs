@@ -6,9 +6,6 @@ use compact_str::CompactString;
 use super::{FencingTokenTooLongError, MeteredSize, fencing::FencingToken};
 use crate::{deep_size::DeepSize, record::SeqNum};
 
-pub const COMMAND_ID_FENCE: &[u8] = b"fence";
-pub const COMMAND_ID_TRIM: &[u8] = b"trim";
-
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CommandOp {
     Fence,
@@ -18,15 +15,15 @@ pub enum CommandOp {
 impl CommandOp {
     pub fn to_id(self) -> &'static [u8] {
         match self {
-            Self::Fence => COMMAND_ID_FENCE,
-            Self::Trim => COMMAND_ID_TRIM,
+            Self::Fence => b"fence",
+            Self::Trim => b"trim",
         }
     }
 
     pub fn from_id(name: &[u8]) -> Option<Self> {
         match name {
-            COMMAND_ID_FENCE => Some(Self::Fence),
-            COMMAND_ID_TRIM => Some(Self::Trim),
+            b"fence" => Some(Self::Fence),
+            b"trim" => Some(Self::Trim),
             _ => None,
         }
     }
