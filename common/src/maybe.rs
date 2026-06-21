@@ -89,21 +89,6 @@ impl<T> Maybe<Option<T>> {
         }
     }
 
-    pub fn opt_or_default_mut(&mut self) -> &mut T
-    where
-        T: Default,
-    {
-        match self {
-            Maybe::Unspecified | Maybe::Specified(None) => {
-                *self = Self::Specified(Some(T::default()));
-                match self {
-                    Self::Specified(Some(x)) => x,
-                    _ => unreachable!(),
-                }
-            }
-            Maybe::Specified(Some(x)) => x,
-        }
-    }
 }
 
 impl<T> From<T> for Maybe<T> {
