@@ -351,27 +351,6 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
     }
 }
 
-impl From<s2_common::config::OptionalStreamConfig> for StreamConfig {
-    fn from(value: s2_common::config::OptionalStreamConfig) -> Self {
-        let s2_common::config::OptionalStreamConfig {
-            storage_class,
-            retention_policy,
-            timestamping,
-            delete_on_empty,
-        } = value;
-
-        let timestamping = (timestamping.mode.is_some() || timestamping.uncapped.is_some())
-            .then(|| timestamping.into());
-        let delete_on_empty = delete_on_empty.min_age.map(|_| delete_on_empty.into());
-
-        Self {
-            storage_class: storage_class.map(Into::into),
-            retention_policy: retention_policy.map(Into::into),
-            timestamping,
-            delete_on_empty,
-        }
-    }
-}
 
 impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
     type Error = s2_common::ValidationError;
@@ -1037,22 +1016,6 @@ mod tests {
     }
 
     #[test]
-    fn optional_stream_config_into_api_preserves_explicit_zero_delete_on_empty() {
-        let api: StreamConfig = s2_common::config::OptionalStreamConfig {
-            delete_on_empty: s2_common::config::OptionalDeleteOnEmptyConfig {
-                min_age: Some(Duration::ZERO),
-            },
-            ..Default::default()
-        }
-        .into();
-
-        assert_eq!(
-            api.delete_on_empty,
-            Some(DeleteOnEmptyConfig { min_age_secs: 0 })
-        );
-    }
-
-    #[test]
     fn optional_stream_config_to_opt_preserves_explicit_zero_delete_on_empty() {
         let api = StreamConfig::to_opt(s2_common::config::OptionalStreamConfig {
             delete_on_empty: s2_common::config::OptionalDeleteOnEmptyConfig {
@@ -1065,26 +1028,6 @@ mod tests {
         assert_eq!(
             api.delete_on_empty,
             Some(DeleteOnEmptyConfig { min_age_secs: 0 })
-        );
-    }
-
-    #[test]
-    fn optional_stream_config_into_api_preserves_nested_timestamping_omission() {
-        let api: StreamConfig = s2_common::config::OptionalStreamConfig {
-            timestamping: s2_common::config::OptionalTimestampingConfig {
-                mode: Some(s2_common::config::TimestampingMode::Arrival),
-                uncapped: None,
-            },
-            ..Default::default()
-        }
-        .into();
-
-        assert_eq!(
-            api.timestamping,
-            Some(TimestampingConfig {
-                mode: Some(TimestampingMode::Arrival),
-                uncapped: None
-            })
         );
     }
 
