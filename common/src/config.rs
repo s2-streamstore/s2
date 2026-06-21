@@ -180,7 +180,6 @@ impl From<TimestampingConfig> for OptionalTimestampingConfig {
     }
 }
 
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalDeleteOnEmptyConfig {
     pub min_age: Option<Duration>,
@@ -215,7 +214,6 @@ impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalStreamConfig {
@@ -282,7 +280,6 @@ impl OptionalStreamConfig {
         }
     }
 }
-
 
 impl From<OptionalStreamConfig> for StreamConfig {
     fn from(value: OptionalStreamConfig) -> Self {
@@ -362,7 +359,6 @@ impl BasinConfig {
         self
     }
 }
-
 
 #[derive(Debug, Clone, Default)]
 pub struct BasinReconfiguration {
