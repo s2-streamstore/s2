@@ -88,7 +88,6 @@ impl<T> Maybe<Option<T>> {
             },
         }
     }
-
 }
 
 impl<T> From<T> for Maybe<T> {
