@@ -46,21 +46,6 @@ pub struct AccountMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest {
-    fn from(value: AccountMetricSetRequest) -> Self {
-        Self {
-            set: match value.set {
-                AccountMetricSet::ActiveBasins => {
-                    s2_common::metrics::AccountMetricSet::ActiveBasins
-                }
-                AccountMetricSet::AccountOps => s2_common::metrics::AccountMetricSet::AccountOps,
-            },
-            start: value.start,
-            end: value.end,
-            interval: value.interval.map(Into::into),
-        }
-    }
-}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,27 +73,6 @@ pub struct BasinMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-impl From<BasinMetricSetRequest> for s2_common::metrics::BasinMetricsRequest {
-    fn from(value: BasinMetricSetRequest) -> Self {
-        Self {
-            set: match value.set {
-                BasinMetricSet::AppendOps => s2_common::metrics::BasinMetricSet::AppendOps,
-                BasinMetricSet::AppendThroughput => {
-                    s2_common::metrics::BasinMetricSet::AppendThroughput
-                }
-                BasinMetricSet::BasinOps => s2_common::metrics::BasinMetricSet::BasinOps,
-                BasinMetricSet::ReadOps => s2_common::metrics::BasinMetricSet::ReadOps,
-                BasinMetricSet::ReadThroughput => {
-                    s2_common::metrics::BasinMetricSet::ReadThroughput
-                }
-                BasinMetricSet::Storage => s2_common::metrics::BasinMetricSet::Storage,
-            },
-            start: value.start,
-            end: value.end,
-            interval: value.interval.map(Into::into),
-        }
-    }
-}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,18 +108,6 @@ pub struct StreamMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-impl From<StreamMetricSetRequest> for s2_common::metrics::StreamMetricsRequest {
-    fn from(value: StreamMetricSetRequest) -> Self {
-        Self {
-            set: match value.set {
-                StreamMetricSet::Storage => s2_common::metrics::StreamMetricSet::Storage,
-            },
-            start: value.start,
-            end: value.end,
-            interval: value.interval.map(Into::into),
-        }
-    }
-}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,10 +268,3 @@ pub struct MetricSetResponse {
     pub values: Vec<Metric>,
 }
 
-impl From<s2_common::metrics::MetricsResponse> for MetricSetResponse {
-    fn from(value: s2_common::metrics::MetricsResponse) -> Self {
-        Self {
-            values: value.values.into_iter().map(Into::into).collect(),
-        }
-    }
-}
