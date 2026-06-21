@@ -130,10 +130,6 @@ where
         }
     }
 
-    pub fn reserve(&mut self, additional: usize) {
-        self.inner.reserve(additional);
-    }
-
     pub fn push(&mut self, item: Metered<T>) {
         self.inner.push(item.inner);
         self.size += item.size;
