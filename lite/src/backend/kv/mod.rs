@@ -31,8 +31,6 @@ pub enum DeserializationError {
     InvalidValue { name: &'static str, error: String },
     #[error("missing field separator")]
     MissingFieldSeparator,
-    #[error("json serialization error: {0}")]
-    JsonSerialization(String),
     #[error("json deserialization error: {0}")]
     JsonDeserialization(String),
 }
