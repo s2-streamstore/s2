@@ -39,8 +39,3 @@ impl From<[u8; StreamId::LEN]> for StreamId {
     }
 }
 
-impl From<StreamId> for [u8; StreamId::LEN] {
-    fn from(id: StreamId) -> Self {
-        id.0.into()
-    }
-}
