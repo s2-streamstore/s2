@@ -104,6 +104,7 @@ impl<'de> Deserialize<'de> for BasinInfo {
             created_at,
             deleted_at,
         } = BasinInfoSerde::deserialize(deserializer)?;
+
         let state = basin_state_for_deleted_at(deleted_at.as_ref());
 
         Ok(Self {

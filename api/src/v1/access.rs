@@ -205,17 +205,6 @@ impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
     }
 }
 
-impl From<s2_common::access::IssueAccessTokenRequest> for AccessTokenInfo {
-    fn from(value: s2_common::access::IssueAccessTokenRequest) -> Self {
-        Self {
-            id: value.id,
-            expires_at: value.expires_at,
-            auto_prefix_streams: Some(value.auto_prefix_streams),
-            scope: value.scope.into(),
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -440,56 +429,7 @@ pub struct IssueAccessTokenResponse {
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
-
     use super::*;
-
-    fn random_basin_resource_set() -> impl Strategy<Value = serde_json::Value> {
-        prop_oneof![
-            Just(serde_json::json!({"exact": ""})),
-            "[a-z][a-z0-9]{7,20}".prop_map(|s| serde_json::json!({"exact": s})),
-            Just(serde_json::json!({"prefix": ""})),
-            "[a-z][a-z0-9]{0,10}".prop_map(|s| serde_json::json!({"prefix": s})),
-        ]
-    }
-
-    fn random_resource_set() -> impl Strategy<Value = serde_json::Value> {
-        prop_oneof![
-            Just(serde_json::json!({"exact": ""})),
-            "[a-z][a-z0-9]{0,20}".prop_map(|s| serde_json::json!({"exact": s})),
-            Just(serde_json::json!({"prefix": ""})),
-            "[a-z][a-z0-9]{0,10}".prop_map(|s| serde_json::json!({"prefix": s})),
-        ]
-    }
-
-    fn random_access_token_info() -> impl Strategy<Value = serde_json::Value> {
-        (
-            "[a-z][a-z0-9]{0,20}",
-            proptest::option::of(random_basin_resource_set()),
-            proptest::option::of(random_resource_set()),
-            proptest::option::of(random_resource_set()),
-        )
-            .prop_map(|(id, basins, streams, access_tokens)| {
-                serde_json::json!({
-                    "id": id,
-                    "scope": {
-                        "basins": basins,
-                        "streams": streams,
-                        "access_tokens": access_tokens
-                    }
-                })
-            })
-    }
-
-    proptest! {
-        #[test]
-        fn access_token_info_roundtrip(json in random_access_token_info()) {
-            let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
-            let internal: s2_common::access::IssueAccessTokenRequest = parsed.clone().try_into().unwrap();
-            let back: AccessTokenInfo = internal.into();
-            prop_assert_eq!(parsed.id, back.id);
-        }
-    }
 
     #[test]
     fn empty_exact_converts_to_resource_set_none() {
