@@ -46,7 +46,6 @@ pub struct AccountMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -72,7 +71,6 @@ pub struct BasinMetricSetRequest {
     /// Interval to aggregate over for timeseries metric sets.
     pub interval: Option<TimeseriesInterval>,
 }
-
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +105,6 @@ pub struct StreamMetricSetRequest {
     /// Interval to aggregate over for timeseries metric sets.
     pub interval: Option<TimeseriesInterval>,
 }
-
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,4 +264,3 @@ pub struct MetricSetResponse {
     /// Metrics comprising the set.
     pub values: Vec<Metric>,
 }
-

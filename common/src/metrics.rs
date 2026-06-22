@@ -51,4 +51,3 @@ pub enum Metric {
     Gauge(GaugeMetric),
     Label(LabelMetric),
 }
-
