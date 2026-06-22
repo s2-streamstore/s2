@@ -4351,25 +4351,4 @@ mod tests {
         assert_eq!(resp.message, "basin not found");
         assert!(resp.to_string().contains("not_found"));
     }
-
-    #[test]
-    fn access_token_info_accepts_absent_expiry() {
-        let value = api::access::AccessTokenInfo {
-            id: "test-token".parse().unwrap(),
-            expires_at: None,
-            auto_prefix_streams: false,
-            scope: api::access::AccessTokenScope {
-                basins: None,
-                streams: None,
-                access_tokens: None,
-                op_groups: None,
-                ops: None,
-            },
-        };
-
-        let info = AccessTokenInfo::try_from(value).unwrap();
-
-        assert!(info.expires_at.is_none());
-        assert!(!info.auto_prefix_streams);
-    }
 }

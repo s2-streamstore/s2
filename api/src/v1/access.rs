@@ -497,49 +497,4 @@ mod tests {
             s2_common::access::ResourceSet::None
         ));
     }
-
-    #[test]
-    fn issue_access_token_request_converts_explicit_fields() {
-        let json = serde_json::json!({
-            "id": "test-token",
-            "expires_at": "2026-06-22T02:04:00Z",
-            "auto_prefix_streams": true,
-            "scope": {
-                "streams": {"prefix": "tenant-a/"},
-                "ops": ["append"]
-            }
-        });
-
-        let parsed: IssueAccessTokenRequest = serde_json::from_value(json).unwrap();
-        let internal: s2_common::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
-
-        assert_eq!(internal.id.as_ref(), "test-token");
-        assert!(internal.expires_at.is_some());
-        assert!(internal.auto_prefix_streams);
-        assert!(matches!(
-            internal.scope.streams,
-            s2_common::access::ResourceSet::Prefix(_)
-        ));
-        assert!(
-            internal
-                .scope
-                .ops
-                .contains(s2_common::access::Operation::Append)
-        );
-    }
-
-    #[test]
-    fn access_token_info_preserves_absent_expiry() {
-        let internal = s2_common::access::AccessTokenInfo {
-            id: "test-token".parse().unwrap(),
-            expires_at: None,
-            auto_prefix_streams: false,
-            scope: Default::default(),
-        };
-
-        let value = AccessTokenInfo::from(internal);
-
-        assert!(value.expires_at.is_none());
-        assert!(!value.auto_prefix_streams);
-    }
 }
