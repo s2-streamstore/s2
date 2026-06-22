@@ -167,6 +167,33 @@ impl From<s2_common::access::Operation> for Operation {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AccessTokenInfo {
     /// Access token ID.
+    pub id: AccessTokenId,
+    /// Expiration time in RFC 3339 format.
+    #[serde(with = "time::serde::rfc3339")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    pub expires_at: OffsetDateTime,
+    /// Namespace streams based on the configured stream-level scope.
+    pub auto_prefix_streams: bool,
+    /// Access token scope.
+    pub scope: AccessTokenScope,
+}
+
+impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
+    fn from(value: s2_common::access::AccessTokenInfo) -> Self {
+        Self {
+            id: value.id,
+            expires_at: value.expires_at,
+            auto_prefix_streams: value.auto_prefix_streams,
+            scope: value.scope.into(),
+        }
+    }
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct IssueAccessTokenRequest {
+    /// Access token ID.
     /// It must be unique to the account and between 1 and 96 bytes in length.
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
@@ -181,27 +208,16 @@ pub struct AccessTokenInfo {
     pub scope: AccessTokenScope,
 }
 
-impl TryFrom<AccessTokenInfo> for s2_common::access::IssueAccessTokenRequest {
+impl TryFrom<IssueAccessTokenRequest> for s2_common::access::IssueAccessTokenRequest {
     type Error = s2_common::ValidationError;
 
-    fn try_from(value: AccessTokenInfo) -> Result<Self, Self::Error> {
+    fn try_from(value: IssueAccessTokenRequest) -> Result<Self, Self::Error> {
         Ok(Self {
             id: value.id,
             expires_at: value.expires_at,
             auto_prefix_streams: value.auto_prefix_streams.unwrap_or_default(),
             scope: value.scope.try_into()?,
         })
-    }
-}
-
-impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
-    fn from(value: s2_common::access::AccessTokenInfo) -> Self {
-        Self {
-            id: value.id,
-            expires_at: Some(value.expires_at),
-            auto_prefix_streams: Some(value.auto_prefix_streams),
-            scope: value.scope.into(),
-        }
     }
 }
 
@@ -442,7 +458,7 @@ mod tests {
             }
         });
 
-        let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
+        let parsed: IssueAccessTokenRequest = serde_json::from_value(json).unwrap();
         let internal: s2_common::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
 
         assert!(matches!(
@@ -466,7 +482,7 @@ mod tests {
             "scope": {}
         });
 
-        let parsed: AccessTokenInfo = serde_json::from_value(json).unwrap();
+        let parsed: IssueAccessTokenRequest = serde_json::from_value(json).unwrap();
         let internal: s2_common::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
 
         assert!(matches!(
@@ -481,5 +497,35 @@ mod tests {
             internal.scope.access_tokens,
             s2_common::access::ResourceSet::None
         ));
+    }
+
+    #[test]
+    fn issue_access_token_request_converts_explicit_fields() {
+        let json = serde_json::json!({
+            "id": "test-token",
+            "expires_at": "2026-06-22T02:04:00Z",
+            "auto_prefix_streams": true,
+            "scope": {
+                "streams": {"prefix": "tenant-a/"},
+                "ops": ["append"]
+            }
+        });
+
+        let parsed: IssueAccessTokenRequest = serde_json::from_value(json).unwrap();
+        let internal: s2_common::access::IssueAccessTokenRequest = parsed.try_into().unwrap();
+
+        assert_eq!(internal.id.as_ref(), "test-token");
+        assert!(internal.expires_at.is_some());
+        assert!(internal.auto_prefix_streams);
+        assert!(matches!(
+            internal.scope.streams,
+            s2_common::access::ResourceSet::Prefix(_)
+        ));
+        assert!(
+            internal
+                .scope
+                .ops
+                .contains(s2_common::access::Operation::Append)
+        );
     }
 }

@@ -12,7 +12,7 @@ use http::{
 use prost::{self, Message};
 use s2_api::v1::{
     access::{
-        AccessTokenInfo, IssueAccessTokenResponse, ListAccessTokensRequest,
+        IssueAccessTokenRequest, IssueAccessTokenResponse, ListAccessTokensRequest,
         ListAccessTokensResponse,
     },
     basin::{
@@ -91,10 +91,10 @@ impl AccountClient {
 
     pub async fn issue_access_token(
         &self,
-        info: AccessTokenInfo,
+        request: IssueAccessTokenRequest,
     ) -> Result<IssueAccessTokenResponse, ApiError> {
         let url = self.uri("v1/access-tokens");
-        let request = self.post(url).json(&info).build()?;
+        let request = self.post(url).json(&request).build()?;
         let response = self.request(request).send().await?;
         Ok(response.json::<IssueAccessTokenResponse>()?)
     }

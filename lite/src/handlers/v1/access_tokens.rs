@@ -47,7 +47,7 @@ pub async fn list_access_tokens(
 #[from_request(rejection(ServiceError))]
 pub struct IssueArgs {
     #[from_request(via(Json))]
-    _request: v1t::access::AccessTokenInfo,
+    _request: v1t::access::IssueAccessTokenRequest,
 }
 
 /// Issue a new access token.
@@ -55,7 +55,7 @@ pub struct IssueArgs {
     post,
     path = super::paths::access_tokens::ISSUE,
     tag = super::paths::access_tokens::TAG,
-    request_body = v1t::access::AccessTokenInfo,
+    request_body = v1t::access::IssueAccessTokenRequest,
     responses(
         (status = StatusCode::CREATED, body = v1t::access::IssueAccessTokenResponse),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

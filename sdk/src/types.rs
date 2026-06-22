@@ -1575,15 +1575,10 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
     type Error = ValidationError;
 
     fn try_from(value: api::access::AccessTokenInfo) -> Result<Self, Self::Error> {
-        let expires_at = value
-            .expires_at
-            .map(S2DateTime::try_from)
-            .transpose()?
-            .ok_or_else(|| ValidationError::from("missing expires_at"))?;
         Ok(Self {
             id: value.id,
-            expires_at,
-            auto_prefix_streams: value.auto_prefix_streams.unwrap_or(false),
+            expires_at: value.expires_at.try_into()?,
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         })
     }
@@ -2140,7 +2135,7 @@ impl IssueAccessTokenInput {
     }
 }
 
-impl From<IssueAccessTokenInput> for api::access::AccessTokenInfo {
+impl From<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
     fn from(value: IssueAccessTokenInput) -> Self {
         Self {
             id: value.id,
