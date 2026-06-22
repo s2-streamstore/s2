@@ -892,7 +892,9 @@ fn format_compact_row(row: &[String], widths: &[usize], right_aligned_columns: &
             line.push_str(cell);
         } else {
             line.push_str(cell);
-            line.push_str(&" ".repeat(padding));
+            if idx + 1 < row.len() {
+                line.push_str(&" ".repeat(padding));
+            }
         }
     }
     line
@@ -1057,6 +1059,19 @@ mod tests {
         assert_eq!(
             format_compact_table(&["name", "count"], &rows, &[1]),
             "name   count\nalpha      9"
+        );
+    }
+
+    #[test]
+    fn compact_table_does_not_pad_last_column() {
+        let rows = vec![
+            vec!["a".to_owned(), "x".to_owned()],
+            vec!["bb".to_owned(), "yy".to_owned()],
+        ];
+
+        assert_eq!(
+            format_compact_table(&["k", "v"], &rows, &[]),
+            "k   v\na   x\nbb  yy"
         );
     }
 }
