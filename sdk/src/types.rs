@@ -1562,8 +1562,8 @@ impl From<api::location::LocationInfo> for LocationInfo {
 pub struct AccessTokenInfo {
     /// Access token ID.
     pub id: AccessTokenId,
-    /// Expiration time.
-    pub expires_at: S2DateTime,
+    /// Expiration time, or `None` if the token does not expire.
+    pub expires_at: Option<S2DateTime>,
     /// Whether to automatically prefix stream names during creation and strip the prefix during
     /// listing.
     pub auto_prefix_streams: bool,
@@ -1575,11 +1575,7 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
     type Error = ValidationError;
 
     fn try_from(value: api::access::AccessTokenInfo) -> Result<Self, Self::Error> {
-        let expires_at = value
-            .expires_at
-            .map(S2DateTime::try_from)
-            .transpose()?
-            .ok_or_else(|| ValidationError::from("missing expires_at"))?;
+        let expires_at = value.expires_at.map(S2DateTime::try_from).transpose()?;
         Ok(Self {
             id: value.id,
             expires_at,
@@ -4354,5 +4350,26 @@ mod tests {
         assert_eq!(resp.code, "not_found");
         assert_eq!(resp.message, "basin not found");
         assert!(resp.to_string().contains("not_found"));
+    }
+
+    #[test]
+    fn access_token_info_accepts_absent_expiry() {
+        let value = api::access::AccessTokenInfo {
+            id: "test-token".parse().unwrap(),
+            expires_at: None,
+            auto_prefix_streams: false,
+            scope: api::access::AccessTokenScope {
+                basins: None,
+                streams: None,
+                access_tokens: None,
+                op_groups: None,
+                ops: None,
+            },
+        };
+
+        let info = AccessTokenInfo::try_from(value).unwrap();
+
+        assert!(info.expires_at.is_none());
+        assert!(!info.auto_prefix_streams);
     }
 }

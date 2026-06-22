@@ -1015,7 +1015,9 @@ fn draw_access_tokens(f: &mut Frame, area: Rect, state: &AccessTokensState) {
             let prefix = if is_selected { "▸ " } else { "  " };
             let token_id_str = token.id.to_string();
             let token_id_display = truncate_str(&token_id_str, 28, "…");
-            let expires_str = token.expires_at.to_string();
+            let expires_str = token
+                .expires_at
+                .map_or_else(|| "Never".to_string(), |expires_at| expires_at.to_string());
             let expires_display = truncate_str(&expires_str, 26, "…");
 
             let name_style = if is_selected {
@@ -6376,7 +6378,10 @@ fn draw_input_dialog(
                 Line::from(vec![
                     Span::styled("   Expires At:  ", Style::default().fg(TEXT_MUTED)),
                     Span::styled(
-                        token.expires_at.to_string(),
+                        token.expires_at.map_or_else(
+                            || "Never".to_string(),
+                            |expires_at| expires_at.to_string(),
+                        ),
                         Style::default().fg(TEXT_PRIMARY),
                     ),
                 ]),

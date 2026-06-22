@@ -181,7 +181,7 @@ impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
     fn from(value: s2_common::access::AccessTokenInfo) -> Self {
         Self {
             id: value.id,
-            expires_at: Some(value.expires_at),
+            expires_at: value.expires_at,
             auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         }
@@ -526,5 +526,20 @@ mod tests {
                 .ops
                 .contains(s2_common::access::Operation::Append)
         );
+    }
+
+    #[test]
+    fn access_token_info_preserves_absent_expiry() {
+        let internal = s2_common::access::AccessTokenInfo {
+            id: "test-token".parse().unwrap(),
+            expires_at: None,
+            auto_prefix_streams: false,
+            scope: Default::default(),
+        };
+
+        let value = AccessTokenInfo::from(internal);
+
+        assert!(value.expires_at.is_none());
+        assert!(!value.auto_prefix_streams);
     }
 }

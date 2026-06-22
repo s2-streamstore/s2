@@ -228,7 +228,7 @@ pub struct AccessTokenScope {
 #[derive(Debug, Clone)]
 pub struct AccessTokenInfo {
     pub id: AccessTokenId,
-    pub expires_at: time::OffsetDateTime,
+    pub expires_at: Option<time::OffsetDateTime>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
 }

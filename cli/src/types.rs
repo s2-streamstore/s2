@@ -691,7 +691,7 @@ impl From<sdk::types::ReadWritePermissions> for ReadWritePermissions {
 #[derive(Debug, Serialize)]
 pub struct AccessTokenInfo {
     pub id: String,
-    pub expires_at: String,
+    pub expires_at: Option<String>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
 }
@@ -700,7 +700,7 @@ impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
     fn from(info: sdk::types::AccessTokenInfo) -> Self {
         AccessTokenInfo {
             id: info.id.to_string(),
-            expires_at: info.expires_at.to_string(),
+            expires_at: info.expires_at.map(|expires_at| expires_at.to_string()),
             auto_prefix_streams: info.auto_prefix_streams,
             scope: info.scope.into(),
         }

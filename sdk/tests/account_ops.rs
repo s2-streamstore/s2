@@ -416,7 +416,7 @@ async fn issue_access_token_with_expiration_and_auto_prefix_streams() -> Result<
         .iter()
         .find(|t| t.id == token_id)
         .expect("token should be present");
-    assert_eq!(issued_token.expires_at, expires_at);
+    assert_eq!(issued_token.expires_at, Some(expires_at));
     assert!(issued_token.auto_prefix_streams);
 
     s2.revoke_access_token(token_id).await?;
