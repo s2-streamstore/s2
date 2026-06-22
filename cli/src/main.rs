@@ -39,10 +39,12 @@ use s2_sdk::{
     },
 };
 use strum::VariantNames;
-use tabled::{Table, Tabled};
 use tokio::{io::AsyncWriteExt, select};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
-use types::{AccessTokenInfo, BasinConfig, S2BasinAndMaybeStreamUri, StreamConfig};
+use types::{
+    AccessTokenInfo, AccessTokenMatcher, BasinConfig, BasinMatcher, PermittedOperationGroups,
+    ReadWritePermissions, S2BasinAndMaybeStreamUri, StreamConfig, StreamMatcher,
+};
 
 fn install_rustls_crypto_provider() {
     rustls::crypto::aws_lc_rs::default_provider()
@@ -272,10 +274,7 @@ async fn run() -> Result<(), CliError> {
 
         Command::ListAccessTokens(args) => {
             let (tokens, _) = ops::list_access_tokens(&s2, args).await?;
-            for token_info in tokens {
-                let info = AccessTokenInfo::from(token_info);
-                println!("{}", json_to_table(&serde_json::to_value(&info)?));
-            }
+            print_access_tokens(tokens);
         }
 
         Command::IssueAccessToken(args) => {
@@ -722,6 +721,183 @@ fn deletion_marker() -> colored::ColoredString {
     "[deleting]".red().bold()
 }
 
+fn print_access_tokens(tokens: Vec<s2_sdk::types::AccessTokenInfo>) {
+    let rows = tokens
+        .into_iter()
+        .map(|token| access_token_row(&AccessTokenInfo::from(token)))
+        .collect::<Vec<_>>();
+    print_compact_table(
+        &[
+            "id",
+            "expires",
+            "auto-prefix",
+            "basins",
+            "streams",
+            "access-tokens",
+            "op-groups",
+            "ops",
+        ],
+        &rows,
+        &[],
+    );
+}
+
+fn access_token_row(info: &AccessTokenInfo) -> Vec<String> {
+    vec![
+        info.id.clone(),
+        info.expires_at
+            .clone()
+            .unwrap_or_else(|| "never".to_owned()),
+        format_bool(info.auto_prefix_streams),
+        format_basin_matcher(&info.scope.basins),
+        format_stream_matcher(&info.scope.streams),
+        format_access_token_matcher(&info.scope.access_tokens),
+        format_op_group_perms(&info.scope.op_group_perms),
+        format_ops(&info.scope.ops),
+    ]
+}
+
+fn format_bool(value: bool) -> String {
+    if value { "yes" } else { "no" }.to_owned()
+}
+
+fn format_basin_matcher(matcher: &Option<BasinMatcher>) -> String {
+    match matcher {
+        Some(BasinMatcher::Exact(value)) => format!("={value}"),
+        Some(BasinMatcher::Prefix(value)) => format_prefix_matcher(value.to_string()),
+        None => "*".to_owned(),
+    }
+}
+
+fn format_stream_matcher(matcher: &Option<StreamMatcher>) -> String {
+    match matcher {
+        Some(StreamMatcher::Exact(value)) => format!("={value}"),
+        Some(StreamMatcher::Prefix(value)) => format_prefix_matcher(value.to_string()),
+        None => "*".to_owned(),
+    }
+}
+
+fn format_access_token_matcher(matcher: &Option<AccessTokenMatcher>) -> String {
+    match matcher {
+        Some(AccessTokenMatcher::Exact(value)) => format!("={value}"),
+        Some(AccessTokenMatcher::Prefix(value)) => format_prefix_matcher(value.to_string()),
+        None => "*".to_owned(),
+    }
+}
+
+fn format_prefix_matcher(prefix: String) -> String {
+    if prefix.is_empty() {
+        "*".to_owned()
+    } else {
+        format!("{prefix}*")
+    }
+}
+
+fn format_op_group_perms(groups: &Option<PermittedOperationGroups>) -> String {
+    let Some(groups) = groups else {
+        return "-".to_owned();
+    };
+
+    let mut parts = Vec::new();
+    if let Some(perms) = &groups.account {
+        parts.push(format!("account={}", format_read_write_perms(perms)));
+    }
+    if let Some(perms) = &groups.basin {
+        parts.push(format!("basin={}", format_read_write_perms(perms)));
+    }
+    if let Some(perms) = &groups.stream {
+        parts.push(format!("stream={}", format_read_write_perms(perms)));
+    }
+
+    if parts.is_empty() {
+        "-".to_owned()
+    } else {
+        parts.join(",")
+    }
+}
+
+fn format_read_write_perms(perms: &ReadWritePermissions) -> String {
+    match (perms.read, perms.write) {
+        (true, true) => "rw",
+        (true, false) => "r",
+        (false, true) => "w",
+        (false, false) => "-",
+    }
+    .to_owned()
+}
+
+fn format_ops(ops: &[types::Operation]) -> String {
+    if ops.is_empty() {
+        "-".to_owned()
+    } else {
+        ops.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn print_compact_table(headers: &[&str], rows: &[Vec<String>], right_aligned_columns: &[usize]) {
+    if rows.is_empty() {
+        return;
+    }
+    println!(
+        "{}",
+        format_compact_table(headers, rows, right_aligned_columns)
+    );
+}
+
+fn format_compact_table(
+    headers: &[&str],
+    rows: &[Vec<String>],
+    right_aligned_columns: &[usize],
+) -> String {
+    let mut widths = headers
+        .iter()
+        .map(|header| header.chars().count())
+        .collect::<Vec<_>>();
+
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            if let Some(width) = widths.get_mut(idx) {
+                *width = (*width).max(cell.chars().count());
+            }
+        }
+    }
+
+    let header_cells = headers
+        .iter()
+        .map(|header| (*header).to_owned())
+        .collect::<Vec<_>>();
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(format_compact_row(&header_cells, &widths, &[]));
+    lines.extend(
+        rows.iter()
+            .map(|row| format_compact_row(row, &widths, right_aligned_columns)),
+    );
+    lines.join("\n")
+}
+
+fn format_compact_row(row: &[String], widths: &[usize], right_aligned_columns: &[usize]) -> String {
+    let mut line = String::new();
+    for (idx, cell) in row.iter().enumerate() {
+        if idx > 0 {
+            line.push_str("  ");
+        }
+
+        let width = widths.get(idx).copied().unwrap_or_default();
+        let padding = width.saturating_sub(cell.chars().count());
+        if right_aligned_columns.contains(&idx) {
+            line.push_str(&" ".repeat(padding));
+            line.push_str(cell);
+        } else {
+            line.push_str(cell);
+            line.push_str(&" ".repeat(padding));
+        }
+    }
+    line
+}
+
 async fn write_record(
     record: &s2_sdk::types::SequencedRecord,
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
@@ -785,80 +961,31 @@ fn format_unit(unit: s2_sdk::types::MetricUnit) -> &'static str {
 }
 
 fn print_metrics(metrics: &[Metric]) {
-    #[derive(Tabled)]
-    struct AccumulationRow {
-        interval_start: String,
-        count: String,
-    }
-
-    #[derive(Tabled)]
-    struct GaugeRow {
-        time: String,
-        value: String,
-    }
-
     for metric in metrics {
         match metric {
             Metric::Scalar(m) => {
                 println!("{}: {} {}", m.name, m.value, format_unit(m.unit));
             }
             Metric::Accumulation(m) => {
-                let rows: Vec<AccumulationRow> = m
+                let rows = m
                     .values
                     .iter()
-                    .map(|(ts, value)| AccumulationRow {
-                        interval_start: format_timestamp(*ts),
-                        count: value.to_string(),
-                    })
-                    .collect();
+                    .map(|(ts, value)| vec![format_timestamp(*ts), value.to_string()])
+                    .collect::<Vec<_>>();
 
                 println!("{}", m.name);
-
-                let mut table = Table::new(rows);
-                table.modify(
-                    tabled::settings::object::Columns::last(),
-                    tabled::settings::Alignment::right(),
-                );
-
-                let interval_col = "interval start time".to_string();
-                let count_col = format_unit(m.unit).to_string();
-                table.with(
-                    tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 0))
-                        .with(tabled::settings::Format::content(|_| interval_col.clone())),
-                );
-                table.with(
-                    tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 1))
-                        .with(tabled::settings::Format::content(|_| count_col.clone())),
-                );
-
-                println!("{table}");
+                print_compact_table(&["interval start time", format_unit(m.unit)], &rows, &[1]);
                 println!();
             }
             Metric::Gauge(m) => {
-                let rows: Vec<GaugeRow> = m
+                let rows = m
                     .values
                     .iter()
-                    .map(|(ts, value)| GaugeRow {
-                        time: format_timestamp(*ts),
-                        value: value.to_string(),
-                    })
-                    .collect();
+                    .map(|(ts, value)| vec![format_timestamp(*ts), value.to_string()])
+                    .collect::<Vec<_>>();
 
-                let count_col = format_unit(m.unit).to_string();
-                println!("{}\n", m.name);
-
-                let mut table = Table::new(rows);
-                table.modify(
-                    tabled::settings::object::Columns::last(),
-                    tabled::settings::Alignment::right(),
-                );
-
-                table.with(
-                    tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 1))
-                        .with(tabled::settings::Format::content(|_| count_col.clone())),
-                );
-
-                println!("{table}");
+                println!("{}", m.name);
+                print_compact_table(&["time", format_unit(m.unit)], &rows, &[1]);
                 println!();
             }
             Metric::Label(m) => {
@@ -885,5 +1012,51 @@ fn resolve_encryption_key(
             )?))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AccessTokenScope, Operation};
+
+    #[test]
+    fn formats_access_token_rows_compactly() {
+        let info = AccessTokenInfo {
+            id: "token-a".to_owned(),
+            expires_at: None,
+            auto_prefix_streams: true,
+            scope: AccessTokenScope {
+                basins: Some("=basin-alpha".parse().expect("valid basin matcher")),
+                streams: Some("events/".parse().expect("valid stream matcher")),
+                access_tokens: None,
+                op_group_perms: Some("account=rw,stream=r".parse().expect("valid perms")),
+                ops: vec![Operation::Append, Operation::Read],
+            },
+        };
+
+        assert_eq!(
+            access_token_row(&info),
+            vec![
+                "token-a",
+                "never",
+                "yes",
+                "=basin-alpha",
+                "events/*",
+                "*",
+                "account=rw,stream=r",
+                "append,read"
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_table_uses_aligned_columns_without_borders() {
+        let rows = vec![vec!["alpha".to_owned(), "9".to_owned()]];
+
+        assert_eq!(
+            format_compact_table(&["name", "count"], &rows, &[1]),
+            "name   count\nalpha      9"
+        );
     }
 }
