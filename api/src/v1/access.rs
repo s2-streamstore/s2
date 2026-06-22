@@ -172,8 +172,7 @@ pub struct AccessTokenInfo {
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub expires_at: Option<OffsetDateTime>,
     /// Namespace streams based on the configured stream-level scope.
-    #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]
-    pub auto_prefix_streams: Option<bool>,
+    pub auto_prefix_streams: bool,
     /// Access token scope.
     pub scope: AccessTokenScope,
 }
@@ -183,7 +182,7 @@ impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
         Self {
             id: value.id,
             expires_at: Some(value.expires_at),
-            auto_prefix_streams: Some(value.auto_prefix_streams),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         }
     }

@@ -1583,7 +1583,7 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
         Ok(Self {
             id: value.id,
             expires_at,
-            auto_prefix_streams: value.auto_prefix_streams.unwrap_or(false),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         })
     }
