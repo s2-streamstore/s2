@@ -5,6 +5,7 @@ use std::time::Duration;
 use assert_matches::assert_matches;
 use common::{S2Stream, SharedS2Basin, s2_config, unique_basin_name, unique_stream_name};
 use futures_util::StreamExt;
+#[cfg(any(feature = "gzip", feature = "zstd"))]
 use rstest::rstest;
 use s2_sdk::{
     append_session::AppendSessionConfig, batching::BatchingConfig, producer::ProducerConfig,
@@ -1697,9 +1698,10 @@ async fn create_stream_inherits_basin_default_config() -> Result<(), S2Error> {
     Ok(())
 }
 
+#[cfg(any(feature = "gzip", feature = "zstd"))]
 #[rstest]
-#[case::gzip(Compression::Gzip)]
-#[case::zstd(Compression::Zstd)]
+#[cfg_attr(feature = "gzip", case::gzip(Compression::Gzip))]
+#[cfg_attr(feature = "zstd", case::zstd(Compression::Zstd))]
 #[tokio::test]
 async fn compression_roundtrip_unary(#[case] compression: Compression) -> Result<(), S2Error> {
     let config = s2_config(compression).expect("valid S2 config");
@@ -1740,9 +1742,10 @@ async fn compression_roundtrip_unary(#[case] compression: Compression) -> Result
     Ok(())
 }
 
+#[cfg(any(feature = "gzip", feature = "zstd"))]
 #[rstest]
-#[case::gzip(Compression::Gzip)]
-#[case::zstd(Compression::Zstd)]
+#[cfg_attr(feature = "gzip", case::gzip(Compression::Gzip))]
+#[cfg_attr(feature = "zstd", case::zstd(Compression::Zstd))]
 #[tokio::test]
 async fn compression_with_no_side_effects_unary(
     #[case] compression: Compression,
@@ -1785,9 +1788,10 @@ async fn compression_with_no_side_effects_unary(
     Ok(())
 }
 
+#[cfg(any(feature = "gzip", feature = "zstd"))]
 #[rstest]
-#[case::gzip(Compression::Gzip)]
-#[case::zstd(Compression::Zstd)]
+#[cfg_attr(feature = "gzip", case::gzip(Compression::Gzip))]
+#[cfg_attr(feature = "zstd", case::zstd(Compression::Zstd))]
 #[tokio::test]
 async fn compression_roundtrip_session(#[case] compression: Compression) -> Result<(), S2Error> {
     let config = s2_config(compression).expect("valid S2 config");

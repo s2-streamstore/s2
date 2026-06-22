@@ -15,13 +15,15 @@ cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
 features = ["rustls-aws-lc-rs", "rustls-ring"]
 
 [features]
-default = ["rustls-aws-lc-rs"]
+default = ["rustls-aws-lc-rs", "zstd"]
 _hidden = []
+gzip = ["dep:async-compression", "async-compression/gzip", "async-compression/tokio", "s2-api/gzip", "tokio/io-util"]
 rustls-aws-lc-rs = ["hyper-rustls/aws-lc-rs", "rustls/aws-lc-rs"]
 rustls-ring = ["hyper-rustls/ring", "rustls/ring"]
+zstd = ["dep:async-compression", "async-compression/tokio", "async-compression/zstd", "s2-api/zstd", "tokio/io-util"]
 
 [dependencies]
-async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
+async-compression = { version = "0.4", default-features = false, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -45,7 +47,7 @@ serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
 time = { workspace = true }
-tokio = { workspace = true, features = ["time", "macros", "io-util", "sync"] }
+tokio = { workspace = true, features = ["time", "macros", "sync"] }
 tokio-muxt = "0.7"
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["rt", "codec"] }

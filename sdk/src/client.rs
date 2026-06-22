@@ -8,13 +8,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_compression::{
-    Level,
-    tokio::{
-        bufread::{GzipDecoder, ZstdDecoder},
-        write::{GzipEncoder, ZstdEncoder},
-    },
-};
+#[cfg(any(feature = "gzip", feature = "zstd"))]
+use async_compression::Level;
+#[cfg(feature = "gzip")]
+use async_compression::tokio::{bufread::GzipDecoder, write::GzipEncoder};
+#[cfg(feature = "zstd")]
+use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::Stream;
@@ -32,14 +31,15 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::RwLock,
-    time::timeout,
-};
+#[cfg(any(feature = "gzip", feature = "zstd"))]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{sync::RwLock, time::timeout};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::frame_signal::{FrameSignal, RequestFrameMonitorBody};
+use crate::{
+    frame_signal::{FrameSignal, RequestFrameMonitorBody},
+    types::Compression,
+};
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 90;
@@ -48,24 +48,6 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxBody = UnsyncBoxBody<Bytes, BoxError>;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub enum Compression {
-    #[default]
-    None,
-    Gzip,
-    Zstd,
-}
-
-impl From<crate::types::Compression> for Compression {
-    fn from(c: crate::types::Compression) -> Self {
-        match c {
-            crate::types::Compression::None => Compression::None,
-            crate::types::Compression::Gzip => Compression::Gzip,
-            crate::types::Compression::Zstd => Compression::Zstd,
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -119,6 +101,7 @@ impl Body {
         )))
     }
 
+    #[cfg(any(feature = "gzip", feature = "zstd"))]
     fn as_bytes(&self) -> Option<&[u8]> {
         match &self.0 {
             BodyInner::Empty => Some(&[]),
@@ -637,6 +620,7 @@ async fn compress_body(
 ) -> Result<(Body, Option<HeaderValue>), Error> {
     match compression {
         Compression::None => Ok((body, None)),
+        #[cfg(feature = "gzip")]
         Compression::Gzip => {
             let Some(data) = body.as_bytes() else {
                 return Err(Error::Compression(
@@ -658,6 +642,7 @@ async fn compress_body(
                 Some(HeaderValue::from_static("gzip")),
             ))
         }
+        #[cfg(feature = "zstd")]
         Compression::Zstd => {
             let Some(data) = body.as_bytes() else {
                 return Err(Error::Compression(
@@ -686,6 +671,7 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Err
     let content_encoding = headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok());
 
     match content_encoding {
+        #[cfg(feature = "gzip")]
         Some("gzip") => {
             let mut decoder = GzipDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
@@ -695,6 +681,11 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Err
                 .map_err(|e| Error::Compression(e.to_string()))?;
             Ok(Bytes::from(decompressed))
         }
+        #[cfg(not(feature = "gzip"))]
+        Some("gzip") => Err(Error::Compression(
+            "gzip content encoding support is not enabled".into(),
+        )),
+        #[cfg(feature = "zstd")]
         Some("zstd") => {
             let mut decoder = ZstdDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
@@ -704,6 +695,10 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Err
                 .map_err(|e| Error::Compression(e.to_string()))?;
             Ok(Bytes::from(decompressed))
         }
+        #[cfg(not(feature = "zstd"))]
+        Some("zstd") => Err(Error::Compression(
+            "zstd content encoding support is not enabled".into(),
+        )),
         _ => Ok(bytes),
     }
 }

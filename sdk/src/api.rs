@@ -7,7 +7,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
     HeaderMap, HeaderValue, StatusCode, Uri,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
+    header::{ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE},
 };
 use prost::{self, Message};
 use s2_api::v1::{
@@ -859,20 +859,8 @@ impl BaseClient {
                 .map_err(|e| ApiError::MalformedAccessToken(e.to_string()))?,
         );
         default_headers.insert(http::header::USER_AGENT, config.user_agent.clone());
-        match config.compression {
-            Compression::Gzip => {
-                default_headers.insert(
-                    http::header::ACCEPT_ENCODING,
-                    HeaderValue::from_static("gzip"),
-                );
-            }
-            Compression::Zstd => {
-                default_headers.insert(
-                    http::header::ACCEPT_ENCODING,
-                    HeaderValue::from_static("zstd"),
-                );
-            }
-            Compression::None => {}
+        if let Some(accept_encoding) = accept_encoding_header_value(config.compression) {
+            default_headers.insert(ACCEPT_ENCODING, accept_encoding);
         }
 
         let client = client::Pool::new(connector);
@@ -951,6 +939,18 @@ fn set_encryption_header(request: &mut client::Request, encryption: Option<&Encr
             S2_ENCRYPTION_KEY_HEADER.clone(),
             encryption.to_header_value(),
         );
+    }
+}
+
+fn accept_encoding_header_value(compression: Compression) -> Option<HeaderValue> {
+    match compression {
+        Compression::None => None,
+        #[cfg(all(feature = "gzip", feature = "zstd"))]
+        _ => Some(HeaderValue::from_static("zstd, gzip")),
+        #[cfg(all(feature = "gzip", not(feature = "zstd")))]
+        Compression::Gzip => Some(HeaderValue::from_static("gzip")),
+        #[cfg(all(feature = "zstd", not(feature = "gzip")))]
+        Compression::Zstd => Some(HeaderValue::from_static("zstd")),
     }
 }
 
@@ -1277,6 +1277,39 @@ mod tests {
         assert!(!ClientError::ConnectionReset("test".into()).has_no_side_effects());
         assert!(!ClientError::ConnectionAborted("test".into()).has_no_side_effects());
         assert!(!ClientError::Others("test".into()).has_no_side_effects());
+    }
+
+    fn request_accept_encoding(compression: Compression) -> Option<String> {
+        let config = S2Config::new("test-token".to_owned()).with_compression(compression);
+        let connector = hyper_util::client::legacy::connect::HttpConnector::new();
+        let client = BaseClient::init_with_connector(&config, connector).expect("client init");
+        let mut request = client
+            .get("http://localhost/v1/test".parse().unwrap())
+            .build()
+            .unwrap();
+
+        request
+            .headers_mut()
+            .get(ACCEPT_ENCODING)
+            .map(|value| value.to_str().unwrap().to_owned())
+    }
+
+    #[tokio::test]
+    async fn base_client_leaves_accept_encoding_unset_without_compression() {
+        assert_eq!(request_accept_encoding(Compression::None), None);
+    }
+
+    #[cfg(all(feature = "gzip", feature = "zstd"))]
+    #[tokio::test]
+    async fn base_client_prefers_zstd_in_accept_encoding() {
+        assert_eq!(
+            request_accept_encoding(Compression::Gzip).as_deref(),
+            Some("zstd, gzip")
+        );
+        assert_eq!(
+            request_accept_encoding(Compression::Zstd).as_deref(),
+            Some("zstd, gzip")
+        );
     }
 
     #[test]

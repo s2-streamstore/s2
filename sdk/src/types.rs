@@ -275,8 +275,10 @@ pub enum Compression {
     /// No compression.
     None,
     /// Gzip compression.
+    #[cfg(feature = "gzip")]
     Gzip,
     /// Zstd compression.
+    #[cfg(feature = "zstd")]
     Zstd,
 }
 
@@ -284,7 +286,9 @@ impl From<Compression> for CompressionAlgorithm {
     fn from(value: Compression) -> Self {
         match value {
             Compression::None => CompressionAlgorithm::None,
+            #[cfg(feature = "gzip")]
             Compression::Gzip => CompressionAlgorithm::Gzip,
+            #[cfg(feature = "zstd")]
             Compression::Zstd => CompressionAlgorithm::Zstd,
         }
     }
@@ -459,7 +463,9 @@ impl S2Config {
         Self { retry, ..self }
     }
 
-    /// Set the compression algorithm for requests and responses.
+    /// Set the compression algorithm for request bodies and enable compressed responses.
+    ///
+    /// Responses advertise all enabled compression codecs, preferring zstd.
     ///
     /// Defaults to no compression.
     pub fn with_compression(self, compression: Compression) -> Self {
@@ -3826,8 +3832,14 @@ mod tests {
 
     #[rstest]
     #[case::none(Compression::None, CompressionAlgorithm::None)]
-    #[case::gzip(Compression::Gzip, CompressionAlgorithm::Gzip)]
-    #[case::zstd(Compression::Zstd, CompressionAlgorithm::Zstd)]
+    #[cfg_attr(
+        feature = "gzip",
+        case::gzip(Compression::Gzip, CompressionAlgorithm::Gzip)
+    )]
+    #[cfg_attr(
+        feature = "zstd",
+        case::zstd(Compression::Zstd, CompressionAlgorithm::Zstd)
+    )]
     fn compression_conversion(#[case] sdk: Compression, #[case] api: CompressionAlgorithm) {
         assert_eq!(CompressionAlgorithm::from(sdk), api);
     }

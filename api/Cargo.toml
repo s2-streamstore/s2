@@ -17,16 +17,19 @@ include = [
 ]
 
 [features]
-axum = ["dep:axum", "dep:sonic-rs", "s2-common/axum"]
+default = ["zstd"]
+axum = ["dep:axum", "dep:sonic-rs", "gzip", "s2-common/axum", "zstd"]
 utoipa = ["dep:utoipa"]
 codegen = ["dep:prost-build"]
+gzip = ["dep:flate2"]
+zstd = ["dep:zstd"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }
-flate2 = { workspace = true }
+flate2 = { workspace = true, optional = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }
@@ -42,7 +45,7 @@ thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 tokio-util = { workspace = true, features = ["codec", "io"] }
 utoipa = { workspace = true, optional = true, features = ["time"] }
-zstd = { workspace = true }
+zstd = { workspace = true, optional = true }
 
 [build-dependencies]
 prost-build = { workspace = true, optional = true }
