@@ -145,10 +145,6 @@ impl EncryptedRecord {
         Self { encoded, format }
     }
 
-    pub fn algorithm(&self) -> EncryptionAlgorithm {
-        self.format.algorithm()
-    }
-
     pub fn max_assignable_seq_num(&self) -> SeqNum {
         self.format.max_assignable_seq_num()
     }
@@ -636,7 +632,6 @@ mod tests {
         let encrypted_record = encrypt_test_record(plaintext, EncryptionAlgorithm::Aegis256, &aad);
         let encoded = encrypted_record.to_bytes();
         assert_eq!(encrypted_record.format, EncryptedRecordFormat::Aegis256V1);
-        assert_eq!(encrypted_record.algorithm(), EncryptionAlgorithm::Aegis256);
         assert_eq!(encoded[0], 0x01);
     }
 
@@ -762,7 +757,6 @@ mod tests {
             panic!("expected encrypted envelope record");
         };
         assert_eq!(envelope.format, EncryptedRecordFormat::Aegis256V1);
-        assert_eq!(envelope.algorithm(), EncryptionAlgorithm::Aegis256);
 
         let decrypted = decrypt_stored_record(stored, &encryption, &aad).unwrap();
         let Record::Envelope(record) = decrypted.into_inner() else {

@@ -3,7 +3,6 @@ use bytes::BytesMut;
 use bytes::{Buf, BufMut, Bytes};
 use s2_common::{
     deep_size::DeepSize,
-    encryption::EncryptionAlgorithm,
     record::{CommandRecord, Metered, MeteredSize, Record, SeqNum, Sequenced},
 };
 
@@ -127,13 +126,6 @@ impl StoredRecord {
             Self::Plaintext(Record::Command(record)) => record.encode_into(buf),
             Self::Plaintext(Record::Envelope(record)) => record.encode_into(buf),
             Self::Encrypted { record, .. } => record.encode_into(buf),
-        }
-    }
-
-    pub fn encryption_algorithm(&self) -> Option<EncryptionAlgorithm> {
-        match self {
-            Self::Plaintext(_) => None,
-            Self::Encrypted { record, .. } => Some(record.algorithm()),
         }
     }
 
