@@ -38,4 +38,3 @@ impl From<[u8; StreamId::LEN]> for StreamId {
         Self(bytes.into())
     }
 }
-
