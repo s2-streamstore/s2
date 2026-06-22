@@ -1,8 +1,10 @@
+mod batcher;
 mod command;
 mod envelope;
 mod fencing;
 mod metering;
 
+pub use batcher::{RecordBatch, RecordBatcher};
 use bytes::Bytes;
 pub use command::{CommandOp, CommandPayloadError, CommandRecord};
 pub use envelope::{EnvelopeRecord, HeaderValidationError};
