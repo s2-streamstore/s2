@@ -269,8 +269,11 @@ impl std::fmt::Debug for AppendRequest {
 pub enum AppendInputStreamError {
     #[error("Failed to decode S2S frame: {0}")]
     FrameDecode(#[from] std::io::Error),
-    #[error("S2S frame read timed out")]
-    FrameTimeout,
+    #[error("S2S frame read timed out after {elapsed:?} with {buffered_bytes} buffered bytes")]
+    FrameTimeout {
+        buffered_bytes: usize,
+        elapsed: Duration,
+    },
     #[error(transparent)]
     Validation(#[from] s2_common::ValidationError),
 }

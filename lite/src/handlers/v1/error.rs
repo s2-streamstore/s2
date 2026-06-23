@@ -89,7 +89,7 @@ impl ServiceError {
                 AppendInputStreamError::FrameDecode(e) => {
                     standard(ErrorCode::BadFrame, e.to_string())
                 }
-                AppendInputStreamError::FrameTimeout => {
+                AppendInputStreamError::FrameTimeout { .. } => {
                     standard(ErrorCode::RequestTimeout, e.to_string())
                 }
                 AppendInputStreamError::Validation(e) => {
