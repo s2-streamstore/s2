@@ -1,14 +1,20 @@
+use std::{io, pin::Pin, time::Duration};
+
 use axum::{
+    body::Bytes,
     extract::{FromRequest, FromRequestParts, Request},
     response::{IntoResponse, Response},
 };
+use bytes::BytesMut;
+use futures_core::Stream;
 use futures_util::StreamExt as _;
 use http::{StatusCode, request::Parts};
 use s2_common::{
     encryption::EncryptionKey,
     http::{ParseableHeader, extract::HeaderRejection},
 };
-use tokio_util::{codec::FramedRead, io::StreamReader};
+use tokio::time::{Instant, timeout_at};
+use tokio_util::codec::Decoder as _;
 
 use super::{AppendInput, AppendInputStreamError, AppendRequest, ReadRequest, proto, s2s};
 use crate::{
@@ -19,6 +25,8 @@ use crate::{
     mime::JsonOrProto,
     v1::stream::sse::LastEventId,
 };
+
+const S2S_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppendRequestRejection {
@@ -59,32 +67,12 @@ where
             let response_compression =
                 s2s::CompressionAlgorithm::from_accept_encoding(req.headers());
 
-            let body_reader = StreamReader::new(
+            let inputs = decode_s2s_append_inputs(
                 req.into_body()
                     .into_data_stream()
-                    .map(|result| result.map_err(std::io::Error::other)),
+                    .map(|result| result.map_err(io::Error::other)),
+                S2S_FRAME_READ_TIMEOUT,
             );
-
-            let framed = FramedRead::new(body_reader, s2s::FrameDecoder);
-
-            let inputs = futures_util::stream::try_unfold(framed, |mut framed| async move {
-                let Some(msg) = framed.next().await else {
-                    return Ok(None);
-                };
-                match msg? {
-                    s2s::SessionMessage::Regular(data) => {
-                        let input = data.try_into_proto::<proto::AppendInput>()?;
-                        let input = s2_common::stream::AppendInput::try_from(input)?;
-                        Ok(Some((input, framed)))
-                    }
-                    s2s::SessionMessage::Terminal(_) => {
-                        Err(AppendInputStreamError::FrameDecode(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Unexpected terminal frame as input",
-                        )))
-                    }
-                }
-            });
 
             return Ok(Self::S2s {
                 encryption_key,
@@ -177,5 +165,143 @@ where
         Ok(value) => Ok(Some(value)),
         Err(HeaderRejection::MissingHeader(_)) => Ok(None),
         Err(e) => Err(e)?,
+    }
+}
+
+type S2sBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, io::Error>> + Send>>;
+
+struct S2sAppendDecodeState {
+    body: S2sBodyStream,
+    decoder: s2s::FrameDecoder,
+    buffer: BytesMut,
+    frame_deadline: Option<Instant>,
+    frame_timeout: Duration,
+}
+
+fn decode_s2s_append_inputs(
+    body: impl Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
+    frame_timeout: Duration,
+) -> impl Stream<Item = Result<s2_common::stream::AppendInput, AppendInputStreamError>> {
+    let state = S2sAppendDecodeState {
+        body: Box::pin(body),
+        decoder: s2s::FrameDecoder,
+        buffer: BytesMut::new(),
+        frame_deadline: None,
+        frame_timeout,
+    };
+
+    futures_util::stream::try_unfold(state, |mut state| async move {
+        loop {
+            match state.decoder.decode(&mut state.buffer) {
+                Ok(Some(s2s::SessionMessage::Regular(data))) => {
+                    state.frame_deadline = if state.buffer.is_empty() {
+                        None
+                    } else {
+                        Some(Instant::now() + state.frame_timeout)
+                    };
+                    let input = data.try_into_proto::<proto::AppendInput>()?;
+                    let input = s2_common::stream::AppendInput::try_from(input)?;
+                    return Ok(Some((input, state)));
+                }
+                Ok(Some(s2s::SessionMessage::Terminal(_))) => {
+                    return Err(AppendInputStreamError::FrameDecode(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Unexpected terminal frame as input",
+                    )));
+                }
+                Ok(None) => {
+                    if !state.buffer.is_empty() && state.frame_deadline.is_none() {
+                        state.frame_deadline = Some(Instant::now() + state.frame_timeout);
+                    }
+                }
+                Err(err) => return Err(err.into()),
+            }
+
+            let next = match state.frame_deadline {
+                Some(deadline) => timeout_at(deadline, state.body.as_mut().next())
+                    .await
+                    .map_err(|_| s2s_frame_timeout())?,
+                None => state.body.as_mut().next().await,
+            };
+
+            match next {
+                Some(Ok(chunk)) => state.buffer.extend_from_slice(&chunk),
+                Some(Err(err)) => return Err(err.into()),
+                None if state.buffer.is_empty() => return Ok(None),
+                None => {
+                    return Err(AppendInputStreamError::FrameDecode(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "not all bytes were consumed from the buffer, {} remaining",
+                            state.buffer.len()
+                        ),
+                    )));
+                }
+            }
+        }
+    })
+}
+
+fn s2s_frame_timeout() -> AppendInputStreamError {
+    AppendInputStreamError::FrameDecode(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "S2S frame read timed out",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use futures_util::{StreamExt as _, pin_mut, stream};
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn s2s_append_decode_does_not_timeout_before_frame_starts() {
+        let body = stream::pending::<Result<Bytes, io::Error>>();
+        let inputs = decode_s2s_append_inputs(body, Duration::from_secs(20));
+        pin_mut!(inputs);
+
+        let next = inputs.next();
+        pin_mut!(next);
+        tokio::select! {
+            result = &mut next => panic!("unexpected decode result: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        tokio::time::advance(Duration::from_secs(40)).await;
+        tokio::select! {
+            result = &mut next => panic!("unexpected decode result: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn s2s_append_decode_times_out_incomplete_frame() {
+        let body = stream::once(async { Ok::<_, io::Error>(Bytes::from_static(&[0, 0, 2])) })
+            .chain(stream::pending());
+        let inputs = decode_s2s_append_inputs(body, Duration::from_secs(20));
+        pin_mut!(inputs);
+
+        let next = inputs.next();
+        pin_mut!(next);
+        tokio::select! {
+            result = &mut next => panic!("unexpected decode result: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let err = next.await.expect("stream item").expect_err("timeout");
+        match err {
+            AppendInputStreamError::FrameDecode(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+                assert_eq!(err.to_string(), "S2S frame read timed out");
+            }
+            AppendInputStreamError::Validation(err) => {
+                panic!("unexpected validation error: {err}");
+            }
+        }
     }
 }
