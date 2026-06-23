@@ -26,7 +26,26 @@ use crate::{
     v1::stream::sse::LastEventId,
 };
 
-const S2S_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_S2S_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S2sFrameReadTimeout(Duration);
+
+impl S2sFrameReadTimeout {
+    pub const fn new(timeout: Duration) -> Self {
+        Self(timeout)
+    }
+
+    pub const fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl Default for S2sFrameReadTimeout {
+    fn default() -> Self {
+        Self(DEFAULT_S2S_FRAME_READ_TIMEOUT)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppendRequestRejection {
@@ -66,12 +85,18 @@ where
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
                 s2s::CompressionAlgorithm::from_accept_encoding(req.headers());
+            let frame_timeout = req
+                .extensions()
+                .get::<S2sFrameReadTimeout>()
+                .copied()
+                .unwrap_or_default()
+                .get();
 
             let inputs = decode_s2s_append_inputs(
                 req.into_body()
                     .into_data_stream()
                     .map(|result| result.map_err(io::Error::other)),
-                S2S_FRAME_READ_TIMEOUT,
+                frame_timeout,
             );
 
             return Ok(Self::S2s {
@@ -258,10 +283,15 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn s2s_frame_read_timeout_defaults_to_request_timeout() {
+        assert_eq!(S2sFrameReadTimeout::default().get(), Duration::from_secs(5));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn s2s_append_decode_does_not_timeout_before_frame_starts() {
         let body = stream::pending::<Result<Bytes, io::Error>>();
-        let inputs = decode_s2s_append_inputs(body, Duration::from_secs(20));
+        let inputs = decode_s2s_append_inputs(body, S2sFrameReadTimeout::default().get());
         pin_mut!(inputs);
 
         let next = inputs.next();
@@ -282,7 +312,7 @@ mod tests {
     async fn s2s_append_decode_times_out_incomplete_frame() {
         let body = stream::once(async { Ok::<_, io::Error>(Bytes::from_static(&[0, 0, 2])) })
             .chain(stream::pending());
-        let inputs = decode_s2s_append_inputs(body, Duration::from_secs(20));
+        let inputs = decode_s2s_append_inputs(body, S2sFrameReadTimeout::default().get());
         pin_mut!(inputs);
 
         let next = inputs.next();
@@ -292,7 +322,7 @@ mod tests {
             _ = tokio::task::yield_now() => {}
         }
 
-        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
         let err = next.await.expect("stream item").expect_err("timeout");
         match err {
             AppendInputStreamError::FrameDecode(err) => {
