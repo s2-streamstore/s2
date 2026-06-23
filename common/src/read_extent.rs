@@ -8,11 +8,6 @@ pub struct CountOrBytes {
 
 impl CountOrBytes {
     pub const ZERO: CountOrBytes = CountOrBytes { count: 0, bytes: 0 };
-
-    pub const MAX: CountOrBytes = CountOrBytes {
-        count: usize::MAX,
-        bytes: usize::MAX,
-    };
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
