@@ -6,9 +6,8 @@ use s2_sdk::{
     S2,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinConfig, BasinName, BasinReconfiguration,
-        CreateBasinInput, CreateStreamInput, DeleteStreamInput, EncryptionAlgorithm, EncryptionKey,
-        ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput, S2Config,
-        StreamName,
+        CreateBasinInput, CreateStreamInput, DeleteStreamInput, EncryptionAlgorithm, ReadFrom,
+        ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput, S2Config, StreamName,
     },
 };
 
@@ -47,12 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await?;
 
-    let encryption_key: EncryptionKey = std::env::var("S2_ENCRYPTION_KEY")?.parse()?;
-
     // ANCHOR: append-read
     let stream = basin
         .stream(stream_name.clone())
-        .with_encryption_key(encryption_key);
+        .with_encryption_key(std::env::var("S2_ENCRYPTION_KEY")?.parse()?);
 
     stream
         .append(AppendInput::new(AppendRecordBatch::try_from_iter([
