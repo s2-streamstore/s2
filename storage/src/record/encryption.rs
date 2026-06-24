@@ -33,7 +33,6 @@ use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 use s2_common::{
-    deep_size::DeepSize,
     encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::{EnvelopeRecord, Metered, MeteredExt as _, MeteredSize, Record, SeqNum, Sequenced},
     stream::{
@@ -184,12 +183,6 @@ impl std::fmt::Debug for EncryptedRecord {
             .field("ciphertext.len", &self.ciphertext().len())
             .field("tag.len", &self.tag().len())
             .finish()
-    }
-}
-
-impl DeepSize for EncryptedRecord {
-    fn deep_size(&self) -> usize {
-        self.encoded.len()
     }
 }
 

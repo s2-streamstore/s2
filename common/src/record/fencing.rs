@@ -2,8 +2,6 @@ use std::{ops::Deref, str::FromStr};
 
 use compact_str::{CompactString, ToCompactString};
 
-use crate::deep_size::DeepSize;
-
 pub const MAX_FENCING_TOKEN_LENGTH: usize = 36;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -90,8 +88,4 @@ impl Deref for FencingToken {
     }
 }
 
-impl DeepSize for FencingToken {
-    fn deep_size(&self) -> usize {
-        self.0.len()
-    }
-}
+

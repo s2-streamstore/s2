@@ -1,10 +1,7 @@
 #[cfg(test)]
 use bytes::BytesMut;
 use bytes::{Buf, BufMut, Bytes};
-use s2_common::{
-    deep_size::DeepSize,
-    record::{CommandRecord, Metered, MeteredSize, Record, SeqNum, Sequenced},
-};
+use s2_common::record::{CommandRecord, Metered, MeteredSize, Record, SeqNum, Sequenced};
 
 use super::{
     codec::{StoredRecordDecodeError, WireEncode, decode_command_record, decode_envelope_record},
@@ -133,18 +130,6 @@ impl StoredRecord {
         match self {
             Self::Plaintext(_) => SeqNum::MAX,
             Self::Encrypted { record, .. } => record.max_assignable_seq_num(),
-        }
-    }
-}
-
-impl DeepSize for StoredRecord {
-    fn deep_size(&self) -> usize {
-        match self {
-            Self::Plaintext(record) => record.deep_size(),
-            Self::Encrypted {
-                metered_size,
-                record,
-            } => metered_size.deep_size() + record.deep_size(),
         }
     }
 }

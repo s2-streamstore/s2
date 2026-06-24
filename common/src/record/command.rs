@@ -4,7 +4,7 @@ use bytes::Bytes;
 use compact_str::CompactString;
 
 use super::{FencingTokenTooLongError, MeteredSize, fencing::FencingToken};
-use crate::{deep_size::DeepSize, record::SeqNum};
+use crate::record::SeqNum;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CommandOp {
@@ -40,15 +40,6 @@ impl fmt::Display for CommandOp {
 pub enum CommandRecord {
     Fence(FencingToken),
     Trim(SeqNum),
-}
-
-impl DeepSize for CommandRecord {
-    fn deep_size(&self) -> usize {
-        match self {
-            Self::Fence(token) => token.deep_size(),
-            Self::Trim(seq_num) => seq_num.deep_size(),
-        }
-    }
 }
 
 impl MeteredSize for CommandRecord {

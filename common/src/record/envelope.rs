@@ -1,7 +1,6 @@
 use bytes::Bytes;
 
 use super::{Header, MeteredSize, RecordPartsError};
-use crate::deep_size::DeepSize;
 
 const MAX_HEADER_COUNT: usize = 0xFF_FFFF;
 const MAX_HEADER_NAME_OR_VALUE_LEN: usize = u32::MAX as usize;
@@ -62,12 +61,6 @@ impl std::fmt::Debug for EnvelopeRecord {
             .field("headers.len", &self.headers.len())
             .field("body.len", &self.body.len())
             .finish()
-    }
-}
-
-impl DeepSize for EnvelopeRecord {
-    fn deep_size(&self) -> usize {
-        self.headers.deep_size() + self.body.deep_size()
     }
 }
 

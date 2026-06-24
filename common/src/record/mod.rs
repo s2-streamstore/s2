@@ -9,8 +9,6 @@ pub use envelope::{EnvelopeRecord, HeaderValidationError};
 pub use fencing::{FencingToken, FencingTokenTooLongError, MAX_FENCING_TOKEN_LENGTH};
 pub use metering::{Metered, MeteredExt, MeteredSize};
 
-use crate::deep_size::DeepSize;
-
 pub type SeqNum = u64;
 pub type NonZeroSeqNum = std::num::NonZeroU64;
 pub type Timestamp = u64;
@@ -34,12 +32,6 @@ impl std::fmt::Display for StreamPosition {
     }
 }
 
-impl DeepSize for StreamPosition {
-    fn deep_size(&self) -> usize {
-        self.seq_num.deep_size() + self.timestamp.deep_size()
-    }
-}
-
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum RecordPartsError {
     #[error("unknown command")]
@@ -56,12 +48,6 @@ pub struct Header {
     pub value: Bytes,
 }
 
-impl DeepSize for Header {
-    fn deep_size(&self) -> usize {
-        self.name.len() + self.value.len()
-    }
-}
-
 impl MeteredSize for Record {
     fn metered_size(&self) -> usize {
         match self {
@@ -75,15 +61,6 @@ impl MeteredSize for Record {
 pub enum Record {
     Command(CommandRecord),
     Envelope(EnvelopeRecord),
-}
-
-impl DeepSize for Record {
-    fn deep_size(&self) -> usize {
-        match self {
-            Self::Command(c) => c.deep_size(),
-            Self::Envelope(e) => e.deep_size(),
-        }
-    }
 }
 
 impl Record {
@@ -161,15 +138,6 @@ where
 {
     fn metered_size(&self) -> usize {
         self.inner.metered_size()
-    }
-}
-
-impl<T> DeepSize for Sequenced<T>
-where
-    T: DeepSize,
-{
-    fn deep_size(&self) -> usize {
-        self.position.deep_size() + self.inner.deep_size()
     }
 }
 
