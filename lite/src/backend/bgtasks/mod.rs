@@ -12,7 +12,6 @@ mod stream_trim;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BgtaskTrigger {
     BasinDeletion,
-    StreamDeleteOnEmpty,
     StreamTrim,
 }
 
@@ -28,7 +27,7 @@ pub fn spawn(backend: &Backend) {
     spawn_bgtask(
         "stream-delete-on-empty",
         Duration::from_secs(60),
-        &[BgtaskTrigger::StreamDeleteOnEmpty],
+        &[],
         backend.bgtask_trigger_subscribe(),
         move |backend| backend.clone().tick_stream_doe(),
         backend.clone(),
