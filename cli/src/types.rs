@@ -202,7 +202,6 @@ pub struct TimestampingConfig {
 
 #[derive(Clone, Debug, Serialize)]
 pub enum RetentionPolicy {
-    #[allow(dead_code)]
     Age(#[serde(serialize_with = "serialize_duration_humantime")] Duration),
     Infinite,
 }
