@@ -130,12 +130,6 @@ impl From<EncryptionAlgorithm> for s2_common::encryption::EncryptionAlgorithm {
 #[derive(Debug, Clone, Copy)]
 pub struct RetentionPolicy(pub s2_common::config::RetentionPolicy);
 
-impl RetentionPolicy {
-    pub fn age_secs(self) -> Option<u64> {
-        self.0.age().map(|d| d.as_secs())
-    }
-}
-
 impl TryFrom<String> for RetentionPolicy {
     type Error = String;
 
