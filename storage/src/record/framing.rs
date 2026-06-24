@@ -207,8 +207,8 @@ mod test {
     use proptest::prelude::*;
     use rstest::rstest;
     use s2_common::record::{
-        CommandRecord, EnvelopeRecord, Header, MAX_FENCING_TOKEN_LENGTH, MeteredExt, StreamPosition,
-        Timestamp,
+        CommandRecord, EnvelopeRecord, Header, MAX_FENCING_TOKEN_LENGTH, MeteredExt,
+        StreamPosition, Timestamp,
     };
 
     use super::*;
@@ -501,10 +501,6 @@ mod test {
         let decoded = decode_stored_record(Bytes::from(encoded)).unwrap();
 
         assert_eq!(decoded.metered_size(), 99);
-        assert_eq!(
-            decoded.into_inner(),
-            StoredRecord::Plaintext(record)
-        );
+        assert_eq!(decoded.into_inner(), StoredRecord::Plaintext(record));
     }
-
 }
