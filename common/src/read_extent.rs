@@ -8,11 +8,6 @@ pub struct CountOrBytes {
 
 impl CountOrBytes {
     pub const ZERO: CountOrBytes = CountOrBytes { count: 0, bytes: 0 };
-
-    pub const MAX: CountOrBytes = CountOrBytes {
-        count: usize::MAX,
-        bytes: usize::MAX,
-    };
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
@@ -147,15 +142,6 @@ impl From<Option<Timestamp>> for ReadUntil {
         match timestamp {
             Some(ts) => ReadUntil::Timestamp(ts),
             None => ReadUntil::Unbounded,
-        }
-    }
-}
-
-impl From<ReadUntil> for Option<Timestamp> {
-    fn from(until: ReadUntil) -> Self {
-        match until {
-            ReadUntil::Unbounded => None,
-            ReadUntil::Timestamp(ts) => Some(ts),
         }
     }
 }
