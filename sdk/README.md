@@ -66,12 +66,13 @@ The Rust SDK provides ergonomic interface and utilities to interact with the
 The [`examples`](./examples) directory in this repository contains a variety of
 example use cases demonstrating how to use the SDK effectively.
 
-You might have to set either one or all of these env vars based on the example you run.
+You might have to set one or more of these env vars based on the example you run.
 
 ```bash
 export S2_ACCESS_TOKEN="<YOUR_ACCESS_TOKEN>"
 export S2_BASIN="<YOUR_BASIN_NAME>"
 export S2_STREAM="<YOUR_STREAM_NAME>"
+export S2_ENCRYPTION_KEY="<YOUR_ENCRYPTION_KEY>"
 cargo run --example <example_name>
 ```
 
