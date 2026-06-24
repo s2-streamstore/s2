@@ -116,6 +116,7 @@ mod help_text {
     // Uncapped - exact from spec
     pub const TS_UNCAPPED: &str = "Allow client timestamps to exceed arrival time.";
     pub const TS_CAPPED: &str = "Client timestamps capped at arrival time.";
+    pub const TS_INHERIT: &str = "Clear setting, inherit from basin default.";
 
     // Retention - exact from spec
     pub const RETENTION_INFINITE: &str = "Retain records unless explicitly trimmed.";
@@ -217,6 +218,36 @@ fn render_toggle(on: bool, is_selected: bool) -> Vec<Span<'static>> {
             Span::styled(" OFF ", Style::default().fg(TEXT_MUTED).bg(GRAY_800)),
             Span::styled("", Style::default().fg(GRAY_800)),
         ]
+    }
+}
+
+/// Render a tri-state toggle: Some(true) = "YES", Some(false) = "NO", None = "INHERIT"
+fn render_tristate_toggle(value: Option<bool>, is_selected: bool) -> Vec<Span<'static>> {
+    match value {
+        Some(true) => vec![
+            Span::styled(
+                "",
+                Style::default().fg(if is_selected { CYAN } else { GRAY_800 }),
+            ),
+            Span::styled(" YES ", Style::default().fg(BG_DARK).bg(CYAN).bold()),
+            Span::styled("", Style::default().fg(CYAN)),
+        ],
+        Some(false) => vec![
+            Span::styled(
+                "",
+                Style::default().fg(if is_selected { TEXT_MUTED } else { GRAY_800 }),
+            ),
+            Span::styled(" NO ", Style::default().fg(TEXT_MUTED).bg(GRAY_800)),
+            Span::styled("", Style::default().fg(GRAY_800)),
+        ],
+        None => vec![
+            Span::styled(
+                "",
+                Style::default().fg(if is_selected { PURPLE } else { GRAY_800 }),
+            ),
+            Span::styled(" INHERIT ", Style::default().fg(BG_DARK).bg(PURPLE).bold()),
+            Span::styled("", Style::default().fg(PURPLE)),
+        ],
     }
 }
 
@@ -5319,18 +5350,18 @@ fn draw_input_dialog(
             // Uncapped Timestamps
             let (ind, lbl) = render_field_row_bold(4, "  Uncapped", *selected);
             let mut uncapped_spans = vec![ind, lbl, Span::raw("  ")];
-            uncapped_spans.extend(render_toggle(
-                timestamping_uncapped.unwrap_or(false),
+            uncapped_spans.extend(render_tristate_toggle(
+                *timestamping_uncapped,
                 *selected == 4,
             ));
             lines.push(Line::from(uncapped_spans));
 
             // Uncapped help text
             if *selected == 4 {
-                let uncapped_help = if timestamping_uncapped.unwrap_or(false) {
-                    help_text::TS_UNCAPPED
-                } else {
-                    help_text::TS_CAPPED
+                let uncapped_help = match timestamping_uncapped {
+                    Some(true) => help_text::TS_UNCAPPED,
+                    Some(false) => help_text::TS_CAPPED,
+                    None => help_text::TS_INHERIT,
                 };
                 lines.push(Line::from(vec![
                     Span::raw("                  "),
@@ -5553,18 +5584,18 @@ fn draw_input_dialog(
             // Uncapped Timestamps
             let (ind, lbl) = render_field_row(4, "  Uncapped", *selected);
             let mut uncapped_spans = vec![ind, lbl, Span::raw("  ")];
-            uncapped_spans.extend(render_toggle(
-                timestamping_uncapped.unwrap_or(false),
+            uncapped_spans.extend(render_tristate_toggle(
+                *timestamping_uncapped,
                 *selected == 4,
             ));
             lines.push(Line::from(uncapped_spans));
 
             // Uncapped help text
             if *selected == 4 {
-                let uncapped_help = if timestamping_uncapped.unwrap_or(false) {
-                    help_text::TS_UNCAPPED
-                } else {
-                    help_text::TS_CAPPED
+                let uncapped_help = match timestamping_uncapped {
+                    Some(true) => help_text::TS_UNCAPPED,
+                    Some(false) => help_text::TS_CAPPED,
+                    None => help_text::TS_INHERIT,
                 };
                 lines.push(Line::from(vec![
                     Span::raw("                  "),

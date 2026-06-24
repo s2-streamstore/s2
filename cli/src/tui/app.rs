@@ -28,7 +28,7 @@ use super::{
 use crate::{
     cli::{
         CreateStreamArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
-        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs,
+        ListStreamsArgs, ReadArgs,
     },
     config::{self, Compression, ConfigKey},
     error::CliError,
@@ -36,8 +36,7 @@ use crate::{
     record_format::{RecordFormat, RecordsOut},
     types::{
         BasinConfig, DeleteOnEmptyConfig, Operation, RetentionPolicy, S2BasinAndMaybeStreamUri,
-        S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig, TimestampingConfig,
-        TimestampingMode,
+        S2BasinAndStreamUri, StorageClass, StreamConfig, TimestampingConfig, TimestampingMode,
     },
 };
 
@@ -2768,7 +2767,13 @@ impl App {
                         }
                     }
                     KeyCode::Char(' ') => match *selected {
-                        4 => *timestamping_uncapped = Some(!timestamping_uncapped.unwrap_or(false)),
+                        4 => {
+                            *timestamping_uncapped = match *timestamping_uncapped {
+                                Some(true) => Some(false),
+                                Some(false) => None,
+                                None => Some(true),
+                            };
+                        }
                         5 => {
                             *create_stream_on_append =
                                 Some(!create_stream_on_append.unwrap_or(false))
@@ -2889,7 +2894,11 @@ impl App {
                         }
                     }
                     KeyCode::Char(' ') if *selected == 4 => {
-                        *timestamping_uncapped = Some(!timestamping_uncapped.unwrap_or(false));
+                        *timestamping_uncapped = match *timestamping_uncapped {
+                            Some(true) => Some(false),
+                            Some(false) => None,
+                            None => Some(true),
+                        };
                     }
                     KeyCode::Enter => {
                         if *selected == 2 && *retention_policy == RetentionPolicyOption::Age {
@@ -4960,41 +4969,59 @@ impl App {
         config: BasinReconfigureConfig,
         tx: mpsc::UnboundedSender<Event>,
     ) {
+        use s2_common::maybe::Maybe;
+        use s2_sdk::types::{
+            BasinReconfiguration, ReconfigureBasinInput, StreamReconfiguration,
+            TimestampingReconfiguration,
+        };
+
         let s2 = self.s2.clone().expect("S2 client not initialized");
         let tx_refresh = tx.clone();
         tokio::spawn(async move {
-            let retention_policy = match config.retention_policy {
-                RetentionPolicyOption::Infinite => Some(crate::types::RetentionPolicy::Infinite),
-                RetentionPolicyOption::Age => Some(crate::types::RetentionPolicy::Age(
-                    Duration::from_secs(config.retention_age_secs),
-                )),
+            let mut stream_reconfig = StreamReconfiguration::new();
+            if let Some(storage_class) = config.storage_class {
+                stream_reconfig = stream_reconfig.with_storage_class(storage_class.into());
+            }
+            match config.retention_policy {
+                RetentionPolicyOption::Infinite => {
+                    stream_reconfig = stream_reconfig
+                        .with_retention_policy(s2_sdk::types::RetentionPolicy::Infinite);
+                }
+                RetentionPolicyOption::Age => {
+                    stream_reconfig = stream_reconfig.with_retention_policy(
+                        s2_sdk::types::RetentionPolicy::Age(config.retention_age_secs),
+                    );
+                }
             };
 
-            let timestamping =
-                if config.timestamping_mode.is_some() || config.timestamping_uncapped.is_some() {
-                    Some(crate::types::TimestampingConfig {
-                        timestamping_mode: config.timestamping_mode,
-                        timestamping_uncapped: config.timestamping_uncapped,
-                    })
-                } else {
-                    None
-                };
-
-            let default_stream_config = StreamConfig {
-                storage_class: config.storage_class,
-                retention_policy,
-                timestamping,
-                delete_on_empty: None,
+            // Build timestamping reconfiguration with tri-state uncapped support:
+            // Some(val) -> set to val, None -> clear to inherit from parent.
+            let mut ts_reconfig = TimestampingReconfiguration::new();
+            if let Some(mode) = config.timestamping_mode {
+                ts_reconfig = ts_reconfig.with_mode(mode.into());
+            }
+            ts_reconfig.uncapped = match config.timestamping_uncapped {
+                Some(val) => Maybe::Specified(Some(val)),
+                None => Maybe::Specified(None),
             };
+            stream_reconfig = stream_reconfig.with_timestamping(ts_reconfig);
 
-            let args = ReconfigureBasinArgs {
-                basin: S2BasinUri(basin),
-                stream_cipher: config.stream_cipher,
-                create_stream_on_append: config.create_stream_on_append,
-                create_stream_on_read: config.create_stream_on_read,
-                default_stream_config,
-            };
-            match ops::reconfigure_basin(&s2, args).await {
+            let mut reconfig = BasinReconfiguration::new();
+            reconfig = reconfig.with_default_stream_config(stream_reconfig);
+            if let Some(algorithm) = config.stream_cipher {
+                reconfig = reconfig.with_stream_cipher(algorithm);
+            }
+            if let Some(val) = config.create_stream_on_append {
+                reconfig = reconfig.with_create_stream_on_append(val);
+            }
+            if let Some(val) = config.create_stream_on_read {
+                reconfig = reconfig.with_create_stream_on_read(val);
+            }
+
+            match s2
+                .reconfigure_basin(ReconfigureBasinInput::new(basin.clone(), reconfig))
+                .await
+            {
                 Ok(_) => {
                     let _ = tx.send(Event::BasinReconfigured(Ok(())));
                     // Trigger refresh
@@ -5009,7 +5036,10 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::BasinReconfigured(Err(e)));
+                    let _ = tx.send(Event::BasinReconfigured(Err(CliError::op(
+                        crate::error::OpKind::ReconfigureBasin,
+                        e,
+                    ))));
                 }
             }
         });
@@ -5022,47 +5052,56 @@ impl App {
         config: StreamReconfigureConfig,
         tx: mpsc::UnboundedSender<Event>,
     ) {
+        use s2_common::maybe::Maybe;
+        use s2_sdk::types::{
+            DeleteOnEmptyReconfiguration, ReconfigureStreamInput, StreamReconfiguration,
+            TimestampingReconfiguration,
+        };
+
         let s2 = self.s2.clone().expect("S2 client not initialized");
         let basin_clone = basin.clone();
         let tx_refresh = tx.clone();
         tokio::spawn(async move {
-            let retention_policy = match config.retention_policy {
-                RetentionPolicyOption::Infinite => Some(crate::types::RetentionPolicy::Infinite),
-                RetentionPolicyOption::Age => Some(crate::types::RetentionPolicy::Age(
-                    Duration::from_secs(config.retention_age_secs),
-                )),
+            let mut stream_reconfig = StreamReconfiguration::new();
+            if let Some(storage_class) = config.storage_class {
+                stream_reconfig = stream_reconfig.with_storage_class(storage_class.into());
+            }
+            match config.retention_policy {
+                RetentionPolicyOption::Infinite => {
+                    stream_reconfig = stream_reconfig
+                        .with_retention_policy(s2_sdk::types::RetentionPolicy::Infinite);
+                }
+                RetentionPolicyOption::Age => {
+                    stream_reconfig = stream_reconfig.with_retention_policy(
+                        s2_sdk::types::RetentionPolicy::Age(config.retention_age_secs),
+                    );
+                }
             };
 
-            let timestamping =
-                if config.timestamping_mode.is_some() || config.timestamping_uncapped.is_some() {
-                    Some(crate::types::TimestampingConfig {
-                        timestamping_mode: config.timestamping_mode,
-                        timestamping_uncapped: config.timestamping_uncapped,
-                    })
-                } else {
-                    None
-                };
-
-            let delete_on_empty = if config.delete_on_empty_enabled {
-                humantime::parse_duration(&config.delete_on_empty_min_age)
-                    .ok()
-                    .map(|d| crate::types::DeleteOnEmptyConfig {
-                        delete_on_empty_min_age: d,
-                    })
-            } else {
-                None
+            // Build timestamping reconfiguration with tri-state uncapped support:
+            // Some(val) -> set to val, None -> clear to inherit from parent.
+            let mut ts_reconfig = TimestampingReconfiguration::new();
+            if let Some(mode) = config.timestamping_mode {
+                ts_reconfig = ts_reconfig.with_mode(mode.into());
+            }
+            ts_reconfig.uncapped = match config.timestamping_uncapped {
+                Some(val) => Maybe::Specified(Some(val)),
+                None => Maybe::Specified(None),
             };
+            stream_reconfig = stream_reconfig.with_timestamping(ts_reconfig);
 
-            let args = ReconfigureStreamArgs {
-                uri: S2BasinAndStreamUri { basin, stream },
-                config: StreamConfig {
-                    storage_class: config.storage_class,
-                    retention_policy,
-                    timestamping,
-                    delete_on_empty,
-                },
-            };
-            match ops::reconfigure_stream(&s2, args).await {
+            if config.delete_on_empty_enabled
+                && let Ok(d) = humantime::parse_duration(&config.delete_on_empty_min_age)
+            {
+                stream_reconfig = stream_reconfig
+                    .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().with_min_age(d));
+            }
+
+            let basin_handle = s2.basin(basin);
+            match basin_handle
+                .reconfigure_stream(ReconfigureStreamInput::new(stream, stream_reconfig))
+                .await
+            {
                 Ok(_) => {
                     let _ = tx.send(Event::StreamReconfigured(Ok(())));
                     // Trigger refresh
@@ -5081,7 +5120,10 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::StreamReconfigured(Err(e)));
+                    let _ = tx.send(Event::StreamReconfigured(Err(CliError::op(
+                        crate::error::OpKind::ReconfigureStream,
+                        e,
+                    ))));
                 }
             }
         });
