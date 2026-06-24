@@ -38,7 +38,7 @@ pub struct ListBasinsResponse {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct BasinInfo {
     /// Basin name.
@@ -51,9 +51,6 @@ pub struct BasinInfo {
     /// Deletion time in RFC 3339 format, if the basin is being deleted.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
-    /// Deprecated basin state inferred from `deleted_at`.
-    #[cfg_attr(feature = "utoipa", schema(ignore))]
-    pub state: BasinState,
 }
 
 impl From<s2_common::basin::BasinInfo> for BasinInfo {
@@ -70,62 +67,8 @@ impl From<s2_common::basin::BasinInfo> for BasinInfo {
             location,
             created_at,
             deleted_at,
-            state: basin_state_for_deleted_at(deleted_at.as_ref()),
         }
     }
-}
-
-fn basin_state_for_deleted_at(deleted_at: Option<&OffsetDateTime>) -> BasinState {
-    if deleted_at.is_some() {
-        BasinState::Deleting
-    } else {
-        BasinState::Active
-    }
-}
-
-#[derive(Deserialize)]
-struct BasinInfoSerde {
-    name: BasinName,
-    location: Option<LocationName>,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    deleted_at: Option<OffsetDateTime>,
-}
-
-impl<'de> Deserialize<'de> for BasinInfo {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let BasinInfoSerde {
-            name,
-            location,
-            created_at,
-            deleted_at,
-        } = BasinInfoSerde::deserialize(deserializer)?;
-
-        let state = basin_state_for_deleted_at(deleted_at.as_ref());
-
-        Ok(Self {
-            name,
-            location,
-            created_at,
-            deleted_at,
-            state,
-        })
-    }
-}
-
-#[rustfmt::skip]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum BasinState {
-    /// Basin is active.
-    Active,
-    /// Basin is being deleted.
-    Deleting,
 }
 
 #[rustfmt::skip]
