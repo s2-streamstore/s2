@@ -85,11 +85,6 @@ pub enum Error {
     Compression(String),
 }
 
-impl Error {
-    pub fn is_connect(&self) -> bool {
-        matches!(self, Error::Send(e) if e.is_connect())
-    }
-}
 
 enum BodyInner {
     Empty,
