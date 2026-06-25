@@ -79,7 +79,7 @@ mod tests {
             header_value in prop::collection::vec(any::<u8>(), 0..50),
             body in prop::collection::vec(any::<u8>(), 0..200),
         ) {
-            use s2_common::record::{Header, Metered, MeteredExt as _, MeteredSize, Record};
+            use s2_common::record::{Header, MeteredExt as _, MeteredSize, Record};
             use s2_storage::record::StoredRecord;
 
             let header_name = Bytes::from(header_name);
