@@ -52,11 +52,19 @@ pub enum Event {
     /// Tail position loaded
     TailPositionLoaded(Result<StreamPosition, CliError>),
 
-    /// A record was received during read/tail
-    RecordReceived(Result<SequencedRecord, CliError>),
+    /// A record was received during read/tail.
+    ///
+    /// `generation` identifies the read task that produced this record. The UI
+    /// ignores records whose generation does not match the active read, so
+    /// records from a superseded read task (e.g. after switching streams) are
+    /// dropped instead of leaking into the new view.
+    RecordReceived {
+        generation: u64,
+        result: Result<SequencedRecord, CliError>,
+    },
 
-    /// Read stream ended
-    ReadEnded,
+    /// Read stream ended (tagged with the producing read task's generation)
+    ReadEnded { generation: u64 },
 
     /// A record was received for the PiP (picture-in-picture) tail
     PipRecordReceived(Result<SequencedRecord, CliError>),

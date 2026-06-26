@@ -1012,6 +1012,13 @@ pub struct App {
     should_quit: bool,
     /// Stop signal for the benchmark task
     bench_stop_signal: Option<Arc<AtomicBool>>,
+    /// Generation counter bumped each time a new read/tail is started. Records
+    /// and end-of-stream events are tagged with the generation of the task that
+    /// produced them; events from a superseded task are ignored.
+    read_generation: u64,
+    /// Handle to the active read/tail task, aborted when a new read starts so
+    /// the previous stream's session is torn down rather than left running.
+    read_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub fn location_pill_idx(location: &str, custom_active: bool, names: &[&str]) -> usize {
@@ -1164,6 +1171,8 @@ impl App {
             locations: None,
             should_quit: false,
             bench_stop_signal: None,
+            read_generation: 0,
+            read_task: None,
         }
     }
 
@@ -1474,7 +1483,12 @@ impl App {
                 }
             }
 
-            Event::RecordReceived(result) => {
+            Event::RecordReceived { generation, result } => {
+                // Ignore records produced by a superseded read task (e.g. after
+                // switching to a different stream); they belong to the old view.
+                if generation != self.read_generation {
+                    return;
+                }
                 if let Screen::ReadView(state) = &mut self.screen {
                     state.loading = false;
                     match result {
@@ -1551,7 +1565,10 @@ impl App {
                 }
             }
 
-            Event::ReadEnded => {
+            Event::ReadEnded { generation } => {
+                if generation != self.read_generation {
+                    return;
+                }
                 if let Screen::ReadView(state) = &mut self.screen {
                     state.loading = false;
                     if !state.is_tailing {
@@ -4509,13 +4526,15 @@ impl App {
             show_timeline: false,
         });
 
+        let generation = self.begin_read();
+
         let s2 = self.s2.clone().expect("S2 client not initialized");
         let uri = S2BasinAndStreamUri {
             basin: basin_name,
             stream: stream_name,
         };
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Simple tail: no flags = TailOffset(0) = start at current tail, wait for new records
             let args = ReadArgs {
                 uri,
@@ -4539,26 +4558,48 @@ impl App {
                         match batch_result {
                             Ok(batch) => {
                                 for record in batch.records {
-                                    if tx.send(Event::RecordReceived(Ok(record))).is_err() {
+                                    if tx
+                                        .send(Event::RecordReceived {
+                                            generation,
+                                            result: Ok(record),
+                                        })
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.send(Event::RecordReceived(Err(
-                                    crate::error::CliError::op(crate::error::OpKind::Read, e),
-                                )));
+                                let _ = tx.send(Event::RecordReceived {
+                                    generation,
+                                    result: Err(crate::error::CliError::op(
+                                        crate::error::OpKind::Read,
+                                        e,
+                                    )),
+                                });
                                 return;
                             }
                         }
                     }
-                    let _ = tx.send(Event::ReadEnded);
+                    let _ = tx.send(Event::ReadEnded { generation });
                 }
                 Err(e) => {
                     let _ = tx.send(Event::Error(e));
                 }
             }
         });
+        self.read_task = Some(handle);
+    }
+
+    /// Bump the read generation and abort any in-flight read task, returning the
+    /// new generation that a freshly spawned read task should tag its events
+    /// with. Ensures records from a previous stream stop flowing into the view.
+    fn begin_read(&mut self) -> u64 {
+        if let Some(handle) = self.read_task.take() {
+            handle.abort();
+        }
+        self.read_generation = self.read_generation.wrapping_add(1);
+        self.read_generation
     }
 
     /// Start a picture-in-picture tail for a stream
@@ -4703,13 +4744,15 @@ impl App {
             show_timeline: false,
         });
 
+        let generation = self.begin_read();
+
         let s2 = self.s2.clone().expect("S2 client not initialized");
         let uri = S2BasinAndStreamUri {
             basin: basin_name,
             stream: stream_name,
         };
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let seq_num = if start_from == ReadStartFrom::SeqNum {
                 seq_num_value.parse().ok()
             } else {
@@ -4835,35 +4878,47 @@ impl App {
                                             }
                                         };
                                         if let Err(e) = writer.write_all(line.as_bytes()).await {
-                                            let _ = tx.send(Event::RecordReceived(Err(
-                                                crate::error::CliError::RecordWrite(format!(
-                                                    "failed to write to output file: {e}"
+                                            let _ = tx.send(Event::RecordReceived {
+                                                generation,
+                                                result: Err(crate::error::CliError::RecordWrite(
+                                                    format!("failed to write to output file: {e}"),
                                                 )),
-                                            )));
+                                            });
                                             return;
                                         }
                                     }
 
-                                    if tx.send(Event::RecordReceived(Ok(record))).is_err() {
+                                    if tx
+                                        .send(Event::RecordReceived {
+                                            generation,
+                                            result: Ok(record),
+                                        })
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.send(Event::RecordReceived(Err(
-                                    crate::error::CliError::op(crate::error::OpKind::Read, e),
-                                )));
+                                let _ = tx.send(Event::RecordReceived {
+                                    generation,
+                                    result: Err(crate::error::CliError::op(
+                                        crate::error::OpKind::Read,
+                                        e,
+                                    )),
+                                });
                                 return;
                             }
                         }
                     }
-                    let _ = tx.send(Event::ReadEnded);
+                    let _ = tx.send(Event::ReadEnded { generation });
                 }
                 Err(e) => {
                     let _ = tx.send(Event::Error(e));
                 }
             }
         });
+        self.read_task = Some(handle);
     }
 
     fn load_basin_config(&self, basin: BasinName, tx: mpsc::UnboundedSender<Event>) {
