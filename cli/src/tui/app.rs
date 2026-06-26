@@ -1051,6 +1051,10 @@ pub fn location_pill_idx(location: &str, custom_active: bool, names: &[&str]) ->
     }
 }
 
+fn location_field_editable(location: &str, custom_active: bool, names: &[&str]) -> bool {
+    names.is_empty() || location_pill_idx(location, custom_active, names) == names.len() + 1
+}
+
 fn select_location_pill(
     location: &mut String,
     custom_active: &mut bool,
@@ -2504,9 +2508,11 @@ impl App {
                                 *editing = true;
                             }
                             1 => {
-                                let editable =
-                                    known_location_names.is_empty() || *custom_location_active;
-                                if editable {
+                                if location_field_editable(
+                                    location,
+                                    *custom_location_active,
+                                    &known_location_names,
+                                ) {
                                     *cursor = location.len();
                                     *editing = true;
                                 }
