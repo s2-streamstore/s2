@@ -138,8 +138,16 @@ pub async fn reconfigure_basin(
         reconfig = reconfig.with_create_stream_on_read(val);
     }
 
+    reconfigure_basin_with(s2, args.basin.into(), reconfig).await
+}
+
+pub async fn reconfigure_basin_with(
+    s2: &S2,
+    basin: BasinName,
+    reconfig: BasinReconfiguration,
+) -> Result<BasinConfig, CliError> {
     let config = s2
-        .reconfigure_basin(ReconfigureBasinInput::new(args.basin.into(), reconfig))
+        .reconfigure_basin(ReconfigureBasinInput::new(basin, reconfig))
         .await
         .map_err(|e| CliError::op(OpKind::ReconfigureBasin, e))?;
 
@@ -423,11 +431,18 @@ pub async fn reconfigure_stream(
     s2: &S2,
     args: ReconfigureStreamArgs,
 ) -> Result<StreamConfig, CliError> {
-    let basin = s2.basin(args.uri.basin);
-
     let reconfig: StreamReconfiguration = args.config.into();
-    let config = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(args.uri.stream, reconfig))
+    reconfigure_stream_with(s2, args.uri, reconfig).await
+}
+
+pub async fn reconfigure_stream_with(
+    s2: &S2,
+    uri: S2BasinAndStreamUri,
+    reconfig: StreamReconfiguration,
+) -> Result<StreamConfig, CliError> {
+    let config = s2
+        .basin(uri.basin)
+        .reconfigure_stream(ReconfigureStreamInput::new(uri.stream, reconfig))
         .await
         .map_err(|e| CliError::op(OpKind::ReconfigureStream, e))?;
 

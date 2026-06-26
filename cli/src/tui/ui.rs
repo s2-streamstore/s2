@@ -116,6 +116,7 @@ mod help_text {
     // Uncapped - exact from spec
     pub const TS_UNCAPPED: &str = "Allow client timestamps to exceed arrival time.";
     pub const TS_CAPPED: &str = "Client timestamps capped at arrival time.";
+    pub const TS_UNCAPPED_DEFAULT: &str = "Inherit uncapped setting from basin default.";
 
     // Retention - exact from spec
     pub const RETENTION_INFINITE: &str = "Retain records unless explicitly trimmed.";
@@ -5317,20 +5318,25 @@ fn draw_input_dialog(
             }
 
             // Uncapped Timestamps
+            let uncapped_opts = [
+                ("Inherit", timestamping_uncapped.is_none()),
+                ("On", *timestamping_uncapped == Some(true)),
+                ("Off", *timestamping_uncapped == Some(false)),
+            ];
             let (ind, lbl) = render_field_row_bold(4, "  Uncapped", *selected);
             let mut uncapped_spans = vec![ind, lbl, Span::raw("  ")];
-            uncapped_spans.extend(render_toggle(
-                timestamping_uncapped.unwrap_or(false),
-                *selected == 4,
-            ));
+            for (label, active) in &uncapped_opts {
+                uncapped_spans.push(render_pill(label, *selected == 4, *active));
+                uncapped_spans.push(Span::raw(" "));
+            }
             lines.push(Line::from(uncapped_spans));
 
             // Uncapped help text
             if *selected == 4 {
-                let uncapped_help = if timestamping_uncapped.unwrap_or(false) {
-                    help_text::TS_UNCAPPED
-                } else {
-                    help_text::TS_CAPPED
+                let uncapped_help = match *timestamping_uncapped {
+                    None => help_text::TS_UNCAPPED_DEFAULT,
+                    Some(true) => help_text::TS_UNCAPPED,
+                    Some(false) => help_text::TS_CAPPED,
                 };
                 lines.push(Line::from(vec![
                     Span::raw("                  "),
@@ -5551,20 +5557,25 @@ fn draw_input_dialog(
             }
 
             // Uncapped Timestamps
+            let uncapped_opts = [
+                ("Inherit", timestamping_uncapped.is_none()),
+                ("On", *timestamping_uncapped == Some(true)),
+                ("Off", *timestamping_uncapped == Some(false)),
+            ];
             let (ind, lbl) = render_field_row(4, "  Uncapped", *selected);
             let mut uncapped_spans = vec![ind, lbl, Span::raw("  ")];
-            uncapped_spans.extend(render_toggle(
-                timestamping_uncapped.unwrap_or(false),
-                *selected == 4,
-            ));
+            for (label, active) in &uncapped_opts {
+                uncapped_spans.push(render_pill(label, *selected == 4, *active));
+                uncapped_spans.push(Span::raw(" "));
+            }
             lines.push(Line::from(uncapped_spans));
 
             // Uncapped help text
             if *selected == 4 {
-                let uncapped_help = if timestamping_uncapped.unwrap_or(false) {
-                    help_text::TS_UNCAPPED
-                } else {
-                    help_text::TS_CAPPED
+                let uncapped_help = match *timestamping_uncapped {
+                    None => help_text::TS_UNCAPPED_DEFAULT,
+                    Some(true) => help_text::TS_UNCAPPED,
+                    Some(false) => help_text::TS_CAPPED,
                 };
                 lines.push(Line::from(vec![
                     Span::raw("                  "),
