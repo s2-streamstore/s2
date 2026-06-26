@@ -5181,6 +5181,7 @@ fn draw_input_dialog(
             editing_age,
             age_input,
             cursor,
+            loaded: _,
         } => {
             // Options
             let storage_opts = [

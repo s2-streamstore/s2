@@ -679,6 +679,9 @@ pub enum InputMode {
         editing_age: bool,
         age_input: String,
         cursor: usize,
+        /// Whether the current config has loaded; submit is blocked until then so
+        /// an unpopulated form can't clobber existing values.
+        loaded: bool,
     },
     /// Reconfiguring a stream
     ReconfigureStream {
@@ -695,6 +698,9 @@ pub enum InputMode {
         editing_age: bool,
         age_input: String,
         cursor: usize,
+        /// Whether the current config has loaded; submit is blocked until then so
+        /// an unpopulated form can't clobber existing values.
+        loaded: bool,
     },
     /// Custom read configuration
     CustomRead {
@@ -1769,6 +1775,7 @@ impl App {
                     timestamping_mode,
                     timestamping_uncapped,
                     age_input,
+                    loaded,
                     ..
                 } = &mut self.input_mode
                 {
@@ -1786,6 +1793,7 @@ impl App {
                             }
                             *timestamping_mode = info.timestamping_mode;
                             *timestamping_uncapped = info.timestamping_uncapped;
+                            *loaded = true;
                         }
                         Err(e) => {
                             self.input_mode = InputMode::Normal;
@@ -1808,6 +1816,7 @@ impl App {
                     delete_on_empty_enabled,
                     delete_on_empty_min_age,
                     age_input,
+                    loaded,
                     ..
                 } = &mut self.input_mode
                 {
@@ -1830,6 +1839,7 @@ impl App {
                             } else {
                                 *delete_on_empty_enabled = false;
                             }
+                            *loaded = true;
                         }
                         Err(e) => {
                             self.input_mode = InputMode::Normal;
@@ -2770,6 +2780,7 @@ impl App {
                 editing_age,
                 age_input,
                 cursor,
+                loaded,
             } => {
                 const BASIN_MAX_ROW: usize = 6;
                 if *editing_age {
@@ -2842,7 +2853,7 @@ impl App {
                         4 => *timestamping_uncapped = uncapped_next(*timestamping_uncapped),
                         _ => {}
                     },
-                    KeyCode::Char('s') => {
+                    KeyCode::Char('s') if *loaded => {
                         let b = basin.clone();
                         let config = BasinReconfigureConfig {
                             stream_cipher: None,
@@ -2874,6 +2885,7 @@ impl App {
                 editing_age,
                 age_input,
                 cursor,
+                loaded,
             } => {
                 if *editing_age {
                     let (field, digits_only): (&mut String, bool) = if *selected == 2 {
@@ -2964,7 +2976,7 @@ impl App {
                         5 => *delete_on_empty_enabled = !*delete_on_empty_enabled,
                         _ => {}
                     },
-                    KeyCode::Char('s') => {
+                    KeyCode::Char('s') if *loaded => {
                         let b = basin.clone();
                         let s = stream.clone();
                         let config = StreamReconfigureConfig {
@@ -3740,6 +3752,7 @@ impl App {
                         editing_age: false,
                         age_input: String::new(),
                         cursor: 0,
+                        loaded: false,
                     };
                     // Load current config
                     self.load_basin_config(basin_name, tx);
@@ -3974,6 +3987,7 @@ impl App {
                         editing_age: false,
                         age_input: String::new(),
                         cursor: 0,
+                        loaded: false,
                     };
                     // Load current config
                     self.load_stream_config_for_reconfig(basin_name, stream_name, tx);
@@ -4062,6 +4076,7 @@ impl App {
                     editing_age: false,
                     age_input: String::new(),
                     cursor: 0,
+                    loaded: false,
                 };
                 self.load_stream_config_for_reconfig(basin_name, stream_name, tx);
             }
@@ -7800,6 +7815,7 @@ mod tests {
             editing_age: false,
             age_input: String::new(),
             cursor: 0,
+            loaded: true,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
 
@@ -7823,5 +7839,35 @@ mod tests {
 
         app.handle_input_key(key(KeyCode::Left), tx.clone());
         assert_eq!(uncapped(&app), None);
+    }
+
+    #[test]
+    fn reconfigure_stream_submit_blocked_until_loaded() {
+        // No S2 client: submitting an unloaded form would panic if not gated,
+        // and would otherwise clobber the stream's config with form defaults.
+        let mut app = App::new(None);
+        app.input_mode = InputMode::ReconfigureStream {
+            basin: "test-basin".parse().unwrap(),
+            stream: "test-stream".parse().unwrap(),
+            storage_class: None,
+            retention_policy: RetentionPolicyOption::Infinite,
+            retention_age_secs: 0,
+            timestamping_mode: None,
+            timestamping_uncapped: None,
+            delete_on_empty_enabled: false,
+            delete_on_empty_min_age: String::new(),
+            selected: 0,
+            editing_age: false,
+            age_input: String::new(),
+            cursor: 0,
+            loaded: false,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.handle_input_key(key(KeyCode::Char('s')), tx.clone());
+        assert!(matches!(
+            app.input_mode,
+            InputMode::ReconfigureStream { .. }
+        ));
     }
 }
