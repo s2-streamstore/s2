@@ -9,6 +9,8 @@ use crate::{
     types::{LatencyStats, StorageClass, StreamConfig, TimestampingMode},
 };
 
+pub type BenchRunId = u64;
+
 /// Basin config info for reconfiguration
 #[derive(Debug, Clone)]
 pub struct BasinConfigInfo {
@@ -132,22 +134,40 @@ pub enum Event {
     Error(CliError),
 
     /// Benchmark stream created
-    BenchStreamCreated(Result<String, CliError>),
+    BenchStreamCreated {
+        run_id: BenchRunId,
+        result: Result<String, CliError>,
+    },
 
     /// Benchmark write sample received
-    BenchWriteSample(BenchSample),
+    BenchWriteSample {
+        run_id: BenchRunId,
+        sample: BenchSample,
+    },
 
     /// Benchmark read sample received
-    BenchReadSample(BenchSample),
+    BenchReadSample {
+        run_id: BenchRunId,
+        sample: BenchSample,
+    },
 
     /// Benchmark catchup sample received
-    BenchCatchupSample(BenchSample),
+    BenchCatchupSample {
+        run_id: BenchRunId,
+        sample: BenchSample,
+    },
 
     /// Benchmark phase completed
-    BenchPhaseComplete(BenchPhase),
+    BenchPhaseComplete {
+        run_id: BenchRunId,
+        phase: BenchPhase,
+    },
 
     /// Benchmark finished with final stats
-    BenchComplete(Result<BenchFinalStats, CliError>),
+    BenchComplete {
+        run_id: BenchRunId,
+        result: Result<BenchFinalStats, CliError>,
+    },
 }
 
 /// A sample from the benchmark (write, read, or catchup)
