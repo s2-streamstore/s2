@@ -19,7 +19,10 @@ use s2_sdk::types::{
 use tokio::sync::mpsc;
 
 use super::{
-    event::{BasinConfigInfo, BenchFinalStats, BenchPhase, BenchSample, Event, StreamConfigInfo},
+    event::{
+        BasinConfigInfo, BenchFinalStats, BenchPhase, BenchRunId, BenchSample, Event,
+        StreamConfigInfo,
+    },
     text_input::{
         TextInput, cursor_backspace, cursor_delete, cursor_insert, cursor_move_end,
         cursor_move_home, cursor_move_left, cursor_move_right,
@@ -1036,8 +1039,9 @@ pub struct App {
     should_quit: bool,
     /// Stop signal for the benchmark task
     bench_stop_signal: Option<Arc<AtomicBool>>,
-    /// Handle to the spawned benchmark task, so it can be aborted on reset
+    /// Handle to the current benchmark task
     bench_task: Option<tokio::task::JoinHandle<()>>,
+    bench_run_id: BenchRunId,
 }
 
 pub fn location_pill_idx(location: &str, custom_active: bool, names: &[&str]) -> usize {
@@ -1222,19 +1226,26 @@ impl App {
             should_quit: false,
             bench_stop_signal: None,
             bench_task: None,
+            bench_run_id: 0,
         }
     }
 
-    /// Hard-stop any in-flight benchmark task so it emits no further events.
-    /// Unlike the graceful stop on quit, the reset path reuses the BenchView
-    /// screen, so a late `BenchComplete` would corrupt the next run.
-    fn abort_benchmark(&mut self) {
+    fn next_benchmark_run_id(&mut self) -> BenchRunId {
+        self.bench_run_id = self.bench_run_id.wrapping_add(1);
+        self.bench_run_id
+    }
+
+    fn is_current_benchmark(&self, run_id: BenchRunId) -> bool {
+        run_id == self.bench_run_id
+    }
+
+    /// Ask any in-flight benchmark to stop and detach its task.
+    /// The task is left alive so it can delete the temporary stream.
+    fn stop_benchmark(&mut self) {
         if let Some(stop) = self.bench_stop_signal.take() {
             stop.store(true, Ordering::Relaxed);
         }
-        if let Some(task) = self.bench_task.take() {
-            task.abort();
-        }
+        self.bench_task.take();
     }
 
     /// Create an S2 client from the given access token
@@ -2139,10 +2150,11 @@ impl App {
                 });
             }
 
-            Event::BenchStreamCreated(result) => {
+            Event::BenchStreamCreated { run_id, result } => {
+                if !self.is_current_benchmark(run_id) {
+                    return;
+                }
                 if let Screen::BenchView(state) = &mut self.screen {
-                    // Stale event from an aborted run; in config phase no benchmark
-                    // events are expected.
                     if state.config_phase {
                         return;
                     }
@@ -2156,6 +2168,8 @@ impl App {
                             });
                         }
                         Err(e) => {
+                            self.bench_stop_signal = None;
+                            self.bench_task = None;
                             state.error = Some(e.to_string());
                             state.running = false;
                         }
@@ -2163,8 +2177,14 @@ impl App {
                 }
             }
 
-            Event::BenchWriteSample(sample) => {
+            Event::BenchWriteSample { run_id, sample } => {
+                if !self.is_current_benchmark(run_id) {
+                    return;
+                }
                 if let Screen::BenchView(state) = &mut self.screen {
+                    if state.config_phase || !state.running {
+                        return;
+                    }
                     state.write_mibps = sample.mib_per_sec;
                     state.write_recps = sample.records_per_sec;
                     state.write_bytes = sample.bytes;
@@ -2180,8 +2200,14 @@ impl App {
                 }
             }
 
-            Event::BenchReadSample(sample) => {
+            Event::BenchReadSample { run_id, sample } => {
+                if !self.is_current_benchmark(run_id) {
+                    return;
+                }
                 if let Screen::BenchView(state) = &mut self.screen {
+                    if state.config_phase || !state.running {
+                        return;
+                    }
                     state.read_mibps = sample.mib_per_sec;
                     state.read_recps = sample.records_per_sec;
                     state.read_bytes = sample.bytes;
@@ -2195,8 +2221,14 @@ impl App {
                 }
             }
 
-            Event::BenchCatchupSample(sample) => {
+            Event::BenchCatchupSample { run_id, sample } => {
+                if !self.is_current_benchmark(run_id) {
+                    return;
+                }
                 if let Screen::BenchView(state) = &mut self.screen {
+                    if state.config_phase || !state.running {
+                        return;
+                    }
                     state.catchup_mibps = sample.mib_per_sec;
                     state.catchup_recps = sample.records_per_sec;
                     state.catchup_bytes = sample.bytes;
@@ -2205,8 +2237,14 @@ impl App {
                 }
             }
 
-            Event::BenchPhaseComplete(phase) => {
+            Event::BenchPhaseComplete { run_id, phase } => {
+                if !self.is_current_benchmark(run_id) {
+                    return;
+                }
                 if let Screen::BenchView(state) = &mut self.screen {
+                    if state.config_phase || !state.running {
+                        return;
+                    }
                     state.phase = match phase {
                         BenchPhase::Write => BenchPhase::Read,
                         BenchPhase::Read => BenchPhase::CatchupWait,
@@ -2216,11 +2254,15 @@ impl App {
                 }
             }
 
-            Event::BenchComplete(result) => {
+            Event::BenchComplete { run_id, result } => {
+                if !self.is_current_benchmark(run_id) {
+                    return;
+                }
                 if let Screen::BenchView(state) = &mut self.screen {
                     if state.config_phase {
                         return;
                     }
+                    self.bench_stop_signal = None;
                     self.bench_task = None;
                     state.running = false;
                     match result {
@@ -7208,15 +7250,18 @@ impl App {
         if !state.config_phase && !state.running {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
+                    self.stop_benchmark();
+                    self.next_benchmark_run_id();
                     // Go back to basins
                     self.screen = Screen::Basins(BasinsState::default());
                     self.load_basins(tx);
                 }
                 KeyCode::Char('r') => {
-                    // Abort a benchmark still finishing in the background (reset
-                    // during the stream-creation window) before reusing the screen.
+                    // Stop a benchmark still starting/cleaning up before reusing
+                    // the screen; cleanup continues in the detached task.
                     let basin_name = state.basin_name.clone();
-                    self.abort_benchmark();
+                    self.stop_benchmark();
+                    self.next_benchmark_run_id();
                     self.screen = Screen::BenchView(BenchViewState::new(basin_name));
                 }
                 _ => {}
@@ -7372,15 +7417,19 @@ impl App {
         catchup_delay_secs: u64,
         tx: mpsc::UnboundedSender<Event>,
     ) {
+        // Defensively stop any prior task before starting a new run.
+        self.stop_benchmark();
+        let run_id = self.next_benchmark_run_id();
+
         let Some(s2) = self.s2.clone() else {
-            let _ = tx.send(Event::BenchStreamCreated(Err(CliError::Config(
-                crate::error::CliConfigError::MissingAccessToken,
-            ))));
+            let _ = tx.send(Event::BenchStreamCreated {
+                run_id,
+                result: Err(CliError::Config(
+                    crate::error::CliConfigError::MissingAccessToken,
+                )),
+            });
             return;
         };
-
-        // Defensively stop any prior task before starting a new run.
-        self.abort_benchmark();
 
         // Create a stop signal that can be triggered from the UI
         let user_stop = Arc::new(AtomicBool::new(false));
@@ -7416,14 +7465,17 @@ impl App {
                 )
                 .await
             {
-                let _ = tx.send(Event::BenchStreamCreated(Err(CliError::op(
-                    crate::error::OpKind::Bench,
-                    e,
-                ))));
+                let _ = tx.send(Event::BenchStreamCreated {
+                    run_id,
+                    result: Err(CliError::op(crate::error::OpKind::Bench, e)),
+                });
                 return;
             }
 
-            let _ = tx.send(Event::BenchStreamCreated(Ok(stream_name_str)));
+            let _ = tx.send(Event::BenchStreamCreated {
+                run_id,
+                result: Ok(stream_name_str),
+            });
 
             // Get stream handle
             let stream = basin.stream(stream_name.clone());
@@ -7436,6 +7488,7 @@ impl App {
                 Duration::from_secs(duration_secs),
                 Duration::from_secs(catchup_delay_secs),
                 user_stop,
+                run_id,
                 tx.clone(),
             )
             .await;
@@ -7445,13 +7498,14 @@ impl App {
                 .delete_stream(DeleteStreamInput::new(stream_name))
                 .await;
 
-            let _ = tx.send(Event::BenchComplete(result));
+            let _ = tx.send(Event::BenchComplete { run_id, result });
         });
         self.bench_task = Some(task);
     }
 }
 
 /// Run the benchmark and send events to the TUI
+#[allow(clippy::too_many_arguments)]
 async fn run_bench_with_events(
     stream: s2_sdk::S2Stream,
     record_size: usize,
@@ -7459,6 +7513,7 @@ async fn run_bench_with_events(
     duration: std::time::Duration,
     catchup_delay: std::time::Duration,
     user_stop: Arc<AtomicBool>,
+    run_id: BenchRunId,
     tx: mpsc::UnboundedSender<Event>,
 ) -> Result<BenchFinalStats, CliError> {
     use std::{
@@ -7544,7 +7599,10 @@ async fn run_bench_with_events(
         tokio::select! {
             _ = tokio::time::sleep_until(deadline), if !write_stop.load(Ordering::Relaxed) => {
                 write_stop.store(true, Ordering::Relaxed);
-                let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::Write));
+                let _ = tx.send(Event::BenchPhaseComplete {
+                    run_id,
+                    phase: BenchPhase::Write,
+                });
             }
             event = brx.recv() => {
                 match event {
@@ -7552,13 +7610,16 @@ async fn run_bench_with_events(
                         ack_latency_stats.extend(sample.ack_latencies.iter().copied());
                         let mibps = sample.bytes as f64 / (1024.0 * 1024.0) / sample.elapsed.as_secs_f64().max(0.001);
                         let recps = sample.records as f64 / sample.elapsed.as_secs_f64().max(0.001);
-                        let _ = tx.send(Event::BenchWriteSample(BenchSample {
-                            bytes: sample.bytes,
-                            records: sample.records,
-                            elapsed: sample.elapsed,
-                            mib_per_sec: mibps,
-                            records_per_sec: recps,
-                        }));
+                        let _ = tx.send(Event::BenchWriteSample {
+                            run_id,
+                            sample: BenchSample {
+                                bytes: sample.bytes,
+                                records: sample.records,
+                                elapsed: sample.elapsed,
+                                mib_per_sec: mibps,
+                                records_per_sec: recps,
+                            },
+                        });
                     }
                     Some(BenchEvent::Write(Err(e))) => {
                         write_stop.store(true, Ordering::Relaxed);
@@ -7573,13 +7634,16 @@ async fn run_bench_with_events(
                         e2e_latency_stats.extend(sample.e2e_latencies.iter().copied());
                         let mibps = sample.bytes as f64 / (1024.0 * 1024.0) / sample.elapsed.as_secs_f64().max(0.001);
                         let recps = sample.records as f64 / sample.elapsed.as_secs_f64().max(0.001);
-                        let _ = tx.send(Event::BenchReadSample(BenchSample {
-                            bytes: sample.bytes,
-                            records: sample.records,
-                            elapsed: sample.elapsed,
-                            mib_per_sec: mibps,
-                            records_per_sec: recps,
-                        }));
+                        let _ = tx.send(Event::BenchReadSample {
+                            run_id,
+                            sample: BenchSample {
+                                bytes: sample.bytes,
+                                records: sample.records,
+                                elapsed: sample.elapsed,
+                                mib_per_sec: mibps,
+                                records_per_sec: recps,
+                            },
+                        });
                     }
                     Some(BenchEvent::Read(Err(e))) => {
                         write_stop.store(true, Ordering::Relaxed);
@@ -7589,7 +7653,10 @@ async fn run_bench_with_events(
                     }
                     Some(BenchEvent::ReadDone) => {
                         read_done = true;
-                        let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::Read));
+                        let _ = tx.send(Event::BenchPhaseComplete {
+                            run_id,
+                            phase: BenchPhase::Read,
+                        });
                     }
                     None => {
                         write_done = true;
@@ -7622,7 +7689,10 @@ async fn run_bench_with_events(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::CatchupWait));
+    let _ = tx.send(Event::BenchPhaseComplete {
+        run_id,
+        phase: BenchPhase::CatchupWait,
+    });
 
     let catchup_stream = bench_read_catchup(stream.clone(), record_size, bench_start);
     let mut catchup_stream = std::pin::pin!(catchup_stream);
@@ -7638,13 +7708,16 @@ async fn run_bench_with_events(
                     / (1024.0 * 1024.0)
                     / sample.elapsed.as_secs_f64().max(0.001);
                 let recps = sample.records as f64 / sample.elapsed.as_secs_f64().max(0.001);
-                let _ = tx.send(Event::BenchCatchupSample(BenchSample {
-                    bytes: sample.bytes,
-                    records: sample.records,
-                    elapsed: sample.elapsed,
-                    mib_per_sec: mibps,
-                    records_per_sec: recps,
-                }));
+                let _ = tx.send(Event::BenchCatchupSample {
+                    run_id,
+                    sample: BenchSample {
+                        bytes: sample.bytes,
+                        records: sample.records,
+                        elapsed: sample.elapsed,
+                        mib_per_sec: mibps,
+                        records_per_sec: recps,
+                    },
+                });
             }
             Ok(Some(Err(e))) => {
                 return Err(e);
@@ -7657,7 +7730,10 @@ async fn run_bench_with_events(
             }
         }
     }
-    let _ = tx.send(Event::BenchPhaseComplete(BenchPhase::Catchup));
+    let _ = tx.send(Event::BenchPhaseComplete {
+        run_id,
+        phase: BenchPhase::Catchup,
+    });
 
     Ok(BenchFinalStats {
         ack_latency: ack_latency_stats.snapshot().map(|s| s.stats),
@@ -7667,13 +7743,115 @@ async fn run_bench_with_events(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     use super::*;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn bench_sample(bytes: u64) -> BenchSample {
+        BenchSample {
+            bytes,
+            records: 1,
+            elapsed: Duration::from_secs(1),
+            mib_per_sec: bytes as f64 / (1024.0 * 1024.0),
+            records_per_sec: 1.0,
+        }
+    }
+
+    #[test]
+    fn stale_benchmark_events_do_not_mutate_current_view() {
+        let mut app = App::new(None);
+        app.bench_run_id = 2;
+        app.screen = Screen::BenchView(BenchViewState::new("benchbasin".parse().unwrap()));
+        let Screen::BenchView(state) = &mut app.screen else {
+            panic!()
+        };
+        state.config_phase = false;
+        state.running = true;
+
+        app.handle_event(Event::BenchWriteSample {
+            run_id: 1,
+            sample: bench_sample(1024),
+        });
+        app.handle_event(Event::BenchPhaseComplete {
+            run_id: 1,
+            phase: BenchPhase::Write,
+        });
+        app.handle_event(Event::BenchComplete {
+            run_id: 1,
+            result: Ok(BenchFinalStats {
+                ack_latency: None,
+                e2e_latency: None,
+            }),
+        });
+
+        let Screen::BenchView(state) = &app.screen else {
+            panic!()
+        };
+        assert!(state.running);
+        assert_eq!(state.phase, BenchPhase::Write);
+        assert_eq!(state.write_bytes, 0);
+        assert!(state.ack_latency.is_none());
+    }
+
+    #[test]
+    fn benchmark_events_do_not_mutate_config_phase() {
+        let mut app = App::new(None);
+        app.bench_run_id = 1;
+        app.screen = Screen::BenchView(BenchViewState::new("benchbasin".parse().unwrap()));
+
+        app.handle_event(Event::BenchWriteSample {
+            run_id: 1,
+            sample: bench_sample(1024),
+        });
+        app.handle_event(Event::BenchPhaseComplete {
+            run_id: 1,
+            phase: BenchPhase::Write,
+        });
+
+        let Screen::BenchView(state) = &app.screen else {
+            panic!()
+        };
+        assert!(state.config_phase);
+        assert_eq!(state.phase, BenchPhase::Write);
+        assert_eq!(state.write_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn stop_benchmark_detaches_task_for_cleanup() {
+        let mut app = App::new(None);
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = stop.clone();
+        let (done_tx, done_rx) = oneshot::channel();
+
+        app.bench_stop_signal = Some(stop);
+        app.bench_task = Some(tokio::spawn(async move {
+            while !task_stop.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+            let _ = done_tx.send(());
+        }));
+
+        app.stop_benchmark();
+
+        assert!(app.bench_stop_signal.is_none());
+        assert!(app.bench_task.is_none());
+        tokio::time::timeout(Duration::from_secs(1), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
