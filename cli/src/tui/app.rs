@@ -1036,6 +1036,8 @@ pub struct App {
     should_quit: bool,
     /// Stop signal for the benchmark task
     bench_stop_signal: Option<Arc<AtomicBool>>,
+    /// Handle to the spawned benchmark task, so it can be aborted on reset
+    bench_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub fn location_pill_idx(location: &str, custom_active: bool, names: &[&str]) -> usize {
@@ -1219,6 +1221,19 @@ impl App {
             locations: None,
             should_quit: false,
             bench_stop_signal: None,
+            bench_task: None,
+        }
+    }
+
+    /// Hard-stop any in-flight benchmark task so it emits no further events.
+    /// Unlike the graceful stop on quit, the reset path reuses the BenchView
+    /// screen, so a late `BenchComplete` would corrupt the next run.
+    fn abort_benchmark(&mut self) {
+        if let Some(stop) = self.bench_stop_signal.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(task) = self.bench_task.take() {
+            task.abort();
         }
     }
 
@@ -2126,6 +2141,11 @@ impl App {
 
             Event::BenchStreamCreated(result) => {
                 if let Screen::BenchView(state) = &mut self.screen {
+                    // Stale event from an aborted run; in config phase no benchmark
+                    // events are expected.
+                    if state.config_phase {
+                        return;
+                    }
                     match result {
                         Ok(stream_name) => {
                             state.stream_name = Some(stream_name);
@@ -2198,6 +2218,10 @@ impl App {
 
             Event::BenchComplete(result) => {
                 if let Screen::BenchView(state) = &mut self.screen {
+                    if state.config_phase {
+                        return;
+                    }
+                    self.bench_task = None;
                     state.running = false;
                     match result {
                         Ok(stats) => {
@@ -7189,8 +7213,10 @@ impl App {
                     self.load_basins(tx);
                 }
                 KeyCode::Char('r') => {
-                    // Reset to config phase
+                    // Abort a benchmark still finishing in the background (reset
+                    // during the stream-creation window) before reusing the screen.
                     let basin_name = state.basin_name.clone();
+                    self.abort_benchmark();
                     self.screen = Screen::BenchView(BenchViewState::new(basin_name));
                 }
                 _ => {}
@@ -7353,11 +7379,14 @@ impl App {
             return;
         };
 
+        // Defensively stop any prior task before starting a new run.
+        self.abort_benchmark();
+
         // Create a stop signal that can be triggered from the UI
         let user_stop = Arc::new(AtomicBool::new(false));
         self.bench_stop_signal = Some(user_stop.clone());
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             use std::{num::NonZeroU64, time::Duration};
 
             use s2_sdk::types::{
@@ -7418,6 +7447,7 @@ impl App {
 
             let _ = tx.send(Event::BenchComplete(result));
         });
+        self.bench_task = Some(task);
     }
 }
 
