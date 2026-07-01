@@ -135,9 +135,6 @@ impl<T> ProvisionResult<T> {
         }
     }
 }
-pub static REQUEST_TOKEN_HEADER: http::HeaderName =
-    http::HeaderName::from_static("s2-request-token");
-
 pub static PROVISION_RESULT_HEADER: http::HeaderName =
     http::HeaderName::from_static("s2-provision-result");
 
@@ -229,6 +226,8 @@ impl Deref for RequestToken {
 
 impl crate::http::ParseableHeader for RequestToken {
     fn name() -> &'static http::HeaderName {
+        static REQUEST_TOKEN_HEADER: http::HeaderName =
+            http::HeaderName::from_static("s2-request-token");
         &REQUEST_TOKEN_HEADER
     }
 }

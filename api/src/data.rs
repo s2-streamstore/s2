@@ -49,6 +49,7 @@ pub enum Format {
 
 impl s2_common::http::ParseableHeader for Format {
     fn name() -> &'static http::HeaderName {
+        static FORMAT_HEADER: http::HeaderName = http::HeaderName::from_static("s2-format");
         &FORMAT_HEADER
     }
 }
@@ -82,8 +83,6 @@ impl FromStr for Format {
         }
     }
 }
-
-pub static FORMAT_HEADER: http::HeaderName = http::HeaderName::from_static("s2-format");
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]

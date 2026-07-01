@@ -10,8 +10,6 @@ use strum::{Display, EnumString};
 
 use crate::http::ParseableHeader;
 
-pub static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-encryption-key");
-
 // 32 bytes in Base 64
 const MAX_ENCRYPTION_KEY_HEADER_VALUE_LEN: usize = 44;
 
@@ -151,6 +149,7 @@ impl FromStr for EncryptionKey {
 
 impl ParseableHeader for EncryptionKey {
     fn name() -> &'static HeaderName {
+        static S2_ENCRYPTION_KEY_HEADER: HeaderName = HeaderName::from_static("s2-encryption-key");
         &S2_ENCRYPTION_KEY_HEADER
     }
 }

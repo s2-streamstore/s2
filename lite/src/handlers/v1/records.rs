@@ -474,9 +474,10 @@ mod tests {
         s2s::{FrameDecoder, SessionMessage},
     };
     use s2_common::{
-        basin::{BASIN_HEADER, BasinName},
+        basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        encryption::{EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
+        encryption::{EncryptionAlgorithm, EncryptionKey},
+        http::ParseableHeader,
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
         resources::ProvisionMode,
@@ -617,7 +618,7 @@ mod tests {
         Request::builder()
             .method(method)
             .uri(uri.into())
-            .header(BASIN_HEADER.as_str(), basin.as_ref())
+            .header(BasinName::name().as_str(), basin.as_ref())
     }
 
     async fn send(app: &axum::Router, request: Request<Body>) -> Response {
@@ -683,7 +684,7 @@ mod tests {
                 .header(header::CONTENT_TYPE, "application/protobuf")
                 .header(header::ACCEPT, "application/protobuf")
                 .header(
-                    S2_ENCRYPTION_KEY_HEADER.as_str(),
+                    EncryptionKey::name().as_str(),
                     encryption_key.to_header_value(),
                 )
                 .body(Body::from(input.encode_to_vec()))
@@ -779,10 +780,7 @@ mod tests {
         let response = send(
             &app,
             request_builder("GET", read_uri(&stream), &basin)
-                .header(
-                    S2_ENCRYPTION_KEY_HEADER.as_str(),
-                    wrong_key.to_header_value(),
-                )
+                .header(EncryptionKey::name().as_str(), wrong_key.to_header_value())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -882,7 +880,7 @@ mod tests {
             request_builder("GET", read_uri(&stream), &basin)
                 .header(header::CONTENT_TYPE, "s2s/proto")
                 .header(
-                    S2_ENCRYPTION_KEY_HEADER.as_str(),
+                    EncryptionKey::name().as_str(),
                     encryption_key.to_header_value(),
                 )
                 .body(Body::empty())

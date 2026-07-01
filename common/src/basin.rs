@@ -10,8 +10,6 @@ use super::{
 };
 use crate::{caps, resources::ListItemsRequest};
 
-pub static BASIN_HEADER: http::HeaderName = http::HeaderName::from_static("s2-basin");
-
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
     feature = "rkyv",
@@ -195,6 +193,7 @@ impl From<BasinName> for BasinNameStartAfter {
 
 impl crate::http::ParseableHeader for BasinName {
     fn name() -> &'static http::HeaderName {
+        static BASIN_HEADER: http::HeaderName = http::HeaderName::from_static("s2-basin");
         &BASIN_HEADER
     }
 }

@@ -8,7 +8,7 @@ use std::{
 use axum_server::tls_rustls::RustlsConfig;
 use bytesize::ByteSize;
 use http::header::AUTHORIZATION;
-use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
+use s2_common::{encryption::EncryptionKey, http::ParseableHeader};
 use slatedb::object_store;
 use tokio::time::Instant;
 use tower_http::{
@@ -216,7 +216,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         )
         .layer(SetSensitiveRequestHeadersLayer::new([
             AUTHORIZATION,
-            S2_ENCRYPTION_KEY_HEADER.clone(),
+            EncryptionKey::name().clone(),
         ]));
 
     if !args.no_cors {
