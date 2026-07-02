@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.37.2] - 2026-07-02
+## [0.38.0] - 2026-07-02
 
 ### Miscellaneous Tasks
 
