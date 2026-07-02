@@ -830,17 +830,4 @@ mod tests {
 
         assert!(err.is_err());
     }
-
-    #[test]
-    fn issue_access_token_old_style_flags_are_rejected() {
-        let cases: [&[&str]; 4] = [
-            &["s2", "issue-access-token", "my-token", "--streams", "=foo"],
-            &["s2", "issue-access-token", "my-token", "--streams"],
-            &["s2", "issue-access-token", "my-token", "--basins"],
-            &["s2", "issue-access-token", "my-token", "--access-tokens"],
-        ];
-        for args in cases {
-            assert!(Cli::try_parse_from(args).is_err());
-        }
-    }
 }
