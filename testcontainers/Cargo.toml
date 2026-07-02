@@ -1,6 +1,6 @@
 [package]
 name = "s2-testcontainers"
-version = "0.37.1"
+version = "0.37.2"
 description = "Testcontainers helpers for the S2 Docker image"
 edition.workspace = true
 license.workspace = true

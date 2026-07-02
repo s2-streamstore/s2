@@ -5059,7 +5059,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.30.5"
+version = "0.30.6"
 dependencies = [
  "axum",
  "base64ct",
@@ -5090,7 +5090,7 @@ dependencies = [
 
 [[package]]
 name = "s2-cli"
-version = "0.37.1"
+version = "0.37.2"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -5138,7 +5138,7 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.40.0"
+version = "0.40.1"
 dependencies = [
  "axum",
  "base64ct",
@@ -5162,7 +5162,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.37.1"
+version = "0.37.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5210,7 +5210,7 @@ dependencies = [
 
 [[package]]
 name = "s2-resource-spec"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "humantime",
  "s2-common",
@@ -5221,7 +5221,7 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.31.7"
+version = "0.31.8"
 dependencies = [
  "assert_matches",
  "async-compression",
@@ -5263,7 +5263,7 @@ dependencies = [
 
 [[package]]
 name = "s2-storage"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -5280,7 +5280,7 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.37.1"
+version = "0.37.2"
 dependencies = [
  "reqwest 0.13.4",
  "s2-sdk",
