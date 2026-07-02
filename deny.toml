@@ -6,6 +6,8 @@ ignore = [
     # Transitive deps via slatedb/foyer — not actionable.
     "RUSTSEC-2024-0436", # paste unmaintained
     "RUSTSEC-2025-0141", # bincode unmaintained
+    "RUSTSEC-2026-0194", # quick-xml quadratic attr check (via slatedb→object_store)
+    "RUSTSEC-2026-0195", # quick-xml NsReader OOM (via slatedb→object_store)
     # Transitive dep via tabled_derive — no fixed release available.
     "RUSTSEC-2026-0173", # proc-macro-error2 unmaintained
 ]
