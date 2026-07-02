@@ -6325,25 +6325,65 @@ impl App {
                 }
                 _ => expiry.duration_str().map(|s| s.to_string()),
             };
-            let (basins_prefix, basins_exact) = match basins_scope {
-                ScopeOption::All => (Some(BasinNamePrefix::default()), None),
-                ScopeOption::None => (None, None),
-                ScopeOption::Prefix => (basins_value.parse().ok(), None),
-                ScopeOption::Exact => (None, basins_value.parse().ok()),
-            };
+            fn parse_scope_value<T>(value: &str, label: &str) -> Result<T, CliError>
+            where
+                T: std::str::FromStr,
+                T::Err: std::fmt::Display,
+            {
+                value
+                    .parse()
+                    .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid {label}: {e}")))
+            }
 
-            let (streams_prefix, streams_exact) = match streams_scope {
-                ScopeOption::All => (Some(StreamNamePrefix::default()), None),
-                ScopeOption::None => (None, None),
-                ScopeOption::Prefix => (streams_value.parse().ok(), None),
-                ScopeOption::Exact => (None, streams_value.parse().ok()),
-            };
-
-            let (access_tokens_prefix, access_tokens_exact) = match tokens_scope {
-                ScopeOption::All => (Some(AccessTokenIdPrefix::default()), None),
-                ScopeOption::None => (None, None),
-                ScopeOption::Prefix => (tokens_value.parse().ok(), None),
-                ScopeOption::Exact => (None, tokens_value.parse().ok()),
+            let scopes = (|| {
+                Ok::<_, CliError>((
+                    match basins_scope {
+                        ScopeOption::All => (Some(BasinNamePrefix::default()), None),
+                        ScopeOption::None => (None, None),
+                        ScopeOption::Prefix => (
+                            Some(parse_scope_value(&basins_value, "basin prefix")?),
+                            None,
+                        ),
+                        ScopeOption::Exact => {
+                            (None, Some(parse_scope_value(&basins_value, "basin name")?))
+                        }
+                    },
+                    match streams_scope {
+                        ScopeOption::All => (Some(StreamNamePrefix::default()), None),
+                        ScopeOption::None => (None, None),
+                        ScopeOption::Prefix => (
+                            Some(parse_scope_value(&streams_value, "stream prefix")?),
+                            None,
+                        ),
+                        ScopeOption::Exact => (
+                            None,
+                            Some(parse_scope_value(&streams_value, "stream name")?),
+                        ),
+                    },
+                    match tokens_scope {
+                        ScopeOption::All => (Some(AccessTokenIdPrefix::default()), None),
+                        ScopeOption::None => (None, None),
+                        ScopeOption::Prefix => (
+                            Some(parse_scope_value(&tokens_value, "access token prefix")?),
+                            None,
+                        ),
+                        ScopeOption::Exact => (
+                            None,
+                            Some(parse_scope_value(&tokens_value, "access token ID")?),
+                        ),
+                    },
+                ))
+            })();
+            let (
+                (basins_prefix, basins_exact),
+                (streams_prefix, streams_exact),
+                (access_tokens_prefix, access_tokens_exact),
+            ) = match scopes {
+                Ok(scopes) => scopes,
+                Err(e) => {
+                    let _ = tx.send(Event::AccessTokenIssued(Err(e)));
+                    return;
+                }
             };
             let args = IssueAccessTokenArgs {
                 id: token_id,
