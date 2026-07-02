@@ -151,15 +151,6 @@ impl From<Option<Timestamp>> for ReadUntil {
     }
 }
 
-impl From<ReadUntil> for Option<Timestamp> {
-    fn from(until: ReadUntil) -> Self {
-        match until {
-            ReadUntil::Unbounded => None,
-            ReadUntil::Timestamp(ts) => Some(ts),
-        }
-    }
-}
-
 impl ReadUntil {
     pub fn is_unbounded(&self) -> bool {
         matches!(self, ReadUntil::Unbounded)
