@@ -206,14 +206,20 @@ pub async fn list_access_tokens(
 
 pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<String, CliError> {
     let mut scope = AccessTokenScopeInput::from_ops(args.ops.into_iter().map(|op| op.into()));
-    if let Some(basins) = args.basins {
-        scope = scope.with_basins(basins.into());
+    if let Some(v) = args.basins_exact {
+        scope = scope.with_basins(sdk::types::BasinMatcher::Exact(v));
+    } else if let Some(v) = args.basins_prefix {
+        scope = scope.with_basins(sdk::types::BasinMatcher::Prefix(v));
     }
-    if let Some(streams) = args.streams {
-        scope = scope.with_streams(streams.into());
+    if let Some(v) = args.streams_exact {
+        scope = scope.with_streams(sdk::types::StreamMatcher::Exact(v));
+    } else if let Some(v) = args.streams_prefix {
+        scope = scope.with_streams(sdk::types::StreamMatcher::Prefix(v));
     }
-    if let Some(access_tokens) = args.access_tokens {
-        scope = scope.with_access_tokens(access_tokens.into());
+    if let Some(v) = args.access_tokens_exact {
+        scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Exact(v));
+    } else if let Some(v) = args.access_tokens_prefix {
+        scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Prefix(v));
     }
     if let Some(op_group_perms) = args.op_group_perms {
         scope = scope.with_op_group_perms(op_group_perms.into());
