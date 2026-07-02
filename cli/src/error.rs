@@ -103,12 +103,6 @@ impl CliError {
     }
 }
 
-impl From<S2UriParseError> for CliError {
-    fn from(err: S2UriParseError) -> Self {
-        Self::InvalidArgs(miette::miette!("{}", err))
-    }
-}
-
 #[derive(Debug, Clone, Copy, strum::AsRefStr)]
 #[strum(serialize_all = "title_case")]
 pub enum OpKind {
