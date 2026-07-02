@@ -103,7 +103,6 @@ impl CliError {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, strum::AsRefStr)]
 #[strum(serialize_all = "title_case")]
 pub enum OpKind {

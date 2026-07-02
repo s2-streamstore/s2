@@ -8,6 +8,9 @@ ignore = [
     "RUSTSEC-2025-0141", # bincode unmaintained
     # Transitive dep via tabled_derive — no fixed release available.
     "RUSTSEC-2026-0173", # proc-macro-error2 unmaintained
+    # Transitive dep via object_store (slatedb) — fix requires object_store >=0.13.
+    "RUSTSEC-2026-0194", # quick-xml quadratic attribute check
+    "RUSTSEC-2026-0195", # quick-xml unbounded namespace allocation
 ]
 
 [licenses]
