@@ -468,69 +468,6 @@ where
     serializer.serialize_str(&humantime::format_duration(*value).to_string())
 }
 
-impl FromStr for BasinMatcher {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Some(value) = s.strip_prefix('=') {
-            Ok(Self::Exact(value.parse().map_err(|e| format!("{e}"))?))
-        } else {
-            Ok(Self::Prefix(s.parse().map_err(|e| format!("{e}"))?))
-        }
-    }
-}
-
-impl FromStr for StreamMatcher {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Some(value) = s.strip_prefix('=') {
-            Ok(Self::Exact(value.parse().map_err(|e| format!("{e}"))?))
-        } else {
-            Ok(Self::Prefix(s.parse().map_err(|e| format!("{e}"))?))
-        }
-    }
-}
-
-impl FromStr for AccessTokenMatcher {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Some(value) = s.strip_prefix('=') {
-            Ok(Self::Exact(value.parse().map_err(|e| format!("{e}"))?))
-        } else {
-            Ok(Self::Prefix(s.parse().map_err(|e| format!("{e}"))?))
-        }
-    }
-}
-
-impl From<BasinMatcher> for sdk::types::BasinMatcher {
-    fn from(matcher: BasinMatcher) -> Self {
-        match matcher {
-            BasinMatcher::Exact(v) => sdk::types::BasinMatcher::Exact(v),
-            BasinMatcher::Prefix(v) => sdk::types::BasinMatcher::Prefix(v),
-        }
-    }
-}
-
-impl From<StreamMatcher> for sdk::types::StreamMatcher {
-    fn from(matcher: StreamMatcher) -> Self {
-        match matcher {
-            StreamMatcher::Exact(v) => sdk::types::StreamMatcher::Exact(v),
-            StreamMatcher::Prefix(v) => sdk::types::StreamMatcher::Prefix(v),
-        }
-    }
-}
-
-impl From<AccessTokenMatcher> for sdk::types::AccessTokenMatcher {
-    fn from(matcher: AccessTokenMatcher) -> Self {
-        match matcher {
-            AccessTokenMatcher::Exact(v) => sdk::types::AccessTokenMatcher::Exact(v),
-            AccessTokenMatcher::Prefix(v) => sdk::types::AccessTokenMatcher::Prefix(v),
-        }
-    }
-}
-
 impl From<sdk::types::BasinMatcher> for BasinMatcher {
     fn from(matcher: sdk::types::BasinMatcher) -> Self {
         match matcher {

@@ -2,9 +2,9 @@ use std::{num::NonZeroU64, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
-    AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamNamePrefix,
-    StreamNameStartAfter,
+    AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
+    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamName,
+    StreamNamePrefix, StreamNameStartAfter,
 };
 
 use crate::{
@@ -13,9 +13,8 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        AccessTokenMatcher, BasinConfig, BasinMatcher, Interval, LocationName, Operation,
-        PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
-        StorageClass, StreamConfig, StreamMatcher,
+        BasinConfig, Interval, LocationName, Operation, PermittedOperationGroups,
+        S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig,
     },
 };
 
@@ -344,20 +343,29 @@ pub struct IssueAccessTokenArgs {
     #[arg(long, default_value_t = false)]
     pub auto_prefix_streams: bool,
 
-    /// Basin names allowed.
-    /// Matches exact value if it starts with `=`, otherwise treats it as a prefix.
-    #[arg(long)]
-    pub basins: Option<BasinMatcher>,
+    /// Basin name prefix allowed. `""` matches all basins.
+    #[arg(long, conflicts_with = "basins_exact")]
+    pub basins_prefix: Option<BasinNamePrefix>,
 
-    /// Stream names allowed.
-    /// Matches exact value if it starts with `=`, otherwise treats it as a prefix.
+    /// Exact basin name allowed.
     #[arg(long)]
-    pub streams: Option<StreamMatcher>,
+    pub basins_exact: Option<BasinName>,
 
-    /// Token IDs allowed.
-    /// Matches exact value if it starts with `=`, otherwise treats it as a prefix.
+    /// Stream name prefix allowed. `""` matches all streams.
+    #[arg(long, conflicts_with = "streams_exact")]
+    pub streams_prefix: Option<StreamNamePrefix>,
+
+    /// Exact stream name allowed.
     #[arg(long)]
-    pub access_tokens: Option<AccessTokenMatcher>,
+    pub streams_exact: Option<StreamName>,
+
+    /// Access token ID prefix allowed. `""` matches all tokens.
+    #[arg(long, conflicts_with = "access_tokens_exact")]
+    pub access_tokens_prefix: Option<AccessTokenIdPrefix>,
+
+    /// Exact access token ID allowed.
+    #[arg(long)]
+    pub access_tokens_exact: Option<AccessTokenId>,
 
     /// Access permissions at the operation group level.
     /// The format is: "account=rw,basin=r,stream=w"
@@ -746,4 +754,80 @@ pub struct GetStreamMetricsArgs {
 
     #[command(subcommand)]
     pub metric: StreamMetricCommand,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command, IssueAccessTokenArgs};
+
+    fn issue_access_token_args_from<I, T>(args: I) -> IssueAccessTokenArgs
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Cli::try_parse_from(args).expect("cli parses");
+        match cli.command {
+            Some(Command::IssueAccessToken(args)) => args,
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issue_access_token_streams_prefix_empty_matches_all() {
+        let args = issue_access_token_args_from([
+            "s2",
+            "issue-access-token",
+            "my-token",
+            "--streams-prefix",
+            "",
+        ]);
+
+        assert_eq!(args.streams_prefix.unwrap().to_string(), "");
+        assert!(args.streams_exact.is_none());
+    }
+
+    #[test]
+    fn issue_access_token_streams_prefix_accepts_leading_equals() {
+        let args = issue_access_token_args_from([
+            "s2",
+            "issue-access-token",
+            "my-token",
+            "--streams-prefix",
+            "=tenant/",
+        ]);
+
+        assert_eq!(args.streams_prefix.unwrap().to_string(), "=tenant/");
+        assert!(args.streams_exact.is_none());
+    }
+
+    #[test]
+    fn issue_access_token_streams_exact_accepts_leading_equals() {
+        let args = issue_access_token_args_from([
+            "s2",
+            "issue-access-token",
+            "my-token",
+            "--streams-exact",
+            "=stream",
+        ]);
+
+        assert_eq!(args.streams_exact.unwrap().to_string(), "=stream");
+        assert!(args.streams_prefix.is_none());
+    }
+
+    #[test]
+    fn issue_access_token_streams_flags_conflict() {
+        let err = Cli::try_parse_from([
+            "s2",
+            "issue-access-token",
+            "my-token",
+            "--streams-prefix",
+            "x",
+            "--streams-exact",
+            "y",
+        ]);
+
+        assert!(err.is_err());
+    }
 }

@@ -13,8 +13,9 @@ use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModi
 use ratatui::{Terminal, prelude::Backend};
 use s2_common::maybe::Maybe;
 use s2_sdk::types::{
-    AccessTokenId, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName, StreamInfo,
-    StreamMetricSet, StreamName, StreamPosition, TimeRange,
+    AccessTokenId, AccessTokenIdPrefix, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName,
+    BasinNamePrefix, StreamInfo, StreamMetricSet, StreamName, StreamNamePrefix, StreamPosition,
+    TimeRange,
 };
 use tokio::sync::mpsc;
 
@@ -6324,46 +6325,77 @@ impl App {
                 }
                 _ => expiry.duration_str().map(|s| s.to_string()),
             };
-            let basins_matcher = match basins_scope {
-                ScopeOption::All => None,
-                ScopeOption::None => Some("".to_string()), // Empty string = no basins
-                ScopeOption::Prefix => Some(basins_value.clone()),
-                ScopeOption::Exact => Some(format!("={}", basins_value)),
-            };
+            fn parse_scope_value<T>(value: &str, label: &str) -> Result<T, CliError>
+            where
+                T: std::str::FromStr,
+                T::Err: std::fmt::Display,
+            {
+                value
+                    .parse()
+                    .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid {label}: {e}")))
+            }
 
-            let streams_matcher = match streams_scope {
-                ScopeOption::All => None,
-                ScopeOption::None => Some("".to_string()),
-                ScopeOption::Prefix => Some(streams_value.clone()),
-                ScopeOption::Exact => Some(format!("={}", streams_value)),
-            };
-
-            let tokens_matcher = match tokens_scope {
-                ScopeOption::All => None,
-                ScopeOption::None => Some("".to_string()),
-                ScopeOption::Prefix => Some(tokens_value.clone()),
-                ScopeOption::Exact => Some(format!("={}", tokens_value)),
+            let scopes = (|| {
+                Ok::<_, CliError>((
+                    match basins_scope {
+                        ScopeOption::All => (Some(BasinNamePrefix::default()), None),
+                        ScopeOption::None => (None, None),
+                        ScopeOption::Prefix => (
+                            Some(parse_scope_value(&basins_value, "basin prefix")?),
+                            None,
+                        ),
+                        ScopeOption::Exact => {
+                            (None, Some(parse_scope_value(&basins_value, "basin name")?))
+                        }
+                    },
+                    match streams_scope {
+                        ScopeOption::All => (Some(StreamNamePrefix::default()), None),
+                        ScopeOption::None => (None, None),
+                        ScopeOption::Prefix => (
+                            Some(parse_scope_value(&streams_value, "stream prefix")?),
+                            None,
+                        ),
+                        ScopeOption::Exact => (
+                            None,
+                            Some(parse_scope_value(&streams_value, "stream name")?),
+                        ),
+                    },
+                    match tokens_scope {
+                        ScopeOption::All => (Some(AccessTokenIdPrefix::default()), None),
+                        ScopeOption::None => (None, None),
+                        ScopeOption::Prefix => (
+                            Some(parse_scope_value(&tokens_value, "access token prefix")?),
+                            None,
+                        ),
+                        ScopeOption::Exact => (
+                            None,
+                            Some(parse_scope_value(&tokens_value, "access token ID")?),
+                        ),
+                    },
+                ))
+            })();
+            let (
+                (basins_prefix, basins_exact),
+                (streams_prefix, streams_exact),
+                (access_tokens_prefix, access_tokens_exact),
+            ) = match scopes {
+                Ok(scopes) => scopes,
+                Err(e) => {
+                    let _ = tx.send(Event::AccessTokenIssued(Err(e)));
+                    return;
+                }
             };
             let args = IssueAccessTokenArgs {
                 id: token_id,
                 expires_in: expires_in_str.and_then(|s| s.parse().ok()),
                 expires_at: None,
                 auto_prefix_streams,
-                basins: basins_matcher.and_then(|s| {
-                    if s.is_empty() && matches!(basins_scope, ScopeOption::None) {
-                        // For "None" scope, we don't pass anything (API default is all)
-                        // Actually, to restrict to none, we need special handling
-                        None
-                    } else if s.is_empty() {
-                        None
-                    } else {
-                        s.parse().ok()
-                    }
-                }),
-                streams: streams_matcher
-                    .and_then(|s| if s.is_empty() { None } else { s.parse().ok() }),
-                access_tokens: tokens_matcher
-                    .and_then(|s| if s.is_empty() { None } else { s.parse().ok() }),
+                basins_prefix,
+                basins_exact,
+                streams_prefix,
+                streams_exact,
+                access_tokens_prefix,
+                access_tokens_exact,
                 op_group_perms: None,
                 ops: operations,
             };
