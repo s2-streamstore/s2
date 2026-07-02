@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 /// BLAKE3 hash (32 bytes) of any number of fields.
 ///
 /// Default SerDe implementation uses hex representation.
@@ -41,27 +39,9 @@ impl std::fmt::Display for Bash {
     }
 }
 
-impl AsRef<[u8]> for Bash {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-impl From<Bash> for [u8; Bash::LEN] {
-    fn from(bash: Bash) -> Self {
-        bash.0.into()
-    }
-}
-
 impl From<[u8; Bash::LEN]> for Bash {
     fn from(bytes: [u8; Bash::LEN]) -> Self {
         Self(blake3::Hash::from_bytes(bytes))
-    }
-}
-
-impl From<Bash> for Bytes {
-    fn from(bash: Bash) -> Self {
-        Bytes::copy_from_slice(bash.as_bytes())
     }
 }
 
