@@ -29,7 +29,7 @@
 //! append/read metering, limits, or accounting.
 
 use aegis::aegis256::Aegis256;
-use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInOut};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 use s2_common::{
@@ -212,35 +212,57 @@ pub fn encrypt_record(
     let record = match (record.into_inner(), encryption) {
         (record @ Record::Command(_), _) => StoredRecord::Plaintext(record),
         (record @ Record::Envelope(_), EncryptionSpec::Plain) => StoredRecord::Plaintext(record),
-        (Record::Envelope(envelope), EncryptionSpec::Aegis256(key)) => {
-            let format = EncryptedRecordFormat::Aegis256V1;
-            let (mut encoded, payload_start) = prep_encryption_buffer(&envelope, format);
-            let (prefix, payload) = encoded.split_at_mut(payload_start);
-            let nonce: &[u8; 32] = prefix[FORMAT_ID_LEN..]
-                .try_into()
-                .expect("AEGIS-256 nonce must be 32 bytes");
-            let tag =
-                Aegis256::<16>::new(key.expose_secret(), nonce).encrypt_in_place(payload, aad);
-            encoded.put_slice(tag.as_ref());
-
-            let encrypted = EncryptedRecord::new(encoded.freeze(), format);
-            StoredRecord::encrypted(encrypted, metered_size)
-        }
-        (Record::Envelope(envelope), EncryptionSpec::Aes256Gcm(key)) => {
-            let format = EncryptedRecordFormat::Aes256GcmV1;
-            let (mut encoded, payload_start) = prep_encryption_buffer(&envelope, format);
-            let (prefix, payload) = encoded.split_at_mut(payload_start);
-            let nonce = aes_gcm::Nonce::from_slice(&prefix[FORMAT_ID_LEN..]);
-            let tag = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()))
-                .encrypt_in_place_detached(nonce, aad, payload)
-                .expect("AES-256-GCM encryption should not fail on size validation");
-            encoded.put_slice(tag.as_ref());
-
-            let encrypted = EncryptedRecord::new(encoded.freeze(), format);
-            StoredRecord::encrypted(encrypted, metered_size)
-        }
+        (Record::Envelope(envelope), EncryptionSpec::Aegis256(key)) => encrypt_envelope_record(
+            &envelope,
+            metered_size,
+            EncryptedRecordFormat::Aegis256V1,
+            |nonce, payload| {
+                let nonce: &[u8; 32] = nonce.try_into().expect("AEGIS-256 nonce must be 32 bytes");
+                Aegis256::<16>::new(key.expose_secret(), nonce).encrypt_in_place(payload, aad)
+            },
+        ),
+        (Record::Envelope(envelope), EncryptionSpec::Aes256Gcm(key)) => encrypt_envelope_record(
+            &envelope,
+            metered_size,
+            EncryptedRecordFormat::Aes256GcmV1,
+            |nonce, payload| {
+                let nonce: &aes_gcm::aead::Nonce<Aes256Gcm> = nonce
+                    .try_into()
+                    .expect("AES-256-GCM nonce must be 12 bytes");
+                let cipher = Aes256Gcm::new_from_slice(key.expose_secret())
+                    .expect("AES-256-GCM key must be 32 bytes");
+                cipher
+                    .encrypt_inout_detached(nonce, aad, payload.into())
+                    .expect("AES-256-GCM encryption should not fail on size validation")
+            },
+        ),
     };
     record.metered()
+}
+
+fn encrypt_envelope_record<Tag>(
+    envelope: &EnvelopeRecord,
+    metered_size: usize,
+    format: EncryptedRecordFormat,
+    encrypt_payload: impl FnOnce(&[u8], &mut [u8]) -> Tag,
+) -> StoredRecord
+where
+    Tag: AsRef<[u8]>,
+{
+    let payload_start = FORMAT_ID_LEN + format.nonce_len();
+    let mut encoded =
+        BytesMut::with_capacity(payload_start + envelope.encoded_size() + format.tag_len());
+    encoded.put_u8(format.format_id());
+    format.put_random_nonce(&mut encoded);
+    envelope.encode_into(&mut encoded);
+
+    let (prefix, payload) = encoded.split_at_mut(payload_start);
+    let tag = encrypt_payload(&prefix[FORMAT_ID_LEN..], payload);
+    debug_assert_eq!(tag.as_ref().len(), format.tag_len());
+    encoded.put_slice(tag.as_ref());
+
+    let encrypted = EncryptedRecord::new(encoded.freeze(), format);
+    StoredRecord::encrypted(encrypted, metered_size)
 }
 
 pub fn encrypt_append_input(
@@ -271,19 +293,6 @@ pub fn encrypt_append_input(
         match_seq_num,
         fencing_token,
     }
-}
-
-fn prep_encryption_buffer(
-    envelope: &EnvelopeRecord,
-    format: EncryptedRecordFormat,
-) -> (BytesMut, usize) {
-    let payload_start = FORMAT_ID_LEN + format.nonce_len();
-    let mut encoded =
-        BytesMut::with_capacity(payload_start + envelope.encoded_size() + format.tag_len());
-    encoded.put_u8(format.format_id());
-    format.put_random_nonce(&mut encoded);
-    envelope.encode_into(&mut encoded);
-    (encoded, payload_start)
 }
 
 impl TryFrom<Bytes> for EncryptedRecord {
@@ -418,21 +427,20 @@ fn decrypt_payload(
         }
         (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Aes256Gcm(key)) => {
             let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
-            let nonce: &[u8; 12] = prefix
+            let nonce: &aes_gcm::aead::Nonce<Aes256Gcm> = prefix
                 .get(FORMAT_ID_LEN..)
                 .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
                 .try_into()
                 .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-            let nonce = aes_gcm::Nonce::from_slice(nonce);
             let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
-            let tag: &[u8; 16] = tag
+            let tag: &aes_gcm::aead::Tag<Aes256Gcm> = tag
                 .as_ref()
                 .try_into()
                 .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-            let tag = aes_gcm::Tag::from_slice(tag);
-            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()));
+            let cipher = Aes256Gcm::new_from_slice(key.expose_secret())
+                .expect("AES-256-GCM key must be 32 bytes");
             cipher
-                .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
+                .decrypt_inout_detached(nonce, aad, ciphertext.into(), tag)
                 .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
