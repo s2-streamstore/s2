@@ -29,7 +29,7 @@
 //! append/read metering, limits, or accounting.
 
 use aegis::aegis256::Aegis256;
-use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInPlace};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::AeadInOut};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::random;
 use s2_common::{
@@ -230,9 +230,13 @@ pub fn encrypt_record(
             let format = EncryptedRecordFormat::Aes256GcmV1;
             let (mut encoded, payload_start) = prep_encryption_buffer(&envelope, format);
             let (prefix, payload) = encoded.split_at_mut(payload_start);
-            let nonce = aes_gcm::Nonce::from_slice(&prefix[FORMAT_ID_LEN..]);
-            let tag = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()))
-                .encrypt_in_place_detached(nonce, aad, payload)
+            let nonce: &aes_gcm::aead::Nonce<Aes256Gcm> = prefix[FORMAT_ID_LEN..]
+                .try_into()
+                .expect("AES-256-GCM nonce must be 12 bytes");
+            let cipher = Aes256Gcm::new_from_slice(key.expose_secret())
+                .expect("AES-256-GCM key must be 32 bytes");
+            let tag = cipher
+                .encrypt_inout_detached(nonce, aad, payload.into())
                 .expect("AES-256-GCM encryption should not fail on size validation");
             encoded.put_slice(tag.as_ref());
 
@@ -418,21 +422,20 @@ fn decrypt_payload(
         }
         (EncryptedRecordFormat::Aes256GcmV1, EncryptionSpec::Aes256Gcm(key)) => {
             let (prefix, payload_and_tag) = encoded.split_at_mut(payload_start);
-            let nonce: &[u8; 12] = prefix
+            let nonce: &aes_gcm::aead::Nonce<Aes256Gcm> = prefix
                 .get(FORMAT_ID_LEN..)
                 .ok_or(RecordDecryptionError::MalformedEncryptedRecord)?
                 .try_into()
                 .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-            let nonce = aes_gcm::Nonce::from_slice(nonce);
             let (ciphertext, tag) = payload_and_tag.split_at_mut(plaintext_len);
-            let tag: &[u8; 16] = tag
+            let tag: &aes_gcm::aead::Tag<Aes256Gcm> = tag
                 .as_ref()
                 .try_into()
                 .map_err(|_| RecordDecryptionError::MalformedEncryptedRecord)?;
-            let tag = aes_gcm::Tag::from_slice(tag);
-            let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose_secret()));
+            let cipher = Aes256Gcm::new_from_slice(key.expose_secret())
+                .expect("AES-256-GCM key must be 32 bytes");
             cipher
-                .decrypt_in_place_detached(nonce, aad, ciphertext, tag)
+                .decrypt_inout_detached(nonce, aad, ciphertext.into(), tag)
                 .map_err(|_| RecordDecryptionError::AuthenticationFailed)?;
             Ok(decryption_finish(encoded, payload_start, plaintext_len))
         }
