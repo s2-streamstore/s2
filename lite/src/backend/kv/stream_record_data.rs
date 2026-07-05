@@ -6,6 +6,23 @@ use super::{DeserializationError, KeyType, check_exact_size, invalid_value_err};
 use crate::stream_id::StreamId;
 
 const KEY_LEN: usize = 1 + StreamId::LEN + 8 + 8;
+const KEY_SUFFIX_LEN: usize = 8 + 8;
+
+pub fn ser_key_prefix(stream_id: StreamId) -> Bytes {
+    let mut buf = BytesMut::with_capacity(1 + StreamId::LEN);
+    buf.put_u8(KeyType::StreamRecordData as u8);
+    buf.put_slice(stream_id.as_bytes());
+    debug_assert_eq!(buf.len(), 1 + StreamId::LEN, "serialized length mismatch");
+    buf.freeze()
+}
+
+pub fn ser_key_suffix(pos: StreamPosition) -> Bytes {
+    let mut buf = BytesMut::with_capacity(KEY_SUFFIX_LEN);
+    buf.put_u64(pos.seq_num);
+    buf.put_u64(pos.timestamp);
+    debug_assert_eq!(buf.len(), KEY_SUFFIX_LEN, "serialized length mismatch");
+    buf.freeze()
+}
 
 pub fn ser_key(stream_id: StreamId, pos: StreamPosition) -> Bytes {
     let mut buf = BytesMut::with_capacity(KEY_LEN);
@@ -71,6 +88,21 @@ mod tests {
             let (decoded_stream_id, decoded_pos) = super::deser_key(key_bytes).unwrap();
             prop_assert_eq!(stream_id, decoded_stream_id);
             prop_assert_eq!(pos, decoded_pos);
+        }
+
+        #[test]
+        fn stream_record_data_key_prefix_and_suffix_match_record_keys(
+            stream_id_bytes in any::<[u8; StreamId::LEN]>(),
+            seq_num in any::<SeqNum>(),
+            timestamp in any::<Timestamp>(),
+        ) {
+            let stream_id = StreamId::from(stream_id_bytes);
+            let pos = StreamPosition { seq_num, timestamp };
+            let prefix = super::ser_key_prefix(stream_id);
+            let suffix = super::ser_key_suffix(pos);
+            let key = super::ser_key(stream_id, pos);
+            let expected = [prefix.as_ref(), suffix.as_ref()].concat();
+            prop_assert_eq!(key.as_ref(), expected.as_slice());
         }
 
         #[test]

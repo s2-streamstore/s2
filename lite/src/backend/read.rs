@@ -110,20 +110,15 @@ async fn read_session(
     let session = async_stream::try_stream! {
         'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
             if state.start_seq_num < state.tail.seq_num {
-                let start_key = kv::stream_record_data::ser_key(
-                    stream_id,
-                    StreamPosition {
-                        seq_num: state.start_seq_num,
-                        timestamp: 0,
-                    },
-                );
-                let end_key = kv::stream_record_data::ser_key(
-                    stream_id,
-                    StreamPosition {
-                        seq_num: state.tail.seq_num,
-                        timestamp: 0,
-                    },
-                );
+                let prefix = kv::stream_record_data::ser_key_prefix(stream_id);
+                let start_suffix = kv::stream_record_data::ser_key_suffix(StreamPosition {
+                    seq_num: state.start_seq_num,
+                    timestamp: 0,
+                });
+                let end_suffix = kv::stream_record_data::ser_key_suffix(StreamPosition {
+                    seq_num: state.tail.seq_num,
+                    timestamp: 0,
+                });
                 let scan_opts = ScanOptions {
                     durability_filter: DurabilityLevel::Remote,
                     read_ahead_bytes: 1024 * 1024,
@@ -131,7 +126,9 @@ async fn read_session(
                     max_fetch_tasks: 8,
                     ..Default::default()
                 };
-                let mut it = db.scan_with_options(start_key..end_key, &scan_opts).await?;
+                let mut it = db
+                    .scan_prefix_with_options(prefix, start_suffix..end_suffix, &scan_opts)
+                    .await?;
 
                 let mut records = Metered::with_capacity(
                     limit.count()
@@ -292,25 +289,18 @@ async fn resolve_timestamp(
     stream_id: StreamId,
     timestamp: Timestamp,
 ) -> Result<Option<StreamPosition>, StorageError> {
-    let start_key = kv::stream_record_timestamp::ser_key(
-        stream_id,
-        StreamPosition {
-            seq_num: SeqNum::MIN,
-            timestamp,
-        },
-    );
-    let end_key = kv::stream_record_timestamp::ser_key(
-        stream_id,
-        StreamPosition {
-            seq_num: SeqNum::MAX,
-            timestamp: Timestamp::MAX,
-        },
-    );
+    let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
+    let start_suffix = kv::stream_record_timestamp::ser_key_suffix(StreamPosition {
+        seq_num: SeqNum::MIN,
+        timestamp,
+    });
     let scan_opts = ScanOptions {
         durability_filter: DurabilityLevel::Remote,
         ..Default::default()
     };
-    let mut it = db.scan_with_options(start_key..end_key, &scan_opts).await?;
+    let mut it = db
+        .scan_prefix_with_options(prefix, start_suffix.., &scan_opts)
+        .await?;
     Ok(match it.next().await? {
         Some(kv) => {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
