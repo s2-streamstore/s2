@@ -55,7 +55,7 @@ fn install_rustls_crypto_provider() {
 async fn main() -> miette::Result<()> {
     install_rustls_crypto_provider();
     miette::set_panic_hook();
-    // `s2 lite` runs a server, which should not phone home to GitHub.
+    // don't run update check for `s2 lite`.
     let update_check = if std::env::args().nth(1).as_deref() == Some("lite") {
         None
     } else {
