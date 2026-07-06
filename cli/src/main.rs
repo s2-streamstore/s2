@@ -62,7 +62,9 @@ async fn main() -> miette::Result<()> {
         update::spawn_check()
     };
     let result = run().await;
-    update::notify(update_check).await;
+    if result.is_ok() {
+        update::notify(update_check).await;
+    }
     result?;
     Ok(())
 }
