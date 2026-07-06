@@ -5077,7 +5077,7 @@ dependencies = [
 
 [[package]]
 name = "s2-cli"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -5149,7 +5149,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5197,7 +5197,7 @@ dependencies = [
 
 [[package]]
 name = "s2-resource-spec"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "humantime",
  "s2-common",
@@ -5250,7 +5250,7 @@ dependencies = [
 
 [[package]]
 name = "s2-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -5267,7 +5267,7 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "reqwest",
  "s2-sdk",
