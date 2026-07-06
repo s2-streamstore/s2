@@ -150,14 +150,7 @@ pub async fn notify(check: Option<JoinHandle<Option<Version>>>) {
     );
     eprintln!(
         "{}",
-        format!(
-            "Release notes: https://github.com/s2-streamstore/s2/releases/tag/{CLI_TAG_PREFIX}{latest}"
-        )
-        .yellow()
-    );
-    eprintln!(
-        "{}",
-        "To upgrade:    https://s2.dev/docs/quickstart#get-started-with-the-cli".yellow()
+        "To upgrade: https://s2.dev/docs/quickstart#get-started-with-the-cli".yellow()
     );
 }
 
