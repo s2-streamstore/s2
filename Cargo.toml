@@ -70,6 +70,7 @@ s2-sdk = { path = "sdk", version = "0.31" }
 s2-storage = { path = "storage", version = "0.2" }
 schemars = "1.2"
 secrecy = "0.10.3"
+semver = "1.0"
 serde = "1.0"
 serde_json = "1.0"
 slatedb = "0.14.1"
