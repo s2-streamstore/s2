@@ -5099,7 +5099,7 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "ratatui",
- "reqwest 0.13.4",
+ "reqwest",
  "rstest",
  "rustls",
  "s2-api",
