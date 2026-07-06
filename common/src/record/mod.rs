@@ -102,10 +102,6 @@ impl Record {
         Ok(Self::Envelope(envelope))
     }
 
-    pub fn sequenced(self, position: StreamPosition) -> SequencedRecord {
-        Sequenced::new(position, self)
-    }
-
     pub fn into_parts(self) -> (Vec<Header>, Bytes) {
         match self {
             Record::Envelope(e) => e.into_parts(),
@@ -268,23 +264,6 @@ mod test {
             other => panic!("Command expected, got {other:?}"),
         }
         assert_eq!(record_metered, semantic_metered_size(&record));
-        let sequenced_record = record.clone().sequenced(StreamPosition {
-            seq_num: 42,
-            timestamp: 100_000,
-        });
-        let sequenced_metered = sequenced_record.metered_size();
-        assert_eq!(record_metered, sequenced_metered);
-        assert_eq!(
-            sequenced_record.position,
-            StreamPosition {
-                seq_num: 42,
-                timestamp: 100_000,
-            }
-        );
-        assert_eq!(
-            sequenced_record.inner,
-            Record::try_from_parts(headers, body).unwrap()
-        );
     }
 
     #[rstest]
