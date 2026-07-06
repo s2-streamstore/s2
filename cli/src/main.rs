@@ -10,6 +10,7 @@ mod ops;
 mod record_format;
 mod tui;
 mod types;
+mod update;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -54,7 +55,15 @@ fn install_rustls_crypto_provider() {
 async fn main() -> miette::Result<()> {
     install_rustls_crypto_provider();
     miette::set_panic_hook();
-    run().await?;
+    // `s2 lite` runs a server, which should not phone home to GitHub.
+    let update_check = if std::env::args().nth(1).as_deref() == Some("lite") {
+        None
+    } else {
+        update::spawn_check()
+    };
+    let result = run().await;
+    update::notify(update_check).await;
+    result?;
     Ok(())
 }
 
