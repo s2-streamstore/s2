@@ -134,6 +134,33 @@ fn latest_cli_version<'a>(tags: impl IntoIterator<Item = (&'a str, bool)>) -> Op
         .max()
 }
 
+/// Await the background check and print a reminder if a newer version exists.
+pub async fn notify(check: Option<JoinHandle<Option<Version>>>) {
+    let Some(handle) = check else {
+        return;
+    };
+    let Ok(Ok(Some(latest))) = tokio::time::timeout(FETCH_TIMEOUT, handle).await else {
+        return;
+    };
+    eprintln!(
+        "\n{} {} {}",
+        "A new release of s2-cli is available:".yellow(),
+        CURRENT_VERSION.cyan(),
+        format!("→ {latest}").cyan(),
+    );
+    eprintln!(
+        "{}",
+        format!(
+            "Release notes: https://github.com/s2-streamstore/s2/releases/tag/{CLI_TAG_PREFIX}{latest}"
+        )
+        .yellow()
+    );
+    eprintln!(
+        "{}",
+        "To upgrade:    https://s2.dev/docs/quickstart#get-started-with-the-cli".yellow()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,31 +189,4 @@ mod tests {
         let latest = fetch_latest().await;
         assert!(latest.is_some(), "expected a released s2-cli version");
     }
-}
-
-/// Await the background check and print a reminder if a newer version exists.
-pub async fn notify(check: Option<JoinHandle<Option<Version>>>) {
-    let Some(handle) = check else {
-        return;
-    };
-    let Ok(Ok(Some(latest))) = tokio::time::timeout(FETCH_TIMEOUT, handle).await else {
-        return;
-    };
-    eprintln!(
-        "\n{} {} {}",
-        "A new release of s2-cli is available:".yellow(),
-        CURRENT_VERSION.cyan(),
-        format!("→ {latest}").cyan(),
-    );
-    eprintln!(
-        "{}",
-        format!(
-            "Release notes: https://github.com/s2-streamstore/s2/releases/tag/{CLI_TAG_PREFIX}{latest}"
-        )
-        .yellow()
-    );
-    eprintln!(
-        "{}",
-        "To upgrade:    https://s2.dev/docs/quickstart#get-started-with-the-cli".yellow()
-    );
 }
