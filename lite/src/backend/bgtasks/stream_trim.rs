@@ -82,7 +82,10 @@ impl Backend {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
         };
-        let mut it = self.db.scan_prefix_with_options(prefix, &scan_opts).await?;
+        let mut it = self
+            .db
+            .scan_prefix_with_options(prefix, .., &scan_opts)
+            .await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0usize;
         let mut has_remaining_records = false;

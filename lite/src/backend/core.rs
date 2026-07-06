@@ -169,30 +169,27 @@ impl Backend {
         stream: &StreamName,
         tail_pos: StreamPosition,
     ) -> Result<(), StorageError> {
-        let start_key = kv::stream_record_data::ser_key(
-            stream_id,
-            StreamPosition {
-                seq_num: tail_pos.seq_num,
-                timestamp: 0,
-            },
-        );
+        let prefix = kv::stream_record_data::ser_key_prefix(stream_id);
+        let start_suffix = kv::stream_record_data::ser_key_suffix(StreamPosition {
+            seq_num: tail_pos.seq_num,
+            timestamp: 0,
+        });
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
         };
-        let mut it = self.db.scan_with_options(start_key.., &scan_opts).await?;
+        let mut it = self
+            .db
+            .scan_prefix_with_options(prefix, start_suffix.., &scan_opts)
+            .await?;
         let Some(kv) = it.next().await? else {
             return Ok(());
         };
-        if kv.key.first().copied() != Some(kv::KeyType::StreamRecordData as u8) {
-            return Ok(());
-        }
         let (deser_stream_id, pos) = kv::stream_record_data::deser_key(kv.key)?;
-        assert!(
-            deser_stream_id != stream_id,
+        debug_assert_eq!(deser_stream_id, stream_id);
+        panic!(
             "invariant violation: stream `{basin}/{stream}` tail_pos {tail_pos:?} but found record at {pos:?}"
-        );
-        Ok(())
+        )
     }
 
     fn streamer_client_slot(&self, basin: &BasinName, stream: &StreamName) -> StreamerClientSlot {
