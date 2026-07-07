@@ -411,6 +411,7 @@ pub fn default_connector(
 ) -> Result<HttpsConnector<HttpConnector>, std::io::Error> {
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
+    connector.set_nodelay(true);
     if let Some(timeout) = connect_timeout {
         connector.set_connect_timeout(Some(timeout));
     }
