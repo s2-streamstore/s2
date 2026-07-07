@@ -261,7 +261,7 @@ impl S2Endpoints {
     pub(crate) fn for_aws() -> Self {
         Self {
             scheme: Scheme::HTTPS,
-            account_authority: "aws.s2.dev".try_into().expect("valid authority"),
+            account_authority: "a.s2.dev".try_into().expect("valid authority"),
             basin_authority: BasinAuthority::ParentZone(
                 "b.s2.dev".try_into().expect("valid authority"),
             ),

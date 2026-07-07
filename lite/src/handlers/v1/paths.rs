@@ -58,6 +58,6 @@ pub mod streams {
 }
 
 pub mod cloud_endpoints {
-    pub const ACCOUNT: &str = "https://aws.s2.dev/v1";
+    pub const ACCOUNT: &str = "https://a.s2.dev/v1";
     pub const BASIN: &str = "https://{basin}.b.s2.dev/v1";
 }
