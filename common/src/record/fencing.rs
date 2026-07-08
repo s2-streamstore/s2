@@ -70,12 +70,6 @@ impl FromStr for FencingToken {
     }
 }
 
-impl From<FencingToken> for CompactString {
-    fn from(token: FencingToken) -> Self {
-        token.0
-    }
-}
-
 impl AsRef<str> for FencingToken {
     fn as_ref(&self) -> &str {
         &self.0
