@@ -2,7 +2,6 @@ mod batcher;
 mod codec;
 mod encryption;
 mod framing;
-mod iterator;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;
 
@@ -18,7 +17,6 @@ pub use framing::{
     decode_record, decode_stored_record, encode_stored_record, encode_stored_record_into,
     stored_record_encoded_size, try_metered_size,
 };
-pub use iterator::StoredRecordIterator;
 use s2_common::stream::{
     AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ReadBatch, ReadSessionOutput,
 };

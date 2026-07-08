@@ -176,13 +176,12 @@ mod tests {
         read_extent::{ReadLimit, ReadUntil},
         record::{
             CommandRecord, EnvelopeRecord, Metered, MeteredExt, MeteredSize, Record, SeqNum,
-            Sequenced, SequencedRecord, StreamPosition, Timestamp,
+            SequencedRecord, StreamPosition, Timestamp,
         },
     };
 
     use crate::record::{
-        RecordBatch, RecordBatcher, StoredRecord, StoredRecordDecodeError, StoredRecordIterator,
-        StoredSequencedBytes, StoredSequencedRecord, encode_stored_record,
+        RecordBatch, RecordBatcher, StoredRecord, StoredRecordDecodeError, StoredSequencedRecord,
     };
 
     fn test_logical_record(seq_num: SeqNum, timestamp: Timestamp) -> SequencedRecord {
@@ -222,18 +221,6 @@ mod tests {
         records: Vec<SequencedRecord>,
     ) -> impl Iterator<Item = Result<Metered<SequencedRecord>, StoredRecordDecodeError>> {
         records.into_iter().map(Metered::from).map(Ok)
-    }
-
-    fn to_stored_bytes_iter(
-        records: Vec<StoredSequencedRecord>,
-    ) -> impl Iterator<Item = Result<StoredSequencedBytes, StoredRecordDecodeError>> {
-        records
-            .into_iter()
-            .map(|record| {
-                let (position, record) = record.into_parts();
-                Sequenced::new(position, encode_stored_record((&record).metered()))
-            })
-            .map(Ok)
     }
 
     fn assert_batch(batch: &RecordBatch, expected: &[StoredSequencedRecord], is_terminal: bool) {
@@ -389,59 +376,6 @@ mod tests {
             .expect("second batch expected")
             .expect("second batch ok");
         assert_batch(&second_batch, &records[1..], false);
-        assert!(batcher.next().is_none());
-    }
-
-    #[test]
-    fn surfaces_decode_errors_after_draining_buffer() {
-        let records = vec![test_record(1, 10), test_record(2, 11)];
-        let invalid_data = Sequenced::new(
-            StreamPosition {
-                seq_num: 3,
-                timestamp: 12,
-            },
-            Bytes::new(),
-        );
-
-        let mut batcher = RecordBatcher::new(
-            StoredRecordIterator::new(
-                to_stored_bytes_iter(records.clone()).chain(std::iter::once(Ok(invalid_data))),
-            ),
-            ReadLimit::Unbounded,
-            ReadUntil::Unbounded,
-        );
-
-        let batch = batcher.next().expect("batch expected").expect("ok batch");
-        assert_batch(&batch, &records, false);
-
-        let error = batcher
-            .next()
-            .expect("error expected")
-            .expect_err("expected decode error");
-        assert!(matches!(
-            error,
-            StoredRecordDecodeError::Truncated("MagicByte")
-        ));
-        assert!(batcher.next().is_none());
-    }
-
-    #[test]
-    fn surfaces_iterator_errors_immediately() {
-        let iterator = StoredRecordIterator::new(std::iter::once::<
-            Result<StoredSequencedBytes, StoredRecordDecodeError>,
-        >(Err(
-            StoredRecordDecodeError::InvalidValue("test", "boom"),
-        )));
-        let mut batcher = RecordBatcher::new(iterator, ReadLimit::Unbounded, ReadUntil::Unbounded);
-
-        let error = batcher
-            .next()
-            .expect("error expected")
-            .expect_err("expected iterator error");
-        assert!(matches!(
-            error,
-            StoredRecordDecodeError::InvalidValue("test", "boom")
-        ));
         assert!(batcher.next().is_none());
     }
 }
