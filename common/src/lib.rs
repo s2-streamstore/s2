@@ -9,7 +9,6 @@ pub mod encryption;
 pub mod http;
 pub mod location;
 pub mod maybe;
-pub mod metrics;
 pub mod read_extent;
 pub mod record;
 pub mod resources;

@@ -11,26 +11,6 @@ pub enum TimeseriesInterval {
     Day,
 }
 
-impl From<TimeseriesInterval> for s2_common::metrics::TimeseriesInterval {
-    fn from(value: TimeseriesInterval) -> Self {
-        match value {
-            TimeseriesInterval::Minute => s2_common::metrics::TimeseriesInterval::Minute,
-            TimeseriesInterval::Hour => s2_common::metrics::TimeseriesInterval::Hour,
-            TimeseriesInterval::Day => s2_common::metrics::TimeseriesInterval::Day,
-        }
-    }
-}
-
-impl From<s2_common::metrics::TimeseriesInterval> for TimeseriesInterval {
-    fn from(value: s2_common::metrics::TimeseriesInterval) -> Self {
-        match value {
-            s2_common::metrics::TimeseriesInterval::Minute => Self::Minute,
-            s2_common::metrics::TimeseriesInterval::Hour => Self::Hour,
-            s2_common::metrics::TimeseriesInterval::Day => Self::Day,
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema, utoipa::IntoParams))]
@@ -44,22 +24,6 @@ pub struct AccountMetricSetRequest {
     pub end: Option<u32>,
     /// Interval to aggregate over for timeseries metric sets.
     pub interval: Option<TimeseriesInterval>,
-}
-
-impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest {
-    fn from(value: AccountMetricSetRequest) -> Self {
-        Self {
-            set: match value.set {
-                AccountMetricSet::ActiveBasins => {
-                    s2_common::metrics::AccountMetricSet::ActiveBasins
-                }
-                AccountMetricSet::AccountOps => s2_common::metrics::AccountMetricSet::AccountOps,
-            },
-            start: value.start,
-            end: value.end,
-            interval: value.interval.map(Into::into),
-        }
-    }
 }
 
 #[rustfmt::skip]
@@ -86,28 +50,6 @@ pub struct BasinMetricSetRequest {
     pub end: Option<u32>,
     /// Interval to aggregate over for timeseries metric sets.
     pub interval: Option<TimeseriesInterval>,
-}
-
-impl From<BasinMetricSetRequest> for s2_common::metrics::BasinMetricsRequest {
-    fn from(value: BasinMetricSetRequest) -> Self {
-        Self {
-            set: match value.set {
-                BasinMetricSet::AppendOps => s2_common::metrics::BasinMetricSet::AppendOps,
-                BasinMetricSet::AppendThroughput => {
-                    s2_common::metrics::BasinMetricSet::AppendThroughput
-                }
-                BasinMetricSet::BasinOps => s2_common::metrics::BasinMetricSet::BasinOps,
-                BasinMetricSet::ReadOps => s2_common::metrics::BasinMetricSet::ReadOps,
-                BasinMetricSet::ReadThroughput => {
-                    s2_common::metrics::BasinMetricSet::ReadThroughput
-                }
-                BasinMetricSet::Storage => s2_common::metrics::BasinMetricSet::Storage,
-            },
-            start: value.start,
-            end: value.end,
-            interval: value.interval.map(Into::into),
-        }
-    }
 }
 
 #[rustfmt::skip]
@@ -144,19 +86,6 @@ pub struct StreamMetricSetRequest {
     pub interval: Option<TimeseriesInterval>,
 }
 
-impl From<StreamMetricSetRequest> for s2_common::metrics::StreamMetricsRequest {
-    fn from(value: StreamMetricSetRequest) -> Self {
-        Self {
-            set: match value.set {
-                StreamMetricSet::Storage => s2_common::metrics::StreamMetricSet::Storage,
-            },
-            start: value.start,
-            end: value.end,
-            interval: value.interval.map(Into::into),
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -175,15 +104,6 @@ pub enum MetricUnit {
     Operations,
 }
 
-impl From<s2_common::metrics::MetricUnit> for MetricUnit {
-    fn from(value: s2_common::metrics::MetricUnit) -> Self {
-        match value {
-            s2_common::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
-            s2_common::metrics::MetricUnit::Operations => MetricUnit::Operations,
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -195,16 +115,6 @@ pub struct ScalarMetric {
     pub unit: MetricUnit,
     /// Metric value.
     pub value: f64,
-}
-
-impl From<s2_common::metrics::ScalarMetric> for ScalarMetric {
-    fn from(value: s2_common::metrics::ScalarMetric) -> Self {
-        Self {
-            name: value.name,
-            unit: value.unit.into(),
-            value: value.value,
-        }
-    }
 }
 
 #[rustfmt::skip]
@@ -224,17 +134,6 @@ pub struct AccumulationMetric {
     pub values: Vec<(u32, f64)>,
 }
 
-impl From<s2_common::metrics::AccumulationMetric> for AccumulationMetric {
-    fn from(value: s2_common::metrics::AccumulationMetric) -> Self {
-        Self {
-            name: value.name,
-            unit: value.unit.into(),
-            interval: value.interval.into(),
-            values: value.values,
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -250,16 +149,6 @@ pub struct GaugeMetric {
     pub values: Vec<(u32, f64)>,
 }
 
-impl From<s2_common::metrics::GaugeMetric> for GaugeMetric {
-    fn from(value: s2_common::metrics::GaugeMetric) -> Self {
-        Self {
-            name: value.name,
-            unit: value.unit.into(),
-            values: value.values,
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -269,15 +158,6 @@ pub struct LabelMetric {
     pub name: CompactString,
     /// Label values.
     pub values: Vec<String>,
-}
-
-impl From<s2_common::metrics::LabelMetric> for LabelMetric {
-    fn from(value: s2_common::metrics::LabelMetric) -> Self {
-        Self {
-            name: value.name,
-            values: value.values,
-        }
-    }
 }
 
 #[rustfmt::skip]
@@ -295,31 +175,10 @@ pub enum Metric {
     Label(LabelMetric),
 }
 
-impl From<s2_common::metrics::Metric> for Metric {
-    fn from(value: s2_common::metrics::Metric) -> Self {
-        match value {
-            s2_common::metrics::Metric::Scalar(scalar) => Metric::Scalar(scalar.into()),
-            s2_common::metrics::Metric::Accumulation(timeseries) => {
-                Metric::Accumulation(timeseries.into())
-            }
-            s2_common::metrics::Metric::Gauge(timeseries) => Metric::Gauge(timeseries.into()),
-            s2_common::metrics::Metric::Label(label) => Metric::Label(label.into()),
-        }
-    }
-}
-
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct MetricSetResponse {
     /// Metrics comprising the set.
     pub values: Vec<Metric>,
-}
-
-impl From<s2_common::metrics::MetricsResponse> for MetricSetResponse {
-    fn from(value: s2_common::metrics::MetricsResponse) -> Self {
-        Self {
-            values: value.values.into_iter().map(Into::into).collect(),
-        }
-    }
 }
