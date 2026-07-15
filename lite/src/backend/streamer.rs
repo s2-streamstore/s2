@@ -1076,7 +1076,7 @@ mod tests {
     use bytes::Bytes;
     use s2_common::{
         encryption::EncryptionSpec,
-        record::{EnvelopeRecord, MeteredExt as _, Record},
+        record::{EnvelopeRecord, Record},
     };
     use s2_storage::record::{
         StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
