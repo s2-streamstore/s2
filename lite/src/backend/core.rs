@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use bytesize::ByteSize;
 use dashmap::DashMap;
@@ -304,6 +304,32 @@ impl Backend {
         }
     }
 
+    /// Lookup for a stream that is known to exist: `start_streamer` reads at
+    /// `DurabilityLevel::Remote`, which can lag a concurrent creator's freshly
+    /// committed meta, so a transient not-found is retried until the durable
+    /// watermark catches up (bounded, in case the DB is wedged).
+    async fn streamer_client_guarded_provisioned(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+    ) -> Result<GuardedStreamerClient, StreamerError> {
+        const RETRY_DEADLINE: Duration = Duration::from_secs(2);
+        const MAX_BACKOFF: Duration = Duration::from_millis(100);
+        let deadline = tokio::time::Instant::now() + RETRY_DEADLINE;
+        let mut backoff = Duration::from_millis(1);
+        loop {
+            match self.streamer_client_guarded(basin, stream).await {
+                Err(StreamerError::StreamNotFound(_))
+                    if tokio::time::Instant::now() + backoff < deadline =>
+                {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                }
+                result => return result,
+            }
+        }
+    }
+
     pub(super) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
@@ -356,7 +382,9 @@ impl Backend {
                             }
                         }
                     }
-                    let client = self.streamer_client_guarded(basin, stream).await?;
+                    let client = self
+                        .streamer_client_guarded_provisioned(basin, stream)
+                        .await?;
                     let encryption = resolve_encryption(client.cipher())?;
                     Ok(StreamHandle {
                         db: self.db.clone(),
@@ -555,6 +583,68 @@ mod tests {
                 assert_eq!(*generation_id, current_generation_id)
             }
             _ => panic!("expected initializing slot to remain unchanged"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_appends_auto_create_stream_without_spurious_not_found() {
+        use s2_common::stream::{AppendInput, AppendRecord, AppendRecordParts};
+
+        use crate::backend::error::AppendError;
+
+        fn append_input(body: &str) -> AppendInput {
+            let record =
+                Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
+            let record: AppendRecord = AppendRecordParts {
+                timestamp: None,
+                record: Metered::from(record),
+            }
+            .try_into()
+            .unwrap();
+            AppendInput {
+                records: vec![record].try_into().unwrap(),
+                match_seq_num: None,
+                fencing_token: None,
+            }
+        }
+
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("autocreate").unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig {
+                    create_stream_on_append: true,
+                    ..BasinConfig::default()
+                },
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        for round in 0..10 {
+            let stream = StreamName::from_str(&format!("fresh-{round}")).unwrap();
+            let tasks: Vec<_> = (0..4)
+                .map(|i| {
+                    let backend = backend.clone();
+                    let basin = basin.clone();
+                    let stream = stream.clone();
+                    tokio::spawn(async move {
+                        let handle = backend.open_for_append(&basin, &stream, None).await?;
+                        handle.append(append_input(&format!("r{i}"))).await
+                    })
+                })
+                .collect();
+            for task in tasks {
+                match task.await.unwrap() {
+                    Ok(_) => {}
+                    // Conflict losers surface as retryable 409s to clients.
+                    Err(AppendError::TransactionConflict(_)) => {}
+                    Err(e) => panic!("concurrent auto-create append failed: {e:?}"),
+                }
+            }
         }
     }
 }
