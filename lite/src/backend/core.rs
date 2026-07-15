@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use bytesize::ByteSize;
 use dashmap::DashMap;
@@ -77,6 +77,26 @@ impl Backend {
 
     pub(super) fn bgtask_trigger_subscribe(&self) -> broadcast::Receiver<BgtaskTrigger> {
         self.bgtask_trigger_tx.subscribe()
+    }
+
+    /// Wait until writes up to `db_seq` are durable, i.e. visible to reads at
+    /// `DurabilityLevel::Remote`. Resolves immediately if they already are.
+    pub(super) async fn await_durable_seq(&self, db_seq: u64) -> Result<(), StorageError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.durability_notifier.subscribe(db_seq, move |res| {
+            let _ = tx.send(res);
+        });
+        let reason = match rx.await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(reason)) => reason,
+            // Callback dropped uninvoked: abrupt runtime shutdown.
+            Err(_) => slatedb::CloseReason::Clean,
+        };
+        Err(slatedb::Error::closed(
+            "database closed while waiting for durability".to_owned(),
+            reason,
+        )
+        .into())
     }
 
     async fn start_streamer(
@@ -304,32 +324,6 @@ impl Backend {
         }
     }
 
-    /// Lookup for a stream that is known to exist: `start_streamer` reads at
-    /// `DurabilityLevel::Remote`, which can lag a concurrent creator's freshly
-    /// committed meta, so a transient not-found is retried until the durable
-    /// watermark catches up (bounded, in case the DB is wedged).
-    async fn streamer_client_guarded_provisioned(
-        &self,
-        basin: &BasinName,
-        stream: &StreamName,
-    ) -> Result<GuardedStreamerClient, StreamerError> {
-        const RETRY_DEADLINE: Duration = Duration::from_secs(2);
-        const MAX_BACKOFF: Duration = Duration::from_millis(100);
-        let deadline = tokio::time::Instant::now() + RETRY_DEADLINE;
-        let mut backoff = Duration::from_millis(1);
-        loop {
-            match self.streamer_client_guarded(basin, stream).await {
-                Err(StreamerError::StreamNotFound(_))
-                    if tokio::time::Instant::now() + backoff < deadline =>
-                {
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
-                }
-                result => return result,
-            }
-        }
-    }
-
     pub(super) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
@@ -382,9 +376,9 @@ impl Backend {
                             }
                         }
                     }
-                    let client = self
-                        .streamer_client_guarded_provisioned(basin, stream)
-                        .await?;
+                    // provision_stream guarantees the outcome is durably
+                    // visible, so start_streamer's Remote-level read sees it.
+                    let client = self.streamer_client_guarded(basin, stream).await?;
                     let encryption = resolve_encryption(client.cipher())?;
                     Ok(StreamHandle {
                         db: self.db.clone(),
