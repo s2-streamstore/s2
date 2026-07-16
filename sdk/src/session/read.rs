@@ -48,11 +48,23 @@ impl From<ReadSessionError> for S2Error {
 pub type Streaming<R> =
     Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionError>>>>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum CaughtUpState {
     Behind,
     CaughtUp(StreamPosition),
     Ended,
+    Failed,
+}
+
+fn set_state(tx: &watch::Sender<CaughtUpState>, new: CaughtUpState) {
+    tx.send_if_modified(|state| {
+        if *state == new {
+            false
+        } else {
+            *state = new;
+            true
+        }
+    });
 }
 
 /// Read session yielding [`ReadBatch`]es, with automatic resumption on retryable errors.
@@ -93,11 +105,16 @@ impl ReadSession {
                             "read session ended before catching up".to_owned(),
                         ));
                     }
+                    CaughtUpState::Failed => {
+                        return Err(S2Error::Client(
+                            "read session failed before catching up".to_owned(),
+                        ));
+                    }
                     CaughtUpState::Behind => {}
                 }
                 if rx.changed().await.is_err() {
                     return Err(S2Error::Client(
-                        "read session ended before catching up".to_owned(),
+                        "read session dropped before catching up".to_owned(),
                     ));
                 }
             }
@@ -168,7 +185,7 @@ pub async fn read_session(
                         if can_retry(&err, &mut retry_backoff).await {
                             continue;
                         }
-                        caught_up_tx.send_replace(CaughtUpState::Ended);
+                        set_state(&caught_up_tx, CaughtUpState::Failed);
                         yield Err(err);
                         break;
                     }
@@ -215,7 +232,7 @@ pub async fn read_session(
                             .last()
                             .is_none_or(|last| last.seq_num + 1 == tail.seq_num)
                     });
-                    caught_up_tx.send_replace(match caught_up_tail {
+                    set_state(&caught_up_tx, match caught_up_tail {
                         Some(tail) => CaughtUpState::CaughtUp(tail),
                         None => CaughtUpState::Behind,
                     });
@@ -231,10 +248,10 @@ pub async fn read_session(
                 Some(Err(err)) => {
                     batches = None;
                     if can_retry(&err, &mut retry_backoff).await {
-                        caught_up_tx.send_replace(CaughtUpState::Behind);
+                        set_state(&caught_up_tx, CaughtUpState::Behind);
                         continue;
                     }
-                    caught_up_tx.send_replace(CaughtUpState::Ended);
+                    set_state(&caught_up_tx, CaughtUpState::Failed);
                     yield Err(err);
                     break;
                 }

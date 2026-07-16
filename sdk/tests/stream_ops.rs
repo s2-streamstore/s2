@@ -842,7 +842,9 @@ async fn read_session_caught_up_errors_when_limit_reached_before_tail(
 
     assert!(!session.is_caught_up());
     let result = session.caught_up().await;
-    assert_matches!(result, Err(S2Error::Client(_)));
+    assert_matches!(result, Err(S2Error::Client(msg)) => {
+        assert_eq!(msg, "read session ended before catching up");
+    });
 
     Ok(())
 }
