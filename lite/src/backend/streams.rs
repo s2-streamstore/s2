@@ -226,7 +226,6 @@ impl Backend {
                 )?;
             }
 
-            // await_durable commit: the outcome is durably visible on return.
             txn.commit().await?;
         }
 
