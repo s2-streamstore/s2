@@ -56,22 +56,6 @@ enum CaughtUpState {
 }
 
 /// Read session yielding [`ReadBatch`]es, with automatic resumption on retryable errors.
-///
-/// Implements [`Stream`](futures_core::Stream). Also maintains a caught-up-to-tail
-/// signal, observable via [`is_caught_up`](Self::is_caught_up) and
-/// [`caught_up`](Self::caught_up), derived from server reports already on the wire:
-///
-/// - A heartbeat (empty batch carrying the tail) marks the session as caught up. The first one
-///   marks the backlog-to-live transition, periodic ones confirm idle-at-tail.
-/// - A batch carrying the tail marks the session as caught up iff its last record abuts the tail,
-///   and behind otherwise.
-/// - A batch without a tail (reading old data) marks the session as behind.
-/// - An internal retry resets to behind until the new connection re-signals.
-///
-/// Caught-up is session-relative and does not linearize: it means the session has
-/// consumed everything the server has reported to it, and concurrent appends may
-/// already have advanced the true tail. For an authoritative tail, use
-/// [`check_tail`](crate::S2Stream::check_tail).
 pub struct ReadSession {
     batches: Pin<Box<dyn Send + futures_core::Stream<Item = Result<ReadBatch, S2Error>>>>,
     caught_up: watch::Receiver<CaughtUpState>,
