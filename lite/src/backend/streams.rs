@@ -76,6 +76,9 @@ impl Backend {
         Ok(Page::new(streams, has_more))
     }
 
+    /// Invariant: any outcome asserting the stream exists — `Created`,
+    /// `Updated`, `Noop`, or `StreamAlreadyExists` — is durably visible
+    /// (readable at `DurabilityLevel::Remote`) by the time this returns.
     pub async fn provision_stream(
         &self,
         basin: BasinName,
@@ -101,8 +104,14 @@ impl Backend {
 
         let stream_meta_key = kv::stream_meta::ser_key(&basin, &stream);
 
-        let existing_meta =
-            db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?;
+        // Existence is decided from a Memory-level read; capture the row's
+        // commit seq so exists-outcomes can await durability (see fn doc).
+        let existing_entry = txn.get_key_value(&stream_meta_key).await?;
+        let existing_seq = existing_entry.as_ref().map(|kv| kv.seq);
+        let existing_meta = existing_entry
+            .map(|kv| kv::stream_meta::deser_value(kv.value))
+            .transpose()
+            .map_err(StorageError::from)?;
         if let Some(existing_meta) = &existing_meta
             && existing_meta.deleted_at.is_some()
         {
@@ -117,7 +126,7 @@ impl Backend {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
-                return if new_creation_idempotency_key.is_some()
+                let result = if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
                     Ok(ProvisionResult::Noop(StreamInfo {
@@ -129,6 +138,10 @@ impl Backend {
                 } else {
                     Err(StreamAlreadyExistsError { basin, stream }.into())
                 };
+                drop(txn);
+                self.await_durable_seq(existing_seq.expect("existing meta was read"))
+                    .await?;
+                return result;
             }
             (Some(existing), ProvisionMode::Ensure) => {
                 let desired_config = config.merge(basin_defaults);
@@ -176,7 +189,11 @@ impl Backend {
             ),
         };
 
-        if !matches!(&outcome, ProvisionResult::Noop(_)) {
+        if matches!(&outcome, ProvisionResult::Noop(_)) {
+            drop(txn);
+            self.await_durable_seq(existing_seq.expect("noop implies existing meta"))
+                .await?;
+        } else {
             let meta = outcome.inner();
 
             txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;

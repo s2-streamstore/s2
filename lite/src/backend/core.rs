@@ -79,6 +79,25 @@ impl Backend {
         self.bgtask_trigger_tx.subscribe()
     }
 
+    /// Wait until writes up to `db_seq` are durable, i.e. visible to reads at
+    /// `DurabilityLevel::Remote`. Resolves immediately if they already are.
+    pub(super) async fn await_durable_seq(&self, db_seq: u64) -> Result<(), StorageError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.durability_notifier.subscribe(db_seq, move |res| {
+            let _ = tx.send(res);
+        });
+        let reason = match rx.await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(reason)) => reason,
+            Err(_) => slatedb::CloseReason::Clean,
+        };
+        Err(slatedb::Error::closed(
+            "database closed while waiting for durability".to_owned(),
+            reason,
+        )
+        .into())
+    }
+
     async fn start_streamer(
         &self,
         generation_id: StreamerGenerationId,
@@ -555,6 +574,68 @@ mod tests {
                 assert_eq!(*generation_id, current_generation_id)
             }
             _ => panic!("expected initializing slot to remain unchanged"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_appends_auto_create_stream_without_spurious_not_found() {
+        use s2_common::stream::{AppendInput, AppendRecord, AppendRecordParts};
+
+        use crate::backend::error::AppendError;
+
+        fn append_input(body: &str) -> AppendInput {
+            let record =
+                Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
+            let record: AppendRecord = AppendRecordParts {
+                timestamp: None,
+                record: Metered::from(record),
+            }
+            .try_into()
+            .unwrap();
+            AppendInput {
+                records: vec![record].try_into().unwrap(),
+                match_seq_num: None,
+                fencing_token: None,
+            }
+        }
+
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("autocreate").unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig {
+                    create_stream_on_append: true,
+                    ..BasinConfig::default()
+                },
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        for round in 0..10 {
+            let stream = StreamName::from_str(&format!("fresh-{round}")).unwrap();
+            let tasks: Vec<_> = (0..4)
+                .map(|i| {
+                    let backend = backend.clone();
+                    let basin = basin.clone();
+                    let stream = stream.clone();
+                    tokio::spawn(async move {
+                        let handle = backend.open_for_append(&basin, &stream, None).await?;
+                        handle.append(append_input(&format!("r{i}"))).await
+                    })
+                })
+                .collect();
+            for task in tasks {
+                match task.await.unwrap() {
+                    Ok(_) => {}
+                    // Conflict losers surface as retryable 409s to clients.
+                    Err(AppendError::TransactionConflict(_)) => {}
+                    Err(e) => panic!("concurrent auto-create append failed: {e:?}"),
+                }
+            }
         }
     }
 }

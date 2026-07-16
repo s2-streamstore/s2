@@ -310,7 +310,7 @@ async fn delete_nonexistent_basin_errors() -> Result<(), S2Error> {
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, message: _, .. })) => {
+        Err(S2Error::Server(ErrorResponse { code, .. })) => {
             assert_eq!(code, "basin_not_found")
         }
     );

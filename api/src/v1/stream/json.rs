@@ -276,13 +276,12 @@ impl std::fmt::Display for Base64Display<'_> {
         const OUTPUT_CHUNK: usize = 4 * 256;
 
         let mut output = [0u8; OUTPUT_CHUNK];
-        let mut chunks = self.0.chunks_exact(INPUT_CHUNK);
-        for chunk in &mut chunks {
+        let (chunks, remainder) = self.0.as_chunks::<INPUT_CHUNK>();
+        for chunk in chunks {
             let encoded = Base64::encode(chunk, &mut output).map_err(|_| std::fmt::Error)?;
             f.write_str(encoded)?;
         }
 
-        let remainder = chunks.remainder();
         if !remainder.is_empty() {
             let encoded_len = Base64::encoded_len(remainder);
             let encoded = Base64::encode(remainder, &mut output[..encoded_len])

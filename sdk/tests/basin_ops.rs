@@ -318,7 +318,7 @@ async fn delete_nonexistent_stream_errors(basin: &S2Basin) -> Result<(), S2Error
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse {code, message: _, ..})) => {
+        Err(S2Error::Server(ErrorResponse { code, .. })) => {
             assert_eq!(code, "stream_not_found")
         }
     );

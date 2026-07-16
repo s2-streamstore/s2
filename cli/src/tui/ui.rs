@@ -3487,7 +3487,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             if state.body.is_empty() && !body_editing {
                 "(empty)".to_string()
             } else {
-                format!("{}{}", &state.body, cursor(body_editing))
+                format!("{}{}", state.body, cursor(body_editing))
             },
             Style::default().fg(if body_editing {
                 CYAN
@@ -3538,7 +3538,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             Span::styled(
                 format!(
                     "{}{}",
-                    &state.header_key_input,
+                    state.header_key_input,
                     if state.editing_header_key { "▎" } else { "" }
                 ),
                 Style::default().fg(if state.editing_header_key {
@@ -3551,7 +3551,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             Span::styled(
                 format!(
                     "{}{}",
-                    &state.header_value_input,
+                    state.header_value_input,
                     if !state.editing_header_key { "▎" } else { "" }
                 ),
                 Style::default().fg(if !state.editing_header_key {
@@ -3590,7 +3590,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             if state.match_seq_num.is_empty() && !match_editing {
                 "(none)".to_string()
             } else {
-                format!("{}{}", &state.match_seq_num, cursor(match_editing))
+                format!("{}{}", state.match_seq_num, cursor(match_editing))
             },
             Style::default().fg(if match_editing {
                 CYAN
@@ -3629,7 +3629,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             if state.fencing_token.is_empty() && !fence_editing {
                 "(none)".to_string()
             } else {
-                format!("{}{}", &state.fencing_token, cursor(fence_editing))
+                format!("{}{}", state.fencing_token, cursor(fence_editing))
             },
             Style::default().fg(if fence_editing {
                 CYAN
@@ -3677,7 +3677,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
             if state.input_file.is_empty() && !file_editing {
                 "(none)".to_string()
             } else {
-                format!("{}{}", &state.input_file, cursor(file_editing))
+                format!("{}{}", state.input_file, cursor(file_editing))
             },
             Style::default().fg(if file_editing {
                 CYAN
@@ -3811,7 +3811,7 @@ fn draw_append_view(f: &mut Frame, area: Rect, state: &AppendViewState) {
                 ));
             }
             spans.push(Span::styled(
-                format!(" {}", &result.body_preview),
+                format!(" {}", result.body_preview),
                 Style::default().fg(TEXT_SECONDARY),
             ));
             history_lines.push(Line::from(spans));
