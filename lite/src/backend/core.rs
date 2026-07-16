@@ -89,7 +89,6 @@ impl Backend {
         let reason = match rx.await {
             Ok(Ok(_)) => return Ok(()),
             Ok(Err(reason)) => reason,
-            // Callback dropped uninvoked: abrupt runtime shutdown.
             Err(_) => slatedb::CloseReason::Clean,
         };
         Err(slatedb::Error::closed(
@@ -376,8 +375,6 @@ impl Backend {
                             }
                         }
                     }
-                    // provision_stream guarantees the outcome is durably
-                    // visible, so start_streamer's Remote-level read sees it.
                     let client = self.streamer_client_guarded(basin, stream).await?;
                     let encryption = resolve_encryption(client.cipher())?;
                     Ok(StreamHandle {
