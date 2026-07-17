@@ -108,9 +108,3 @@ pub mod append_session {
         AppendSession, AppendSessionConfig, BatchSubmitPermit, BatchSubmitTicket,
     };
 }
-/// Read session for streaming records with automatic resumption.
-///
-/// See [`ReadSession`](read_session::ReadSession).
-pub mod read_session {
-    pub use crate::session::read::ReadSession;
-}

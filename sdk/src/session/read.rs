@@ -1,22 +1,15 @@
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{pin::Pin, time::Duration};
 
 use async_stream::{stream, try_stream};
 use futures_util::StreamExt;
 use s2_api::v1::stream::{ReadEnd, ReadStart};
-use tokio::{
-    sync::watch,
-    time::{Instant, timeout},
-};
+use tokio::time::{Instant, timeout};
 use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
-    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName, StreamPosition},
+    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -48,88 +41,6 @@ impl From<ReadSessionError> for S2Error {
 pub type Streaming<R> =
     Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionError>>>>;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CaughtUpState {
-    Behind,
-    CaughtUp(StreamPosition),
-    Ended,
-    Failed,
-}
-
-fn set_state(tx: &watch::Sender<CaughtUpState>, new: CaughtUpState) {
-    tx.send_if_modified(|state| {
-        if *state == new {
-            false
-        } else {
-            *state = new;
-            true
-        }
-    });
-}
-
-/// Read session yielding [`ReadBatch`]es, with automatic resumption on retryable errors.
-pub struct ReadSession {
-    batches: Pin<Box<dyn Send + futures_core::Stream<Item = Result<ReadBatch, S2Error>>>>,
-    caught_up: watch::Receiver<CaughtUpState>,
-}
-
-impl ReadSession {
-    /// True while the session is at the live tail: every record that existed as of
-    /// the last server report has been consumed.
-    pub fn is_caught_up(&self) -> bool {
-        matches!(*self.caught_up.borrow(), CaughtUpState::CaughtUp(_))
-    }
-
-    /// Wait until the session reaches the live tail, returning the last observed
-    /// tail position at that moment. Completes immediately if already caught up.
-    /// Call again after falling behind to await the next catch-up. A pending
-    /// future stays pending across internal retries.
-    ///
-    /// Errors if the session terminates before reaching the tail, whether due to a
-    /// fatal error or a stop condition (count/bytes/until limit) being met.
-    ///
-    /// The returned future does not borrow the session, so it can be polled
-    /// concurrently with record consumption, e.g. in a `select!` arm alongside
-    /// [`next`](futures_util::StreamExt::next). Note that the signal advances only
-    /// while the session is being polled.
-    pub fn caught_up(
-        &self,
-    ) -> impl Future<Output = Result<StreamPosition, S2Error>> + Send + use<> {
-        let mut rx = self.caught_up.clone();
-        async move {
-            loop {
-                match *rx.borrow_and_update() {
-                    CaughtUpState::CaughtUp(tail) => return Ok(tail),
-                    CaughtUpState::Ended => {
-                        return Err(S2Error::Client(
-                            "read session ended before catching up".to_owned(),
-                        ));
-                    }
-                    CaughtUpState::Failed => {
-                        return Err(S2Error::Client(
-                            "read session failed before catching up".to_owned(),
-                        ));
-                    }
-                    CaughtUpState::Behind => {}
-                }
-                if rx.changed().await.is_err() {
-                    return Err(S2Error::Client(
-                        "read session dropped before catching up".to_owned(),
-                    ));
-                }
-            }
-        }
-    }
-}
-
-impl futures_core::Stream for ReadSession {
-    type Item = Result<ReadBatch, S2Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.batches.as_mut().poll_next(cx)
-    }
-}
-
 pub async fn read_session(
     client: BasinClient,
     name: StreamName,
@@ -137,11 +48,10 @@ pub async fn read_session(
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
-) -> Result<ReadSession, ReadSessionError> {
+) -> Result<Streaming<ReadBatch>, ReadSessionError> {
     let mut retry_backoff = retry_builder(&client.config.retry).build();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
-    let (caught_up_tx, caught_up_rx) = watch::channel(CaughtUpState::Behind);
 
     let batches = loop {
         end.wait = remaining_wait(baseline_wait, last_tail_at);
@@ -167,7 +77,7 @@ pub async fn read_session(
         }
     };
 
-    let batches = stream! {
+    Ok(Box::pin(stream! {
         let mut batches: Option<Streaming<ReadBatch>> = Some(batches);
 
         loop {
@@ -185,7 +95,6 @@ pub async fn read_session(
                         if can_retry(&err, &mut retry_backoff).await {
                             continue;
                         }
-                        set_state(&caught_up_tx, CaughtUpState::Failed);
                         yield Err(err);
                         break;
                     }
@@ -224,19 +133,6 @@ pub async fn read_session(
                         )
                     }
 
-                    // Compared before command-record filtering, so a filtered
-                    // record at the tail still counts toward being caught up.
-                    let caught_up_tail = batch.tail.filter(|tail| {
-                        batch
-                            .records
-                            .last()
-                            .is_none_or(|last| last.seq_num + 1 == tail.seq_num)
-                    });
-                    set_state(&caught_up_tx, match caught_up_tail {
-                        Some(tail) => CaughtUpState::CaughtUp(tail),
-                        None => CaughtUpState::Behind,
-                    });
-
                     if ignore_command_records {
                         batch.records.retain(|r| !r.is_command_record());
                     }
@@ -248,32 +144,15 @@ pub async fn read_session(
                 Some(Err(err)) => {
                     batches = None;
                     if can_retry(&err, &mut retry_backoff).await {
-                        set_state(&caught_up_tx, CaughtUpState::Behind);
                         continue;
                     }
-                    set_state(&caught_up_tx, CaughtUpState::Failed);
                     yield Err(err);
                     break;
                 }
-                None => {
-                    caught_up_tx.send_if_modified(|state| {
-                        if matches!(state, CaughtUpState::Behind) {
-                            *state = CaughtUpState::Ended;
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                    break;
-                }
+                None => break,
             }
         }
-    };
-
-    Ok(ReadSession {
-        batches: Box::pin(batches.map(|res| res.map_err(S2Error::from))),
-        caught_up: caught_up_rx,
-    })
+    }))
 }
 
 async fn session_inner(

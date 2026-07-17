@@ -529,11 +529,10 @@ pub async fn read(
         stop = stop.with_until(..until);
     }
 
-    let session = stream
+    stream
         .read_session(ReadInput::new().with_start(start).with_stop(stop))
         .await
-        .map_err(|e| CliError::op(OpKind::Read, e))?;
-    Ok(Box::pin(session))
+        .map_err(|e| CliError::op(OpKind::Read, e))
 }
 
 pub fn append<'a, S, E>(
