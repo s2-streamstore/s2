@@ -225,8 +225,8 @@ pub async fn read(
                 let mut errored = false;
                 while let Some(output) = session.next().await {
                     match output {
-                        Ok(ReadSessionOutput::Heartbeat(_tail)) => {
-                            yield v1t::stream::sse::ping_event();
+                        Ok(ReadSessionOutput::Heartbeat(tail)) => {
+                            yield v1t::stream::sse::ping_event(tail);
                         },
                         Ok(ReadSessionOutput::Batch(batch)) => {
                             let Some(last_record) = batch.records.last() else {

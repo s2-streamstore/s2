@@ -3,7 +3,7 @@ use std::str::FromStr;
 use s2_common::http::ParseableHeader;
 use serde::Serialize;
 
-use super::ReadBatch;
+use super::{ReadBatch, StreamPosition};
 
 static LAST_EVENT_ID_HEADER: http::HeaderName = http::HeaderName::from_static("last-event-id");
 
@@ -153,11 +153,14 @@ pub fn error_event(data: String) -> Result<axum::response::sse::Event, axum::Err
 }
 
 #[cfg(feature = "axum")]
-pub fn ping_event() -> Result<axum::response::sse::Event, axum::Error> {
+pub fn ping_event(
+    tail: s2_common::record::StreamPosition,
+) -> Result<axum::response::sse::Event, axum::Error> {
     axum::response::sse::Event::default()
         .event(Ping::Ping)
         .json_data(PingEventData {
             timestamp: elapsed_since_epoch().as_millis() as u64,
+            tail: tail.into(),
         })
 }
 
@@ -181,5 +184,8 @@ impl AsRef<str> for DoneEventData {
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PingEventData {
+    /// Time the ping was emitted, as Unix epoch milliseconds.
     pub timestamp: u64,
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
+    pub tail: StreamPosition,
 }
