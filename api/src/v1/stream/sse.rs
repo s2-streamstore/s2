@@ -184,6 +184,7 @@ impl AsRef<str> for DoneEventData {
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PingEventData {
+    /// Time the ping was emitted, as Unix epoch milliseconds.
     pub timestamp: u64,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
     pub tail: StreamPosition,
