@@ -78,20 +78,17 @@ impl From<CaughtUpError> for S2Error {
 type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
 type SharedCaughtUp = Shared<BoxFuture<'static, CaughtUpResult>>;
 
-pin_project_lite::pin_project! {
-    /// A future that returns the next caught-up tail.
-    #[derive(Clone)]
-    pub struct CaughtUp {
-        #[pin]
-        inner: SharedCaughtUp,
-    }
+/// A future that returns the next caught-up tail.
+#[derive(Clone)]
+pub struct CaughtUp {
+    inner: SharedCaughtUp,
 }
 
 impl Future for CaughtUp {
     type Output = CaughtUpResult;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.project().inner.poll(cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner).poll(cx)
     }
 }
 
@@ -207,7 +204,6 @@ impl ReadUpdate {
 pub struct ReadSession {
     updates: Streaming<ReadUpdate>,
     state: CaughtUpState,
-    terminated: bool,
 }
 
 impl ReadSession {
@@ -215,7 +211,6 @@ impl ReadSession {
         Self {
             updates,
             state: CaughtUpState::new(),
-            terminated: false,
         }
     }
 
@@ -242,34 +237,25 @@ impl futures_core::Stream for ReadSession {
     type Item = Result<ReadBatch, S2Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.terminated {
-            return Poll::Ready(None);
-        }
-
         loop {
             match self.updates.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(update))) => {
                     self.state.set_behind();
-                    if let Some(batch) = update.batch {
-                        if let Some(tail) = update.caught_up_tail {
-                            self.state.set_caught_up(tail);
-                        }
-                        return Poll::Ready(Some(Ok(batch)));
-                    }
                     if let Some(tail) = update.caught_up_tail {
                         self.state.set_caught_up(tail);
+                    }
+                    if let Some(batch) = update.batch {
+                        return Poll::Ready(Some(Ok(batch)));
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
                     let error = S2Error::from(error);
                     self.state.end(Some(error.clone()));
-                    self.terminated = true;
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
                     self.state.end(None);
-                    self.terminated = true;
                     return Poll::Ready(None);
                 }
             }
@@ -617,7 +603,6 @@ mod tests {
         let mut session = test_session(stream::empty());
         let caught_up = session.caught_up();
 
-        assert!(session.next().await.is_none());
         assert!(session.next().await.is_none());
         assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
     }
