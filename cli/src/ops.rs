@@ -204,6 +204,22 @@ pub async fn list_access_tokens(
     }
 }
 
+pub async fn get_access_token(s2: &S2, id: AccessTokenId) -> Result<AccessTokenInfo, CliError> {
+    let page = s2
+        .list_access_tokens(
+            ListAccessTokensInput::new()
+                .with_prefix(id.clone().into())
+                .with_limit(1),
+        )
+        .await
+        .map_err(|e| CliError::op(OpKind::ListAccessTokens, e))?;
+
+    page.values
+        .into_iter()
+        .find(|info| info.id == id)
+        .ok_or_else(|| CliError::AccessTokenNotFound(id.to_string()))
+}
+
 pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<String, CliError> {
     let mut scope = AccessTokenScopeInput::from_ops(args.ops.into_iter().map(|op| op.into()));
     if let Some(v) = args.basins_exact {

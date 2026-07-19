@@ -4,6 +4,7 @@ mod apply;
 mod bench;
 mod cli;
 mod config;
+mod diff;
 mod error;
 mod lite;
 mod ops;
@@ -16,7 +17,7 @@ mod update;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{pin::Pin, time::Duration};
+use std::{io::Write as _, pin::Pin, time::Duration};
 
 use clap::{CommandFactory, Parser};
 use cli::{ApplyArgs, Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
@@ -162,6 +163,10 @@ async fn run() -> Result<(), CliError> {
         return Ok(());
     }
 
+    if let Command::Diff(args) = &command {
+        diff::validate_args(args)?;
+    }
+
     let cli_config = load_cli_config()?;
     let sdk_config = sdk_config(
         &cli_config,
@@ -300,6 +305,15 @@ async fn run() -> Result<(), CliError> {
                 "{}",
                 format!("✓ Access token '{}' revoked", id).green().bold()
             );
+        }
+
+        Command::Diff(args) => {
+            let exit_code = args.exit_code;
+            let outcome = diff::run(&s2, args).await?;
+            if exit_code && outcome.has_differences {
+                let _ = std::io::stdout().flush();
+                std::process::exit(1);
+            }
         }
 
         Command::ListLocations => {

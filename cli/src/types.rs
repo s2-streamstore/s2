@@ -126,6 +126,34 @@ impl FromStr for S2BasinAndStreamUri {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiffResource {
+    Basin(BasinName),
+    Stream(S2BasinAndStreamUri),
+    AccessToken(AccessTokenId),
+}
+
+impl FromStr for DiffResource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if !s.contains("://") {
+            return Err(
+                "resource type cannot be inferred from a bare name; use `--resource`".to_owned(),
+            );
+        }
+
+        let S2Uri { basin, stream } = s.parse().map_err(|e: S2UriParseError| e.to_string())?;
+        match stream {
+            Some(stream) => Ok(Self::Stream(S2BasinAndStreamUri {
+                basin,
+                stream: stream.parse().map_err(|e| format!("{e}"))?,
+            })),
+            None => Ok(Self::Basin(basin)),
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone, Serialize)]
 pub struct BasinConfig {
     #[clap(flatten)]

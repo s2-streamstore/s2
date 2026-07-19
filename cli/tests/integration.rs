@@ -105,6 +105,73 @@ fn create_basin_with_config() {
 
 #[test]
 #[serial]
+fn diff_basins() {
+    let left = unique_name("test-cli-diff-basin-left");
+    let right = unique_name("test-cli-diff-basin-right");
+
+    s2().args(["create-basin", &left, "--retention-policy", "infinite"])
+        .assert()
+        .success();
+    s2().args([
+        "create-basin",
+        &right,
+        "--create-stream-on-append",
+        "--retention-policy",
+        "7d",
+        "--timestamping-mode",
+        "arrival",
+    ])
+    .assert()
+    .success();
+    wait_for_basin(&left);
+    wait_for_basin(&right);
+
+    s2().args(["diff", &format!("s2://{left}"), &format!("s2://{right}")])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(format!("--- s2://{left}"))
+                .and(predicate::str::contains(format!("+++ s2://{right}")))
+                .and(predicate::str::contains("create_stream_on_append"))
+                .and(predicate::str::contains("- false"))
+                .and(predicate::str::contains("+ true"))
+                .and(predicate::str::contains(
+                    "default_stream_config.retention_policy\n- infinite\n+ 7d",
+                ))
+                .and(predicate::str::contains(
+                    "default_stream_config.timestamping.mode\n- client-prefer\n+ arrival",
+                )),
+        );
+
+    s2().args([
+        "diff",
+        "--resource",
+        "basin",
+        &left,
+        &right,
+        "--output",
+        "json",
+    ])
+    .assert()
+    .success()
+    .stdout(
+        predicate::str::contains("\"resource\": \"basin\"")
+            .and(predicate::str::contains(
+                "\"path\": \"create_stream_on_append\"",
+            ))
+            .and(predicate::str::contains(
+                "\"path\": \"default_stream_config.retention_policy\"",
+            ))
+            .and(predicate::str::contains("\"left\": \"infinite\""))
+            .and(predicate::str::contains("\"right\": \"7d\"")),
+    );
+
+    cleanup_basin(&left);
+    cleanup_basin(&right);
+}
+
+#[test]
+#[serial]
 fn reconfigure_basin() {
     let basin = unique_name("test-cli-basin-reconfig");
 
@@ -195,6 +262,129 @@ fn create_stream_with_config() {
     s2().args(["get-stream-config", &uri]).assert().success();
 
     cleanup_stream(&basin, &stream);
+}
+
+#[test]
+#[serial]
+fn diff_streams() {
+    let basin = ensure_test_basin("test-cli-diff-streams");
+    let left = unique_name("test-stream-diff-left");
+    let right = unique_name("test-stream-diff-right");
+    let left_uri = format!("s2://{basin}/{left}");
+    let right_uri = format!("s2://{basin}/{right}");
+
+    s2().args(["create-stream", &left_uri]).assert().success();
+    s2().args(["create-stream", &right_uri, "--retention-policy", "1d"])
+        .assert()
+        .success();
+
+    s2().args(["diff", &left_uri, &right_uri])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(format!("--- {left_uri}"))
+                .and(predicate::str::contains(format!("+++ {right_uri}")))
+                .and(predicate::str::contains("retention_policy"))
+                .and(predicate::str::contains("+ 1d")),
+        );
+
+    s2().args([
+        "diff",
+        "--resource",
+        "stream",
+        &left_uri,
+        &right_uri,
+        "--output",
+        "json",
+    ])
+    .assert()
+    .success()
+    .stdout(
+        predicate::str::contains("\"resource\": \"stream\"")
+            .and(predicate::str::contains("\"path\": \"retention_policy\"")),
+    );
+
+    s2().args(["diff", &left_uri, &right_uri, "--exit-code"])
+        .assert()
+        .code(1);
+
+    s2().args(["diff", &left_uri, &left_uri, "--exit-code"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("✓ No differences"));
+
+    cleanup_stream(&basin, &left);
+    cleanup_stream(&basin, &right);
+}
+
+#[test]
+#[serial]
+fn diff_stream_against_basin_defaults() {
+    let basin = unique_name("test-cli-diff-defaults");
+    let stream = unique_name("test-stream-custom-config");
+    let basin_uri = format!("s2://{basin}");
+    let stream_uri = format!("{basin_uri}/{stream}");
+
+    s2().args([
+        "create-basin",
+        &basin,
+        "--retention-policy",
+        "7d",
+        "--timestamping-mode",
+        "arrival",
+    ])
+    .assert()
+    .success();
+    wait_for_basin(&basin);
+    s2().args([
+        "create-stream",
+        &stream_uri,
+        "--retention-policy",
+        "30d",
+        "--timestamping-mode",
+        "client-prefer",
+    ])
+    .assert()
+    .success();
+
+    s2().args(["diff", &basin_uri, &stream_uri])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(format!("--- {basin_uri} (stream defaults)"))
+                .and(predicate::str::contains(format!("+++ {stream_uri}")))
+                .and(predicate::str::contains("retention_policy\n- 7d\n+ 30d"))
+                .and(predicate::str::contains(
+                    "timestamping.mode\n- arrival\n+ client-prefer",
+                )),
+        );
+
+    s2().args(["diff", &stream_uri, &basin_uri])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(format!("--- {stream_uri}"))
+                .and(predicate::str::contains(format!(
+                    "+++ {basin_uri} (stream defaults)"
+                )))
+                .and(predicate::str::contains("retention_policy\n- 30d\n+ 7d")),
+        );
+
+    s2().args(["diff", &basin_uri, &stream_uri, "--output", "json"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"resource\": \"stream-vs-basin-defaults\"")
+                .and(predicate::str::contains(format!(
+                    "\"left\": \"{basin_uri}\""
+                )))
+                .and(predicate::str::contains(format!(
+                    "\"right\": \"{stream_uri}\""
+                ))),
+        );
+
+    cleanup_stream(&basin, &stream);
+    cleanup_basin(&basin);
 }
 
 #[test]

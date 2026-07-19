@@ -81,6 +81,9 @@ pub enum CliError {
     #[error("Apply failed: {0}")]
     #[diagnostic(help("{}", HELP))]
     Apply(String),
+
+    #[error("Access token '{0}' not found")]
+    AccessTokenNotFound(String),
 }
 
 impl CliError {
