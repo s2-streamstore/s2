@@ -76,12 +76,12 @@ impl From<CaughtUpError> for S2Error {
 }
 
 type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
-type SharedCaughtUp = Shared<BoxFuture<'static, CaughtUpResult>>;
+type CaughtUpFuture = Shared<BoxFuture<'static, CaughtUpResult>>;
 
 /// A future that returns the next caught-up tail.
 #[derive(Clone)]
 pub struct CaughtUp {
-    inner: SharedCaughtUp,
+    inner: CaughtUpFuture,
 }
 
 impl Future for CaughtUp {
@@ -93,10 +93,14 @@ impl Future for CaughtUp {
 }
 
 struct CaughtUpState {
+    /// Latest reported tail we've fully delivered, if currently caught up.
     tail: Option<StreamPosition>,
+    /// Once set, the session has ended.
     terminal: bool,
+    /// Fires the current `CaughtUp` future.
     tx: Option<oneshot::Sender<CaughtUpResult>>,
-    future: SharedCaughtUp,
+    /// The future handed out by `caught_up()`.
+    future: CaughtUpFuture,
 }
 
 impl CaughtUpState {
@@ -159,7 +163,7 @@ impl CaughtUpState {
     }
 }
 
-fn pending_caught_up() -> (oneshot::Sender<CaughtUpResult>, SharedCaughtUp) {
+fn pending_caught_up() -> (oneshot::Sender<CaughtUpResult>, CaughtUpFuture) {
     let (tx, rx) = oneshot::channel();
     let future = async move { rx.await.unwrap_or(Err(CaughtUpError::SessionClosed)) }
         .boxed()
