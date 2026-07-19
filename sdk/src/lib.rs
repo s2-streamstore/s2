@@ -108,3 +108,7 @@ pub mod append_session {
         AppendSession, AppendSessionConfig, BatchSubmitPermit, BatchSubmitTicket,
     };
 }
+/// Continuous read sessions.
+pub mod read_session {
+    pub use crate::session::read::{CaughtUp, CaughtUpError, ReadSession};
+}

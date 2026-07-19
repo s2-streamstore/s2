@@ -1,15 +1,26 @@
-use std::{pin::Pin, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use async_stream::{stream, try_stream};
-use futures_util::StreamExt;
+use futures_util::{
+    StreamExt,
+    future::{BoxFuture, FutureExt, Shared, ready},
+};
 use s2_api::v1::stream::{ReadEnd, ReadStart};
-use tokio::time::{Instant, timeout};
+use tokio::{
+    sync::oneshot,
+    time::{Instant, timeout},
+};
 use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
-    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName},
+    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName, StreamPosition},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +52,237 @@ impl From<ReadSessionError> for S2Error {
 pub type Streaming<R> =
     Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionError>>>>;
 
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+/// Error returned while waiting for a read session to catch up.
+pub enum CaughtUpError {
+    #[error("read session ended before catching up")]
+    /// The session ended before reaching a reported tail.
+    SessionClosed,
+    #[error(transparent)]
+    /// The read failed.
+    Read(#[from] S2Error),
+}
+
+impl From<CaughtUpError> for S2Error {
+    fn from(err: CaughtUpError) -> Self {
+        match err {
+            CaughtUpError::SessionClosed => {
+                Self::Client("read session ended before catching up".into())
+            }
+            CaughtUpError::Read(err) => err,
+        }
+    }
+}
+
+type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
+type SharedCaughtUp = Shared<BoxFuture<'static, CaughtUpResult>>;
+
+pin_project_lite::pin_project! {
+    /// A future that returns the next caught-up tail.
+    #[derive(Clone)]
+    pub struct CaughtUp {
+        #[pin]
+        inner: SharedCaughtUp,
+    }
+}
+
+impl Future for CaughtUp {
+    type Output = CaughtUpResult;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project().inner.poll(cx)
+    }
+}
+
+struct CaughtUpState {
+    tail: Option<StreamPosition>,
+    terminal: bool,
+    tx: Option<oneshot::Sender<CaughtUpResult>>,
+    future: SharedCaughtUp,
+}
+
+impl CaughtUpState {
+    fn new() -> Self {
+        let (tx, future) = pending_caught_up();
+        Self {
+            tail: None,
+            terminal: false,
+            tx: Some(tx),
+            future,
+        }
+    }
+
+    fn is_caught_up(&self) -> bool {
+        self.tail.is_some()
+    }
+
+    fn future(&self) -> CaughtUp {
+        CaughtUp {
+            inner: self.future.clone(),
+        }
+    }
+
+    fn set_behind(&mut self) {
+        if self.terminal || self.tail.take().is_none() {
+            return;
+        }
+        let (tx, future) = pending_caught_up();
+        self.tx = Some(tx);
+        self.future = future;
+    }
+
+    fn set_caught_up(&mut self, tail: StreamPosition) {
+        if self.terminal {
+            return;
+        }
+        self.tail = Some(tail);
+        self.complete(Ok(tail));
+    }
+
+    fn end(&mut self, error: Option<S2Error>) {
+        if self.terminal {
+            return;
+        }
+        self.terminal = true;
+        if let Some(error) = error {
+            self.tail = None;
+            self.complete(Err(CaughtUpError::Read(error)));
+        } else if self.tail.is_none() {
+            self.complete(Err(CaughtUpError::SessionClosed));
+        }
+    }
+
+    fn complete(&mut self, result: CaughtUpResult) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(result);
+        } else {
+            self.future = ready(result).boxed().shared();
+        }
+    }
+}
+
+fn pending_caught_up() -> (oneshot::Sender<CaughtUpResult>, SharedCaughtUp) {
+    let (tx, rx) = oneshot::channel();
+    let future = async move { rx.await.unwrap_or(Err(CaughtUpError::SessionClosed)) }
+        .boxed()
+        .shared();
+    (tx, future)
+}
+
+struct ReadUpdate {
+    batch: Option<ReadBatch>,
+    caught_up_tail: Option<StreamPosition>,
+}
+
+impl ReadUpdate {
+    fn behind() -> Self {
+        Self {
+            batch: None,
+            caught_up_tail: None,
+        }
+    }
+
+    fn from_batch(mut batch: ReadBatch, ignore_command_records: bool) -> Self {
+        let caught_up_tail = batch.tail.filter(|tail| {
+            batch.records.is_empty()
+                || batch
+                    .records
+                    .last()
+                    .is_some_and(|record| record.seq_num.checked_add(1) == Some(tail.seq_num))
+        });
+
+        if ignore_command_records {
+            batch.records.retain(|record| !record.is_command_record());
+        }
+
+        Self {
+            batch: (!batch.records.is_empty()).then_some(batch),
+            caught_up_tail,
+        }
+    }
+}
+
+/// A continuous stream of read batches.
+pub struct ReadSession {
+    updates: Streaming<ReadUpdate>,
+    state: CaughtUpState,
+    terminated: bool,
+}
+
+impl ReadSession {
+    fn new(updates: Streaming<ReadUpdate>) -> Self {
+        Self {
+            updates,
+            state: CaughtUpState::new(),
+            terminated: false,
+        }
+    }
+
+    /// Return whether all records through the latest reported tail were delivered.
+    ///
+    /// A later batch that does not reach a reported tail or a reconnect resets it.
+    /// Ignored command records count toward progress. Use
+    /// [`S2Stream::check_tail`](crate::S2Stream::check_tail) for the current tail.
+    pub fn is_caught_up(&self) -> bool {
+        self.state.is_caught_up()
+    }
+
+    /// Return a future for the next caught-up tail.
+    ///
+    /// It is ready immediately when already caught up and remains pending across retries.
+    /// Keep reading batches while waiting. Call again after falling behind. Returns
+    /// [`CaughtUpError`] if the read fails or ends first.
+    pub fn caught_up(&self) -> CaughtUp {
+        self.state.future()
+    }
+}
+
+impl futures_core::Stream for ReadSession {
+    type Item = Result<ReadBatch, S2Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.terminated {
+            return Poll::Ready(None);
+        }
+
+        loop {
+            match self.updates.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(update))) => {
+                    self.state.set_behind();
+                    if let Some(batch) = update.batch {
+                        if let Some(tail) = update.caught_up_tail {
+                            self.state.set_caught_up(tail);
+                        }
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
+                    if let Some(tail) = update.caught_up_tail {
+                        self.state.set_caught_up(tail);
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    let error = S2Error::from(error);
+                    self.state.end(Some(error.clone()));
+                    self.terminated = true;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    self.state.end(None);
+                    self.terminated = true;
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ReadSession {
+    fn drop(&mut self) {
+        self.state.end(None);
+    }
+}
+
 pub async fn read_session(
     client: BasinClient,
     name: StreamName,
@@ -48,7 +290,7 @@ pub async fn read_session(
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
-) -> Result<Streaming<ReadBatch>, ReadSessionError> {
+) -> Result<ReadSession, ReadSessionError> {
     let mut retry_backoff = retry_builder(&client.config.retry).build();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
@@ -69,7 +311,8 @@ pub async fn read_session(
                 break batches;
             }
             Err(err) => {
-                if can_retry(&err, &mut retry_backoff).await {
+                if let Some(backoff) = retry_delay(&err, &mut retry_backoff) {
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
                 return Err(err);
@@ -77,7 +320,7 @@ pub async fn read_session(
         }
     };
 
-    Ok(Box::pin(stream! {
+    let updates = Box::pin(stream! {
         let mut batches: Option<Streaming<ReadBatch>> = Some(batches);
 
         loop {
@@ -92,7 +335,8 @@ pub async fn read_session(
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
-                        if can_retry(&err, &mut retry_backoff).await {
+                        if let Some(backoff) = retry_delay(&err, &mut retry_backoff) {
+                            tokio::time::sleep(backoff).await;
                             continue;
                         }
                         yield Err(err);
@@ -107,7 +351,7 @@ pub async fn read_session(
                 .next()
                 .await
             {
-                Some(Ok(mut batch)) => {
+                Some(Ok(batch)) => {
                     if retry_backoff.used() > 0 {
                         retry_backoff.reset();
                     }
@@ -133,17 +377,13 @@ pub async fn read_session(
                         )
                     }
 
-                    if ignore_command_records {
-                        batch.records.retain(|r| !r.is_command_record());
-                    }
-
-                    if !batch.records.is_empty() {
-                        yield Ok(batch);
-                    }
+                    yield Ok(ReadUpdate::from_batch(batch, ignore_command_records));
                 }
                 Some(Err(err)) => {
                     batches = None;
-                    if can_retry(&err, &mut retry_backoff).await {
+                    if let Some(backoff) = retry_delay(&err, &mut retry_backoff) {
+                        yield Ok(ReadUpdate::behind());
+                        tokio::time::sleep(backoff).await;
                         continue;
                     }
                     yield Err(err);
@@ -152,7 +392,8 @@ pub async fn read_session(
                 None => break,
             }
         }
-    }))
+    });
+    Ok(ReadSession::new(updates))
 }
 
 async fn session_inner(
@@ -191,7 +432,7 @@ fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> 
     })
 }
 
-async fn can_retry(err: &ReadSessionError, backoffs: &mut RetryBackoff) -> bool {
+fn retry_delay(err: &ReadSessionError, backoffs: &mut RetryBackoff) -> Option<Duration> {
     if err.is_retryable()
         && let Some(backoff) = backoffs.next()
     {
@@ -201,8 +442,7 @@ async fn can_retry(err: &ReadSessionError, backoffs: &mut RetryBackoff) -> bool 
             num_retries_remaining = backoffs.remaining(),
             "retrying read session"
         );
-        tokio::time::sleep(backoff).await;
-        true
+        Some(backoff)
     } else {
         debug!(
             %err,
@@ -210,6 +450,199 @@ async fn can_retry(err: &ReadSessionError, backoffs: &mut RetryBackoff) -> bool 
             retries_exhausted = backoffs.is_exhausted(),
             "not retrying read session"
         );
-        false
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use futures_util::{StreamExt, poll, stream};
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    use super::*;
+    use crate::types::{Header, SequencedRecord};
+
+    fn position(seq_num: u64) -> StreamPosition {
+        StreamPosition {
+            seq_num,
+            timestamp: seq_num,
+        }
+    }
+
+    fn record(seq_num: u64, command: bool) -> SequencedRecord {
+        SequencedRecord {
+            seq_num,
+            timestamp: seq_num,
+            body: Bytes::new(),
+            headers: if command {
+                vec![Header::new("", "fence")]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn batch(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> ReadBatch {
+        ReadBatch { records, tail }
+    }
+
+    fn test_session(
+        updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionError>> + Send + 'static,
+    ) -> ReadSession {
+        ReadSession::new(Box::pin(updates))
+    }
+
+    #[tokio::test]
+    async fn caught_up_follows_delivery_and_pins_tail() {
+        let tail = position(2);
+        let mut session = test_session(stream::iter([
+            Ok(ReadUpdate::from_batch(
+                batch(vec![record(0, false), record(1, false)], Some(tail)),
+                false,
+            )),
+            Ok(ReadUpdate::from_batch(
+                batch(vec![record(2, false)], Some(position(5))),
+                false,
+            )),
+        ]));
+        let caught_up = session.caught_up();
+        let mut pending = Box::pin(caught_up.clone());
+
+        assert!(poll!(pending.as_mut()).is_pending());
+        assert!(!session.is_caught_up());
+
+        let first = session.next().await.unwrap().unwrap();
+        assert_eq!(first.records.len(), 2);
+        assert!(session.is_caught_up());
+        let caught_up_while_caught = session.caught_up();
+
+        session.next().await.unwrap().unwrap();
+        assert!(!session.is_caught_up());
+        assert_eq!(caught_up.await.unwrap(), tail);
+        assert_eq!(caught_up_while_caught.await.unwrap(), tail);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_waits_for_visible_batch() {
+        let tail = position(2);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut session = test_session(UnboundedReceiverStream::new(rx));
+        let caught_up = session.caught_up();
+
+        tx.send(Ok(ReadUpdate::from_batch(
+            batch(vec![record(0, false), record(1, false)], None),
+            false,
+        )))
+        .unwrap();
+        tx.send(Ok(ReadUpdate::from_batch(
+            batch(Vec::new(), Some(tail)),
+            false,
+        )))
+        .unwrap();
+
+        assert_eq!(session.next().await.unwrap().unwrap().records.len(), 2);
+        assert!(!session.is_caught_up());
+
+        let mut next = Box::pin(session.next());
+        assert!(poll!(next.as_mut()).is_pending());
+        drop(next);
+        assert!(session.is_caught_up());
+        assert_eq!(caught_up.await.unwrap(), tail);
+    }
+
+    #[tokio::test]
+    async fn filtered_command_counts_toward_caught_up() {
+        let tail = position(2);
+        let mut session = test_session(stream::iter([
+            Ok(ReadUpdate::from_batch(
+                batch(vec![record(0, false)], None),
+                true,
+            )),
+            Ok(ReadUpdate::from_batch(
+                batch(vec![record(1, true)], Some(tail)),
+                true,
+            )),
+        ]));
+        let caught_up = session.caught_up();
+
+        let delivered = session.next().await.unwrap().unwrap();
+        assert_eq!(delivered.records.len(), 1);
+        assert_eq!(delivered.records[0].seq_num, 0);
+        assert!(!session.is_caught_up());
+
+        assert!(session.next().await.is_none());
+        assert!(session.is_caught_up());
+        assert_eq!(caught_up.await.unwrap(), tail);
+    }
+
+    #[tokio::test]
+    async fn caught_up_wait_survives_retry() {
+        let first_tail = position(1);
+        let tail = position(3);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut session = test_session(UnboundedReceiverStream::new(rx));
+
+        tx.send(Ok(ReadUpdate::from_batch(
+            batch(Vec::new(), Some(first_tail)),
+            false,
+        )))
+        .unwrap();
+        let mut next = Box::pin(session.next());
+        assert!(poll!(next.as_mut()).is_pending());
+        drop(next);
+        assert!(session.is_caught_up());
+
+        tx.send(Ok(ReadUpdate::behind())).unwrap();
+        let mut next = Box::pin(session.next());
+        assert!(poll!(next.as_mut()).is_pending());
+        drop(next);
+        assert!(!session.is_caught_up());
+        let caught_up = session.caught_up();
+
+        tx.send(Ok(ReadUpdate::behind())).unwrap();
+        tx.send(Ok(ReadUpdate::from_batch(
+            batch(Vec::new(), Some(tail)),
+            false,
+        )))
+        .unwrap();
+        drop(tx);
+        assert!(session.next().await.is_none());
+        assert_eq!(caught_up.await.unwrap(), tail);
+    }
+
+    #[tokio::test]
+    async fn clean_end_rejects_wait() {
+        let mut session = test_session(stream::empty());
+        let caught_up = session.caught_up();
+
+        assert!(session.next().await.is_none());
+        assert!(session.next().await.is_none());
+        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
+    }
+
+    #[tokio::test]
+    async fn read_error_rejects_wait() {
+        let mut session = test_session(stream::iter([Err(ReadSessionError::HeartbeatTimeout)]));
+        let caught_up = session.caught_up();
+
+        let error = session.next().await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "heartbeat timeout");
+        assert!(matches!(
+            caught_up.await,
+            Err(CaughtUpError::Read(S2Error::Client(message)))
+                if message == "heartbeat timeout"
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropping_session_rejects_wait() {
+        let caught_up = {
+            let session = test_session(stream::pending());
+            session.caught_up()
+        };
+
+        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
     }
 }
