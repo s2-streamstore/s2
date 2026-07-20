@@ -223,6 +223,16 @@ impl S2Endpoints {
         })
     }
 
+    /// Create endpoints for a single account and basin endpoint.
+    ///
+    /// This is useful for S2-compatible services that expose both APIs at one endpoint.
+    pub fn from_single(endpoint: &str) -> Result<Self, ValidationError> {
+        Self::new(
+            AccountEndpoint::new(endpoint)?,
+            BasinEndpoint::new(endpoint)?,
+        )
+    }
+
     /// Create a new [`S2Endpoints`] from environment variables.
     ///
     /// The following environment variables are expected to be set:
@@ -258,7 +268,8 @@ impl S2Endpoints {
         })
     }
 
-    pub(crate) fn for_aws() -> Self {
+    /// Return the default S2 Cloud endpoints.
+    pub fn for_cloud() -> Self {
         Self {
             scheme: Scheme::HTTPS,
             account_authority: "a.s2.dev".try_into().expect("valid authority"),
@@ -414,7 +425,7 @@ impl S2Config {
     pub fn new(access_token: impl Into<String>) -> Self {
         Self {
             access_token: access_token.into().into(),
-            endpoints: S2Endpoints::for_aws(),
+            endpoints: S2Endpoints::for_cloud(),
             connection_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(5),
             retry: RetryConfig::new(),
@@ -3816,6 +3827,26 @@ mod tests {
         let basin: BasinEndpoint = "https://{basin}.b.s2.dev".parse().unwrap();
         let ep = S2Endpoints::new(account, basin).unwrap();
         assert_eq!(ep.scheme, Scheme::HTTPS);
+    }
+
+    #[test]
+    fn s2_endpoints_from_single_defaults_to_https() {
+        let ep = S2Endpoints::from_single("localhost:8080").unwrap();
+        let authority: Authority = "localhost:8080".parse().unwrap();
+        assert_eq!(ep.scheme, Scheme::HTTPS);
+        assert_eq!(ep.account_authority, authority);
+        assert_eq!(ep.basin_authority, BasinAuthority::Direct(authority));
+    }
+
+    #[test]
+    fn s2_endpoints_from_single_accepts_explicit_scheme() {
+        let ep = S2Endpoints::from_single("http://localhost:8080").unwrap();
+        assert_eq!(ep.scheme, Scheme::HTTP);
+    }
+
+    #[test]
+    fn s2_endpoints_from_single_rejects_invalid_endpoint() {
+        assert!(S2Endpoints::from_single("not a valid endpoint").is_err());
     }
 
     // -- Compression --
