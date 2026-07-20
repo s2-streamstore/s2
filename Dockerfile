@@ -1,5 +1,7 @@
 # Build stage
-FROM rust:latest AS builder
+FROM reg.mini.dev/rust:latest AS builder
+
+USER root
 
 WORKDIR /build
 
