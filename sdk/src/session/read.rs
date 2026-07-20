@@ -78,7 +78,7 @@ impl From<CaughtUpError> for S2Error {
 type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
 type CaughtUpFuture = Shared<BoxFuture<'static, CaughtUpResult>>;
 
-/// A future that returns the next caught-up tail.
+/// A future that returns the current or next caught-up tail.
 #[derive(Clone)]
 pub struct CaughtUp {
     inner: CaughtUpFuture,
@@ -227,9 +227,10 @@ impl ReadSession {
         self.state.is_caught_up()
     }
 
-    /// Return a future for the next caught-up tail.
+    /// Return a future for the current or next caught-up tail.
     ///
     /// It is ready immediately when already caught up and remains pending across retries.
+    /// Once resolved, it keeps that tail if the session later falls behind.
     /// Keep reading batches while waiting. Call again after falling behind. Returns
     /// [`CaughtUpError`] if the read fails or ends first.
     pub fn caught_up(&self) -> CaughtUp {
@@ -620,6 +621,31 @@ mod tests {
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
+            Err(CaughtUpError::Read(S2Error::Client(message)))
+                if message == "heartbeat timeout"
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_error_after_caught_up_preserves_resolved_future() {
+        let tail = position(1);
+        let mut session = test_session(stream::iter([
+            Ok(ReadUpdate::from_batch(
+                batch(vec![record(0, false)], Some(tail)),
+                false,
+            )),
+            Err(ReadSessionError::HeartbeatTimeout),
+        ]));
+
+        session.next().await.unwrap().unwrap();
+        assert!(session.is_caught_up());
+        let caught_up = session.caught_up();
+
+        session.next().await.unwrap().unwrap_err();
+        assert!(!session.is_caught_up());
+        assert_eq!(caught_up.await.unwrap(), tail);
+        assert!(matches!(
+            session.caught_up().await,
             Err(CaughtUpError::Read(S2Error::Client(message)))
                 if message == "heartbeat timeout"
         ));
