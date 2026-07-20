@@ -655,33 +655,46 @@ impl From<client::Error> for ApiError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+/// A classified client-side error.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum ClientError {
+    /// Failed to establish a connection.
     #[error("connect: {0}")]
     Connect(String),
+    /// The request timed out.
     #[error("timeout")]
     Timeout,
+    /// The connection closed before the response was complete.
     #[error("connection closed early: {0}")]
     ConnectionClosedEarly(String),
+    /// The request was canceled.
     #[error("request canceled: {0}")]
     RequestCanceled(String),
+    /// The connection ended unexpectedly.
     #[error("unexpected eof: {0}")]
     UnexpectedEof(String),
+    /// The connection was reset.
     #[error("connection reset: {0}")]
     ConnectionReset(String),
+    /// The connection was aborted.
     #[error("connection aborted: {0}")]
     ConnectionAborted(String),
+    /// The connection was refused.
     #[error("connection refused: {0}")]
     ConnectionRefused(String),
+    /// An otherwise-unclassified client error.
     #[error("{0}")]
     Others(String),
 }
 
 impl ClientError {
+    /// Whether retrying the request is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         !matches!(self, ClientError::Others(_))
     }
 
+    /// Whether the request is guaranteed to have had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
             ClientError::Connect(_)

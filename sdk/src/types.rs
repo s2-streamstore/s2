@@ -14,6 +14,7 @@ use std::{
 
 use bytes::Bytes;
 use http::{
+    StatusCode,
     header::HeaderValue,
     uri::{Authority, Scheme},
 };
@@ -61,6 +62,8 @@ pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 use s2_common::{maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH, resources::ProvisionResult};
 use secrecy::SecretString;
 
+/// A classified client-side error.
+pub use crate::api::ClientError;
 use crate::api::{ApiError, ApiErrorResponse};
 
 /// An RFC 3339 datetime.
@@ -3613,10 +3616,14 @@ impl From<api::stream::AppendConditionFailed> for AppendConditionFailed {
 
 #[derive(Debug, Clone, thiserror::Error)]
 /// Errors from S2 operations.
+#[non_exhaustive]
 pub enum S2Error {
-    #[error("{0}")]
     /// Client-side error.
-    Client(String),
+    #[error(transparent)]
+    Client(ClientError),
+    /// An error from a streaming or session operation.
+    #[error(transparent)]
+    Session(SessionError),
     #[error("malformed access token: {0}")]
     /// Access token could not be used as an HTTP header value.
     MalformedAccessToken(String),
@@ -3643,10 +3650,92 @@ impl From<ApiError> for S2Error {
             ApiError::AppendConditionFailed(condition_failed) => {
                 Self::AppendConditionFailed(condition_failed.into())
             }
-            ApiError::Server(_, response) => Self::Server(response.into()),
+            ApiError::Server(status, response) => {
+                Self::Server(ErrorResponse::from_api(status, response))
+            }
             ApiError::MalformedAccessToken(err) => Self::MalformedAccessToken(err),
-            other => Self::Client(other.to_string()),
+            ApiError::Client(client_err) => Self::Client(client_err),
+            other => Self::Client(ClientError::Others(other.to_string())),
         }
+    }
+}
+
+impl S2Error {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            S2Error::Client(e) => e.is_retryable(),
+            S2Error::Server(r) => r.is_retryable(),
+            S2Error::Session(e) => e.is_retryable(),
+            S2Error::MalformedAccessToken(_)
+            | S2Error::Validation(_)
+            | S2Error::AppendConditionFailed(_)
+            | S2Error::ReadUnwritten(_) => false,
+        }
+    }
+
+    /// Whether the operation is guaranteed to have had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            S2Error::Client(e) => e.has_no_side_effects(),
+            S2Error::Server(r) => r.has_no_side_effects(),
+            S2Error::Session(e) => e.has_no_side_effects(),
+            _ => false,
+        }
+    }
+}
+
+/// Errors from streaming/session operations.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum SessionError {
+    /// The read session heartbeat timed out.
+    #[error("heartbeat timeout")]
+    HeartbeatTimeout,
+    /// An append acknowledgement timed out.
+    #[error("append acknowledgement timed out")]
+    AckTimeout,
+    /// The server disconnected.
+    #[error("server disconnected")]
+    ServerDisconnected,
+    /// The response stream closed while appends were in flight.
+    #[error("response stream closed early while appends in flight")]
+    StreamClosedEarly,
+    /// The session was already closed.
+    #[error("session already closed")]
+    SessionClosed,
+    /// The session is closing.
+    #[error("session is closing")]
+    SessionClosing,
+    /// The session was dropped without calling close.
+    #[error("session dropped without calling close")]
+    SessionDropped,
+    /// An append acknowledgement was invalid.
+    #[error("invalid append acknowledgement: {0}")]
+    InvalidAck(String),
+    /// The producer was already closed.
+    #[error("producer already closed")]
+    ProducerClosed,
+    /// The producer is closing.
+    #[error("producer is closing")]
+    ProducerClosing,
+    /// The producer was dropped without calling close.
+    #[error("producer dropped without calling close")]
+    ProducerDropped,
+}
+
+impl SessionError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::HeartbeatTimeout | Self::AckTimeout | Self::ServerDisconnected
+        )
+    }
+
+    /// Whether the operation is guaranteed to have had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        false
     }
 }
 
@@ -3655,18 +3744,43 @@ impl From<ApiError> for S2Error {
 #[non_exhaustive]
 /// Error response from S2 server.
 pub struct ErrorResponse {
+    /// HTTP status returned by the server.
+    pub status: StatusCode,
     /// Error code.
     pub code: String,
     /// Error message.
     pub message: String,
 }
 
-impl From<ApiErrorResponse> for ErrorResponse {
-    fn from(response: ApiErrorResponse) -> Self {
+impl ErrorResponse {
+    pub(crate) fn from_api(status: StatusCode, response: ApiErrorResponse) -> Self {
         Self {
+            status,
             code: response.code,
             message: response.message,
         }
+    }
+
+    /// Whether retrying the request is safe or sensible for this server error.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.status,
+            StatusCode::REQUEST_TIMEOUT
+                | StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::INTERNAL_SERVER_ERROR
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::GATEWAY_TIMEOUT
+        ) || (self.status == StatusCode::CONFLICT && self.code == "transaction_conflict")
+    }
+
+    /// Whether this server error guarantees the request had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        matches!(
+            (self.status, self.code.as_str()),
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+                | (StatusCode::BAD_GATEWAY, "hot_server")
+        )
     }
 }
 
@@ -4346,7 +4460,8 @@ mod tests {
             code: "not_found".to_string(),
             message: "basin not found".to_string(),
         };
-        let resp: ErrorResponse = api_resp.into();
+        let resp = ErrorResponse::from_api(StatusCode::NOT_FOUND, api_resp);
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
         assert_eq!(resp.code, "not_found");
         assert_eq!(resp.message, "basin not found");
         assert!(resp.to_string().contains("not_found"));
