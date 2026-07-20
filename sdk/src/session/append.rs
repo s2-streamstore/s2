@@ -24,7 +24,7 @@ use crate::{
     retry::RetryBackoffBuilder,
     types::{
         AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes, ONE_MIB, S2Error,
-        StreamName, StreamPosition, ValidationError,
+        SessionError, StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -70,7 +70,19 @@ impl From<AppendSessionError> for S2Error {
     fn from(err: AppendSessionError) -> Self {
         match err {
             AppendSessionError::Api(api_err) => api_err.into(),
-            other => S2Error::Client(other.to_string()),
+            AppendSessionError::AckTimeout => S2Error::Session(SessionError::AckTimeout),
+            AppendSessionError::ServerDisconnected => {
+                S2Error::Session(SessionError::ServerDisconnected)
+            }
+            AppendSessionError::StreamClosedEarly => {
+                S2Error::Session(SessionError::StreamClosedEarly)
+            }
+            AppendSessionError::SessionClosed => S2Error::Session(SessionError::SessionClosed),
+            AppendSessionError::SessionClosing => S2Error::Session(SessionError::SessionClosing),
+            AppendSessionError::SessionDropped => S2Error::Session(SessionError::SessionDropped),
+            AppendSessionError::InvalidAck(message) => {
+                S2Error::Session(SessionError::InvalidAck(message))
+            }
         }
     }
 }

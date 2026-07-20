@@ -20,7 +20,9 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
-    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName, StreamPosition},
+    types::{
+        EncryptionKey, MeteredBytes, ReadBatch, S2Error, SessionError, StreamName, StreamPosition,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,7 +46,7 @@ impl From<ReadSessionError> for S2Error {
     fn from(err: ReadSessionError) -> Self {
         match err {
             ReadSessionError::Api(api_err) => api_err.into(),
-            other => S2Error::Client(other.to_string()),
+            ReadSessionError::HeartbeatTimeout => S2Error::Session(SessionError::HeartbeatTimeout),
         }
     }
 }
