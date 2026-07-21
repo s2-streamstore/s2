@@ -1,4 +1,5 @@
 use colored::Colorize;
+use s2_api::v1::config::{BasinConfig as ApiBasinConfig, StreamConfig as ApiStreamConfig};
 use s2_sdk::types::AccessTokenId;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -7,9 +8,7 @@ use crate::{
     cli::{DiffArgs, DiffOutput, DiffResourceKind},
     error::CliError,
     ops,
-    types::{
-        AccessTokenInfo, BasinConfig, DiffResource, S2BasinAndStreamUri, S2BasinUri, StreamConfig,
-    },
+    types::{DiffResource, S2BasinAndStreamUri, S2BasinUri},
 };
 
 #[derive(Debug, Serialize)]
@@ -33,6 +32,13 @@ enum DiffComparison {
     Stream,
     AccessToken,
     StreamVsBasinDefaults,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotKind {
+    Basin,
+    Stream,
+    AccessToken,
 }
 
 impl DiffComparison {
@@ -72,59 +78,71 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         right_label,
     } = resolve_args(&args)?;
 
-    let (mut left_value, mut right_value) = match (left, right) {
+    let (left_value, right_value) = match (left, right) {
         (DiffResource::Basin(left), DiffResource::Basin(right)) => {
             let (left_config, right_config) = tokio::try_join!(
-                ops::get_basin_config(s2, &left),
-                ops::get_basin_config(s2, &right),
+                ops::get_basin_config_api(s2, &left),
+                ops::get_basin_config_api(s2, &right),
             )?;
 
             (
-                serde_json::to_value(BasinConfig::from(left_config))?,
-                serde_json::to_value(BasinConfig::from(right_config))?,
+                api_snapshot(api_basin_config(left_config), SnapshotKind::Basin)?,
+                api_snapshot(api_basin_config(right_config), SnapshotKind::Basin)?,
             )
         }
         (DiffResource::Stream(left), DiffResource::Stream(right)) => {
             let (left_config, right_config) = tokio::try_join!(
-                ops::get_stream_config(s2, left),
-                ops::get_stream_config(s2, right),
+                ops::get_stream_config_api(s2, left),
+                ops::get_stream_config_api(s2, right),
             )?;
 
             (
-                serde_json::to_value(StreamConfig::from(left_config))?,
-                serde_json::to_value(StreamConfig::from(right_config))?,
+                api_snapshot(left_config, SnapshotKind::Stream)?,
+                api_snapshot(right_config, SnapshotKind::Stream)?,
             )
         }
         (DiffResource::Basin(basin), DiffResource::Stream(stream)) => {
             let (basin_config, stream_config) = tokio::try_join!(
-                ops::get_basin_config(s2, &basin),
-                ops::get_stream_config(s2, stream),
+                ops::get_basin_config_api(s2, &basin),
+                ops::get_stream_config_api(s2, stream),
             )?;
 
+            let basin_config = api_basin_config(basin_config);
             (
-                serde_json::to_value(BasinConfig::from(basin_config).default_stream_config)?,
-                serde_json::to_value(StreamConfig::from(stream_config))?,
+                api_snapshot(
+                    basin_config
+                        .default_stream_config
+                        .expect("basin API snapshots always resolve stream defaults"),
+                    SnapshotKind::Stream,
+                )?,
+                api_snapshot(stream_config, SnapshotKind::Stream)?,
             )
         }
         (DiffResource::Stream(stream), DiffResource::Basin(basin)) => {
             let (stream_config, basin_config) = tokio::try_join!(
-                ops::get_stream_config(s2, stream),
-                ops::get_basin_config(s2, &basin),
+                ops::get_stream_config_api(s2, stream),
+                ops::get_basin_config_api(s2, &basin),
             )?;
 
+            let basin_config = api_basin_config(basin_config);
             (
-                serde_json::to_value(StreamConfig::from(stream_config))?,
-                serde_json::to_value(BasinConfig::from(basin_config).default_stream_config)?,
+                api_snapshot(stream_config, SnapshotKind::Stream)?,
+                api_snapshot(
+                    basin_config
+                        .default_stream_config
+                        .expect("basin API snapshots always resolve stream defaults"),
+                    SnapshotKind::Stream,
+                )?,
             )
         }
         (DiffResource::AccessToken(left), DiffResource::AccessToken(right)) => {
             let (left_info, right_info) = tokio::try_join!(
-                ops::get_access_token(s2, left),
-                ops::get_access_token(s2, right),
+                ops::get_access_token_api(s2, left),
+                ops::get_access_token_api(s2, right),
             )?;
 
-            let mut left = serde_json::to_value(AccessTokenInfo::from(left_info))?;
-            let mut right = serde_json::to_value(AccessTokenInfo::from(right_info))?;
+            let mut left = api_snapshot(left_info, SnapshotKind::AccessToken)?;
+            let mut right = api_snapshot(right_info, SnapshotKind::AccessToken)?;
             remove_identity(&mut left);
             remove_identity(&mut right);
             (left, right)
@@ -132,8 +150,6 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         _ => unreachable!("diff arguments are resolved to matching resource types"),
     };
 
-    canonicalize_value(&mut left_value, None);
-    canonicalize_value(&mut right_value, None);
     let differences = field_diffs(&left_value, &right_value);
 
     match args.output {
@@ -152,6 +168,19 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
     Ok(DiffOutcome {
         has_differences: !differences.is_empty(),
     })
+}
+
+fn api_basin_config(mut config: ApiBasinConfig) -> ApiBasinConfig {
+    config
+        .default_stream_config
+        .get_or_insert_with(ApiStreamConfig::default);
+    config
+}
+
+fn api_snapshot(value: impl Serialize, kind: SnapshotKind) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(value)?;
+    canonicalize_value(&mut value, kind, "");
+    Ok(value)
 }
 
 fn resolve_args(args: &DiffArgs) -> Result<ResolvedDiff, CliError> {
@@ -309,37 +338,46 @@ fn remove_identity(value: &mut Value) {
     }
 }
 
-fn canonicalize_value(value: &mut Value, field: Option<&str>) {
-    if let Some(field) = field {
-        if normalize_default_value(value, field) {
-            return;
-        }
-        if field == "retention_policy"
-            && let Some(retention_policy) = canonical_retention_policy(value)
-        {
-            *value = Value::String(retention_policy);
-            return;
-        }
+fn canonicalize_value(value: &mut Value, kind: SnapshotKind, path: &str) {
+    // Keep presentation rules path-scoped so newly added API fields pass through untouched.
+    if normalize_default_value(value, kind, path) {
+        return;
+    }
+    if is_stream_config_path(kind, path, "retention_policy")
+        && let Some(retention_policy) = canonical_retention_policy(value)
+    {
+        *value = Value::String(retention_policy);
+        return;
+    }
+    if is_stream_config_path(kind, path, "delete_on_empty.min_age")
+        && let Some(seconds) = value.as_u64()
+    {
+        *value = Value::String(compact_seconds(seconds));
+        return;
     }
 
     match value {
         Value::Object(object) => {
             let entries = std::mem::take(object);
             for (key, mut value) in entries {
-                let key = canonical_field_name(&key);
-                canonicalize_value(&mut value, Some(key));
+                let key = canonical_field_name(kind, path, &key);
+                let child_path = join_snapshot_path(path, key);
+                canonicalize_value(&mut value, kind, &child_path);
                 object.insert(key.to_owned(), value);
             }
         }
         Value::Array(values) => {
-            for value in values {
-                canonicalize_value(value, None);
+            for value in values.iter_mut() {
+                canonicalize_value(value, kind, path);
+            }
+            if is_access_token_ops_path(kind, path) {
+                values.sort_by_key(Value::to_string);
             }
         }
         Value::String(value) => {
-            if value == "Infinite" {
-                *value = "infinite".to_owned();
-            } else if matches!(field, Some("age" | "min_age")) {
+            if is_access_token_ops_path(kind, path) {
+                *value = canonical_operation(value);
+            } else if is_stream_config_path(kind, path, "delete_on_empty.min_age") {
                 *value = compact_duration(value);
             }
         }
@@ -347,24 +385,34 @@ fn canonicalize_value(value: &mut Value, field: Option<&str>) {
     }
 }
 
-fn normalize_default_value(value: &mut Value, field: &str) -> bool {
+fn normalize_default_value(value: &mut Value, kind: SnapshotKind, path: &str) -> bool {
     if !value.is_null() {
         return false;
     }
 
-    *value = match field {
-        "storage_class" => Value::String("express".to_owned()),
-        "retention_policy" => Value::String("7d".to_owned()),
-        "timestamping" => serde_json::json!({
+    *value = if is_stream_config_path(kind, path, "storage_class") {
+        Value::String("express".to_owned())
+    } else if is_stream_config_path(kind, path, "retention_policy") {
+        Value::String("7d".to_owned())
+    } else if is_stream_config_path(kind, path, "timestamping") {
+        serde_json::json!({
             "mode": "client-prefer",
             "uncapped": false,
-        }),
-        "mode" => Value::String("client-prefer".to_owned()),
-        "uncapped" => Value::Bool(false),
-        "delete_on_empty" => serde_json::json!({"min_age": "0s"}),
-        "min_age" => Value::String("0s".to_owned()),
-        "stream_cipher" => Value::String("none".to_owned()),
-        _ => return false,
+        })
+    } else if is_stream_config_path(kind, path, "timestamping.mode") {
+        Value::String("client-prefer".to_owned())
+    } else if is_stream_config_path(kind, path, "timestamping.uncapped") {
+        Value::Bool(false)
+    } else if is_stream_config_path(kind, path, "delete_on_empty") {
+        serde_json::json!({"min_age": "0s"})
+    } else if is_stream_config_path(kind, path, "delete_on_empty.min_age") {
+        Value::String("0s".to_owned())
+    } else if kind == SnapshotKind::Basin && path == "stream_cipher" {
+        Value::String("none".to_owned())
+    } else if is_access_token_ops_path(kind, path) {
+        Value::Array(Vec::new())
+    } else {
+        return false;
     };
     true
 }
@@ -374,21 +422,88 @@ fn canonical_retention_policy(value: &Value) -> Option<String> {
         Value::String(value) if value.eq_ignore_ascii_case("infinite") => {
             Some("infinite".to_owned())
         }
-        Value::Object(object) => object
-            .get("Age")
-            .or_else(|| object.get("age"))
-            .and_then(Value::as_str)
-            .map(compact_duration),
+        Value::Object(object) if object.len() == 1 => {
+            if let Some(age) = object.get("Age").or_else(|| object.get("age")) {
+                canonical_duration(age)
+            } else if object
+                .get("Infinite")
+                .or_else(|| object.get("infinite"))
+                .is_some_and(|payload| payload.as_object().is_some_and(Map::is_empty))
+            {
+                Some("infinite".to_owned())
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
 
-fn canonical_field_name(field: &str) -> &str {
-    match field {
-        "timestamping_mode" => "mode",
-        "timestamping_uncapped" => "uncapped",
-        "delete_on_empty_min_age" => "min_age",
-        _ => field,
+fn canonical_field_name<'a>(kind: SnapshotKind, parent: &str, field: &'a str) -> &'a str {
+    if is_stream_config_path(kind, parent, "timestamping") {
+        match field {
+            "timestamping_mode" => return "mode",
+            "timestamping_uncapped" => return "uncapped",
+            _ => {}
+        }
+    } else if is_stream_config_path(kind, parent, "delete_on_empty")
+        && matches!(field, "delete_on_empty_min_age" | "min_age_secs")
+    {
+        return "min_age";
+    } else if is_stream_config_path(kind, parent, "retention_policy") {
+        match field {
+            "Age" => return "age",
+            "Infinite" => return "infinite",
+            _ => {}
+        }
+    } else if kind == SnapshotKind::AccessToken && parent == "scope" && field == "op_groups" {
+        return "op_group_perms";
+    }
+    field
+}
+
+fn is_stream_config_path(kind: SnapshotKind, path: &str, relative: &str) -> bool {
+    match kind {
+        SnapshotKind::Stream => path == relative,
+        SnapshotKind::Basin => path
+            .strip_prefix("default_stream_config.")
+            .is_some_and(|path| path == relative),
+        SnapshotKind::AccessToken => false,
+    }
+}
+
+fn is_access_token_ops_path(kind: SnapshotKind, path: &str) -> bool {
+    kind == SnapshotKind::AccessToken && path == "scope.ops"
+}
+
+fn join_snapshot_path(parent: &str, field: &str) -> String {
+    if parent.is_empty() {
+        field.to_owned()
+    } else {
+        format!("{parent}.{field}")
+    }
+}
+
+fn canonical_duration(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(compact_duration(value)),
+        Value::Number(value) => value.as_u64().map(compact_seconds),
+        _ => None,
+    }
+}
+
+fn compact_seconds(seconds: u64) -> String {
+    compact_duration(
+        &humantime::format_duration(std::time::Duration::from_secs(seconds)).to_string(),
+    )
+}
+
+fn canonical_operation(value: &str) -> String {
+    match value {
+        "account-metrics" => "get_account_metrics".to_owned(),
+        "basin-metrics" => "get_basin_metrics".to_owned(),
+        "stream-metrics" => "get_stream_metrics".to_owned(),
+        _ => value.replace('-', "_"),
     }
 }
 
@@ -514,8 +629,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DiffComparison, canonicalize_value, field_diffs, format_value_lines, resolve_args,
-        resource_kind,
+        DiffComparison, SnapshotKind, api_basin_config, api_snapshot, canonicalize_value,
+        field_diffs, format_value_lines, resolve_args, resource_kind,
     };
     use crate::cli::{DiffArgs, DiffOutput, DiffResourceKind};
 
@@ -622,18 +737,18 @@ mod tests {
     #[test]
     fn canonicalizes_config_paths_and_durations() {
         let mut left = json!({
-            "retention_policy": {"Age": "2days"},
-            "timestamping": {"timestamping_mode": "client-prefer"},
-            "delete_on_empty": {"delete_on_empty_min_age": "10m"}
+            "retention_policy": {"age": 172800},
+            "timestamping": {"mode": "client-prefer"},
+            "delete_on_empty": {"min_age_secs": 600}
         });
         let mut right = json!({
-            "retention_policy": {"Age": "30days"},
-            "timestamping": {"timestamping_mode": "arrival"},
-            "delete_on_empty": {"delete_on_empty_min_age": "1hour"}
+            "retention_policy": {"age": 2592000},
+            "timestamping": {"mode": "arrival"},
+            "delete_on_empty": {"min_age_secs": 3600}
         });
 
-        canonicalize_value(&mut left, None);
-        canonicalize_value(&mut right, None);
+        canonicalize_value(&mut left, SnapshotKind::Stream, "");
+        canonicalize_value(&mut right, SnapshotKind::Stream, "");
         let diffs = field_diffs(&left, &right);
 
         assert_eq!(diffs[0].path, "retention_policy");
@@ -646,14 +761,14 @@ mod tests {
     #[test]
     fn canonicalizes_finite_and_infinite_retention_consistently() {
         let mut left = json!({
-            "default_stream_config": {"retention_policy": "Infinite"}
+            "default_stream_config": {"retention_policy": {"infinite": {}}}
         });
         let mut right = json!({
-            "default_stream_config": {"retention_policy": {"Age": "7days"}}
+            "default_stream_config": {"retention_policy": {"age": 604800}}
         });
 
-        canonicalize_value(&mut left, None);
-        canonicalize_value(&mut right, None);
+        canonicalize_value(&mut left, SnapshotKind::Basin, "");
+        canonicalize_value(&mut right, SnapshotKind::Basin, "");
         let diffs = field_diffs(&left, &right);
 
         assert_eq!(diffs.len(), 1);
@@ -675,17 +790,17 @@ mod tests {
         let mut right = json!({
             "default_stream_config": {
                 "storage_class": null,
-                "retention_policy": {"Age": "7days"},
+                "retention_policy": {"age": 604800},
                 "timestamping": {
-                    "timestamping_mode": "arrival",
-                    "timestamping_uncapped": null
+                    "mode": "arrival",
+                    "uncapped": null
                 },
                 "delete_on_empty": null
             }
         });
 
-        canonicalize_value(&mut left, None);
-        canonicalize_value(&mut right, None);
+        canonicalize_value(&mut left, SnapshotKind::Basin, "");
+        canonicalize_value(&mut right, SnapshotKind::Basin, "");
         let diffs = field_diffs(&left, &right);
 
         assert_eq!(diffs.len(), 1);
@@ -703,6 +818,127 @@ mod tests {
             ["client-prefer"]
         );
         assert_eq!(format_value_lines(diffs[0].right.as_ref()), ["arrival"]);
+    }
+
+    #[test]
+    fn typed_api_snapshots_use_canonical_presentation() {
+        use s2_api::v1::config::{DeleteOnEmptyConfig, RetentionPolicy, StreamConfig};
+
+        let snapshot = api_snapshot(
+            StreamConfig {
+                retention_policy: Some(RetentionPolicy::Age(7 * 24 * 60 * 60)),
+                delete_on_empty: Some(DeleteOnEmptyConfig { min_age_secs: 600 }),
+                ..Default::default()
+            },
+            SnapshotKind::Stream,
+        )
+        .expect("API config serializes");
+
+        assert_eq!(snapshot["storage_class"], json!("express"));
+        assert_eq!(snapshot["retention_policy"], json!("7d"));
+        assert_eq!(snapshot["delete_on_empty"]["min_age"], json!("10m"));
+    }
+
+    #[test]
+    fn basin_api_snapshots_materialize_effective_stream_defaults() {
+        let config = api_basin_config(s2_common::config::BasinConfig::default().into());
+
+        assert!(config.default_stream_config.is_some());
+    }
+
+    #[test]
+    fn canonicalizes_access_token_api_names_and_set_order() {
+        let mut left = json!({
+            "scope": {
+                "op_groups": null,
+                "ops": ["read", "get-stream-config", "account-metrics"]
+            }
+        });
+        let mut right = json!({
+            "scope": {
+                "op_groups": null,
+                "ops": ["account-metrics", "read", "get-stream-config"]
+            }
+        });
+
+        canonicalize_value(&mut left, SnapshotKind::AccessToken, "");
+        canonicalize_value(&mut right, SnapshotKind::AccessToken, "");
+
+        assert_eq!(left, right);
+        assert_eq!(
+            left["scope"]["ops"],
+            json!(["get_account_metrics", "get_stream_config", "read"])
+        );
+        assert!(left["scope"].get("op_group_perms").is_some());
+        assert!(left["scope"].get("op_groups").is_none());
+    }
+
+    #[test]
+    fn future_api_fields_flow_into_diffs_without_snapshot_changes() {
+        #[derive(serde::Serialize)]
+        struct FutureStreamConfig {
+            #[serde(flatten)]
+            config: s2_api::v1::config::StreamConfig,
+            future_api_field: u64,
+        }
+
+        let left = api_snapshot(
+            FutureStreamConfig {
+                config: Default::default(),
+                future_api_field: 1,
+            },
+            SnapshotKind::Stream,
+        )
+        .expect("future API config serializes");
+        let right = api_snapshot(
+            FutureStreamConfig {
+                config: Default::default(),
+                future_api_field: 2,
+            },
+            SnapshotKind::Stream,
+        )
+        .expect("future API config serializes");
+
+        let diffs = field_diffs(&left, &right);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "future_api_field");
+    }
+
+    #[test]
+    fn preserves_unknown_nested_fields_verbatim() {
+        let expected = json!({
+            "future_config": {
+                "mode": null,
+                "age": 42,
+                "min_age": 7,
+                "ops": ["z-op", "a-op"],
+                "stream_cipher": null,
+                "retention_policy": {"infinite": {}}
+            }
+        });
+        let mut actual = expected.clone();
+
+        canonicalize_value(&mut actual, SnapshotKind::Stream, "");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn preserves_enriched_retention_payload() {
+        let expected = json!({
+            "retention_policy": {
+                "infinite": {
+                    "future_api_field": true,
+                    "mode": null,
+                    "ops": ["z-op", "a-op"]
+                }
+            }
+        });
+        let mut actual = expected.clone();
+
+        canonicalize_value(&mut actual, SnapshotKind::Stream, "");
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

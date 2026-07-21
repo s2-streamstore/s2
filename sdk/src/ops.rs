@@ -130,6 +130,15 @@ impl S2 {
         Ok(config.into())
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub async fn get_basin_config_api(
+        &self,
+        name: BasinName,
+    ) -> Result<s2_api::v1::config::BasinConfig, S2Error> {
+        Ok(self.client.get_basin_config(name).await?)
+    }
+
     /// Delete a basin.
     pub async fn delete_basin(&self, input: DeleteBasinInput) -> Result<(), S2Error> {
         Ok(self
@@ -166,6 +175,15 @@ impl S2 {
                 .collect::<Result<Vec<_>, _>>()?,
             response.has_more,
         ))
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub async fn list_access_tokens_api(
+        &self,
+        input: ListAccessTokensInput,
+    ) -> Result<s2_api::v1::access::ListAccessTokensResponse, S2Error> {
+        Ok(self.client.list_access_tokens(input.into()).await?)
     }
 
     /// List all access tokens, paginating automatically.
@@ -360,6 +378,15 @@ impl S2Basin {
     pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, S2Error> {
         let config = self.client.get_stream_config(name).await?;
         Ok(config.into())
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub async fn get_stream_config_api(
+        &self,
+        name: StreamName,
+    ) -> Result<s2_api::v1::config::StreamConfig, S2Error> {
+        Ok(self.client.get_stream_config(name).await?)
     }
 
     /// Delete a stream.
