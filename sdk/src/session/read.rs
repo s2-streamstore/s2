@@ -69,9 +69,9 @@ pub enum CaughtUpError {
 impl From<CaughtUpError> for S2Error {
     fn from(err: CaughtUpError) -> Self {
         match err {
-            CaughtUpError::SessionClosed => {
-                Self::Client("read session ended before catching up".into())
-            }
+            CaughtUpError::SessionClosed => Self::Client(crate::api::ClientError::Others(
+                "read session ended before catching up".into(),
+            )),
             CaughtUpError::Read(err) => err,
         }
     }
