@@ -477,7 +477,7 @@ impl S2Stream {
             input.start.into(),
             input.stop.into(),
             input.ignore_command_records,
-            config.auto_reconnect,
+            config.retry_indefinitely,
         )
         .await?)
     }

@@ -3490,7 +3490,7 @@ pub struct ReadSessionConfig {
     /// Reads with any count, byte, timestamp, or wait limit terminate normally.
     ///
     /// Defaults to `false`.
-    pub auto_reconnect: bool,
+    pub retry_indefinitely: bool,
 }
 
 impl ReadSessionConfig {
@@ -3499,10 +3499,10 @@ impl ReadSessionConfig {
         Self::default()
     }
 
-    /// Set whether the read session should reconnect indefinitely.
-    pub fn with_auto_reconnect(self, auto_reconnect: bool) -> Self {
+    /// Set whether the read session should retry indefinitely.
+    pub fn with_retry_indefinitely(self, retry_indefinitely: bool) -> Self {
         Self {
-            auto_reconnect,
+            retry_indefinitely,
             ..self
         }
     }
@@ -4202,11 +4202,11 @@ mod tests {
 
     #[test]
     fn read_session_config_defaults_and_builder() {
-        assert!(!ReadSessionConfig::new().auto_reconnect);
+        assert!(!ReadSessionConfig::new().retry_indefinitely);
         assert!(
             ReadSessionConfig::default()
-                .with_auto_reconnect(true)
-                .auto_reconnect
+                .with_retry_indefinitely(true)
+                .retry_indefinitely
         );
     }
 

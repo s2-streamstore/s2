@@ -291,7 +291,7 @@ pub async fn read_session(
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
-    auto_reconnect: bool,
+    retry_indefinitely: bool,
 ) -> Result<ReadSession, ReadSessionError> {
     let mut retry_backoff = retry_builder(&client.config.retry).build();
     let baseline_wait = end.wait;
@@ -313,7 +313,7 @@ pub async fn read_session(
                 break batches;
             }
             Err(err) => {
-                if let Some(backoff) = retry_delay(&err, &mut retry_backoff, auto_reconnect) {
+                if let Some(backoff) = retry_delay(&err, &mut retry_backoff, retry_indefinitely) {
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -337,7 +337,9 @@ pub async fn read_session(
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
-                        if let Some(backoff) = retry_delay(&err, &mut retry_backoff, auto_reconnect) {
+                        if let Some(backoff) =
+                            retry_delay(&err, &mut retry_backoff, retry_indefinitely)
+                        {
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
@@ -383,7 +385,9 @@ pub async fn read_session(
                 }
                 Some(Err(err)) => {
                     batches = None;
-                    if let Some(backoff) = retry_delay(&err, &mut retry_backoff, auto_reconnect) {
+                    if let Some(backoff) =
+                        retry_delay(&err, &mut retry_backoff, retry_indefinitely)
+                    {
                         yield Ok(ReadUpdate::behind());
                         tokio::time::sleep(backoff).await;
                         continue;
@@ -392,7 +396,7 @@ pub async fn read_session(
                     break;
                 }
                 None => {
-                    if auto_reconnect && is_open_ended(&end) {
+                    if retry_indefinitely && is_open_ended(&end) {
                         batches = None;
                         let backoff = next_retry_delay(&mut retry_backoff, true)
                             .expect("auto reconnect supplies a capped retry delay");
@@ -450,7 +454,7 @@ fn is_open_ended(end: &ReadEnd) -> bool {
 fn retry_delay(
     err: &ReadSessionError,
     backoffs: &mut RetryBackoff,
-    auto_reconnect: bool,
+    retry_indefinitely: bool,
 ) -> Option<Duration> {
     if !err.is_retryable() {
         debug!(
@@ -462,7 +466,7 @@ fn retry_delay(
         return None;
     }
 
-    if let Some(backoff) = next_retry_delay(backoffs, auto_reconnect) {
+    if let Some(backoff) = next_retry_delay(backoffs, retry_indefinitely) {
         debug!(
             %err,
             ?backoff,
@@ -481,10 +485,10 @@ fn retry_delay(
     }
 }
 
-fn next_retry_delay(backoffs: &mut RetryBackoff, auto_reconnect: bool) -> Option<Duration> {
+fn next_retry_delay(backoffs: &mut RetryBackoff, retry_indefinitely: bool) -> Option<Duration> {
     backoffs
         .next()
-        .or_else(|| auto_reconnect.then(|| backoffs.max_base_delay()))
+        .or_else(|| retry_indefinitely.then(|| backoffs.max_base_delay()))
 }
 
 #[cfg(test)]
@@ -765,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_reconnect_retries_past_backoff_budget() {
+    fn retry_indefinitely_retries_past_backoff_budget() {
         let mut backoffs = crate::retry::RetryBackoffBuilder::default().build();
         for _ in 0..3 {
             assert!(backoffs.next().is_some());
