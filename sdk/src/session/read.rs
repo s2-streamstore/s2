@@ -230,41 +230,11 @@ impl ReadSession {
 
     /// Return a future for the current or next caught-up tail.
     ///
-    /// It is ready immediately when already caught up and remains pending across retries.
-    /// Once resolved, it keeps that tail if the session later falls behind.
-    /// Keep reading batches while waiting. Call again after falling behind. Returns
-    /// [`CaughtUpError`] if the read fails or ends first.
-    ///
-    /// # Example
-    ///
-    /// Drive the session stream while waiting for the caught-up signal:
-    ///
-    /// ```rust
-    /// use futures_util::StreamExt;
-    /// use s2_sdk::read_session::{CaughtUpError, ReadSession};
-    ///
-    /// # async fn consume(mut session: ReadSession) -> Result<(), CaughtUpError> {
-    /// let mut caught_up = session.caught_up();
-    /// loop {
-    ///     tokio::select! {
-    ///         tail = &mut caught_up => {
-    ///             println!("Caught up through {}", tail?);
-    ///             break;
-    ///         }
-    ///         Some(batch) = session.next() => {
-    ///             let batch = batch?;
-    ///             println!("Read {} records", batch.records.len());
-    ///         }
-    ///     }
-    /// }
-    ///
-    /// while let Some(batch) = session.next().await {
-    ///     let batch = batch?;
-    ///     println!("Read {} records", batch.records.len());
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Continue polling the read session while awaiting this future; the future does not drive
+    /// reads itself. It is ready immediately when the session is already caught up and remains
+    /// pending across retries. Once it resolves, its returned tail never changes. If the session
+    /// later falls behind, call `caught_up()` again to wait for the next catch-up. The future
+    /// returns [`CaughtUpError`] if the session fails or closes before catching up.
     pub fn caught_up(
         &self,
     ) -> impl Future<Output = Result<StreamPosition, CaughtUpError>>
