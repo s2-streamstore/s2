@@ -59,6 +59,11 @@ pub struct RetryBackoff {
 }
 
 impl RetryBackoff {
+    /// Return the maximum base delay used by this backoff.
+    pub fn max_base_delay(&self) -> Duration {
+        self.max_base_delay
+    }
+
     pub fn remaining(&self) -> u32 {
         self.max_retries.saturating_sub(self.cur_retry)
     }
@@ -160,5 +165,15 @@ mod tests {
         assert!(backoff.is_exhausted());
 
         assert!(backoff.next().is_none());
+    }
+
+    #[test]
+    fn max_base_delay_is_available() {
+        let delay = Duration::from_secs(7);
+        let backoff = RetryBackoffBuilder::default()
+            .with_max_base_delay(delay)
+            .build();
+
+        assert_eq!(backoff.max_base_delay(), delay);
     }
 }

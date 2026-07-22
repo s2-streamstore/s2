@@ -12,8 +12,8 @@ use crate::{
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
         ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
-        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
-        StreamName, StreamPosition, Streaming,
+        ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig,
+        StreamInfo, StreamName, StreamPosition, Streaming,
     },
 };
 
@@ -497,6 +497,16 @@ impl S2Stream {
 
     /// Create a read session.
     pub async fn read_session(&self, input: ReadInput) -> Result<ReadSession, ReadSessionError> {
+        self.read_session_with_config(input, ReadSessionConfig::default())
+            .await
+    }
+
+    /// Create a read session with the given configuration.
+    pub async fn read_session_with_config(
+        &self,
+        input: ReadInput,
+        config: ReadSessionConfig,
+    ) -> Result<ReadSession, ReadSessionError> {
         session::read_session(
             self.client.clone(),
             self.name.clone(),
@@ -504,6 +514,7 @@ impl S2Stream {
             input.start.into(),
             input.stop.into(),
             input.ignore_command_records,
+            config.auto_reconnect,
         )
         .await
     }
