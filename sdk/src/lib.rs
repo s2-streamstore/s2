@@ -50,6 +50,7 @@ demonstrating how to use the SDK effectively:
 * [Explicit stream trimming](https://github.com/s2-streamstore/s2/blob/main/sdk/examples/explicit_trim.rs)
 * [Producer](https://github.com/s2-streamstore/s2/blob/main/sdk/examples/producer.rs)
 * [Consumer](https://github.com/s2-streamstore/s2/blob/main/sdk/examples/consumer.rs)
+* [Caught-up read session](https://github.com/s2-streamstore/s2/blob/main/sdk/examples/caught_up.rs)
 * and many more...
 
 This documentation is generated using

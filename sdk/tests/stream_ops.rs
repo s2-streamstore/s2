@@ -800,6 +800,27 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     assert_eq!(seq_nums, [ack.tail.seq_num - 2, ack.tail.seq_num - 1]);
     assert_eq!(caught_up_tail, ack.tail);
 
+    let next_ack = stream
+        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+            AppendRecord::new("third")?,
+        ])?))
+        .await?;
+    let next_batch = tokio::time::timeout(Duration::from_secs(30), session.next())
+        .await
+        .expect("session should keep reading after catching up")
+        .expect("session should remain open")?;
+
+    assert_eq!(
+        next_batch
+            .records
+            .iter()
+            .map(|record| record.seq_num)
+            .collect::<Vec<_>>(),
+        [ack.tail.seq_num]
+    );
+    assert!(session.is_caught_up());
+    assert_eq!(next_batch.tail, Some(next_ack.tail));
+
     Ok(())
 }
 
