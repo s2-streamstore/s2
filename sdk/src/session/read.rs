@@ -111,7 +111,7 @@ struct CaughtUpState {
 
 impl CaughtUpState {
     fn new() -> Self {
-        let (tx, future) = pending_caught_up();
+        let (tx, future) = pending_catch_up();
         Self {
             tail: None,
             terminal: false,
@@ -132,7 +132,7 @@ impl CaughtUpState {
         if self.terminal || self.tail.take().is_none() {
             return;
         }
-        let (tx, future) = pending_caught_up();
+        let (tx, future) = pending_catch_up();
         self.tx = Some(tx);
         self.future = future;
     }
@@ -167,7 +167,7 @@ impl CaughtUpState {
     }
 }
 
-fn pending_caught_up() -> (oneshot::Sender<CaughtUpResult>, CaughtUpFuture) {
+fn pending_catch_up() -> (oneshot::Sender<CaughtUpResult>, CaughtUpFuture) {
     let (tx, rx) = oneshot::channel();
     (tx, CaughtUpFuture::Pending(rx.shared()))
 }
