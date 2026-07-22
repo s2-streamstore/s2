@@ -20,7 +20,7 @@ use crate::{
 
 /// Read operations supported by an S2 stream.
 #[async_trait]
-pub trait ReadStreamOps {
+pub trait StreamReadOps {
     /// Check the current tail position.
     async fn check_tail(&self) -> Result<StreamPosition, S2Error>;
 
@@ -485,7 +485,7 @@ impl S2Stream {
 }
 
 #[async_trait]
-impl ReadStreamOps for S2Stream {
+impl StreamReadOps for S2Stream {
     async fn check_tail(&self) -> Result<StreamPosition, S2Error> {
         S2Stream::check_tail(self).await
     }

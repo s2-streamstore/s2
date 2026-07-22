@@ -100,7 +100,7 @@ pub mod producer;
 mod retry;
 pub mod types;
 
-pub use ops::{ReadStreamOps, S2, S2Basin, S2Stream};
+pub use ops::{S2, S2Basin, S2Stream, StreamReadOps};
 /// Append session for pipelining multiple appends with backpressure control.
 ///
 /// See [`AppendSession`](append_session::AppendSession).

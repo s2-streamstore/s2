@@ -3,14 +3,14 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use s2_sdk::{
-    ReadStreamOps,
+    StreamReadOps,
     types::{ReadBatch, ReadInput, S2Error, SequencedRecord, StreamPosition, Streaming},
 };
 
 struct MockReader;
 
 #[async_trait]
-impl ReadStreamOps for MockReader {
+impl StreamReadOps for MockReader {
     async fn check_tail(&self) -> Result<StreamPosition, S2Error> {
         Ok(StreamPosition::new(1, 2))
     }
@@ -24,7 +24,7 @@ impl ReadStreamOps for MockReader {
 
 #[tokio::test]
 async fn mock_read_stream_ops_can_use_public_fixtures() {
-    let reader: Box<dyn ReadStreamOps> = Box::new(MockReader);
+    let reader: Box<dyn StreamReadOps> = Box::new(MockReader);
 
     assert_eq!(
         reader.check_tail().await.unwrap(),
