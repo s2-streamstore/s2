@@ -3529,7 +3529,7 @@ pub struct SequencedRecord {
 }
 
 impl SequencedRecord {
-    #[doc(hidden)]
+    /// Construct a sequenced record from its plain-data fields.
     #[cfg(any(feature = "_hidden", feature = "test-util"))]
     pub fn from_parts(
         seq_num: u64,
