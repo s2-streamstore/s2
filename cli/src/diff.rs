@@ -1,5 +1,8 @@
 use colored::Colorize;
-use s2_api::v1::config::{BasinConfig as ApiBasinConfig, StreamConfig as ApiStreamConfig};
+use s2_api::v1::{
+    access::AccessTokenInfo as ApiAccessTokenInfo,
+    config::{BasinConfig as ApiBasinConfig, StreamConfig as ApiStreamConfig},
+};
 use s2_sdk::types::AccessTokenId;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -24,6 +27,16 @@ struct ResolvedDiff {
     right: DiffResource,
     left_label: String,
     right_label: String,
+}
+
+/// A DTO snapshot has two deliberately separate representations.
+///
+/// `comparison` is the authoritative API representation used to decide whether the resources
+/// differ. `presentation` is a non-authoritative copy that is allowed to make values easier to
+/// read.
+struct ApiSnapshot {
+    comparison: Value,
+    presentation: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +91,7 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         right_label,
     } = resolve_args(&args)?;
 
-    let (left_value, right_value) = match (left, right) {
+    let (mut left_snapshot, mut right_snapshot) = match (left, right) {
         (DiffResource::Basin(left), DiffResource::Basin(right)) => {
             let (left_config, right_config) = tokio::try_join!(
                 ops::get_basin_config_api(s2, &left),
@@ -86,8 +99,8 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
             )?;
 
             (
-                api_snapshot(api_basin_config(left_config), SnapshotKind::Basin)?,
-                api_snapshot(api_basin_config(right_config), SnapshotKind::Basin)?,
+                api_snapshot(resolve_basin_config(left_config)?, SnapshotKind::Basin)?,
+                api_snapshot(resolve_basin_config(right_config)?, SnapshotKind::Basin)?,
             )
         }
         (DiffResource::Stream(left), DiffResource::Stream(right)) => {
@@ -97,8 +110,8 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
             )?;
 
             (
-                api_snapshot(left_config, SnapshotKind::Stream)?,
-                api_snapshot(right_config, SnapshotKind::Stream)?,
+                api_snapshot(resolve_stream_config(left_config)?, SnapshotKind::Stream)?,
+                api_snapshot(resolve_stream_config(right_config)?, SnapshotKind::Stream)?,
             )
         }
         (DiffResource::Basin(basin), DiffResource::Stream(stream)) => {
@@ -107,7 +120,7 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
                 ops::get_stream_config_api(s2, stream),
             )?;
 
-            let basin_config = api_basin_config(basin_config);
+            let basin_config = resolve_basin_config(basin_config)?;
             (
                 api_snapshot(
                     basin_config
@@ -115,7 +128,7 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
                         .expect("basin API snapshots always resolve stream defaults"),
                     SnapshotKind::Stream,
                 )?,
-                api_snapshot(stream_config, SnapshotKind::Stream)?,
+                api_snapshot(resolve_stream_config(stream_config)?, SnapshotKind::Stream)?,
             )
         }
         (DiffResource::Stream(stream), DiffResource::Basin(basin)) => {
@@ -124,9 +137,9 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
                 ops::get_basin_config_api(s2, &basin),
             )?;
 
-            let basin_config = api_basin_config(basin_config);
+            let basin_config = resolve_basin_config(basin_config)?;
             (
-                api_snapshot(stream_config, SnapshotKind::Stream)?,
+                api_snapshot(resolve_stream_config(stream_config)?, SnapshotKind::Stream)?,
                 api_snapshot(
                     basin_config
                         .default_stream_config
@@ -141,16 +154,20 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
                 ops::get_access_token_api(s2, right),
             )?;
 
-            let mut left = api_snapshot(left_info, SnapshotKind::AccessToken)?;
-            let mut right = api_snapshot(right_info, SnapshotKind::AccessToken)?;
-            remove_identity(&mut left);
-            remove_identity(&mut right);
-            (left, right)
+            (
+                api_snapshot(resolve_access_token(left_info)?, SnapshotKind::AccessToken)?,
+                api_snapshot(resolve_access_token(right_info)?, SnapshotKind::AccessToken)?,
+            )
         }
         _ => unreachable!("diff arguments are resolved to matching resource types"),
     };
 
-    let differences = field_diffs(&left_value, &right_value);
+    if comparison == DiffComparison::AccessToken {
+        remove_identity(&mut left_snapshot);
+        remove_identity(&mut right_snapshot);
+    }
+
+    let (differences, has_differences) = snapshot_differences(&left_snapshot, &right_snapshot);
 
     match args.output {
         DiffOutput::Text => print_text_diff(&left_label, &right_label, &differences),
@@ -165,22 +182,59 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         ),
     }
 
-    Ok(DiffOutcome {
-        has_differences: !differences.is_empty(),
+    Ok(DiffOutcome { has_differences })
+}
+
+fn resolve_stream_config(
+    config: ApiStreamConfig,
+) -> Result<ApiStreamConfig, s2_common::ValidationError> {
+    let config: s2_common::config::OptionalStreamConfig = config.try_into()?;
+    let config: s2_common::config::StreamConfig = config.into();
+    Ok(config.into())
+}
+
+fn resolve_basin_config(
+    mut config: ApiBasinConfig,
+) -> Result<ApiBasinConfig, s2_common::ValidationError> {
+    config.default_stream_config = Some(resolve_stream_config(
+        config.default_stream_config.take().unwrap_or_default(),
+    )?);
+    Ok(config)
+}
+
+fn resolve_access_token(
+    mut info: ApiAccessTokenInfo,
+) -> Result<ApiAccessTokenInfo, s2_common::ValidationError> {
+    let scope: s2_common::access::AccessTokenScope = info.scope.try_into()?;
+    info.scope = scope.into();
+    Ok(info)
+}
+
+fn api_snapshot(
+    value: impl Serialize,
+    kind: SnapshotKind,
+) -> Result<ApiSnapshot, serde_json::Error> {
+    let comparison = serde_json::to_value(value)?;
+    let mut presentation = comparison.clone();
+    canonicalize_presentation(&mut presentation, kind, "");
+    Ok(ApiSnapshot {
+        comparison,
+        presentation,
     })
 }
 
-fn api_basin_config(mut config: ApiBasinConfig) -> ApiBasinConfig {
-    config
-        .default_stream_config
-        .get_or_insert_with(ApiStreamConfig::default);
-    config
-}
+fn snapshot_differences(left: &ApiSnapshot, right: &ApiSnapshot) -> (Vec<FieldDiff>, bool) {
+    let comparison_differences = field_diffs(&left.comparison, &right.comparison);
+    let mut differences = field_diffs(&left.presentation, &right.presentation);
+    let has_differences = !comparison_differences.is_empty();
 
-fn api_snapshot(value: impl Serialize, kind: SnapshotKind) -> Result<Value, serde_json::Error> {
-    let mut value = serde_json::to_value(value)?;
-    canonicalize_value(&mut value, kind, "");
-    Ok(value)
+    // Presentation is intentionally non-authoritative. If a future API change makes a display
+    // rule lossy, fall back to the untouched DTO diff instead of reporting a false match.
+    if has_differences != !differences.is_empty() {
+        differences = comparison_differences;
+    }
+
+    (differences, has_differences)
 }
 
 fn resolve_args(args: &DiffArgs) -> Result<ResolvedDiff, CliError> {
@@ -332,15 +386,17 @@ fn resource_kind(resource: &DiffResource) -> DiffResourceKind {
     }
 }
 
-fn remove_identity(value: &mut Value) {
-    if let Value::Object(object) = value {
-        object.remove("id");
+fn remove_identity(snapshot: &mut ApiSnapshot) {
+    for value in [&mut snapshot.comparison, &mut snapshot.presentation] {
+        if let Value::Object(object) = value {
+            object.remove("id");
+        }
     }
 }
 
-fn canonicalize_value(value: &mut Value, kind: SnapshotKind, path: &str) {
-    // Keep presentation rules path-scoped so newly added API fields pass through untouched.
-    if normalize_default_value(value, kind, path) {
+fn canonicalize_presentation(value: &mut Value, kind: SnapshotKind, path: &str) {
+    // Presentation rules are path-scoped and run on a copy of the authoritative comparison value.
+    if format_absent_value(value, kind, path) {
         return;
     }
     if is_stream_config_path(kind, path, "retention_policy")
@@ -362,13 +418,13 @@ fn canonicalize_value(value: &mut Value, kind: SnapshotKind, path: &str) {
             for (key, mut value) in entries {
                 let key = canonical_field_name(kind, path, &key);
                 let child_path = join_snapshot_path(path, key);
-                canonicalize_value(&mut value, kind, &child_path);
+                canonicalize_presentation(&mut value, kind, &child_path);
                 object.insert(key.to_owned(), value);
             }
         }
         Value::Array(values) => {
             for value in values.iter_mut() {
-                canonicalize_value(value, kind, path);
+                canonicalize_presentation(value, kind, path);
             }
             if is_access_token_ops_path(kind, path) {
                 values.sort_by_key(Value::to_string);
@@ -385,36 +441,13 @@ fn canonicalize_value(value: &mut Value, kind: SnapshotKind, path: &str) {
     }
 }
 
-fn normalize_default_value(value: &mut Value, kind: SnapshotKind, path: &str) -> bool {
-    if !value.is_null() {
-        return false;
-    }
-
-    *value = if is_stream_config_path(kind, path, "storage_class") {
-        Value::String("express".to_owned())
-    } else if is_stream_config_path(kind, path, "retention_policy") {
-        Value::String("7d".to_owned())
-    } else if is_stream_config_path(kind, path, "timestamping") {
-        serde_json::json!({
-            "mode": "client-prefer",
-            "uncapped": false,
-        })
-    } else if is_stream_config_path(kind, path, "timestamping.mode") {
-        Value::String("client-prefer".to_owned())
-    } else if is_stream_config_path(kind, path, "timestamping.uncapped") {
-        Value::Bool(false)
-    } else if is_stream_config_path(kind, path, "delete_on_empty") {
-        serde_json::json!({"min_age": "0s"})
-    } else if is_stream_config_path(kind, path, "delete_on_empty.min_age") {
-        Value::String("0s".to_owned())
-    } else if kind == SnapshotKind::Basin && path == "stream_cipher" {
-        Value::String("none".to_owned())
-    } else if is_access_token_ops_path(kind, path) {
-        Value::Array(Vec::new())
+fn format_absent_value(value: &mut Value, kind: SnapshotKind, path: &str) -> bool {
+    if value.is_null() && kind == SnapshotKind::Basin && path == "stream_cipher" {
+        *value = Value::String("none".to_owned());
+        true
     } else {
-        return false;
-    };
-    true
+        false
+    }
 }
 
 fn canonical_retention_policy(value: &Value) -> Option<String> {
@@ -629,8 +662,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DiffComparison, SnapshotKind, api_basin_config, api_snapshot, canonicalize_value,
-        field_diffs, format_value_lines, resolve_args, resource_kind,
+        ApiSnapshot, DiffComparison, SnapshotKind, api_snapshot, canonicalize_presentation,
+        field_diffs, format_value_lines, resolve_access_token, resolve_args, resolve_basin_config,
+        resolve_stream_config, resource_kind, snapshot_differences,
     };
     use crate::cli::{DiffArgs, DiffOutput, DiffResourceKind};
 
@@ -747,8 +781,8 @@ mod tests {
             "delete_on_empty": {"min_age_secs": 3600}
         });
 
-        canonicalize_value(&mut left, SnapshotKind::Stream, "");
-        canonicalize_value(&mut right, SnapshotKind::Stream, "");
+        canonicalize_presentation(&mut left, SnapshotKind::Stream, "");
+        canonicalize_presentation(&mut right, SnapshotKind::Stream, "");
         let diffs = field_diffs(&left, &right);
 
         assert_eq!(diffs[0].path, "retention_policy");
@@ -767,8 +801,8 @@ mod tests {
             "default_stream_config": {"retention_policy": {"age": 604800}}
         });
 
-        canonicalize_value(&mut left, SnapshotKind::Basin, "");
-        canonicalize_value(&mut right, SnapshotKind::Basin, "");
+        canonicalize_presentation(&mut left, SnapshotKind::Basin, "");
+        canonicalize_presentation(&mut right, SnapshotKind::Basin, "");
         let diffs = field_diffs(&left, &right);
 
         assert_eq!(diffs.len(), 1);
@@ -778,16 +812,20 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_omitted_config_defaults_to_effective_values() {
-        let mut left = json!({
+    fn resolves_omitted_config_defaults_through_domain_types() {
+        let left = serde_json::from_value(json!({
             "default_stream_config": {
                 "storage_class": null,
                 "retention_policy": null,
                 "timestamping": null,
                 "delete_on_empty": null
-            }
-        });
-        let mut right = json!({
+            },
+            "stream_cipher": null,
+            "create_stream_on_append": false,
+            "create_stream_on_read": false
+        }))
+        .expect("left basin config deserializes");
+        let right = serde_json::from_value(json!({
             "default_stream_config": {
                 "storage_class": null,
                 "retention_policy": {"age": 604800},
@@ -796,20 +834,32 @@ mod tests {
                     "uncapped": null
                 },
                 "delete_on_empty": null
-            }
-        });
+            },
+            "stream_cipher": null,
+            "create_stream_on_append": false,
+            "create_stream_on_read": false
+        }))
+        .expect("right basin config deserializes");
 
-        canonicalize_value(&mut left, SnapshotKind::Basin, "");
-        canonicalize_value(&mut right, SnapshotKind::Basin, "");
-        let diffs = field_diffs(&left, &right);
+        let left = api_snapshot(
+            resolve_basin_config(left).expect("left config resolves"),
+            SnapshotKind::Basin,
+        )
+        .expect("left config serializes");
+        let right = api_snapshot(
+            resolve_basin_config(right).expect("right config resolves"),
+            SnapshotKind::Basin,
+        )
+        .expect("right config serializes");
+        let diffs = field_diffs(&left.presentation, &right.presentation);
 
         assert_eq!(diffs.len(), 1);
         assert_eq!(
-            left["default_stream_config"]["storage_class"],
+            left.comparison["default_stream_config"]["storage_class"],
             json!("express")
         );
         assert_eq!(
-            left["default_stream_config"]["retention_policy"],
+            left.presentation["default_stream_config"]["retention_policy"],
             json!("7d")
         );
         assert_eq!(diffs[0].path, "default_stream_config.timestamping.mode");
@@ -825,52 +875,73 @@ mod tests {
         use s2_api::v1::config::{DeleteOnEmptyConfig, RetentionPolicy, StreamConfig};
 
         let snapshot = api_snapshot(
-            StreamConfig {
+            resolve_stream_config(StreamConfig {
                 retention_policy: Some(RetentionPolicy::Age(7 * 24 * 60 * 60)),
                 delete_on_empty: Some(DeleteOnEmptyConfig { min_age_secs: 600 }),
                 ..Default::default()
-            },
+            })
+            .expect("API config resolves"),
             SnapshotKind::Stream,
         )
         .expect("API config serializes");
 
-        assert_eq!(snapshot["storage_class"], json!("express"));
-        assert_eq!(snapshot["retention_policy"], json!("7d"));
-        assert_eq!(snapshot["delete_on_empty"]["min_age"], json!("10m"));
+        assert_eq!(snapshot.comparison["storage_class"], json!("express"));
+        assert_eq!(snapshot.presentation["retention_policy"], json!("7d"));
+        assert_eq!(
+            snapshot.presentation["delete_on_empty"]["min_age"],
+            json!("10m")
+        );
     }
 
     #[test]
     fn basin_api_snapshots_materialize_effective_stream_defaults() {
-        let config = api_basin_config(s2_common::config::BasinConfig::default().into());
+        let config = resolve_basin_config(s2_common::config::BasinConfig::default().into())
+            .expect("basin config resolves");
 
         assert!(config.default_stream_config.is_some());
     }
 
     #[test]
-    fn canonicalizes_access_token_api_names_and_set_order() {
-        let mut left = json!({
+    fn resolves_access_token_sets_through_domain_types() {
+        let left = serde_json::from_value(json!({
+            "id": "test-token",
+            "expires_at": null,
+            "auto_prefix_streams": false,
             "scope": {
                 "op_groups": null,
                 "ops": ["read", "get-stream-config", "account-metrics"]
             }
-        });
-        let mut right = json!({
+        }))
+        .expect("left access token deserializes");
+        let right = serde_json::from_value(json!({
+            "id": "test-token",
+            "expires_at": null,
+            "auto_prefix_streams": false,
             "scope": {
                 "op_groups": null,
                 "ops": ["account-metrics", "read", "get-stream-config"]
             }
-        });
+        }))
+        .expect("right access token deserializes");
 
-        canonicalize_value(&mut left, SnapshotKind::AccessToken, "");
-        canonicalize_value(&mut right, SnapshotKind::AccessToken, "");
+        let left = api_snapshot(
+            resolve_access_token(left).expect("left access token resolves"),
+            SnapshotKind::AccessToken,
+        )
+        .expect("left access token serializes");
+        let right = api_snapshot(
+            resolve_access_token(right).expect("right access token resolves"),
+            SnapshotKind::AccessToken,
+        )
+        .expect("right access token serializes");
 
-        assert_eq!(left, right);
+        assert_eq!(left.comparison, right.comparison);
         assert_eq!(
-            left["scope"]["ops"],
+            left.presentation["scope"]["ops"],
             json!(["get_account_metrics", "get_stream_config", "read"])
         );
-        assert!(left["scope"].get("op_group_perms").is_some());
-        assert!(left["scope"].get("op_groups").is_none());
+        assert!(left.presentation["scope"].get("op_group_perms").is_some());
+        assert!(left.presentation["scope"].get("op_groups").is_none());
     }
 
     #[test]
@@ -899,9 +970,32 @@ mod tests {
         )
         .expect("future API config serializes");
 
-        let diffs = field_diffs(&left, &right);
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0].path, "future_api_field");
+        let comparison_diffs = field_diffs(&left.comparison, &right.comparison);
+        let presentation_diffs = field_diffs(&left.presentation, &right.presentation);
+        assert_eq!(comparison_diffs.len(), 1);
+        assert_eq!(comparison_diffs[0].path, "future_api_field");
+        assert_eq!(presentation_diffs.len(), 1);
+        assert_eq!(presentation_diffs[0].path, "future_api_field");
+    }
+
+    #[test]
+    fn lossy_presentation_cannot_hide_a_difference() {
+        let left = ApiSnapshot {
+            comparison: json!({"future_api_field": 1}),
+            presentation: json!({"future_api_field": "same display"}),
+        };
+        let right = ApiSnapshot {
+            comparison: json!({"future_api_field": 2}),
+            presentation: json!({"future_api_field": "same display"}),
+        };
+
+        let (differences, has_differences) = snapshot_differences(&left, &right);
+
+        assert!(has_differences);
+        assert_eq!(differences.len(), 1);
+        assert_eq!(differences[0].path, "future_api_field");
+        assert_eq!(differences[0].left, Some(json!(1)));
+        assert_eq!(differences[0].right, Some(json!(2)));
     }
 
     #[test]
@@ -918,7 +1012,7 @@ mod tests {
         });
         let mut actual = expected.clone();
 
-        canonicalize_value(&mut actual, SnapshotKind::Stream, "");
+        canonicalize_presentation(&mut actual, SnapshotKind::Stream, "");
 
         assert_eq!(actual, expected);
     }
@@ -936,7 +1030,7 @@ mod tests {
         });
         let mut actual = expected.clone();
 
-        canonicalize_value(&mut actual, SnapshotKind::Stream, "");
+        canonicalize_presentation(&mut actual, SnapshotKind::Stream, "");
 
         assert_eq!(actual, expected);
     }

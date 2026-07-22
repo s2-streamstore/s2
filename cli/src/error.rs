@@ -84,6 +84,10 @@ pub enum CliError {
 
     #[error("Access token '{0}' not found")]
     AccessTokenNotFound(String),
+
+    #[error("Invalid configuration returned by S2: {0}")]
+    #[diagnostic(help("{}", BUG_HELP))]
+    InvalidApiConfig(#[from] s2_common::ValidationError),
 }
 
 impl CliError {
