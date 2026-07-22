@@ -3485,7 +3485,9 @@ pub struct ReadInput {
 #[non_exhaustive]
 /// Configuration for a continuous read session.
 pub struct ReadSessionConfig {
-    /// Reconnect indefinitely after retryable errors and clean stream ends.
+    /// Reconnect indefinitely after retryable errors and fully open-ended clean stream ends.
+    ///
+    /// Reads with any count, byte, timestamp, or wait limit terminate normally.
     ///
     /// Defaults to `false`.
     pub auto_reconnect: bool,

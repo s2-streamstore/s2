@@ -444,7 +444,7 @@ fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> 
 }
 
 fn is_open_ended(end: &ReadEnd) -> bool {
-    end.count.is_none() && end.bytes.is_none() && end.until.is_none()
+    end.count.is_none() && end.bytes.is_none() && end.until.is_none() && end.wait.is_none()
 }
 
 fn retry_delay(
@@ -755,6 +755,12 @@ mod tests {
             bytes: None,
             until: Some(1),
             wait: None,
+        }));
+        assert!(!is_open_ended(&ReadEnd {
+            count: None,
+            bytes: None,
+            until: None,
+            wait: Some(1),
         }));
     }
 
