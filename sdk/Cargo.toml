@@ -30,7 +30,7 @@ futures-util = { workspace = true }
 http = { workspace = true }
 http-body = "1"
 http-body-util = "0.1"
-hyper = "1.10"
+hyper = "1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1", "http2"] }
 pin-project-lite = "0.2"
@@ -45,13 +45,13 @@ serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
 time = { workspace = true }
-tokio = { workspace = true, features = ["time", "macros", "io-util", "sync"] }
+tokio = { version = "1.6", features = ["time", "macros", "io-util", "sync"] }
 tokio-muxt = "0.7"
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["rt", "codec"] }
 tracing = { workspace = true }
-urlencoding = "2.1"
-uuid = { workspace = true, features = ["v4", "fast-rng"] }
+urlencoding = "2"
+uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 assert_matches = "1.5"
