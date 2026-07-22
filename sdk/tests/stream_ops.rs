@@ -764,6 +764,68 @@ async fn read_session_beyond_tail_with_clamp_to_tail(stream: &S2Stream) -> Resul
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
+async fn read_session_reports_caught_up_after_tail_delivery(
+    stream: &S2Stream,
+) -> Result<(), S2Error> {
+    let ack = stream
+        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+            AppendRecord::new("first")?,
+            AppendRecord::new("second")?,
+        ])?))
+        .await?;
+    let mut session = stream
+        .read_session(
+            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
+        )
+        .await?;
+    let mut caught_up = session.caught_up();
+    let mut seq_nums = Vec::new();
+
+    assert!(!session.is_caught_up());
+    let caught_up_tail = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                tail = &mut caught_up => break tail.map_err(S2Error::from),
+                batch = session.next() => {
+                    let batch = batch.expect("session should reach the tail")?;
+                    seq_nums.extend(batch.records.into_iter().map(|record| record.seq_num));
+                }
+            }
+        }
+    })
+    .await
+    .expect("session should reach the tail within 30 seconds")?;
+
+    assert!(session.is_caught_up());
+    assert_eq!(seq_nums, [ack.tail.seq_num - 2, ack.tail.seq_num - 1]);
+    assert_eq!(caught_up_tail, ack.tail);
+
+    let next_ack = stream
+        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+            AppendRecord::new("third")?,
+        ])?))
+        .await?;
+    let next_batch = tokio::time::timeout(Duration::from_secs(30), session.next())
+        .await
+        .expect("session should keep reading after catching up")
+        .expect("session should remain open")?;
+
+    assert_eq!(
+        next_batch
+            .records
+            .iter()
+            .map(|record| record.seq_num)
+            .collect::<Vec<_>>(),
+        [ack.tail.seq_num]
+    );
+    assert!(session.is_caught_up());
+    assert_eq!(next_batch.tail, Some(next_ack.tail));
+
+    Ok(())
+}
+
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
 async fn append_with_empty_header_value(stream: &S2Stream) -> Result<(), S2Error> {
     let input = AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
         "lorem",
