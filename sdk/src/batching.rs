@@ -44,6 +44,8 @@ impl BatchingConfig {
     /// Set the duration for how long to wait for more records before flushing a batch.
     ///
     /// Defaults to `5ms`.
+    ///
+    /// This setting is not used by [`append_record_batches_from_iter`].
     pub fn with_linger(self, linger: Duration) -> Self {
         Self { linger, ..self }
     }
@@ -183,6 +185,57 @@ impl Stream for AppendRecordBatches {
     }
 }
 
+/// Eagerly split in-memory records into batches respecting count and byte limits.
+///
+/// ```rust
+/// # use s2_sdk::batching::{append_record_batches_from_iter, BatchingConfig};
+/// # use s2_sdk::types::AppendRecord;
+/// let records = [AppendRecord::new("one")?, AppendRecord::new("two")?];
+/// let batches = append_record_batches_from_iter(records, BatchingConfig::new())?;
+/// assert_eq!(batches.len(), 1);
+/// # Ok::<(), s2_sdk::types::ValidationError>(())
+/// ```
+pub fn append_record_batches_from_iter(
+    records: impl IntoIterator<Item = impl Into<AppendRecord>>,
+    config: BatchingConfig,
+) -> Result<Vec<AppendRecordBatch>, ValidationError> {
+    let mut batches = Vec::new();
+    let mut batch = AppendRecordBatch::with_capacity(config.max_batch_records);
+
+    for item in records {
+        let record = item.into();
+        let record_bytes = record.metered_bytes();
+        if record_bytes > config.max_batch_bytes {
+            return Err(ValidationError(format!(
+                "record size in metered bytes ({record_bytes}) exceeds max_batch_bytes ({})",
+                config.max_batch_bytes
+            )));
+        }
+
+        if !batch.is_empty()
+            && would_overflow_batch(&config, batch.len(), batch.metered_bytes(), record_bytes)
+        {
+            batches.push(std::mem::replace(
+                &mut batch,
+                AppendRecordBatch::with_capacity(config.max_batch_records),
+            ));
+        }
+
+        batch.push(record);
+        if is_batch_full(&config, batch.len(), batch.metered_bytes()) {
+            batches.push(std::mem::replace(
+                &mut batch,
+                AppendRecordBatch::with_capacity(config.max_batch_records),
+            ));
+        }
+    }
+
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
 fn is_batch_full(config: &BatchingConfig, count: usize, bytes: usize) -> bool {
     count >= config.max_batch_records || bytes >= config.max_batch_bytes
 }
@@ -191,9 +244,9 @@ fn would_overflow_batch(
     config: &BatchingConfig,
     count: usize,
     bytes: usize,
-    record: &AppendRecord,
+    record_bytes: usize,
 ) -> bool {
-    count + 1 > config.max_batch_records || bytes + record.metered_bytes() > config.max_batch_bytes
+    count + 1 > config.max_batch_records || bytes + record_bytes > config.max_batch_bytes
 }
 
 fn append_record_batches(
@@ -239,7 +292,13 @@ fn append_record_batches(
                         match next_record {
                             Some(record) => {
                                 let record: AppendRecord = record.into();
-                                if would_overflow_batch(&config, batch.len(), batch.metered_bytes(), &record) {
+                                let record_bytes = record.metered_bytes();
+                                if would_overflow_batch(
+                                    &config,
+                                    batch.len(),
+                                    batch.metered_bytes(),
+                                    record_bytes,
+                                ) {
                                     overflowed_record = Some(record);
                                 } else {
                                     batch.push(record);
@@ -344,6 +403,67 @@ mod tests {
             );
         });
 
+        Ok(())
+    }
+
+    #[test]
+    fn eager_batches_should_be_empty_when_record_iter_is_empty() {
+        let batches = append_record_batches_from_iter(
+            std::iter::empty::<AppendRecord>(),
+            BatchingConfig::new(),
+        )
+        .unwrap();
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn eager_batches_respect_count_limit() -> Result<(), ValidationError> {
+        let records: Vec<_> = (0..10)
+            .map(|i| AppendRecord::new(format!("record{i}")))
+            .collect::<Result<_, _>>()?;
+        let config = BatchingConfig::new().with_max_batch_records(3)?;
+        let batches = append_record_batches_from_iter(records, config)?;
+
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches[0].len(), 3);
+        assert_eq!(batches[1].len(), 3);
+        assert_eq!(batches[2].len(), 3);
+        assert_eq!(batches[3].len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn eager_batches_respect_bytes_limit() -> Result<(), ValidationError> {
+        let records: Vec<_> = (0..10)
+            .map(|i| AppendRecord::new(format!("record{i}")))
+            .collect::<Result<_, _>>()?;
+        let single_record_bytes = records[0].metered_bytes();
+        let max_batch_bytes = single_record_bytes * 3;
+        let config = BatchingConfig::new().with_max_batch_bytes(max_batch_bytes)?;
+        let batches = append_record_batches_from_iter(records, config)?;
+
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches[0].metered_bytes(), max_batch_bytes);
+        assert_eq!(batches[1].metered_bytes(), max_batch_bytes);
+        assert_eq!(batches[2].metered_bytes(), max_batch_bytes);
+        assert_eq!(batches[3].metered_bytes(), single_record_bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn eager_batching_should_error_when_record_is_oversized() -> Result<(), ValidationError> {
+        let record = AppendRecord::new("hello-world")?;
+        let record_bytes = record.metered_bytes();
+        let max_batch_bytes = 10;
+        let config = BatchingConfig::new().with_max_batch_bytes(max_batch_bytes)?;
+        let err = append_record_batches_from_iter([record], config).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "record size in metered bytes ({record_bytes}) exceeds max_batch_bytes ({max_batch_bytes})"
+            )
+        );
         Ok(())
     }
 }
