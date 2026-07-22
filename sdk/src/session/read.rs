@@ -665,8 +665,9 @@ mod tests {
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
-            Err(CaughtUpError::Read(S2Error::Client(message)))
-                if message == "heartbeat timeout"
+            Err(CaughtUpError::Read(S2Error::Session(
+                SessionError::HeartbeatTimeout,
+            )))
         ));
     }
 
@@ -690,8 +691,9 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CaughtUpError::Read(S2Error::Client(message)))
-                if message == "heartbeat timeout"
+            Err(CaughtUpError::Read(S2Error::Session(
+                SessionError::HeartbeatTimeout,
+            )))
         ));
     }
 
