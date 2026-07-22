@@ -15,6 +15,14 @@ impl StreamReadOps for MockReader {
         Ok(StreamPosition::new(1, 2))
     }
 
+    async fn read(&self, _input: ReadInput) -> Result<ReadBatch, S2Error> {
+        let record = SequencedRecord::from_parts(0, 1, Vec::new(), "record");
+        Ok(ReadBatch::new(
+            vec![record],
+            Some(StreamPosition::new(1, 2)),
+        ))
+    }
+
     async fn read_session(&self, _input: ReadInput) -> Result<Streaming<ReadBatch>, S2Error> {
         let record = SequencedRecord::from_parts(0, 1, Vec::new(), "record");
         let batch = ReadBatch::new(vec![record], Some(StreamPosition::new(1, 2)));
@@ -30,6 +38,10 @@ async fn mock_read_stream_ops_can_use_public_fixtures() {
         reader.check_tail().await.unwrap(),
         StreamPosition::new(1, 2)
     );
+
+    let batch = reader.read(ReadInput::new()).await.unwrap();
+    assert_eq!(batch.records[0].seq_num, 0);
+    assert_eq!(batch.tail, Some(StreamPosition::new(1, 2)));
 
     let mut session = reader.read_session(ReadInput::new()).await.unwrap();
     let batch = session.next().await.unwrap().unwrap();
