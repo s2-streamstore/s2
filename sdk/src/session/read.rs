@@ -8,7 +8,7 @@ use std::{
 use async_stream::{stream, try_stream};
 use futures_util::{
     StreamExt,
-    future::{BoxFuture, FutureExt, Shared, ready},
+    future::{FutureExt, Shared},
 };
 use s2_api::v1::stream::{ReadEnd, ReadStart};
 use tokio::{
@@ -76,19 +76,25 @@ impl From<CaughtUpError> for S2Error {
 }
 
 type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
-type CaughtUpFuture = Shared<BoxFuture<'static, CaughtUpResult>>;
 
-/// A future that returns the current or next caught-up tail.
 #[derive(Clone)]
-pub struct CaughtUp {
-    inner: CaughtUpFuture,
+enum CaughtUpFuture {
+    Pending(Shared<oneshot::Receiver<CaughtUpResult>>),
+    Ready(CaughtUpResult),
 }
 
-impl Future for CaughtUp {
+impl Future for CaughtUpFuture {
     type Output = CaughtUpResult;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner).poll(cx)
+        match &mut *self {
+            Self::Pending(future) => match Pin::new(future).poll(cx) {
+                Poll::Ready(Ok(result)) => Poll::Ready(result),
+                Poll::Ready(Err(_)) => Poll::Ready(Err(CaughtUpError::SessionClosed)),
+                Poll::Pending => Poll::Pending,
+            },
+            Self::Ready(result) => Poll::Ready(result.clone()),
+        }
     }
 }
 
@@ -97,7 +103,7 @@ struct CaughtUpState {
     tail: Option<StreamPosition>,
     /// Once set, the session has ended.
     terminal: bool,
-    /// Fires the current `CaughtUp` future.
+    /// Fires the current caught-up future.
     tx: Option<oneshot::Sender<CaughtUpResult>>,
     /// The future handed out by `caught_up()`.
     future: CaughtUpFuture,
@@ -118,10 +124,8 @@ impl CaughtUpState {
         self.tail.is_some()
     }
 
-    fn future(&self) -> CaughtUp {
-        CaughtUp {
-            inner: self.future.clone(),
-        }
+    fn future(&self) -> CaughtUpFuture {
+        self.future.clone()
     }
 
     fn set_behind(&mut self) {
@@ -134,7 +138,7 @@ impl CaughtUpState {
     }
 
     fn set_caught_up(&mut self, tail: StreamPosition) {
-        if self.terminal {
+        if self.terminal || self.tail == Some(tail) {
             return;
         }
         self.tail = Some(tail);
@@ -158,17 +162,14 @@ impl CaughtUpState {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(result);
         } else {
-            self.future = ready(result).boxed().shared();
+            self.future = CaughtUpFuture::Ready(result);
         }
     }
 }
 
 fn pending_caught_up() -> (oneshot::Sender<CaughtUpResult>, CaughtUpFuture) {
     let (tx, rx) = oneshot::channel();
-    let future = async move { rx.await.unwrap_or(Err(CaughtUpError::SessionClosed)) }
-        .boxed()
-        .shared();
-    (tx, future)
+    (tx, CaughtUpFuture::Pending(rx.shared()))
 }
 
 struct ReadUpdate {
@@ -233,7 +234,14 @@ impl ReadSession {
     /// Once resolved, it keeps that tail if the session later falls behind.
     /// Keep reading batches while waiting. Call again after falling behind. Returns
     /// [`CaughtUpError`] if the read fails or ends first.
-    pub fn caught_up(&self) -> CaughtUp {
+    pub fn caught_up(
+        &self,
+    ) -> impl Future<Output = Result<StreamPosition, CaughtUpError>>
+    + Clone
+    + Send
+    + Sync
+    + Unpin
+    + 'static {
         self.state.future()
     }
 }
@@ -246,9 +254,10 @@ impl futures_core::Stream for ReadSession {
             match self.updates.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(update))) => {
-                    self.state.set_behind();
                     if let Some(tail) = update.caught_up_tail {
                         self.state.set_caught_up(tail);
+                    } else {
+                        self.state.set_behind();
                     }
                     if let Some(batch) = update.batch {
                         return Poll::Ready(Some(Ok(batch)));
@@ -541,6 +550,38 @@ mod tests {
         drop(next);
         assert!(session.is_caught_up());
         assert_eq!(caught_up.await.unwrap(), tail);
+    }
+
+    #[tokio::test]
+    async fn unchanged_heartbeat_reuses_caught_up_future() {
+        let tail = position(1);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut session = test_session(UnboundedReceiverStream::new(rx));
+
+        tx.send(Ok(ReadUpdate::from_batch(
+            batch(vec![record(0, false)], Some(tail)),
+            false,
+        )))
+        .unwrap();
+        session.next().await.unwrap().unwrap();
+        let caught_up = session.state.future();
+
+        tx.send(Ok(ReadUpdate::from_batch(
+            batch(Vec::new(), Some(tail)),
+            false,
+        )))
+        .unwrap();
+        let mut next = Box::pin(session.next());
+        assert!(poll!(next.as_mut()).is_pending());
+        drop(next);
+
+        let CaughtUpFuture::Pending(caught_up) = caught_up else {
+            panic!("initial caught-up future should use the pending epoch");
+        };
+        let CaughtUpFuture::Pending(current) = session.state.future() else {
+            panic!("unchanged heartbeat should preserve the pending epoch");
+        };
+        assert!(caught_up.ptr_eq(&current));
     }
 
     #[tokio::test]

@@ -110,5 +110,5 @@ pub mod append_session {
 }
 /// Continuous read sessions.
 pub mod read_session {
-    pub use crate::session::read::{CaughtUp, CaughtUpError, ReadSession};
+    pub use crate::session::read::{CaughtUpError, ReadSession};
 }
