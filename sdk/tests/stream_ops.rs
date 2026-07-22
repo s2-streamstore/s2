@@ -778,23 +778,25 @@ async fn read_session_reports_caught_up_after_tail_delivery(
             ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
         )
         .await?;
-    let caught_up = session.caught_up();
+    let mut caught_up = session.caught_up();
     let mut seq_nums = Vec::new();
 
     assert!(!session.is_caught_up());
     let caught_up_tail = tokio::time::timeout(Duration::from_secs(30), async {
-        while !session.is_caught_up() {
-            let batch = session
-                .next()
-                .await
-                .expect("session should reach the tail")?;
-            seq_nums.extend(batch.records.into_iter().map(|record| record.seq_num));
+        loop {
+            tokio::select! {
+                tail = &mut caught_up => break tail.map_err(S2Error::from),
+                batch = session.next() => {
+                    let batch = batch.expect("session should reach the tail")?;
+                    seq_nums.extend(batch.records.into_iter().map(|record| record.seq_num));
+                }
+            }
         }
-        caught_up.await.map_err(S2Error::from)
     })
     .await
     .expect("session should reach the tail within 30 seconds")?;
 
+    assert!(session.is_caught_up());
     assert_eq!(seq_nums, [ack.tail.seq_num - 2, ack.tail.seq_num - 1]);
     assert_eq!(caught_up_tail, ack.tail);
 
