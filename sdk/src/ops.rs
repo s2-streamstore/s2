@@ -1,11 +1,9 @@
-use futures_util::StreamExt;
-
 #[cfg(feature = "_hidden")]
 use crate::client::Connect;
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
     producer::{Producer, ProducerConfig},
-    session::{self, AppendSession, AppendSessionConfig},
+    session::{self, AppendSession, AppendSessionConfig, ReadSession},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
@@ -488,8 +486,8 @@ impl S2Stream {
     }
 
     /// Create a read session.
-    pub async fn read_session(&self, input: ReadInput) -> Result<Streaming<ReadBatch>, S2Error> {
-        let batches = session::read_session(
+    pub async fn read_session(&self, input: ReadInput) -> Result<ReadSession, S2Error> {
+        Ok(session::read_session(
             self.client.clone(),
             self.name.clone(),
             self.encryption.clone(),
@@ -497,10 +495,6 @@ impl S2Stream {
             input.stop.into(),
             input.ignore_command_records,
         )
-        .await?;
-        Ok(Box::pin(batches.map(|res| match res {
-            Ok(batch) => Ok(batch),
-            Err(err) => Err(err.into()),
-        })))
+        .await?)
     }
 }
