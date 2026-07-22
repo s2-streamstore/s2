@@ -5,6 +5,7 @@ use s2_sdk::{
     self as sdk, S2, S2Stream,
     batching::BatchingConfig,
     producer::{IndexedAppendAck, ProducerConfig},
+    read_session::ReadSession,
     types::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
         AppendInput, AppendRecord, AppendRecordBatch, BasinInfo, BasinMetricSet, BasinName,
@@ -12,10 +13,10 @@ use s2_sdk::{
         DeleteStreamInput, EncryptionKey, FencingToken, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric, ReadBatch, ReadFrom,
-        ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput,
-        S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition,
-        StreamReconfiguration, Streaming, TimeRange, TimeRangeAndInterval,
+        ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric, ReadFrom, ReadInput,
+        ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime,
+        SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition, StreamReconfiguration,
+        TimeRange, TimeRangeAndInterval,
     },
 };
 
@@ -491,7 +492,7 @@ pub async fn read(
     s2: &S2,
     args: &ReadArgs,
     encryption_key: Option<&EncryptionKey>,
-) -> Result<Streaming<ReadBatch>, CliError> {
+) -> Result<ReadSession, CliError> {
     use std::time::SystemTime;
 
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
@@ -529,12 +530,10 @@ pub async fn read(
         stop = stop.with_until(..until);
     }
 
-    let session = stream
+    stream
         .read_session(ReadInput::new().with_start(start).with_stop(stop))
         .await
-        .map_err(|e| CliError::op(OpKind::Read, e))?;
-
-    Ok(Box::pin(session))
+        .map_err(|e| CliError::op(OpKind::Read, e))
 }
 
 pub fn append<'a, S, E>(
