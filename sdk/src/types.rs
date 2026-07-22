@@ -3481,6 +3481,33 @@ pub struct ReadInput {
     pub ignore_command_records: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+/// Configuration for a continuous read session.
+pub struct ReadSessionConfig {
+    /// Reconnect indefinitely after retryable errors and fully open-ended clean stream ends.
+    ///
+    /// Reads with any count, byte, timestamp, or wait limit terminate normally.
+    ///
+    /// Defaults to `false`.
+    pub retry_indefinitely: bool,
+}
+
+impl ReadSessionConfig {
+    /// Create a new [`ReadSessionConfig`] with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether the read session should retry indefinitely.
+    pub fn with_retry_indefinitely(self, retry_indefinitely: bool) -> Self {
+        Self {
+            retry_indefinitely,
+            ..self
+        }
+    }
+}
+
 impl ReadInput {
     /// Create a new [`ReadInput`] with default values.
     pub fn new() -> Self {
@@ -4171,6 +4198,16 @@ mod tests {
         assert_eq!(api.count, Some(50));
         assert_eq!(api.until, Some(1000));
         assert_eq!(api.wait, Some(30));
+    }
+
+    #[test]
+    fn read_session_config_defaults_and_builder() {
+        assert!(!ReadSessionConfig::new().retry_indefinitely);
+        assert!(
+            ReadSessionConfig::default()
+                .with_retry_indefinitely(true)
+                .retry_indefinitely
+        );
     }
 
     // -- Operation roundtrip --
