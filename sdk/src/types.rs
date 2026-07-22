@@ -3689,37 +3689,37 @@ impl S2Error {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum SessionError {
-    /// The read session heartbeat timed out.
+    /// Read sessions produce this when the heartbeat times out.
     #[error("heartbeat timeout")]
     HeartbeatTimeout,
-    /// An append acknowledgement timed out.
+    /// Append sessions produce this when an acknowledgement times out.
     #[error("append acknowledgement timed out")]
     AckTimeout,
-    /// The server disconnected.
+    /// Append sessions produce this when the server disconnects.
     #[error("server disconnected")]
     ServerDisconnected,
-    /// The response stream closed while appends were in flight.
+    /// Append sessions produce this when the response stream closes early.
     #[error("response stream closed early while appends in flight")]
     StreamClosedEarly,
-    /// The session was already closed.
+    /// Append sessions produce this when the session is already closed.
     #[error("session already closed")]
     SessionClosed,
-    /// The session is closing.
+    /// Append sessions produce this while the session is closing.
     #[error("session is closing")]
     SessionClosing,
-    /// The session was dropped without calling close.
+    /// Append sessions produce this when dropped without calling close.
     #[error("session dropped without calling close")]
     SessionDropped,
-    /// An append acknowledgement was invalid.
+    /// Append sessions produce this for an invalid acknowledgement.
     #[error("invalid append acknowledgement: {0}")]
     InvalidAck(String),
-    /// The producer was already closed.
+    /// Producers produce this when already closed.
     #[error("producer already closed")]
     ProducerClosed,
-    /// The producer is closing.
+    /// Producers produce this while closing.
     #[error("producer is closing")]
     ProducerClosing,
-    /// The producer was dropped without calling close.
+    /// Producers produce this when dropped without calling close.
     #[error("producer dropped without calling close")]
     ProducerDropped,
 }
@@ -3735,7 +3735,7 @@ impl SessionError {
 
     /// Whether the operation is guaranteed to have had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
-        false
+        matches!(self, Self::HeartbeatTimeout)
     }
 }
 
@@ -3763,25 +3763,32 @@ impl ErrorResponse {
 
     /// Whether retrying the request is safe or sensible for this server error.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self.status,
-            StatusCode::REQUEST_TIMEOUT
-                | StatusCode::TOO_MANY_REQUESTS
-                | StatusCode::INTERNAL_SERVER_ERROR
-                | StatusCode::BAD_GATEWAY
-                | StatusCode::SERVICE_UNAVAILABLE
-                | StatusCode::GATEWAY_TIMEOUT
-        ) || (self.status == StatusCode::CONFLICT && self.code == "transaction_conflict")
+        server_error_is_retryable(self.status, &self.code)
     }
 
     /// Whether this server error guarantees the request had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
-        matches!(
-            (self.status, self.code.as_str()),
-            (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
-                | (StatusCode::BAD_GATEWAY, "hot_server")
-        )
+        server_error_has_no_side_effects(self.status, &self.code)
     }
+}
+
+pub(crate) fn server_error_is_retryable(status: StatusCode, code: &str) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    ) || (status == StatusCode::CONFLICT && code == "transaction_conflict")
+}
+
+pub(crate) fn server_error_has_no_side_effects(status: StatusCode, code: &str) -> bool {
+    matches!(
+        (status, code),
+        (StatusCode::TOO_MANY_REQUESTS, "rate_limited") | (StatusCode::BAD_GATEWAY, "hot_server")
+    )
 }
 
 fn idempotency_token() -> String {
