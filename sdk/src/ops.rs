@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 #[cfg(feature = "_hidden")]
 use crate::client::Connect;
 use crate::{
@@ -15,6 +17,19 @@ use crate::{
         StreamName, StreamPosition, Streaming,
     },
 };
+
+/// Read operations supported by an S2 stream.
+#[async_trait]
+pub trait StreamReadOps: Send + Sync {
+    /// Check the current tail position.
+    async fn check_tail(&self) -> Result<StreamPosition, S2Error>;
+
+    /// Read a batch of records.
+    async fn read(&self, input: ReadInput) -> Result<ReadBatch, S2Error>;
+
+    /// Open a read session stream.
+    async fn read_session(&self, input: ReadInput) -> Result<Streaming<ReadBatch>, S2Error>;
+}
 
 #[derive(Debug, Clone)]
 /// An S2 account.
@@ -469,5 +484,20 @@ impl S2Stream {
             input.ignore_command_records,
         )
         .await?)
+    }
+}
+
+#[async_trait]
+impl StreamReadOps for S2Stream {
+    async fn check_tail(&self) -> Result<StreamPosition, S2Error> {
+        S2Stream::check_tail(self).await
+    }
+
+    async fn read(&self, input: ReadInput) -> Result<ReadBatch, S2Error> {
+        S2Stream::read(self, input).await
+    }
+
+    async fn read_session(&self, input: ReadInput) -> Result<Streaming<ReadBatch>, S2Error> {
+        Ok(Box::pin(S2Stream::read_session(self, input).await?))
     }
 }

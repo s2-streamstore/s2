@@ -17,6 +17,8 @@ features = ["rustls-aws-lc-rs", "rustls-ring"]
 [features]
 default = ["rustls-aws-lc-rs"]
 _hidden = []
+# Public constructors for building SDK fixtures in downstream tests.
+test-util = []
 rustls-aws-lc-rs = ["hyper-rustls/aws-lc-rs", "rustls/aws-lc-rs"]
 rustls-ring = ["hyper-rustls/ring", "rustls/ring"]
 
