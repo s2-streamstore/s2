@@ -114,7 +114,10 @@ where
     }
 
     Err(last_err.unwrap_or_else(|| {
-        S2Error::Client(format!("metrics not ready after {}s", timeout.as_secs()))
+        S2Error::Client(ClientError::Others(format!(
+            "metrics not ready after {}s",
+            timeout.as_secs()
+        )))
     }))
 }
 

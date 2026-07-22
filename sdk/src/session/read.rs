@@ -20,7 +20,9 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
-    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName, StreamPosition},
+    types::{
+        EncryptionKey, MeteredBytes, ReadBatch, S2Error, SessionError, StreamName, StreamPosition,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,7 +46,7 @@ impl From<ReadSessionError> for S2Error {
     fn from(err: ReadSessionError) -> Self {
         match err {
             ReadSessionError::Api(api_err) => api_err.into(),
-            other => S2Error::Client(other.to_string()),
+            ReadSessionError::HeartbeatTimeout => S2Error::Session(SessionError::HeartbeatTimeout),
         }
     }
 }
@@ -67,9 +69,9 @@ pub enum CaughtUpError {
 impl From<CaughtUpError> for S2Error {
     fn from(err: CaughtUpError) -> Self {
         match err {
-            CaughtUpError::SessionClosed => {
-                Self::Client("read session ended before catching up".into())
-            }
+            CaughtUpError::SessionClosed => Self::Client(crate::api::ClientError::Others(
+                "read session ended before catching up".into(),
+            )),
             CaughtUpError::Read(err) => err,
         }
     }
@@ -663,8 +665,9 @@ mod tests {
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
-            Err(CaughtUpError::Read(S2Error::Client(message)))
-                if message == "heartbeat timeout"
+            Err(CaughtUpError::Read(S2Error::Session(
+                SessionError::HeartbeatTimeout,
+            )))
         ));
     }
 
@@ -688,8 +691,9 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CaughtUpError::Read(S2Error::Client(message)))
-                if message == "heartbeat timeout"
+            Err(CaughtUpError::Read(S2Error::Session(
+                SessionError::HeartbeatTimeout,
+            )))
         ));
     }
 

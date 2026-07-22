@@ -22,7 +22,7 @@ use crate::{
     session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
     types::{
         AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, S2Error,
-        StreamName, ValidationError,
+        SessionError, StreamName, ValidationError,
     },
 };
 
@@ -415,7 +415,11 @@ enum ProducerError {
 
 impl From<ProducerError> for S2Error {
     fn from(err: ProducerError) -> Self {
-        S2Error::Client(err.to_string())
+        match err {
+            ProducerError::Closed => S2Error::Session(SessionError::ProducerClosed),
+            ProducerError::Closing => S2Error::Session(SessionError::ProducerClosing),
+            ProducerError::Dropped => S2Error::Session(SessionError::ProducerDropped),
+        }
     }
 }
 

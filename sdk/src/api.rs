@@ -45,6 +45,7 @@ use crate::{
     types::{
         AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression, EncryptionKey,
         LocationName, RetryConfig, S2Config, S2Endpoints, StreamName,
+        server_error_has_no_side_effects, server_error_is_retryable,
     },
 };
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
@@ -620,17 +621,7 @@ pub enum ApiError {
 impl ApiError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Server(status, err_resp) => {
-                matches!(
-                    *status,
-                    StatusCode::REQUEST_TIMEOUT
-                        | StatusCode::TOO_MANY_REQUESTS
-                        | StatusCode::INTERNAL_SERVER_ERROR
-                        | StatusCode::BAD_GATEWAY
-                        | StatusCode::SERVICE_UNAVAILABLE
-                        | StatusCode::GATEWAY_TIMEOUT
-                ) || (*status == StatusCode::CONFLICT && err_resp.code == "transaction_conflict")
-            }
+            Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
             _ => false,
         }
@@ -638,11 +629,9 @@ impl ApiError {
 
     pub fn has_no_side_effects(&self) -> bool {
         match self {
-            Self::Server(status, err_resp) => matches!(
-                (*status, err_resp.code.as_str()),
-                (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
-                    | (StatusCode::BAD_GATEWAY, "hot_server")
-            ),
+            Self::Server(status, err_resp) => {
+                server_error_has_no_side_effects(*status, &err_resp.code)
+            }
             Self::Client(err) => err.has_no_side_effects(),
             _ => false,
         }
@@ -655,33 +644,46 @@ impl From<client::Error> for ApiError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+/// A classified client-side error.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum ClientError {
+    /// Failed to establish a connection.
     #[error("connect: {0}")]
     Connect(String),
+    /// The request timed out.
     #[error("timeout")]
     Timeout,
+    /// The connection closed before the response was complete.
     #[error("connection closed early: {0}")]
     ConnectionClosedEarly(String),
+    /// The request was canceled.
     #[error("request canceled: {0}")]
     RequestCanceled(String),
+    /// The connection ended unexpectedly.
     #[error("unexpected eof: {0}")]
     UnexpectedEof(String),
+    /// The connection was reset.
     #[error("connection reset: {0}")]
     ConnectionReset(String),
+    /// The connection was aborted.
     #[error("connection aborted: {0}")]
     ConnectionAborted(String),
+    /// The connection was refused.
     #[error("connection refused: {0}")]
     ConnectionRefused(String),
+    /// An otherwise-unclassified client error.
     #[error("{0}")]
     Others(String),
 }
 
 impl ClientError {
+    /// Whether retrying the request is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         !matches!(self, ClientError::Others(_))
     }
 
+    /// Whether the request is guaranteed to have had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
             ClientError::Connect(_)
