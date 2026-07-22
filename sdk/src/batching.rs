@@ -44,6 +44,8 @@ impl BatchingConfig {
     /// Set the duration for how long to wait for more records before flushing a batch.
     ///
     /// Defaults to `5ms`.
+    ///
+    /// This setting is not used by [`append_record_batches_from_iter`].
     pub fn with_linger(self, linger: Duration) -> Self {
         Self { linger, ..self }
     }
@@ -211,7 +213,7 @@ pub fn append_record_batches_from_iter(
         }
 
         if !batch.is_empty()
-            && would_overflow_batch(&config, batch.len(), batch.metered_bytes(), &record)
+            && would_overflow_batch(&config, batch.len(), batch.metered_bytes(), record_bytes)
         {
             batches.push(std::mem::replace(
                 &mut batch,
@@ -242,9 +244,9 @@ fn would_overflow_batch(
     config: &BatchingConfig,
     count: usize,
     bytes: usize,
-    record: &AppendRecord,
+    record_bytes: usize,
 ) -> bool {
-    count + 1 > config.max_batch_records || bytes + record.metered_bytes() > config.max_batch_bytes
+    count + 1 > config.max_batch_records || bytes + record_bytes > config.max_batch_bytes
 }
 
 fn append_record_batches(
@@ -290,7 +292,13 @@ fn append_record_batches(
                         match next_record {
                             Some(record) => {
                                 let record: AppendRecord = record.into();
-                                if would_overflow_batch(&config, batch.len(), batch.metered_bytes(), &record) {
+                                let record_bytes = record.metered_bytes();
+                                if would_overflow_batch(
+                                    &config,
+                                    batch.len(),
+                                    batch.metered_bytes(),
+                                    record_bytes,
+                                ) {
                                     overflowed_record = Some(record);
                                 } else {
                                     batch.push(record);
