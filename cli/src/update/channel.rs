@@ -29,6 +29,9 @@ use serde::Deserialize;
 /// Channel baked into official binaries at build time.
 const BUILD_CHANNEL: Option<&str> = option_env!("S2_BUILD_CHANNEL");
 
+/// Exact source commit stamped into the binary by `build.rs`.
+const GIT_COMMIT: &str = env!("S2_GIT_COMMIT");
+
 /// Name of the receipt file `install.sh` writes next to the binary.
 const RECEIPT_FILE: &str = "s2-receipt.json";
 
@@ -101,12 +104,16 @@ pub fn detect() -> InstallChannel {
     *CHANNEL
 }
 
-/// Version string for `--version` that includes the detected install
-/// channel, e.g. `0.40.1 (via homebrew)`.
+/// Version string for `--version` that includes the source commit and detected
+/// install channel.
 pub fn long_version() -> &'static str {
     static VERSION: LazyLock<String> =
-        LazyLock::new(|| format!("{} (via {})", env!("CARGO_PKG_VERSION"), detect()));
+        LazyLock::new(|| format_version(env!("CARGO_PKG_VERSION"), GIT_COMMIT, detect()));
     &VERSION
+}
+
+fn format_version(version: &str, revision: &str, channel: InstallChannel) -> String {
+    format!("{version} (rev {revision}, via {channel})")
 }
 
 /// Apply the precedence order documented at the module level.
@@ -201,6 +208,18 @@ fn is_cargo(exe: &Path, bin_dirs: Vec<PathBuf>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_includes_full_revision_and_channel() {
+        assert_eq!(
+            format_version(
+                "0.41.0",
+                "0123456789abcdef0123456789abcdef01234567",
+                InstallChannel::Homebrew,
+            ),
+            "0.41.0 (rev 0123456789abcdef0123456789abcdef01234567, via homebrew)"
+        );
+    }
 
     #[test]
     fn stamp_resolution_without_receipt_or_known_paths() {

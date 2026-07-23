@@ -128,6 +128,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: true
+      - name: Resolve source revision
+        id: source_revision
+        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -143,8 +146,16 @@ jobs:
           target: runtime
           tags: ghcr.io/s2-streamstore/s2:${{ steps.image-version.outputs.value }}
           load: true
+          build-args: |
+            S2_GIT_REV=${{ steps.source_revision.outputs.value }}
           cache-from: type=gha,scope=s2-testcontainers
           cache-to: type=gha,mode=max,scope=s2-testcontainers
+      - name: Verify image source revision
+        env:
+          S2_GIT_REV: ${{ steps.source_revision.outputs.value }}
+        run: |
+          docker run --rm ghcr.io/s2-streamstore/s2:${{ steps.image-version.outputs.value }} --version \
+            | grep -F "rev $S2_GIT_REV"
       - run: cargo test -p s2-testcontainers
 
   simulation:

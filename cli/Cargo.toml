@@ -30,15 +30,15 @@ rand = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true }
-self-replace = "1.5"
-sha2 = "0.10"
 s2-common = { workspace = true }
 s2-lite = { workspace = true }
 s2-resource-spec = { workspace = true }
 s2-sdk = { workspace = true, features = ["_hidden"] }
+self-replace = "1.5"
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
+sha2 = "0.10"
 strum = { workspace = true, features = ["derive"] }
 tabled = { workspace = true }
 terminal_size = "0.4"
@@ -56,6 +56,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Rust falls back to the system allocator (HeapAlloc).
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { workspace = true }
+
+[build-dependencies]
+serde_json = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"

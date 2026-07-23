@@ -112,6 +112,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
+      - name: Resolve source revision
+        id: source_revision
+        shell: bash
+        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -133,7 +137,18 @@ jobs:
           # Stamped into the binary (cli/src/update/channel.rs) to mark it as
           # an official release artifact for install-channel detection.
           S2_BUILD_CHANNEL: release
+          S2_GIT_REV: ${{ steps.source_revision.outputs.value }}
         run: ${{ matrix.builder || 'cargo' }} build --release --package s2-cli --target ${{ matrix.target }}
+      - name: Verify source revision stamp
+        shell: bash
+        env:
+          S2_GIT_REV: ${{ steps.source_revision.outputs.value }}
+        run: |
+          BINARY="target/${{ matrix.target }}/release/s2"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            BINARY="${BINARY}.exe"
+          fi
+          grep -aFq "$S2_GIT_REV" "$BINARY"
       - name: Create pem and certificate.der files
         if: matrix.os == 'macos-latest'
         run: |
@@ -193,6 +208,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
+      - name: Resolve source revision
+        id: source_revision
+        shell: bash
+        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
@@ -218,6 +237,8 @@ jobs:
           file: Dockerfile
           target: runtime
           push: true
+          build-args: |
+            S2_GIT_REV=${{ steps.source_revision.outputs.value }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-${{ matrix.arch }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}

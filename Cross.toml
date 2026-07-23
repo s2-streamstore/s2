@@ -1,5 +1,5 @@
 [build.env]
-passthrough = ["S2_BUILD_CHANNEL"]
+passthrough = ["S2_BUILD_CHANNEL", "S2_GIT_REV"]
 
 [target.x86_64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:b21940afb5d20705a9b0b9f95f033a50efb0480eb0cf19a0588a252e0ce46989"
