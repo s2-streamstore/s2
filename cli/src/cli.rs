@@ -1,6 +1,6 @@
 use std::{num::NonZeroU64, path::PathBuf};
 
-use clap::{Args, Parser, Subcommand, builder::styling};
+use clap::{Args, Parser, Subcommand, ValueEnum, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
     BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamName,
@@ -86,6 +86,9 @@ pub enum Command {
         /// ID of the access token to revoke.
         id: AccessTokenId,
     },
+
+    /// Compare two basins, streams, or access tokens.
+    Diff(DiffArgs),
 
     /// List locations.
     ListLocations,
@@ -377,6 +380,55 @@ pub struct IssueAccessTokenArgs {
     /// A union of allowed operations and groups is used as an effective set of allowed operations.
     #[arg(long, value_delimiter = ',')]
     pub ops: Vec<Operation>,
+}
+
+#[derive(Args, Debug)]
+#[command(
+    override_usage = "s2 diff [OPTIONS] <LEFT> <RIGHT>",
+    after_help = "Examples:\n  s2 diff s2://my-basin/left s2://my-basin/right\n  s2 diff s2://my-basin s2://my-basin/my-stream\n  s2 diff --resource basin basin-left basin-right\n  s2 diff --resource access-token token-left token-right\n  s2 diff s2://my-basin/left s2://my-basin/right --output json\n  s2 diff s2://my-basin/left s2://my-basin/right --exit-code"
+)]
+pub struct DiffArgs {
+    /// First resource to compare.
+    pub left: String,
+
+    /// Second resource to compare.
+    pub right: String,
+
+    /// Resource type. Inferred when both resources are S2 URIs.
+    #[arg(short, long, value_enum)]
+    pub resource: Option<DiffResourceKind>,
+
+    /// Output format.
+    #[arg(short, long, value_enum, default_value_t)]
+    pub output: DiffOutput,
+
+    /// Exit with status 1 when differences are found.
+    #[arg(long)]
+    pub exit_code: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffResourceKind {
+    Basin,
+    Stream,
+    AccessToken,
+}
+
+impl DiffResourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Basin => "basin",
+            Self::Stream => "stream",
+            Self::AccessToken => "access-token",
+        }
+    }
+}
+
+#[derive(ValueEnum, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DiffOutput {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Args, Debug)]
@@ -760,7 +812,7 @@ pub struct GetStreamMetricsArgs {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, IssueAccessTokenArgs};
+    use super::{Cli, Command, DiffArgs, DiffOutput, DiffResourceKind, IssueAccessTokenArgs};
 
     fn issue_access_token_args_from<I, T>(args: I) -> IssueAccessTokenArgs
     where
@@ -772,6 +824,98 @@ mod tests {
             Some(Command::IssueAccessToken(args)) => args,
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    fn diff_args_from<I, T>(args: I) -> DiffArgs
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Cli::try_parse_from(args).expect("cli parses");
+        match cli.command {
+            Some(Command::Diff(args)) => args,
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_parses_basins() {
+        let args = diff_args_from(["s2", "diff", "s2://left-basin", "s2://right-basin"]);
+
+        assert_eq!(args.left, "s2://left-basin");
+        assert_eq!(args.right, "s2://right-basin");
+        assert!(args.resource.is_none());
+        assert_eq!(args.output, DiffOutput::Text);
+        assert!(!args.exit_code);
+    }
+
+    #[test]
+    fn diff_parses_streams() {
+        let args = diff_args_from([
+            "s2",
+            "diff",
+            "s2://left-basin/left-stream",
+            "s2://right-basin/right-stream",
+        ]);
+
+        assert_eq!(args.left, "s2://left-basin/left-stream");
+        assert_eq!(args.right, "s2://right-basin/right-stream");
+        assert!(args.resource.is_none());
+    }
+
+    #[test]
+    fn diff_parses_explicit_access_tokens() {
+        let args = diff_args_from(["s2", "diff", "--resource", "access-token", "left", "right"]);
+
+        assert_eq!(args.left, "left");
+        assert_eq!(args.right, "right");
+        assert_eq!(args.resource, Some(DiffResourceKind::AccessToken));
+    }
+
+    #[test]
+    fn diff_parses_explicit_basins() {
+        let args = diff_args_from([
+            "s2",
+            "diff",
+            "left-basin",
+            "right-basin",
+            "--resource",
+            "basin",
+        ]);
+
+        assert_eq!(args.left, "left-basin");
+        assert_eq!(args.right, "right-basin");
+        assert_eq!(args.resource, Some(DiffResourceKind::Basin));
+    }
+
+    #[test]
+    fn diff_parses_explicit_streams() {
+        let args = diff_args_from([
+            "s2",
+            "diff",
+            "--resource",
+            "stream",
+            "s2://left-basin/left-stream",
+            "s2://right-basin/right-stream",
+        ]);
+
+        assert_eq!(args.resource, Some(DiffResourceKind::Stream));
+    }
+
+    #[test]
+    fn diff_parses_json_output_and_exit_code() {
+        let args = diff_args_from([
+            "s2",
+            "diff",
+            "s2://left/stream",
+            "s2://right/stream",
+            "--output",
+            "json",
+            "--exit-code",
+        ]);
+
+        assert_eq!(args.output, DiffOutput::Json);
+        assert!(args.exit_code);
     }
 
     #[test]

@@ -1,6 +1,10 @@
 use std::{pin::Pin, time::Duration};
 
 use futures::{Stream, StreamExt, TryStreamExt, stream, stream::FuturesOrdered};
+use s2_api::v1::{
+    access::AccessTokenInfo as ApiAccessTokenInfo,
+    config::{BasinConfig as ApiBasinConfig, StreamConfig as ApiStreamConfig},
+};
 use s2_sdk::{
     self as sdk, S2, S2Stream,
     batching::BatchingConfig,
@@ -121,6 +125,12 @@ pub async fn get_basin_config(
         .map_err(|e| CliError::op(OpKind::GetBasinConfig, e))
 }
 
+pub async fn get_basin_config_api(s2: &S2, basin: &BasinName) -> Result<ApiBasinConfig, CliError> {
+    s2.get_basin_config_api(basin.clone())
+        .await
+        .map_err(|e| CliError::op(OpKind::GetBasinConfig, e))
+}
+
 pub async fn reconfigure_basin(
     s2: &S2,
     args: ReconfigureBasinArgs,
@@ -203,6 +213,25 @@ pub async fn list_access_tokens(
 
         Ok((items, false))
     }
+}
+
+pub async fn get_access_token_api(
+    s2: &S2,
+    id: AccessTokenId,
+) -> Result<ApiAccessTokenInfo, CliError> {
+    let page = s2
+        .list_access_tokens_api(
+            ListAccessTokensInput::new()
+                .with_prefix(id.clone().into())
+                .with_limit(1),
+        )
+        .await
+        .map_err(|e| CliError::op(OpKind::ListAccessTokens, e))?;
+
+    page.access_tokens
+        .into_iter()
+        .find(|info| info.id == id)
+        .ok_or_else(|| CliError::AccessTokenNotFound(id.to_string()))
 }
 
 pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<String, CliError> {
@@ -430,6 +459,17 @@ pub async fn get_stream_config(
     let basin = s2.basin(uri.basin);
     basin
         .get_stream_config(uri.stream)
+        .await
+        .map_err(|e| CliError::op(OpKind::GetStreamConfig, e))
+}
+
+pub async fn get_stream_config_api(
+    s2: &S2,
+    uri: S2BasinAndStreamUri,
+) -> Result<ApiStreamConfig, CliError> {
+    let basin = s2.basin(uri.basin);
+    basin
+        .get_stream_config_api(uri.stream)
         .await
         .map_err(|e| CliError::op(OpKind::GetStreamConfig, e))
 }

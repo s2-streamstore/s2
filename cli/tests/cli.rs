@@ -80,6 +80,20 @@ fn missing_access_token() {
 }
 
 #[test]
+fn diff_bare_names_require_resource_before_authentication() {
+    TestEnv::new()
+        .s2()
+        .args(["diff", "token-left", "token-right"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Cannot infer a resource type")
+                .and(predicate::str::contains("--resource"))
+                .and(predicate::str::contains("access token is required").not()),
+        );
+}
+
+#[test]
 fn unknown_subcommand() {
     TestEnv::new()
         .s2()
