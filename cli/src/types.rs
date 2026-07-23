@@ -1,6 +1,7 @@
 use std::{str::FromStr, time::Duration};
 
 use clap::{Args, Parser, ValueEnum};
+use colored::Colorize;
 use s2_sdk::{
     self as sdk,
     types::{
@@ -526,11 +527,66 @@ impl From<sdk::types::AccessTokenMatcher> for AccessTokenMatcher {
     }
 }
 
+/// Compact human summary for a resource matcher, used in `s2 list-access-tokens`:
+///
+/// - `*` matches any resource (an empty prefix).
+/// - `<prefix>*` matches names beginning with `<prefix>`.
+/// - `<name>` matches exactly that name.
+macro_rules! impl_matcher_summary {
+    ($($matcher:ty),+ $(,)?) => {$(
+        impl $matcher {
+            fn summary(&self) -> String {
+                match self {
+                    Self::Exact(name) => name.to_string(),
+                    Self::Prefix(prefix) => format!("{prefix}*"),
+                }
+            }
+        }
+    )+};
+}
+impl_matcher_summary!(BasinMatcher, StreamMatcher, AccessTokenMatcher);
+
+/// Renders an optional matcher, using `∅` when the scope grants no access to that resource.
+fn matcher_summary(matcher: Option<String>) -> String {
+    matcher.unwrap_or_else(|| "∅".to_owned())
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PermittedOperationGroups {
     pub account: Option<ReadWritePermissions>,
     pub basin: Option<ReadWritePermissions>,
     pub stream: Option<ReadWritePermissions>,
+}
+
+impl PermittedOperationGroups {
+    /// Compact grant summary like `a:rw b:r s:rw`, labelling account/basin/stream. Groups with
+    /// no permission are omitted; a token with no group permissions renders as `none`.
+    fn summary(&self) -> String {
+        let rendered: Vec<String> = [
+            ("a", self.account.as_ref()),
+            ("b", self.basin.as_ref()),
+            ("s", self.stream.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(label, perm)| {
+            let perm = perm?;
+            let mut rw = String::new();
+            if perm.read {
+                rw.push('r');
+            }
+            if perm.write {
+                rw.push('w');
+            }
+            (!rw.is_empty()).then(|| format!("{label}:{rw}"))
+        })
+        .collect();
+
+        if rendered.is_empty() {
+            "none".to_owned()
+        } else {
+            rendered.join(" ")
+        }
+    }
 }
 
 impl From<PermittedOperationGroups> for sdk::types::OperationGroupPermissions {
@@ -668,6 +724,43 @@ impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
             auto_prefix_streams: info.auto_prefix_streams,
             scope: info.scope.into(),
         }
+    }
+}
+
+impl AccessTokenInfo {
+    /// Two-line compact summary for `s2 list-access-tokens`.
+    ///
+    /// - Header: the token id (padded to `id_width` for column alignment across the listing)
+    ///   followed by its expiry, or `never` when the token does not expire.
+    /// - Detail: a single indented line summarizing the scope — the basin/stream/token matchers,
+    ///   the operation-group permissions, and the count of explicitly granted operations.
+    pub fn summary_block(&self, id_width: usize) -> String {
+        let expires = match &self.expires_at {
+            Some(at) => at.green().to_string(),
+            None => "never".dimmed().to_string(),
+        };
+        let padding = " ".repeat(id_width.saturating_sub(self.id.len()));
+        let header = format!("{}{padding}  expires {expires}", self.id.bold());
+
+        let scope = &self.scope;
+        let detail = format!(
+            "  basins={}  streams={}  tokens={}  perms={}  ops={}",
+            matcher_summary(scope.basins.as_ref().map(BasinMatcher::summary)),
+            matcher_summary(scope.streams.as_ref().map(StreamMatcher::summary)),
+            matcher_summary(
+                scope
+                    .access_tokens
+                    .as_ref()
+                    .map(AccessTokenMatcher::summary)
+            ),
+            scope
+                .op_group_perms
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), PermittedOperationGroups::summary),
+            scope.ops.len(),
+        );
+
+        format!("{header}\n{detail}")
     }
 }
 
@@ -833,10 +926,121 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        OpGroupsParseError, PermittedOperationGroups, ReadWritePermissions,
-        S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, S2Uri,
+        AccessTokenInfo, AccessTokenMatcher, AccessTokenScope, BasinMatcher, OpGroupsParseError,
+        PermittedOperationGroups, ReadWritePermissions, S2BasinAndMaybeStreamUri,
+        S2BasinAndStreamUri, S2BasinUri, S2Uri, StreamMatcher, matcher_summary,
     };
     use crate::error::S2UriParseError;
+
+    fn rw(read: bool, write: bool) -> ReadWritePermissions {
+        ReadWritePermissions { read, write }
+    }
+
+    #[test]
+    fn matcher_summaries_render_any_prefix_and_exact() {
+        assert_eq!(
+            BasinMatcher::Prefix("".parse().unwrap()).summary(),
+            "*",
+            "an empty prefix matches any resource"
+        );
+        assert_eq!(
+            BasinMatcher::Prefix("ls-".parse().unwrap()).summary(),
+            "ls-*"
+        );
+        assert_eq!(
+            BasinMatcher::Exact("exact-basin".parse().unwrap()).summary(),
+            "exact-basin"
+        );
+        assert_eq!(
+            matcher_summary(None),
+            "∅",
+            "an unset matcher grants nothing"
+        );
+    }
+
+    #[test]
+    fn op_group_perms_summary_omits_empty_groups() {
+        assert_eq!(
+            PermittedOperationGroups {
+                account: Some(rw(true, true)),
+                basin: Some(rw(true, true)),
+                stream: Some(rw(true, true)),
+            }
+            .summary(),
+            "a:rw b:rw s:rw"
+        );
+        assert_eq!(
+            PermittedOperationGroups {
+                account: None,
+                basin: Some(rw(true, false)),
+                stream: Some(rw(false, true)),
+            }
+            .summary(),
+            "b:r s:w"
+        );
+        assert_eq!(
+            PermittedOperationGroups {
+                account: None,
+                basin: None,
+                stream: None,
+            }
+            .summary(),
+            "none"
+        );
+    }
+
+    #[test]
+    fn summary_block_renders_header_and_scope() {
+        colored::control::set_override(false);
+
+        let info = AccessTokenInfo {
+            id: "tok".to_owned(),
+            expires_at: None,
+            auto_prefix_streams: false,
+            scope: AccessTokenScope {
+                basins: Some(BasinMatcher::Prefix("".parse().unwrap())),
+                streams: Some(StreamMatcher::Prefix("tenant/".parse().unwrap())),
+                access_tokens: None,
+                op_group_perms: Some(PermittedOperationGroups {
+                    account: Some(rw(true, false)),
+                    basin: None,
+                    stream: None,
+                }),
+                ops: vec![],
+            },
+        };
+
+        // id padded to width 8, unset expiry renders `never`, unset matcher renders `∅`.
+        assert_eq!(
+            info.summary_block(8),
+            "tok       expires never\n\
+             \x20 basins=*  streams=tenant/*  tokens=∅  perms=a:r  ops=0"
+        );
+    }
+
+    #[test]
+    fn summary_block_renders_expiry_and_exact_token_matcher() {
+        colored::control::set_override(false);
+
+        let info = AccessTokenInfo {
+            id: "prod".to_owned(),
+            expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+            auto_prefix_streams: false,
+            scope: AccessTokenScope {
+                basins: None,
+                streams: None,
+                access_tokens: Some(AccessTokenMatcher::Exact("root".parse().unwrap())),
+                op_group_perms: None,
+                ops: vec![super::Operation::Read, super::Operation::Append],
+            },
+        };
+
+        assert_eq!(
+            info.summary_block(4),
+            "prod  expires 2030-01-01T00:00:00Z\n\
+             \x20 basins=∅  streams=∅  tokens=root  perms=none  ops=2"
+        );
+    }
 
     #[rstest]
     #[case("", Ok(PermittedOperationGroups {

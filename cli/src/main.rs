@@ -288,9 +288,15 @@ async fn run() -> Result<ExitCode, CliError> {
 
         Command::ListAccessTokens(args) => {
             let (tokens, _) = ops::list_access_tokens(&s2, args).await?;
-            for token_info in tokens {
-                let info = AccessTokenInfo::from(token_info);
-                println!("{}", json_to_table(&serde_json::to_value(&info)?));
+            let tokens: Vec<AccessTokenInfo> =
+                tokens.into_iter().map(AccessTokenInfo::from).collect();
+            let id_width = tokens.iter().map(|info| info.id.len()).max().unwrap_or(0);
+            let blocks: Vec<String> = tokens
+                .iter()
+                .map(|info| info.summary_block(id_width))
+                .collect();
+            if !blocks.is_empty() {
+                println!("{}", blocks.join("\n\n"));
             }
         }
 
