@@ -145,6 +145,17 @@ curl --progress-bar -fSL "${URL}" -o "${DOWNLOAD_PATH}" \
 
 rm -f "${DOWNLOAD_PATH}"
 
+# Install receipt, read by the CLI (cli/src/update/channel.rs) to know it was
+# installed by this script and can be upgraded in place.
+cat > "${BIN_PATH}/s2-receipt.json" <<EOF
+{
+  "channel": "install-script",
+  "version": "${TAG#s2-cli-v}",
+  "binary_path": "${BIN_PATH}/s2",
+  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
 echo_blue "Successfully downloaded"
 
 EXISTING_S2_PATH=$(command -v s2 2>/dev/null || true)

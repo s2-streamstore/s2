@@ -5,6 +5,10 @@ USER root
 
 WORKDIR /build
 
+# Stamped into the binary (cli/src/update/channel.rs) so it knows it was
+# installed via the Docker image.
+ARG S2_BUILD_CHANNEL=docker
+
 # Use Docker BuildKit cache mounts for faster builds
 RUN --mount=type=bind,source=api,target=/build/api \
     --mount=type=bind,source=common,target=/build/common \

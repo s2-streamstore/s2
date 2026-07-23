@@ -1,11 +1,14 @@
 //! Once-daily reminder when a newer s2-cli release is available on GitHub.
 
+pub mod channel;
+
 use std::{
     io::IsTerminal,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+pub use channel::long_version;
 use colored::Colorize;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -56,9 +59,17 @@ fn unix_now() -> u64 {
 }
 
 /// Start the update check in the background, or return `None` when it should
-/// not run (opted out via `S2_NO_UPDATE_CHECK`, or stderr is not a terminal).
+/// not run:
+///
+/// - opted out via `S2_NO_UPDATE_CHECK`,
+/// - stderr is not a terminal,
+/// - running from the Docker image, where the binary is immutable and image tags are pinned
+///   deliberately.
 pub fn spawn_check() -> Option<JoinHandle<Option<Version>>> {
-    if std::env::var_os("S2_NO_UPDATE_CHECK").is_some() || !std::io::stderr().is_terminal() {
+    if std::env::var_os("S2_NO_UPDATE_CHECK").is_some()
+        || !std::io::stderr().is_terminal()
+        || channel::detect() == channel::InstallChannel::Docker
+    {
         return None;
     }
     Some(tokio::spawn(check()))
@@ -148,10 +159,15 @@ pub async fn notify(check: Option<JoinHandle<Option<Version>>>) {
         CURRENT_VERSION.cyan(),
         format!("→ {latest}").cyan(),
     );
-    eprintln!(
-        "{}",
-        "To upgrade: https://s2.dev/docs/quickstart#get-started-with-the-cli".yellow()
-    );
+    match channel::detect().upgrade_command() {
+        Some(command) => {
+            eprintln!("{} {}", "To upgrade:".yellow(), command.cyan());
+        }
+        None => eprintln!(
+            "{}",
+            "To upgrade: https://s2.dev/docs/quickstart#get-started-with-the-cli".yellow()
+        ),
+    }
 }
 
 #[cfg(test)]

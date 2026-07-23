@@ -129,6 +129,10 @@ jobs:
         with:
           tool: cross@0.2.5
       - name: Build
+        env:
+          # Stamped into the binary (cli/src/update/channel.rs) to mark it as
+          # an official release artifact for install-channel detection.
+          S2_BUILD_CHANNEL: release
         run: ${{ matrix.builder || 'cargo' }} build --release --package s2-cli --target ${{ matrix.target }}
       - name: Create pem and certificate.der files
         if: matrix.os == 'macos-latest'

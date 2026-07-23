@@ -32,7 +32,7 @@ const GENERAL_USAGE: &str = color_print::cstr!(
 );
 
 #[derive(Parser, Debug)]
-#[command(name = "s2", version, override_usage = GENERAL_USAGE, styles = STYLES)]
+#[command(name = "s2", version = crate::update::long_version(), override_usage = GENERAL_USAGE, styles = STYLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
