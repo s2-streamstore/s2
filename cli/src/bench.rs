@@ -218,9 +218,8 @@ enum LatencyTableLayout {
 }
 
 fn latency_table_layout() -> LatencyTableLayout {
-    let width = crossterm::terminal::size()
-        .ok()
-        .map(|(width, _)| width as usize)
+    let width = terminal_size::terminal_size()
+        .map(|(terminal_size::Width(width), _)| width as usize)
         .unwrap_or(usize::MAX);
 
     if width >= LATENCY_TABLE_SIDE_BY_SIDE_WIDTH {

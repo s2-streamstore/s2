@@ -9,7 +9,6 @@ mod error;
 mod lite;
 mod ops;
 mod record_format;
-mod tui;
 mod types;
 mod update;
 
@@ -83,10 +82,6 @@ async fn run() -> Result<ExitCode, CliError> {
         }
         e.exit()
     });
-
-    if cli.interactive {
-        return tui::run().await.map(|()| ExitCode::SUCCESS);
-    }
 
     let Some(command) = cli.command else {
         Cli::command().print_help().ok();
