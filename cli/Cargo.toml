@@ -34,7 +34,6 @@ s2-common = { workspace = true }
 s2-lite = { workspace = true }
 s2-resource-spec = { workspace = true }
 s2-sdk = { workspace = true, features = ["_hidden"] }
-self-replace = "1.5"
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -56,6 +55,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Rust falls back to the system allocator (HeapAlloc).
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { workspace = true }
+
+[target.'cfg(not(windows))'.dependencies]
+self-replace = "1.5"
 
 [build-dependencies]
 serde_json = { workspace = true }

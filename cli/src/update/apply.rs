@@ -1,14 +1,16 @@
 //! `s2 update`: bring the CLI up to date using the strategy that matches how
 //! it was installed (see [`super::channel`]).
 //!
-//! - Install script or manual GitHub download (`InstallScript`, `GithubRelease`): download the
-//!   release artifact for this exact target, verify its SHA-256 against the release's `SHA256SUMS`,
-//!   and atomically replace the running binary in place.
+//! - Install script or manual GitHub download (`InstallScript`, `GithubRelease`): on Unix, download
+//!   the release artifact for this exact target, verify its SHA-256 against the release's
+//!   `SHA256SUMS`, and atomically replace the running binary in place; on Windows, print exact
+//!   manual replacement instructions because a running executable cannot be replaced safely.
 //! - Homebrew or Cargo: the package manager owns the binary, so print its upgrade command (or run
-//!   it with `--yes`).
+//!   it with `--yes` where the running executable can be replaced).
 //! - Docker or source build: nothing to replace; explain how to update.
 
 use std::{
+    fmt,
     io::{Cursor, IsTerminal, Read, Write},
     path::Path,
     time::Duration,
@@ -33,8 +35,6 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub enum UpdateError {
     #[error("could not locate the running executable: {0}")]
     CurrentExe(#[source] std::io::Error),
-    #[error("{0:?} is not a valid version")]
-    BadVersion(String),
     #[error("could not determine the latest release; is GitHub reachable?")]
     LatestUnavailable,
     #[error("failed to build HTTP client: {0}")]
@@ -64,6 +64,12 @@ pub enum UpdateError {
         #[source]
         source: std::io::Error,
     },
+    #[cfg(windows)]
+    #[error(
+        "automatic in-place replacement is disabled on Windows; \
+         install the release manually after s2 exits"
+    )]
+    WindowsInPlaceUnsupported,
     #[error("failed to run `{0}`: {1}")]
     Spawn(String, #[source] std::io::Error),
     #[error("`{0}` exited with a non-zero status")]
@@ -79,49 +85,32 @@ pub async fn run(args: &UpdateArgs) -> Result<(), UpdateError> {
         return report_status(channel, &current).await;
     }
 
-    let target = match &args.version {
-        Some(v) => parse_version(v)?,
-        None => super::fetch_latest()
-            .await
-            .ok_or(UpdateError::LatestUnavailable)?,
-    };
+    let target = super::fetch_latest()
+        .await
+        .ok_or(UpdateError::LatestUnavailable)?;
 
     // Explicit --skip just records the marker and does nothing else.
     if args.skip {
         return do_skip(&target);
     }
 
-    // Only short-circuit when tracking the latest; an explicit --version is
-    // always honored (allows reinstalling or downgrading).
-    if args.version.is_none() && target <= current {
+    if target <= current {
         println!("s2-cli {current} is already up to date.");
         return Ok(());
     }
 
-    // Channels with no binary we can replace: explain and stop.
-    let action = match channel {
-        InstallChannel::InstallScript | InstallChannel::GithubRelease => Action::InPlace,
-        InstallChannel::Homebrew | InstallChannel::Cargo => Action::Run(
-            channel
-                .upgrade_command()
-                .expect("managed channels always have an upgrade command"),
-        ),
-        InstallChannel::Docker => {
-            println!("This is the Docker build of s2-cli. Pull a newer image tag:");
-            println!("    {}", "docker pull ghcr.io/s2-streamstore/s2".cyan());
-            return Ok(());
-        }
-        InstallChannel::SourceBuild => {
-            println!("This s2-cli was built from source. Update your checkout and rebuild,");
-            println!("or install a release build: {}", DOCS_URL.cyan());
+    let action = match plan_update(channel, &target, cfg!(not(windows))) {
+        Plan::Mutate(action) => action,
+        Plan::Advise(advice) => {
+            print!("{}", advice.render(&target, &repo()));
             return Ok(());
         }
     };
 
     // Describe what upgrading entails before asking.
     println!("s2-cli {current} → {target}  (installed via {channel})");
-    if let Action::Run(command) = action {
-        println!("This will run: {}", command.cyan());
+    if let Mutation::Run(command) = &action {
+        println!("This will run: {}", command.to_string().cyan());
     }
 
     // Confirm interactively, unless --yes was given. Never block on a prompt
@@ -131,11 +120,11 @@ pub async fn run(args: &UpdateArgs) -> Result<(), UpdateError> {
     } else if std::io::stdin().is_terminal() {
         prompt_choice("Update now?")
     } else {
-        match action {
-            Action::InPlace => println!("Re-run with {} to update in place.", "--yes".cyan()),
-            Action::Run(command) => println!(
+        match &action {
+            Mutation::InPlace => println!("Re-run with {} to update in place.", "--yes".cyan()),
+            Mutation::Run(command) => println!(
                 "Run {} yourself, or re-run with {}.",
-                command.cyan(),
+                command.to_string().cyan(),
                 "--yes".cyan()
             ),
         }
@@ -144,8 +133,8 @@ pub async fn run(args: &UpdateArgs) -> Result<(), UpdateError> {
 
     match choice {
         Choice::Yes => match action {
-            Action::InPlace => in_place_update(channel, &target).await,
-            Action::Run(command) => run_command(command),
+            Mutation::InPlace => in_place_update(channel, &target).await,
+            Mutation::Run(command) => run_command(&command),
         },
         Choice::Skip => do_skip(&target),
         Choice::No => {
@@ -155,13 +144,126 @@ pub async fn run(args: &UpdateArgs) -> Result<(), UpdateError> {
     }
 }
 
-/// What upgrading this install entails.
-#[derive(Clone, Copy)]
-enum Action {
+#[derive(Debug, PartialEq, Eq)]
+enum Plan {
+    Mutate(Mutation),
+    Advise(Advice),
+}
+
+/// A change this process can safely make.
+#[derive(Debug, PartialEq, Eq)]
+enum Mutation {
     /// Download the release artifact and replace the binary in place.
     InPlace,
     /// Delegate to a package manager's upgrade command.
-    Run(&'static str),
+    Run(CommandSpec),
+}
+
+/// Guidance for channels this process must not mutate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Advice {
+    Docker,
+    SourceBuild,
+    WindowsCargo,
+    WindowsRelease,
+}
+
+impl Advice {
+    fn render(self, target: &Version, repo: &str) -> String {
+        let tag = format!("{CLI_TAG_PREFIX}{target}");
+        match self {
+            Self::Docker => format!(
+                "This is the Docker build of s2-cli. Pull the exact image on the host:\n\
+                 \x20   docker pull ghcr.io/s2-streamstore/s2:{target}\n\
+                 The running container was not changed.\n"
+            ),
+            Self::SourceBuild => format!(
+                "This s2-cli was built from source. Check out {tag} and rebuild,\n\
+                 or install the exact release from:\n\
+                 \x20   https://github.com/{repo}/releases/tag/{tag}\n\
+                 The running binary was not changed.\n"
+            ),
+            Self::WindowsCargo => format!(
+                "Cargo cannot replace the running s2.exe on Windows.\n\
+                 After s2 exits, run:\n\
+                 \x20   {}\n\
+                 The running binary was not changed.\n",
+                cargo_install_command(target),
+            ),
+            Self::WindowsRelease => format!(
+                "Automatic in-place replacement is disabled on Windows.\n\
+                 After s2 exits, download {asset} and {CHECKSUMS_ASSET} from:\n\
+                 \x20   https://github.com/{repo}/releases/tag/{tag}\n\
+                 The running binary was not changed.\n",
+                asset = asset_name(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CommandSpec {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+impl CommandSpec {
+    fn new(program: &'static str, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            program,
+            args: args.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl fmt::Display for CommandSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.program)?;
+        for arg in &self.args {
+            write!(f, " {arg}")?;
+        }
+        Ok(())
+    }
+}
+
+fn cargo_install_command(target: &Version) -> CommandSpec {
+    CommandSpec::new(
+        "cargo",
+        [
+            "install".to_string(),
+            "--locked".to_string(),
+            "--force".to_string(),
+            "--version".to_string(),
+            target.to_string(),
+            "s2-cli".to_string(),
+        ],
+    )
+}
+
+fn plan_update(
+    channel: InstallChannel,
+    target: &Version,
+    running_executable_replaceable: bool,
+) -> Plan {
+    match channel {
+        InstallChannel::InstallScript | InstallChannel::GithubRelease => {
+            if running_executable_replaceable {
+                Plan::Mutate(Mutation::InPlace)
+            } else {
+                Plan::Advise(Advice::WindowsRelease)
+            }
+        }
+        InstallChannel::Cargo if !running_executable_replaceable => {
+            Plan::Advise(Advice::WindowsCargo)
+        }
+        InstallChannel::Cargo => Plan::Mutate(Mutation::Run(cargo_install_command(target))),
+        InstallChannel::Homebrew => Plan::Mutate(Mutation::Run(CommandSpec::new(
+            "brew",
+            ["upgrade", "s2-streamstore/s2/s2"],
+        ))),
+        InstallChannel::Docker => Plan::Advise(Advice::Docker),
+        InstallChannel::SourceBuild => Plan::Advise(Advice::SourceBuild),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -213,14 +315,12 @@ fn do_skip(target: &Version) -> Result<(), UpdateError> {
 }
 
 /// Run a package manager's upgrade command (Homebrew, Cargo).
-fn run_command(command: &str) -> Result<(), UpdateError> {
-    println!("Running: {}", command.cyan());
-    let mut parts = command.split_whitespace();
-    let program = parts.next().expect("upgrade command is non-empty");
-    let status = std::process::Command::new(program)
-        .args(parts)
+fn run_command(command: &CommandSpec) -> Result<(), UpdateError> {
+    println!("Running: {}", command.to_string().cyan());
+    let status = std::process::Command::new(command.program)
+        .args(&command.args)
         .status()
-        .map_err(|e| UpdateError::Spawn(program.to_string(), e))?;
+        .map_err(|e| UpdateError::Spawn(command.program.to_string(), e))?;
     if !status.success() {
         return Err(UpdateError::CommandFailed(command.to_string()));
     }
@@ -291,26 +391,50 @@ async fn in_place_update(channel: InstallChannel, target: &Version) -> Result<()
 /// Write `binary` next to the running executable and atomically swap it into
 /// place. Writing into the target directory first surfaces a permission error
 /// cleanly and keeps the swap on one filesystem.
+#[cfg(not(windows))]
 fn install_binary(exe: &Path, binary: &[u8]) -> Result<(), UpdateError> {
     let map_err = |source| UpdateError::Install {
         path: exe.display().to_string(),
         source,
     };
     let dir = exe.parent().unwrap_or_else(|| Path::new("."));
-    let staged = dir.join(format!(".s2-update-{}.tmp", std::process::id()));
+    let staged = dir.join(format!(".s2-update-{}.tmp", uuid::Uuid::new_v4()));
 
-    std::fs::write(&staged, binary).map_err(map_err)?;
+    // A random name plus create_new prevents a pre-existing file or symlink
+    // from being followed and truncated with the updater's privileges.
+    let mut staged_file = open_new_staged_file(&staged).map_err(map_err)?;
+    if let Err(e) = staged_file.write_all(binary) {
+        drop(staged_file);
+        let _ = std::fs::remove_file(&staged);
+        return Err(map_err(e));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)) {
+        if let Err(e) = staged_file.set_permissions(std::fs::Permissions::from_mode(0o755)) {
+            drop(staged_file);
             let _ = std::fs::remove_file(&staged);
             return Err(map_err(e));
         }
     }
+    drop(staged_file);
+
     let result = self_replace::self_replace(&staged).map_err(map_err);
     let _ = std::fs::remove_file(&staged);
     result
+}
+
+#[cfg(not(windows))]
+fn open_new_staged_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn install_binary(_exe: &Path, _binary: &[u8]) -> Result<(), UpdateError> {
+    Err(UpdateError::WindowsInPlaceUnsupported)
 }
 
 fn write_receipt(exe: &Path, version: &Version) {
@@ -361,15 +485,6 @@ fn binary_name() -> &'static str {
     } else {
         "s2"
     }
-}
-
-/// Accept `1.2.3`, `v1.2.3`, or `s2-cli-v1.2.3`.
-fn parse_version(input: &str) -> Result<Version, UpdateError> {
-    let trimmed = input
-        .strip_prefix(CLI_TAG_PREFIX)
-        .or_else(|| input.strip_prefix('v'))
-        .unwrap_or(input);
-    Version::parse(trimmed).map_err(|_| UpdateError::BadVersion(input.to_string()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -439,11 +554,116 @@ mod tests {
     }
 
     #[test]
-    fn parses_version_in_all_forms() {
-        for input in ["1.2.3", "v1.2.3", "s2-cli-v1.2.3"] {
-            assert_eq!(parse_version(input).unwrap(), Version::new(1, 2, 3));
+    fn cargo_plan_pins_the_latest_target_as_one_argument() {
+        let target = Version::parse("1.2.3-rc.1").unwrap();
+        let expected = Plan::Mutate(Mutation::Run(CommandSpec::new(
+            "cargo",
+            [
+                "install",
+                "--locked",
+                "--force",
+                "--version",
+                "1.2.3-rc.1",
+                "s2-cli",
+            ],
+        )));
+
+        assert_eq!(plan_update(InstallChannel::Cargo, &target, true), expected);
+        assert_eq!(
+            plan_update(InstallChannel::Cargo, &target, false),
+            Plan::Advise(Advice::WindowsCargo)
+        );
+        assert!(
+            Advice::WindowsCargo
+                .render(&target, "example/fork")
+                .contains("cargo install --locked --force --version 1.2.3-rc.1 s2-cli")
+        );
+    }
+
+    #[test]
+    fn homebrew_uses_its_upgrade_command() {
+        let latest = Version::new(0, 42, 0);
+        assert_eq!(
+            plan_update(InstallChannel::Homebrew, &latest, true),
+            Plan::Mutate(Mutation::Run(CommandSpec::new(
+                "brew",
+                ["upgrade", "s2-streamstore/s2/s2"],
+            )))
+        );
+    }
+
+    #[test]
+    fn advisory_plans_name_the_exact_target_without_mutating() {
+        let target = Version::new(0, 40, 0);
+        let docker = plan_update(InstallChannel::Docker, &target, true);
+        let source = plan_update(InstallChannel::SourceBuild, &target, true);
+        let windows = plan_update(InstallChannel::GithubRelease, &target, false);
+
+        assert_eq!(docker, Plan::Advise(Advice::Docker));
+        assert!(
+            Advice::Docker
+                .render(&target, "example/fork")
+                .contains("s2:0.40.0")
+        );
+        assert_eq!(source, Plan::Advise(Advice::SourceBuild));
+        assert!(
+            Advice::SourceBuild
+                .render(&target, "example/fork")
+                .contains("example/fork/releases/tag/s2-cli-v0.40.0")
+        );
+        assert_eq!(windows, Plan::Advise(Advice::WindowsRelease));
+        assert!(
+            Advice::WindowsRelease
+                .render(&target, "example/fork")
+                .contains("example/fork/releases/tag/s2-cli-v0.40.0")
+        );
+    }
+
+    #[test]
+    fn release_channels_only_replace_in_place_where_supported() {
+        let target = Version::new(0, 42, 0);
+        for channel in [InstallChannel::InstallScript, InstallChannel::GithubRelease] {
+            assert_eq!(
+                plan_update(channel, &target, true),
+                Plan::Mutate(Mutation::InPlace)
+            );
+            assert_eq!(
+                plan_update(channel, &target, false),
+                Plan::Advise(Advice::WindowsRelease)
+            );
         }
-        assert!(parse_version("not-a-version").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_does_not_follow_an_existing_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let protected = dir.path().join("protected");
+        let staged = dir.path().join(".s2-update-candidate.tmp");
+        std::fs::write(&protected, b"do not overwrite").unwrap();
+        symlink(&protected, &staged).unwrap();
+
+        let error = open_new_staged_file(&staged).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&protected).unwrap(), b"do not overwrite");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_refuses_without_touching_the_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("s2.exe");
+        std::fs::write(&exe, b"old binary").unwrap();
+
+        assert!(matches!(
+            install_binary(&exe, b"new binary"),
+            Err(UpdateError::WindowsInPlaceUnsupported)
+        ));
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

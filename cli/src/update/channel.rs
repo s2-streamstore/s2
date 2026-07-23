@@ -69,28 +69,6 @@ impl fmt::Display for InstallChannel {
     }
 }
 
-impl InstallChannel {
-    /// Exact command that upgrades an installation from this channel, when
-    /// there is an unambiguous one:
-    ///
-    /// - Channels without a manager re-run `install.sh` (replaced by `s2 self-update` once that
-    ///   exists).
-    /// - Managed channels go through their manager, which owns the binary.
-    /// - `GithubRelease` and `SourceBuild` have no single right answer, so callers should fall back
-    ///   to pointing at the docs.
-    pub fn upgrade_command(&self) -> Option<&'static str> {
-        match self {
-            Self::InstallScript => Some(
-                "curl -fsSL https://raw.githubusercontent.com/s2-streamstore/s2/main/install.sh | bash",
-            ),
-            Self::Homebrew => Some("brew upgrade s2-streamstore/s2/s2"),
-            Self::Cargo => Some("cargo install --locked s2-cli"),
-            Self::Docker => Some("docker pull ghcr.io/s2-streamstore/s2"),
-            Self::GithubRelease | Self::SourceBuild => None,
-        }
-    }
-}
-
 /// Resolve the install channel of the running executable.
 ///
 /// Cached for the lifetime of the process since the answer cannot change.

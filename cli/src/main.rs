@@ -55,21 +55,24 @@ fn install_rustls_crypto_provider() {
 async fn main() -> miette::Result<ExitCode> {
     install_rustls_crypto_provider();
     miette::set_panic_hook();
-    // don't run update check for `s2 lite`.
-    let update_check = if std::env::args().nth(1).as_deref() == Some("lite") {
-        None
-    } else {
+
+    let cli = parse_cli();
+    let passive_update_check = allows_passive_update_check(cli.command.as_ref());
+    let update_check = if passive_update_check {
         update::spawn_check()
+    } else {
+        None
     };
-    let result = run().await;
-    if result.is_ok() {
+
+    let result = run(cli).await;
+    if passive_update_check && result.is_ok() {
         update::notify(update_check).await;
     }
     Ok(result?)
 }
 
-async fn run() -> Result<ExitCode, CliError> {
-    let cli = Cli::try_parse().unwrap_or_else(|e| {
+fn parse_cli() -> Cli {
+    Cli::try_parse().unwrap_or_else(|e| {
         // Customize error message for metric commands to say "metric" instead of "subcommand"
         let msg = e.to_string();
         if msg.contains("requires a subcommand") && msg.contains("get-") && msg.contains("-metrics")
@@ -81,8 +84,14 @@ async fn run() -> Result<ExitCode, CliError> {
             std::process::exit(2);
         }
         e.exit()
-    });
+    })
+}
 
+fn allows_passive_update_check(command: Option<&Command>) -> bool {
+    !matches!(command, Some(Command::Lite(_) | Command::Update(_)))
+}
+
+async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     let Some(command) = cli.command else {
         Cli::command().print_help().ok();
         std::process::exit(0);
@@ -919,5 +928,34 @@ fn resolve_encryption_key(
             )?))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    fn command(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("CLI arguments parse")
+    }
+
+    #[test]
+    fn passive_update_check_uses_the_parsed_command() {
+        let update = command(&["s2", "update", "--check"]);
+        let lite = command(&["s2", "lite"]);
+        let normal = command(&["s2", "config", "list"]);
+
+        assert!(!allows_passive_update_check(update.command.as_ref()));
+        assert!(!allows_passive_update_check(lite.command.as_ref()));
+        assert!(allows_passive_update_check(normal.command.as_ref()));
+        assert!(allows_passive_update_check(None));
+    }
+
+    #[test]
+    fn update_rejects_a_version_target() {
+        let error =
+            Cli::try_parse_from(["s2", "update", "--version", "0.40.0"]).expect_err("must reject");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }
