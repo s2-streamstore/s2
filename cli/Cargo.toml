@@ -16,7 +16,6 @@ path = "src/main.rs"
 async-stream = { workspace = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-chrono = "0.4"
 clap = { workspace = true, features = ["derive"] }
 color-print = { workspace = true }
 colored = { workspace = true }

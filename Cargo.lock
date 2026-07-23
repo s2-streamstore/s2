@@ -4605,7 +4605,6 @@ dependencies = [
  "async-stream",
  "base64ct",
  "bytes",
- "chrono",
  "clap",
  "color-print",
  "colored",
