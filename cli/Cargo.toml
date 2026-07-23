@@ -16,12 +16,10 @@ path = "src/main.rs"
 async-stream = { workspace = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-chrono = "0.4"
 clap = { workspace = true, features = ["derive"] }
 color-print = { workspace = true }
 colored = { workspace = true }
 config = { workspace = true }
-crossterm = "0.29"
 dirs = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
@@ -29,7 +27,6 @@ indicatif = { workspace = true }
 json_to_table = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 rand = { workspace = true }
-ratatui = "0.30"
 reqwest = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true }
@@ -42,6 +39,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 strum = { workspace = true, features = ["derive"] }
 tabled = { workspace = true }
+terminal_size = "0.4"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true, features = ["io-util"] }

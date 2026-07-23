@@ -909,18 +909,6 @@ pub struct LatencyStats {
     pub max: std::time::Duration,
 }
 
-impl LatencyStats {
-    pub fn into_vec(self) -> Vec<(String, std::time::Duration)> {
-        vec![
-            ("min".to_owned(), self.min),
-            ("p50".to_owned(), self.p50),
-            ("p90".to_owned(), self.p90),
-            ("p99".to_owned(), self.p99),
-            ("max".to_owned(), self.max),
-        ]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
