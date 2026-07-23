@@ -1,5 +1,7 @@
-//! Once-daily reminder when a newer s2-cli release is available on GitHub.
+//! Once-daily reminder when a newer s2-cli release is available on GitHub,
+//! and the `s2 update` command that acts on it (see [`apply`]).
 
+pub mod apply;
 pub mod channel;
 
 use std::{
@@ -28,6 +30,11 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 struct CheckState {
     checked_at: u64,
     latest_version: String,
+    /// Version the user asked to stop being reminded about, via
+    /// `s2 update --skip`. Reminders resume once a release newer than this
+    /// appears.
+    #[serde(default)]
+    skipped_version: Option<String>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -75,8 +82,8 @@ pub fn spawn_check() -> Option<JoinHandle<Option<Version>>> {
     Some(tokio::spawn(check()))
 }
 
-/// Return the latest released version if it is newer than the current one and
-/// no check has run within [`CHECK_INTERVAL`].
+/// Return the latest released version if it is newer than the current one,
+/// has not been skipped, and no check has run within [`CHECK_INTERVAL`].
 async fn check() -> Option<Version> {
     let path = state_path()?;
     let now = unix_now();
@@ -86,27 +93,49 @@ async fn check() -> Option<Version> {
     {
         return None;
     }
+    let skipped = state.as_ref().and_then(|s| s.skipped_version.clone());
     let fetched = fetch_latest().await;
     // Record the attempt even on fetch failure, so an unreachable GitHub does
-    // not turn into a lookup on every invocation.
+    // not turn into a lookup on every invocation. Preserve any skip marker.
     let latest_version = fetched
         .as_ref()
         .map(ToString::to_string)
-        .or(state.map(|s| s.latest_version))
+        .or_else(|| state.map(|s| s.latest_version))
         .unwrap_or_default();
     save_state(
         &path,
         &CheckState {
             checked_at: now,
             latest_version,
+            skipped_version: skipped.clone(),
         },
     );
     let latest = fetched?;
+    // A skip only silences that exact version; a newer release resumes nagging.
+    if skipped.as_deref() == Some(latest.to_string().as_str()) {
+        return None;
+    }
     let current = Version::parse(CURRENT_VERSION).ok()?;
     (latest > current).then_some(latest)
 }
 
-async fn fetch_latest() -> Option<Version> {
+/// Persist a request (from `s2 update --skip`) to stop reminding about
+/// `version`. Returns whether the marker was written.
+pub fn skip_version(version: &Version) -> bool {
+    let Some(path) = state_path() else {
+        return false;
+    };
+    let mut state = load_state(&path).unwrap_or(CheckState {
+        checked_at: 0,
+        latest_version: version.to_string(),
+        skipped_version: None,
+    });
+    state.skipped_version = Some(version.to_string());
+    save_state(&path, &state);
+    true
+}
+
+pub(crate) async fn fetch_latest() -> Option<Version> {
     #[derive(Deserialize)]
     struct Release {
         tag_name: String,
@@ -159,15 +188,9 @@ pub async fn notify(check: Option<JoinHandle<Option<Version>>>) {
         CURRENT_VERSION.cyan(),
         format!("→ {latest}").cyan(),
     );
-    match channel::detect().upgrade_command() {
-        Some(command) => {
-            eprintln!("{} {}", "To upgrade:".yellow(), command.cyan());
-        }
-        None => eprintln!(
-            "{}",
-            "To upgrade: https://s2.dev/docs/quickstart#get-started-with-the-cli".yellow()
-        ),
-    }
+    // `s2 update` handles every install channel (in-place upgrade, delegating
+    // to a package manager, or explaining how), so it is the one hint to give.
+    eprintln!("{} {}", "To upgrade, run:".yellow(), "s2 update".cyan());
 }
 
 #[cfg(test)]

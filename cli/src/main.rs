@@ -148,6 +148,13 @@ async fn run() -> Result<ExitCode, CliError> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if let Command::Update(args) = &command {
+        update::apply::run(args)
+            .await
+            .map_err(|e| CliError::Update(e.to_string()))?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     if let Command::Apply(ApplyArgs { schema: true, .. }) = &command {
         let schema = s2_resource_spec::json_schema();
         println!(
@@ -172,7 +179,7 @@ async fn run() -> Result<ExitCode, CliError> {
     let mut exit_code = ExitCode::SUCCESS;
     let result: Result<(), CliError> = (async {
         match command {
-        Command::Config(..) | Command::Lite(..) => unreachable!(),
+        Command::Config(..) | Command::Lite(..) | Command::Update(..) => unreachable!(),
 
         Command::Ls(args) => {
             if let Some(ref uri) = args.uri {

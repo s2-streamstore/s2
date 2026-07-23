@@ -197,6 +197,37 @@ pub enum Command {
     /// Starts a lightweight S2-compatible server that can be backed by
     /// S3, local filesystem, or in-memory storage.
     Lite(crate::lite::LiteArgs),
+
+    /// Update the S2 CLI.
+    ///
+    /// Detects how this binary was installed and upgrades it the right way:
+    ///   - install script / manual download: downloads the matching release artifact, verifies its
+    ///     checksum, and replaces the binary in place;
+    ///   - Homebrew / Cargo: shows (or, with --yes, runs) the upgrade command for that package
+    ///     manager;
+    ///   - Docker / source build: prints how to update.
+    Update(UpdateArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct UpdateArgs {
+    /// Report the installed and latest versions without upgrading.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Silence update reminders for the current latest release without
+    /// upgrading.
+    #[arg(long)]
+    pub skip: bool,
+
+    /// Upgrade to a specific version instead of the latest release.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+
+    /// Do not prompt; for Homebrew and Cargo installs, run the upgrade
+    /// command directly.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Subcommand, Debug)]

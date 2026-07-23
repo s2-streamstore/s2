@@ -30,6 +30,8 @@ rand = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true }
+self-replace = "1.5"
+sha2 = "0.10"
 s2-common = { workspace = true }
 s2-lite = { workspace = true }
 s2-resource-spec = { workspace = true }
@@ -48,6 +50,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { workspace = true, features = ["v4"] }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # tikv-jemallocator does not build on the MSVC toolchain; on Windows-MSVC
 # Rust falls back to the system allocator (HeapAlloc).
