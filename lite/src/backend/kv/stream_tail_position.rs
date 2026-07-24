@@ -11,6 +11,7 @@ pub fn ser_key(stream_id: StreamId) -> Bytes {
     super::ser_stream_id_key(KeyType::StreamTailPosition, stream_id)
 }
 
+#[allow(dead_code)]
 pub fn deser_key(bytes: Bytes) -> Result<StreamId, DeserializationError> {
     super::deser_stream_id_key(KeyType::StreamTailPosition, bytes)
 }
