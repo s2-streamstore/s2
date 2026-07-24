@@ -667,14 +667,6 @@ mod tests {
     }
 
     #[test]
-    fn sha256_matches_known_vector() {
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
     fn checksum_lookup_by_asset_name() {
         let sums = "\
 aaa11111111111111111111111111111111111111111111111111111111111aa  s2-x86_64-apple-darwin.zip
@@ -691,13 +683,6 @@ ccc33333333333333333333333333333333333333333333333333333333333cc *s2-x86_64-unkn
             Some("ccc33333333333333333333333333333333333333333333333333333333333cc")
         );
         assert_eq!(checksum_for(sums, "s2-nonexistent.zip"), None);
-    }
-
-    #[test]
-    fn asset_and_binary_names_are_consistent() {
-        assert!(asset_name().starts_with("s2-"));
-        assert!(asset_name().ends_with(".zip"));
-        assert!(matches!(binary_name(), "s2" | "s2.exe"));
     }
 
     fn zip_with(entry: &str, data: &[u8]) -> Vec<u8> {

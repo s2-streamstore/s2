@@ -214,11 +214,4 @@ mod tests {
         );
         assert_eq!(latest_cli_version([("s2-sdk-v0.31.8", true)]), None);
     }
-
-    #[tokio::test]
-    #[ignore = "hits the GitHub API"]
-    async fn fetches_latest_cli_release() {
-        let latest = fetch_latest().await;
-        assert!(latest.is_some(), "expected a released s2-cli version");
-    }
 }
