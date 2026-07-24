@@ -6,9 +6,8 @@
 //! 1. Install receipt: an `s2-receipt.json` written by `install.sh` next to the binary. Only
 //!    trusted when the binary path recorded in the receipt resolves to the running executable, so a
 //!    binary copied elsewhere does not inherit the receipt.
-//! 2. Channel-specific build stamp: the `S2_BUILD_CHANNEL` env var baked in at compile time by
-//!    build pipelines that know the channel exactly (`docker` in the Dockerfile; `brew` reserved
-//!    for brew-flavored artifacts).
+//! 2. Docker build stamp: `S2_BUILD_CHANNEL=docker`, baked in by the Dockerfile because a container
+//!    cannot be identified from the executable path.
 //! 3. Environment facts (definitional, not heuristic):
 //!    - a resolved executable under a Homebrew cellar was installed by brew;
 //!    - one under `$CARGO_INSTALL_ROOT/bin`, `$CARGO_HOME/bin`, or `~/.cargo/bin` was installed by
@@ -26,7 +25,9 @@ use std::{
 
 use serde::Deserialize;
 
-/// Channel baked into official binaries at build time.
+/// Build provenance baked into Docker and generic release binaries.
+///
+/// Homebrew is intentionally inferred from the resolved executable path instead.
 const BUILD_CHANNEL: Option<&str> = option_env!("S2_BUILD_CHANNEL");
 
 /// Exact source commit stamped into the binary by `build.rs`.
@@ -69,6 +70,20 @@ impl fmt::Display for InstallChannel {
     }
 }
 
+impl InstallChannel {
+    /// Stable identifier for machine-readable metadata such as the HTTP user agent.
+    const fn id(self) -> &'static str {
+        match self {
+            Self::InstallScript => "install-script",
+            Self::Homebrew => "homebrew",
+            Self::Cargo => "cargo",
+            Self::Docker => "docker",
+            Self::GithubRelease => "github-release",
+            Self::SourceBuild => "source-build",
+        }
+    }
+}
+
 /// Resolve the install channel of the running executable.
 ///
 /// Cached for the lifetime of the process since the answer cannot change.
@@ -90,8 +105,19 @@ pub fn long_version() -> &'static str {
     &VERSION
 }
 
+/// HTTP user agent shared by S2 API calls and updater requests.
+pub fn user_agent() -> &'static str {
+    static USER_AGENT: LazyLock<String> =
+        LazyLock::new(|| format_user_agent(env!("CARGO_PKG_VERSION"), detect()));
+    &USER_AGENT
+}
+
 fn format_version(version: &str, revision: &str, channel: InstallChannel) -> String {
     format!("{version} (rev {revision}, via {channel})")
+}
+
+fn format_user_agent(version: &str, channel: InstallChannel) -> String {
+    format!("s2-cli/{version} (channel={})", channel.id())
 }
 
 /// Apply the precedence order documented at the module level.
@@ -104,10 +130,8 @@ fn resolve(exe: Option<&Path>, stamp: Option<&str>) -> InstallChannel {
     {
         return InstallChannel::InstallScript;
     }
-    match stamp {
-        Some("docker") => return InstallChannel::Docker,
-        Some("brew") => return InstallChannel::Homebrew,
-        _ => {}
+    if stamp == Some("docker") {
+        return InstallChannel::Docker;
     }
     if let Some(exe) = exe {
         if is_homebrew(exe, std::env::var_os("HOMEBREW_CELLAR").map(PathBuf::from)) {
@@ -203,13 +227,34 @@ mod tests {
     fn stamp_resolution_without_receipt_or_known_paths() {
         let exe = Path::new("/weird/place/s2");
         assert_eq!(resolve(Some(exe), Some("docker")), InstallChannel::Docker);
-        assert_eq!(resolve(Some(exe), Some("brew")), InstallChannel::Homebrew);
+        assert_eq!(
+            resolve(Some(exe), Some("brew")),
+            InstallChannel::SourceBuild,
+            "Homebrew is detected from its resolved Cellar path, not a build stamp"
+        );
         assert_eq!(
             resolve(Some(exe), Some("release")),
             InstallChannel::GithubRelease
         );
         assert_eq!(resolve(Some(exe), None), InstallChannel::SourceBuild);
         assert_eq!(resolve(None, None), InstallChannel::SourceBuild);
+    }
+
+    #[test]
+    fn user_agent_includes_machine_readable_channel() {
+        for (channel, id) in [
+            (InstallChannel::InstallScript, "install-script"),
+            (InstallChannel::Homebrew, "homebrew"),
+            (InstallChannel::Cargo, "cargo"),
+            (InstallChannel::Docker, "docker"),
+            (InstallChannel::GithubRelease, "github-release"),
+            (InstallChannel::SourceBuild, "source-build"),
+        ] {
+            assert_eq!(
+                format_user_agent("0.41.0", channel),
+                format!("s2-cli/0.41.0 (channel={id})")
+            );
+        }
     }
 
     #[test]

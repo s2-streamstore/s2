@@ -350,7 +350,7 @@ async fn in_place_update(channel: InstallChannel, target: &Version) -> Result<()
         repo = repo(),
     );
     let client = reqwest::Client::builder()
-        .user_agent(concat!("s2-cli/", env!("CARGO_PKG_VERSION")))
+        .user_agent(channel::user_agent())
         .timeout(DOWNLOAD_TIMEOUT)
         .build()
         .map_err(UpdateError::Http)?;

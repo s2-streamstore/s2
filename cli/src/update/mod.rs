@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-pub use channel::long_version;
+pub use channel::{long_version, user_agent};
 use colored::Colorize;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -144,7 +144,7 @@ pub(crate) async fn fetch_latest() -> Option<Version> {
     }
 
     let client = reqwest::Client::builder()
-        .user_agent(concat!("s2-cli/", env!("CARGO_PKG_VERSION")))
+        .user_agent(user_agent())
         .timeout(FETCH_TIMEOUT)
         .build()
         .ok()?;
