@@ -212,12 +212,12 @@ pub enum Command {
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
     /// Report the installed and latest versions without upgrading.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["skip", "yes"])]
     pub check: bool,
 
     /// Silence update reminders for the current latest release without
     /// upgrading.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "yes")]
     pub skip: bool,
 
     /// Do not prompt; for Homebrew and Cargo installs, run the upgrade

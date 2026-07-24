@@ -357,9 +357,18 @@ async fn in_place_update(channel: InstallChannel, target: &Version) -> Result<()
 
     println!("Downloading s2-cli {target} for {TARGET}...");
 
+    // Only a definitive 404 means the release lacks checksums; anything else
+    // (DNS failure, timeout, 5xx) is a download problem and must not steer the
+    // user toward a manual install.
     let sums = get_text(&client, &format!("{base}/{CHECKSUMS_ASSET}"))
         .await
-        .map_err(|_| UpdateError::ChecksumsUnavailable(target.clone()))?;
+        .map_err(|e| {
+            if e.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                UpdateError::ChecksumsUnavailable(target.clone())
+            } else {
+                UpdateError::Download(CHECKSUMS_ASSET.to_string(), e)
+            }
+        })?;
     let expected =
         checksum_for(&sums, &asset).ok_or_else(|| UpdateError::ChecksumMissing(asset.clone()))?;
 
@@ -411,7 +420,12 @@ fn install_binary(exe: &Path, binary: &[u8]) -> Result<(), UpdateError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = staged_file.set_permissions(std::fs::Permissions::from_mode(0o755)) {
+        // Preserve the mode of the binary being replaced (a deliberate 0700
+        // install stays 0700); fall back to 0755 if it cannot be read.
+        let mode = std::fs::metadata(exe)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(0o755);
+        if let Err(e) = staged_file.set_permissions(std::fs::Permissions::from_mode(mode)) {
             drop(staged_file);
             let _ = std::fs::remove_file(&staged);
             return Err(map_err(e));
@@ -432,6 +446,9 @@ fn open_new_staged_file(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+// TODO: the `self-replace` crate does support replacing the running executable
+// on Windows (rename-aside + delete-pending); enable in-place updates there
+// once that path has been validated on a Windows machine.
 #[cfg(windows)]
 fn install_binary(_exe: &Path, _binary: &[u8]) -> Result<(), UpdateError> {
     Err(UpdateError::WindowsInPlaceUnsupported)
@@ -441,11 +458,19 @@ fn write_receipt(exe: &Path, version: &Version) {
     let Some(dir) = exe.parent() else {
         return;
     };
-    let receipt = format!(
-        "{{\n  \"channel\": \"install-script\",\n  \"version\": \"{version}\",\n  \"binary_path\": {:?}\n}}\n",
-        exe.display().to_string(),
-    );
-    let _ = std::fs::write(dir.join("s2-receipt.json"), receipt);
+    // Serialize with serde_json rather than by hand: this file is the source
+    // of truth for channel detection, and a malformed write would permanently
+    // downgrade the detected channel.
+    let receipt = serde_json::json!({
+        "channel": channel::INSTALL_SCRIPT_CHANNEL,
+        "version": version.to_string(),
+        "binary_path": exe.display().to_string(),
+        "installed_at": humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string(),
+    });
+    let Ok(contents) = serde_json::to_string_pretty(&receipt) else {
+        return;
+    };
+    let _ = std::fs::write(dir.join(channel::RECEIPT_FILE), contents + "\n");
 }
 
 async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, reqwest::Error> {
@@ -524,13 +549,12 @@ fn extract_named(archive_bytes: &[u8], want: &str) -> Result<Vec<u8>, UpdateErro
             .unwrap_or("")
             .to_string();
         if is_file && base == want {
-            let mut buf = Vec::with_capacity(entry.size() as usize);
+            // Cap the pre-allocation so a forged size field in the zip header
+            // cannot force a huge allocation; read_to_end grows as needed.
+            let mut buf = Vec::with_capacity(entry.size().min(64 << 20) as usize);
             entry
                 .read_to_end(&mut buf)
-                .map_err(|source| UpdateError::Install {
-                    path: want.to_string(),
-                    source,
-                })?;
+                .map_err(|e| UpdateError::Archive(e.to_string()))?;
             return Ok(buf);
         }
     }
@@ -664,6 +688,24 @@ mod tests {
         ));
         assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn receipt_written_after_update_is_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("s2");
+        write_receipt(&exe, &Version::new(0, 42, 0));
+
+        let contents = std::fs::read_to_string(dir.path().join(channel::RECEIPT_FILE)).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(receipt["channel"], "install-script");
+        assert_eq!(receipt["version"], "0.42.0");
+        assert_eq!(receipt["binary_path"], exe.display().to_string());
+        assert!(
+            receipt["installed_at"]
+                .as_str()
+                .is_some_and(|t| t.ends_with('Z'))
+        );
     }
 
     #[test]

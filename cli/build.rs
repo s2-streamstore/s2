@@ -13,23 +13,23 @@ const EMBEDDED_REVISION: &str = "S2_GIT_COMMIT";
 const UNKNOWN_REVISION: &str = "unknown";
 
 fn main() {
-    println!("cargo:rerun-if-env-changed={REVISION_OVERRIDE}");
-    println!("cargo:rerun-if-env-changed=S2_BUILD_CHANNEL");
+    println!("cargo::rerun-if-env-changed={REVISION_OVERRIDE}");
+    println!("cargo::rerun-if-env-changed=S2_BUILD_CHANNEL");
 
     let target = env::var("TARGET").expect("cargo sets TARGET for build scripts");
-    println!("cargo:rustc-env=S2_TARGET={target}");
+    println!("cargo::rustc-env=S2_TARGET={target}");
 
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR for build scripts"),
     );
     let revision = resolve_revision(&manifest_dir);
-    if revision == UNKNOWN_REVISION && env::var("S2_BUILD_CHANNEL").as_deref() == Ok("release") {
-        panic!("official release builds must set {REVISION_OVERRIDE} to the source commit");
-    }
     if revision == UNKNOWN_REVISION {
-        println!("cargo:warning=building s2-cli without source commit metadata");
+        if env::var("S2_BUILD_CHANNEL").as_deref() == Ok("release") {
+            panic!("official release builds must set {REVISION_OVERRIDE} to the source commit");
+        }
+        println!("cargo::warning=building s2-cli without source commit metadata");
     }
-    println!("cargo:rustc-env={EMBEDDED_REVISION}={revision}");
+    println!("cargo::rustc-env={EMBEDDED_REVISION}={revision}");
 }
 
 fn resolve_revision(manifest_dir: &Path) -> String {
@@ -39,7 +39,7 @@ fn resolve_revision(manifest_dir: &Path) -> String {
 
     let vcs_info = manifest_dir.join(".cargo_vcs_info.json");
     if let Some(revision) = packaged_revision(&vcs_info) {
-        println!("cargo:rerun-if-changed={}", vcs_info.display());
+        println!("cargo::rerun-if-changed={}", vcs_info.display());
         return revision;
     }
 
@@ -85,16 +85,18 @@ fn emit_git_rerun_hints(manifest_dir: &Path) {
     let Some(head) = git_path(manifest_dir, "HEAD") else {
         return;
     };
-    println!("cargo:rerun-if-changed={}", head.display());
+    println!("cargo::rerun-if-changed={}", head.display());
 
+    // The loose ref file may not exist (e.g. right after `git pack-refs`); cargo
+    // treats a registered-but-missing path as always dirty, which errs toward an
+    // extra rebuild rather than a stale embedded revision.
     if let Ok(contents) = fs::read_to_string(&head)
         && let Some(reference) = contents.strip_prefix("ref: ").map(str::trim)
     {
-        if let Some(reference_path) = git_path(manifest_dir, reference) {
-            println!("cargo:rerun-if-changed={}", reference_path.display());
-        }
-        if let Some(packed_refs) = git_path(manifest_dir, "packed-refs") {
-            println!("cargo:rerun-if-changed={}", packed_refs.display());
+        for path in [reference, "packed-refs"] {
+            if let Some(path) = git_path(manifest_dir, path) {
+                println!("cargo::rerun-if-changed={}", path.display());
+            }
         }
     }
 }

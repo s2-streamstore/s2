@@ -33,11 +33,12 @@ const BUILD_CHANNEL: Option<&str> = option_env!("S2_BUILD_CHANNEL");
 /// Exact source commit stamped into the binary by `build.rs`.
 const GIT_COMMIT: &str = env!("S2_GIT_COMMIT");
 
-/// Name of the receipt file `install.sh` writes next to the binary.
-const RECEIPT_FILE: &str = "s2-receipt.json";
+/// Name of the receipt file `install.sh` (and `s2 update` after an in-place
+/// upgrade) writes next to the binary.
+pub(super) const RECEIPT_FILE: &str = "s2-receipt.json";
 
 /// Receipt `channel` value written by `install.sh`.
-const INSTALL_SCRIPT_CHANNEL: &str = "install-script";
+pub(super) const INSTALL_SCRIPT_CHANNEL: &str = "install-script";
 
 /// How the running binary was installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,8 +177,17 @@ fn receipt_matches(exe: &Path) -> bool {
 /// standard prefixes, `$HOMEBREW_CELLAR` when relocated) and symlinks into
 /// `bin`, so a resolved path under the cellar is brew by definition.
 fn is_homebrew(exe: &Path, cellar: Option<PathBuf>) -> bool {
-    exe.components().any(|c| c.as_os_str() == "Cellar")
-        || cellar.is_some_and(|c| exe.starts_with(c))
+    if cellar.is_some_and(|c| exe.starts_with(c)) {
+        return true;
+    }
+    // Require the keg shape `Cellar/<formula>/<version>/.../<binary>` rather than any
+    // component merely named "Cellar", so an unrelated directory of that name can't
+    // masquerade as a brew install. The binary must sit at least below formula/version.
+    let components: Vec<_> = exe.components().map(|c| c.as_os_str()).collect();
+    components
+        .iter()
+        .position(|c| *c == "Cellar")
+        .is_some_and(|cellar| components.len() >= cellar + 4)
 }
 
 /// Directories where `cargo install` places binaries, in cargo's own
@@ -284,6 +294,9 @@ mod tests {
         ));
         assert!(!is_homebrew(Path::new("/Users/me/.s2/bin/s2"), None));
         assert!(!is_homebrew(Path::new("/usr/local/bin/s2"), None));
+        // A directory merely named "Cellar" is not a keg without formula/version beneath it.
+        assert!(!is_homebrew(Path::new("/Users/me/Cellar/s2"), None));
+        assert!(!is_homebrew(Path::new("/home/me/Cellar/projects/s2"), None));
     }
 
     #[test]

@@ -16,8 +16,10 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
+// The largest page GitHub allows: every component in this workspace cuts a
+// release per cycle, so a CLI tag must stay findable several cycles back.
 const RELEASES_API_URL: &str =
-    "https://api.github.com/repos/s2-streamstore/s2/releases?per_page=50";
+    "https://api.github.com/repos/s2-streamstore/s2/releases?per_page=100";
 const CLI_TAG_PREFIX: &str = "s2-cli-v";
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
