@@ -42,7 +42,7 @@ pub struct CliConfig {
 }
 
 #[cfg(target_os = "windows")]
-fn config_path() -> Result<PathBuf, CliConfigError> {
+pub fn config_path() -> Result<PathBuf, CliConfigError> {
     let mut path = dirs::config_dir().ok_or(CliConfigError::DirNotFound)?;
     path.push("s2");
     path.push("config.toml");
@@ -50,12 +50,21 @@ fn config_path() -> Result<PathBuf, CliConfigError> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn config_path() -> Result<PathBuf, CliConfigError> {
+pub fn config_path() -> Result<PathBuf, CliConfigError> {
     let mut path = dirs::home_dir().ok_or(CliConfigError::DirNotFound)?;
     path.push(".config");
     path.push("s2");
     path.push("config.toml");
     Ok(path)
+}
+
+/// Returns the config file path as a displayable string, falling back to a
+/// placeholder if the home directory cannot be determined. Used in user-facing
+/// error messages where panicking would be inappropriate.
+pub fn config_path_string() -> String {
+    config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<config file>".to_string())
 }
 
 pub fn load_config_file() -> Result<CliConfig, CliConfigError> {
@@ -221,11 +230,11 @@ pub fn sdk_config(config: &CliConfig, user_agent: &str) -> Result<S2Config, CliE
     match (&config.account_endpoint, &config.basin_endpoint) {
         (Some(account_endpoint_str), Some(basin_endpoint_str)) => {
             let account_endpoint = AccountEndpoint::new(account_endpoint_str)
-                .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+                .map_err(|e| CliError::EndpointsInvalid(e.to_string()))?;
             let basin_endpoint = BasinEndpoint::new(basin_endpoint_str)
-                .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+                .map_err(|e| CliError::EndpointsInvalid(e.to_string()))?;
             let endpoints = S2Endpoints::new(account_endpoint, basin_endpoint)
-                .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+                .map_err(|e| CliError::EndpointsInvalid(e.to_string()))?;
             sdk_config = sdk_config.with_endpoints(endpoints);
         }
         (Some(_), None) => {

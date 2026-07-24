@@ -161,3 +161,192 @@ fn config_set_invalid_key() {
         .assert()
         .failure();
 }
+
+/// An invalid endpoint set via the config file should produce a source-agnostic
+/// error message that points to both the config file and the environment
+/// variables, without claiming the endpoints were loaded "from environment".
+#[test]
+fn invalid_endpoint_from_config_file() {
+    let env = TestEnv::new();
+
+    // Set up a token and malformed endpoints in the config file (realistic
+    // typo: "https//" instead of "https://").
+    env.s2()
+        .args(["config", "set", "access_token", "test-token"])
+        .assert()
+        .success();
+    env.s2()
+        .args(["config", "set", "account_endpoint", "https//a.s2.dev"])
+        .assert()
+        .success();
+    env.s2()
+        .args(["config", "set", "basin_endpoint", "https//b.s2.dev"])
+        .assert()
+        .success();
+
+    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    // The error should not misattribute the source to environment variables.
+    assert!(
+        !stderr.contains("from environment"),
+        "stderr should not say 'from environment', got: {stderr}"
+    );
+    // The error should be source-agnostic.
+    assert!(
+        stderr.contains("Unable to parse S2 endpoints"),
+        "stderr should say 'Unable to parse S2 endpoints', got: {stderr}"
+    );
+    // Help text should mention the config file path that was actually used.
+    assert!(
+        stderr.contains("config.toml"),
+        "stderr should mention the config file path, got: {stderr}"
+    );
+    // Help text should mention both environment variable names.
+    assert!(
+        stderr.contains("S2_ACCOUNT_ENDPOINT") && stderr.contains("S2_BASIN_ENDPOINT"),
+        "stderr should mention both S2_ACCOUNT_ENDPOINT and S2_BASIN_ENDPOINT, got: {stderr}"
+    );
+    // The underlying parse failure detail should still be surfaced.
+    assert!(
+        stderr.contains("invalid account endpoint"),
+        "stderr should contain the underlying parse error, got: {stderr}"
+    );
+}
+
+/// An invalid endpoint set via environment variables should produce the same
+/// source-agnostic error message.
+#[test]
+fn invalid_endpoint_from_env() {
+    let env = TestEnv::new();
+    let mut cmd = env.s2();
+    cmd.env("S2_ACCESS_TOKEN", "test-token");
+    cmd.env("S2_ACCOUNT_ENDPOINT", "https//a.s2.dev");
+    cmd.env("S2_BASIN_ENDPOINT", "https//b.s2.dev");
+
+    let assert = cmd.args(["list-basins"]).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    assert!(
+        !stderr.contains("from environment"),
+        "stderr should not say 'from environment', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Unable to parse S2 endpoints"),
+        "stderr should say 'Unable to parse S2 endpoints', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("config.toml"),
+        "stderr should mention the config file path, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("S2_ACCOUNT_ENDPOINT") && stderr.contains("S2_BASIN_ENDPOINT"),
+        "stderr should mention both S2_ACCOUNT_ENDPOINT and S2_BASIN_ENDPOINT, got: {stderr}"
+    );
+}
+
+/// When only the basin endpoint is malformed, the parse error for the basin
+/// endpoint should still be surfaced with the source-agnostic message.
+#[test]
+fn invalid_basin_endpoint_from_config_file() {
+    let env = TestEnv::new();
+
+    env.s2()
+        .args(["config", "set", "access_token", "test-token"])
+        .assert()
+        .success();
+    env.s2()
+        .args(["config", "set", "account_endpoint", "https://a.s2.dev"])
+        .assert()
+        .success();
+    env.s2()
+        .args(["config", "set", "basin_endpoint", "https//b.s2.dev"])
+        .assert()
+        .success();
+
+    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    assert!(
+        !stderr.contains("from environment"),
+        "stderr should not say 'from environment', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Unable to parse S2 endpoints"),
+        "stderr should say 'Unable to parse S2 endpoints', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("invalid basin endpoint"),
+        "stderr should contain the underlying basin parse error, got: {stderr}"
+    );
+}
+
+/// When both endpoints parse individually but have mismatched schemes, the
+/// `S2Endpoints::new` mismatch error should also use the source-agnostic
+/// message rather than blaming the environment.
+#[test]
+fn mismatched_endpoint_schemes_from_config_file() {
+    let env = TestEnv::new();
+
+    env.s2()
+        .args(["config", "set", "access_token", "test-token"])
+        .assert()
+        .success();
+    env.s2()
+        .args(["config", "set", "account_endpoint", "https://a.s2.dev"])
+        .assert()
+        .success();
+    env.s2()
+        .args(["config", "set", "basin_endpoint", "http://{basin}.b.s2.dev"])
+        .assert()
+        .success();
+
+    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    assert!(
+        !stderr.contains("from environment"),
+        "stderr should not say 'from environment', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Unable to parse S2 endpoints"),
+        "stderr should say 'Unable to parse S2 endpoints', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("same scheme"),
+        "stderr should mention the scheme mismatch, got: {stderr}"
+    );
+}
+
+/// A command that sets only one endpoint should still warn (not error) and use
+/// default endpoints, ensuring endpoint validation is not triggered in that
+/// path. This guards against regressions in the partial-endpoint warnings.
+#[test]
+fn only_account_endpoint_set_warns_and_uses_defaults() {
+    let env = TestEnv::new();
+
+    env.s2()
+        .args(["config", "set", "access_token", "test-token"])
+        .assert()
+        .success();
+    env.s2()
+        .args(["config", "set", "account_endpoint", "https://a.s2.dev"])
+        .assert()
+        .success();
+
+    // Should not produce an endpoint parse error; it should warn about the
+    // missing basin endpoint and fall back to defaults. Without a reachable
+    // server the command will fail, but it must fail with a network/connection
+    // error, not an endpoint parse error.
+    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    assert!(
+        stderr.contains("account endpoint is set but basin endpoint is not"),
+        "stderr should warn about the partial endpoint config, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Unable to parse S2 endpoints"),
+        "stderr should not report an endpoint parse error, got: {stderr}"
+    );
+}
