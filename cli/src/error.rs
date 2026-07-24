@@ -28,12 +28,14 @@ pub enum CliError {
     #[diagnostic(transparent)]
     InvalidArgs(miette::Report),
 
-    #[error("Unable to load S2 endpoints from environment: {0}")]
+    #[error("Unable to parse S2 endpoints: {0}")]
     #[diagnostic(help(
-        "Are you overriding `S2_ACCOUNT_ENDPOINT` or `S2_BASIN_ENDPOINT`?
-            Make sure the values are in the expected format."
+        "Endpoints can be set in the config file ({}) or via the `S2_ACCOUNT_ENDPOINT` / \
+         `S2_BASIN_ENDPOINT` environment variables. Make sure the values are valid URLs \
+         (e.g., https://a.s2.dev).",
+        crate::config::config_path_string()
     ))]
-    EndpointsFromEnv(String),
+    EndpointsInvalid(String),
 
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help("{}", HELP))]
