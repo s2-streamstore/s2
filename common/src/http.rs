@@ -9,7 +9,7 @@ where
 #[cfg(feature = "axum")]
 pub mod extract {
     use axum::{
-        extract::{FromRequestParts, OptionalFromRequestParts},
+        extract::FromRequestParts,
         response::{IntoResponse, Response},
     };
 
@@ -63,26 +63,6 @@ pub mod extract {
             _state: &S,
         ) -> Result<Self, Self::Rejection> {
             parse_header(&parts.headers).map(Self)
-        }
-    }
-
-    impl<S, T> OptionalFromRequestParts<S> for Header<T>
-    where
-        S: Send + Sync,
-        T: super::ParseableHeader,
-        T::Err: std::fmt::Display,
-    {
-        type Rejection = HeaderRejection;
-
-        async fn from_request_parts(
-            parts: &mut http::request::Parts,
-            _state: &S,
-        ) -> Result<Option<Self>, Self::Rejection> {
-            match parse_header(&parts.headers) {
-                Ok(value) => Ok(Some(Header(value))),
-                Err(HeaderRejection::MissingHeader(_)) => Ok(None),
-                Err(e) => Err(e),
-            }
         }
     }
 
