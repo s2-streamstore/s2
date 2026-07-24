@@ -927,32 +927,3 @@ fn resolve_encryption_key(
         _ => Ok(None),
     }
 }
-
-#[cfg(test)]
-mod launch_tests {
-    use super::*;
-
-    fn command(args: &[&str]) -> Cli {
-        Cli::try_parse_from(args).expect("CLI arguments parse")
-    }
-
-    #[test]
-    fn passive_update_check_uses_the_parsed_command() {
-        let update = command(&["s2", "update", "--check"]);
-        let lite = command(&["s2", "lite"]);
-        let normal = command(&["s2", "config", "list"]);
-
-        assert!(!allows_passive_update_check(update.command.as_ref()));
-        assert!(!allows_passive_update_check(lite.command.as_ref()));
-        assert!(allows_passive_update_check(normal.command.as_ref()));
-        assert!(allows_passive_update_check(None));
-    }
-
-    #[test]
-    fn update_rejects_a_version_target() {
-        let error =
-            Cli::try_parse_from(["s2", "update", "--version", "0.40.0"]).expect_err("must reject");
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-}

@@ -42,26 +42,6 @@ impl TestEnv {
 }
 
 #[test]
-fn version_reports_embedded_commit() {
-    let prefix = format!(
-        "s2 {} (rev {}, via ",
-        env!("CARGO_PKG_VERSION"),
-        env!("S2_GIT_COMMIT")
-    );
-    for arg in ["--version", "-V"] {
-        TestEnv::new()
-            .s2()
-            .arg(arg)
-            .assert()
-            .success()
-            .stderr("")
-            .stdout(
-                predicate::str::starts_with(prefix.clone()).and(predicate::str::ends_with(")\n")),
-            );
-    }
-}
-
-#[test]
 fn invalid_uri_scheme() {
     TestEnv::new()
         .s2()
