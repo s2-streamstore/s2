@@ -32,7 +32,7 @@ const GENERAL_USAGE: &str = color_print::cstr!(
 );
 
 #[derive(Parser, Debug)]
-#[command(name = "s2", version, override_usage = GENERAL_USAGE, styles = STYLES)]
+#[command(name = "s2", version = crate::update::long_version(), override_usage = GENERAL_USAGE, styles = STYLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -197,6 +197,33 @@ pub enum Command {
     /// Starts a lightweight S2-compatible server that can be backed by
     /// S3, local filesystem, or in-memory storage.
     Lite(crate::lite::LiteArgs),
+
+    /// Update the S2 CLI to the latest release.
+    ///
+    /// Detects how this binary was installed and upgrades it the right way:
+    ///   - install script / manual download: downloads the matching release artifact, verifies its
+    ///     checksum, and replaces the binary in place where the platform supports it;
+    ///   - Homebrew / Cargo: shows (or, with --yes where supported, runs) the upgrade command for
+    ///     that package manager;
+    ///   - Docker / source build: prints how to update.
+    Update(UpdateArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct UpdateArgs {
+    /// Report the installed and latest versions without upgrading.
+    #[arg(long, conflicts_with_all = ["skip", "yes"])]
+    pub check: bool,
+
+    /// Silence update reminders for the current latest release without
+    /// upgrading.
+    #[arg(long, conflicts_with = "yes")]
+    pub skip: bool,
+
+    /// Do not prompt; for Homebrew and Cargo installs, run the upgrade
+    /// command directly where the running executable can be replaced.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Subcommand, Debug)]

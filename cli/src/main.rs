@@ -55,21 +55,24 @@ fn install_rustls_crypto_provider() {
 async fn main() -> miette::Result<ExitCode> {
     install_rustls_crypto_provider();
     miette::set_panic_hook();
-    // don't run update check for `s2 lite`.
-    let update_check = if std::env::args().nth(1).as_deref() == Some("lite") {
-        None
-    } else {
+
+    let cli = parse_cli();
+    let passive_update_check = allows_passive_update_check(cli.command.as_ref());
+    let update_check = if passive_update_check {
         update::spawn_check()
+    } else {
+        None
     };
-    let result = run().await;
-    if result.is_ok() {
+
+    let result = run(cli).await;
+    if passive_update_check && result.is_ok() {
         update::notify(update_check).await;
     }
     Ok(result?)
 }
 
-async fn run() -> Result<ExitCode, CliError> {
-    let cli = Cli::try_parse().unwrap_or_else(|e| {
+fn parse_cli() -> Cli {
+    Cli::try_parse().unwrap_or_else(|e| {
         // Customize error message for metric commands to say "metric" instead of "subcommand"
         let msg = e.to_string();
         if msg.contains("requires a subcommand") && msg.contains("get-") && msg.contains("-metrics")
@@ -81,8 +84,14 @@ async fn run() -> Result<ExitCode, CliError> {
             std::process::exit(2);
         }
         e.exit()
-    });
+    })
+}
 
+fn allows_passive_update_check(command: Option<&Command>) -> bool {
+    !matches!(command, Some(Command::Lite(_) | Command::Update(_)))
+}
+
+async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     let Some(command) = cli.command else {
         Cli::command().print_help().ok();
         std::process::exit(0);
@@ -148,6 +157,13 @@ async fn run() -> Result<ExitCode, CliError> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if let Command::Update(args) = &command {
+        update::apply::run(args)
+            .await
+            .map_err(|e| CliError::Update(e.to_string()))?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     if let Command::Apply(ApplyArgs { schema: true, .. }) = &command {
         let schema = s2_resource_spec::json_schema();
         println!(
@@ -162,17 +178,14 @@ async fn run() -> Result<ExitCode, CliError> {
     }
 
     let cli_config = load_cli_config()?;
-    let sdk_config = sdk_config(
-        &cli_config,
-        &format!("s2-cli/{}", env!("CARGO_PKG_VERSION")),
-    )?;
+    let sdk_config = sdk_config(&cli_config, update::user_agent())?;
     let token_source = access_token_source(&cli_config);
     let s2 = S2::new(sdk_config.clone())
         .map_err(|e| CliError::SdkInit(e).with_token_source(token_source))?;
     let mut exit_code = ExitCode::SUCCESS;
     let result: Result<(), CliError> = (async {
         match command {
-        Command::Config(..) | Command::Lite(..) => unreachable!(),
+        Command::Config(..) | Command::Lite(..) | Command::Update(..) => unreachable!(),
 
         Command::Ls(args) => {
             if let Some(ref uri) = args.uri {

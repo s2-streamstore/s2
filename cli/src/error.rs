@@ -88,6 +88,13 @@ pub enum CliError {
     #[error("Invalid configuration returned by S2: {0}")]
     #[diagnostic(help("{}", BUG_HELP))]
     InvalidApiConfig(#[from] s2_common::ValidationError),
+
+    #[error("Update failed: {0}")]
+    #[diagnostic(help(
+        "Retry, or install the latest release manually:\n\
+         https://s2.dev/docs/quickstart#get-started-with-the-cli"
+    ))]
+    Update(String),
 }
 
 impl CliError {

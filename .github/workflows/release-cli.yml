@@ -112,6 +112,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
+      - name: Resolve source revision
+        id: source_revision
+        shell: bash
+        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -129,7 +133,22 @@ jobs:
         with:
           tool: cross@0.2.5
       - name: Build
+        env:
+          # Stamped into the binary (cli/src/update/channel.rs) to mark it as
+          # an official release artifact for install-channel detection.
+          S2_BUILD_CHANNEL: release
+          S2_GIT_REV: ${{ steps.source_revision.outputs.value }}
         run: ${{ matrix.builder || 'cargo' }} build --release --package s2-cli --target ${{ matrix.target }}
+      - name: Verify source revision stamp
+        shell: bash
+        env:
+          S2_GIT_REV: ${{ steps.source_revision.outputs.value }}
+        run: |
+          BINARY="target/${{ matrix.target }}/release/s2"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            BINARY="${BINARY}.exe"
+          fi
+          grep -aFq "$S2_GIT_REV" "$BINARY"
       - name: Create pem and certificate.der files
         if: matrix.os == 'macos-latest'
         run: |
@@ -189,6 +208,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
+      - name: Resolve source revision
+        id: source_revision
+        shell: bash
+        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
@@ -214,6 +237,8 @@ jobs:
           file: Dockerfile
           target: runtime
           push: true
+          build-args: |
+            S2_GIT_REV=${{ steps.source_revision.outputs.value }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-${{ matrix.arch }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
@@ -271,12 +296,21 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: '*-*-*'
+      - name: Generate checksums
+        # `s2 update` downloads this file to verify an artifact before
+        # replacing the binary in place. Names are bare (no directory) to match
+        # the uploaded asset names below.
+        run: |
+          find . -name 's2-*.zip' -print0 | while IFS= read -r -d '' f; do
+            printf '%s  %s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$(basename "$f")"
+          done | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="s2-cli-v${{ steps.version.outputs.value }}"
-          gh release upload "$TAG" */s2-*.zip --clobber || gh release create "$TAG" */s2-*.zip --title "$TAG" --notes ""
+          gh release upload "$TAG" */s2-*.zip SHA256SUMS --clobber || gh release create "$TAG" */s2-*.zip SHA256SUMS --title "$TAG" --notes ""
 
   update_homebrew:
     needs: upload_release_artifacts

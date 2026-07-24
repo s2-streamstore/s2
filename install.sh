@@ -145,6 +145,19 @@ curl --progress-bar -fSL "${URL}" -o "${DOWNLOAD_PATH}" \
 
 rm -f "${DOWNLOAD_PATH}"
 
+# Install receipt, read by the CLI (cli/src/update/channel.rs) to know it was
+# installed by this script and can be upgraded in place.
+# Escape backslashes then quotes so an unusual HOME can't produce invalid JSON.
+BIN_PATH_JSON=$(printf '%s' "${BIN_PATH}/s2" | sed 's/\\/\\\\/g; s/"/\\"/g')
+cat > "${BIN_PATH}/s2-receipt.json" <<EOF
+{
+  "channel": "install-script",
+  "version": "${TAG#s2-cli-v}",
+  "binary_path": "${BIN_PATH_JSON}",
+  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
 echo_blue "Successfully downloaded"
 
 EXISTING_S2_PATH=$(command -v s2 2>/dev/null || true)
