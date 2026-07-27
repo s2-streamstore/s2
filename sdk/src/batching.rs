@@ -412,6 +412,24 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn batches_flush_after_linger_when_stream_remains_open() -> Result<(), ValidationError> {
+        let records: Vec<_> = (0..2)
+            .map(|i| AppendRecord::new(format!("record{i}")))
+            .collect::<Result<_, _>>()?;
+        let records = futures_util::stream::iter(records).chain(futures_util::stream::pending());
+        let config = BatchingConfig::default().with_linger(Duration::from_millis(5));
+        let mut batches = AppendRecordBatches::new(records, config);
+        let next_batch = tokio::spawn(async move { batches.next().await });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(6)).await;
+
+        let batch = next_batch.await.unwrap().unwrap()?;
+        assert_eq!(batch.len(), 2);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn batching_should_error_when_it_sees_oversized_record() -> Result<(), ValidationError> {
         let record = AppendRecord::new("hello-world")?;
