@@ -18,36 +18,25 @@ use crate::types::{
 const RECORD_BATCH_MIN: CountOrBytes = CountOrBytes { count: 1, bytes: 8 };
 
 #[derive(Debug, Clone)]
-/// Configuration for batching [`AppendRecord`]s.
-pub struct BatchingConfig {
-    linger: Duration,
+/// Limits for batching [`AppendRecord`]s.
+pub struct BatchLimits {
     max_batch_bytes: usize,
     max_batch_records: usize,
 }
 
-impl Default for BatchingConfig {
+impl Default for BatchLimits {
     fn default() -> Self {
         Self {
-            linger: Duration::from_millis(5),
             max_batch_bytes: RECORD_BATCH_MAX.bytes,
             max_batch_records: RECORD_BATCH_MAX.count,
         }
     }
 }
 
-impl BatchingConfig {
-    /// Create a new [`BatchingConfig`] with default settings.
+impl BatchLimits {
+    /// Create new [`BatchLimits`] with default settings.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Set the duration for how long to wait for more records before flushing a batch.
-    ///
-    /// Defaults to `5ms`.
-    ///
-    /// This setting is not used by [`append_record_batches_from_iter`].
-    pub fn with_linger(self, linger: Duration) -> Self {
-        Self { linger, ..self }
     }
 
     /// Set the maximum metered bytes per batch.
@@ -95,6 +84,67 @@ impl BatchingConfig {
         Ok(Self {
             max_batch_records,
             ..self
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Configuration for batching [`AppendRecord`]s.
+pub struct BatchingConfig {
+    linger: Duration,
+    limits: BatchLimits,
+}
+
+impl Default for BatchingConfig {
+    fn default() -> Self {
+        Self {
+            linger: Duration::from_millis(5),
+            limits: BatchLimits::default(),
+        }
+    }
+}
+
+impl BatchingConfig {
+    /// Create a new [`BatchingConfig`] with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the duration for how long to wait for more records before flushing a batch.
+    ///
+    /// Defaults to `5ms`.
+    pub fn with_linger(self, linger: Duration) -> Self {
+        Self { linger, ..self }
+    }
+
+    /// Set the batch limits.
+    pub fn with_limits(self, limits: BatchLimits) -> Self {
+        Self { limits, ..self }
+    }
+
+    /// Set the maximum metered bytes per batch.
+    ///
+    /// **Note:** It must be at least `8B` and must not exceed `1MiB`.
+    ///
+    /// Defaults to `1MiB`.
+    pub fn with_max_batch_bytes(self, max_batch_bytes: usize) -> Result<Self, ValidationError> {
+        let Self { linger, limits } = self;
+        Ok(Self {
+            linger,
+            limits: limits.with_max_batch_bytes(max_batch_bytes)?,
+        })
+    }
+
+    /// Set the maximum number of records per batch.
+    ///
+    /// **Note:** It must be at least `1` and must not exceed `1000`.
+    ///
+    /// Defaults to `1000`.
+    pub fn with_max_batch_records(self, max_batch_records: usize) -> Result<Self, ValidationError> {
+        let Self { linger, limits } = self;
+        Ok(Self {
+            linger,
+            limits: limits.with_max_batch_records(max_batch_records)?,
         })
     }
 }
@@ -188,44 +238,44 @@ impl Stream for AppendRecordBatches {
 /// Eagerly split in-memory records into batches respecting count and byte limits.
 ///
 /// ```rust
-/// # use s2_sdk::batching::{append_record_batches_from_iter, BatchingConfig};
+/// # use s2_sdk::batching::{append_record_batches_from_iter, BatchLimits};
 /// # use s2_sdk::types::AppendRecord;
 /// let records = [AppendRecord::new("one")?, AppendRecord::new("two")?];
-/// let batches = append_record_batches_from_iter(records, BatchingConfig::new())?;
+/// let batches = append_record_batches_from_iter(records, BatchLimits::new())?;
 /// assert_eq!(batches.len(), 1);
 /// # Ok::<(), s2_sdk::types::ValidationError>(())
 /// ```
 pub fn append_record_batches_from_iter(
     records: impl IntoIterator<Item = impl Into<AppendRecord>>,
-    config: BatchingConfig,
+    limits: BatchLimits,
 ) -> Result<Vec<AppendRecordBatch>, ValidationError> {
     let mut batches = Vec::new();
-    let mut batch = AppendRecordBatch::with_capacity(config.max_batch_records);
+    let mut batch = AppendRecordBatch::with_capacity(limits.max_batch_records);
 
     for item in records {
         let record = item.into();
         let record_bytes = record.metered_bytes();
-        if record_bytes > config.max_batch_bytes {
+        if record_bytes > limits.max_batch_bytes {
             return Err(ValidationError(format!(
                 "record size in metered bytes ({record_bytes}) exceeds max_batch_bytes ({})",
-                config.max_batch_bytes
+                limits.max_batch_bytes
             )));
         }
 
         if !batch.is_empty()
-            && would_overflow_batch(&config, batch.len(), batch.metered_bytes(), record_bytes)
+            && would_overflow_batch(&limits, batch.len(), batch.metered_bytes(), record_bytes)
         {
             batches.push(std::mem::replace(
                 &mut batch,
-                AppendRecordBatch::with_capacity(config.max_batch_records),
+                AppendRecordBatch::with_capacity(limits.max_batch_records),
             ));
         }
 
         batch.push(record);
-        if is_batch_full(&config, batch.len(), batch.metered_bytes()) {
+        if is_batch_full(&limits, batch.len(), batch.metered_bytes()) {
             batches.push(std::mem::replace(
                 &mut batch,
-                AppendRecordBatch::with_capacity(config.max_batch_records),
+                AppendRecordBatch::with_capacity(limits.max_batch_records),
             ));
         }
     }
@@ -236,17 +286,17 @@ pub fn append_record_batches_from_iter(
     Ok(batches)
 }
 
-fn is_batch_full(config: &BatchingConfig, count: usize, bytes: usize) -> bool {
-    count >= config.max_batch_records || bytes >= config.max_batch_bytes
+fn is_batch_full(limits: &BatchLimits, count: usize, bytes: usize) -> bool {
+    count >= limits.max_batch_records || bytes >= limits.max_batch_bytes
 }
 
 fn would_overflow_batch(
-    config: &BatchingConfig,
+    limits: &BatchLimits,
     count: usize,
     bytes: usize,
     record_bytes: usize,
 ) -> bool {
-    count + 1 > config.max_batch_records || bytes + record_bytes > config.max_batch_bytes
+    count + 1 > limits.max_batch_records || bytes + record_bytes > limits.max_batch_bytes
 }
 
 fn append_record_batches(
@@ -254,7 +304,7 @@ fn append_record_batches(
     config: BatchingConfig,
 ) -> impl Stream<Item = Result<AppendRecordBatch, ValidationError>> + Send + 'static {
     async_stream::try_stream! {
-        let mut batch = AppendRecordBatch::with_capacity(config.max_batch_records);
+        let mut batch = AppendRecordBatch::with_capacity(config.limits.max_batch_records);
         let mut overflowed_record: Option<AppendRecord> = None;
 
         let linger_deadline = tokio::time::sleep(config.linger);
@@ -270,15 +320,15 @@ fn append_record_batches(
             };
 
             let record_bytes = first_record.metered_bytes();
-            if record_bytes > config.max_batch_bytes {
+            if record_bytes > config.limits.max_batch_bytes {
                 Err(ValidationError(format!(
                     "record size in metered bytes ({record_bytes}) exceeds max_batch_bytes ({})",
-                    config.max_batch_bytes
+                    config.limits.max_batch_bytes
                 )))?;
             }
             batch.push(first_record);
 
-            while !is_batch_full(&config, batch.len(), batch.metered_bytes())
+            while !is_batch_full(&config.limits, batch.len(), batch.metered_bytes())
                 && overflowed_record.is_none()
             {
                 if batch.len() == 1 {
@@ -294,7 +344,7 @@ fn append_record_batches(
                                 let record: AppendRecord = record.into();
                                 let record_bytes = record.metered_bytes();
                                 if would_overflow_batch(
-                                    &config,
+                                    &config.limits,
                                     batch.len(),
                                     batch.metered_bytes(),
                                     record_bytes,
@@ -305,7 +355,7 @@ fn append_record_batches(
                                 }
                             }
                             None => {
-                                yield std::mem::replace(&mut batch, AppendRecordBatch::with_capacity(config.max_batch_records));
+                                yield std::mem::replace(&mut batch, AppendRecordBatch::with_capacity(config.limits.max_batch_records));
                                 break 'outer;
                             }
                         }
@@ -318,7 +368,7 @@ fn append_record_batches(
 
             yield std::mem::replace(
                 &mut batch,
-                AppendRecordBatch::with_capacity(config.max_batch_records),
+                AppendRecordBatch::with_capacity(config.limits.max_batch_records),
             );
         }
     }
@@ -408,11 +458,9 @@ mod tests {
 
     #[test]
     fn eager_batches_should_be_empty_when_record_iter_is_empty() {
-        let batches = append_record_batches_from_iter(
-            std::iter::empty::<AppendRecord>(),
-            BatchingConfig::new(),
-        )
-        .unwrap();
+        let batches =
+            append_record_batches_from_iter(std::iter::empty::<AppendRecord>(), BatchLimits::new())
+                .unwrap();
         assert!(batches.is_empty());
     }
 
@@ -421,8 +469,8 @@ mod tests {
         let records: Vec<_> = (0..10)
             .map(|i| AppendRecord::new(format!("record{i}")))
             .collect::<Result<_, _>>()?;
-        let config = BatchingConfig::new().with_max_batch_records(3)?;
-        let batches = append_record_batches_from_iter(records, config)?;
+        let limits = BatchLimits::new().with_max_batch_records(3)?;
+        let batches = append_record_batches_from_iter(records, limits)?;
 
         assert_eq!(batches.len(), 4);
         assert_eq!(batches[0].len(), 3);
@@ -439,8 +487,8 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let single_record_bytes = records[0].metered_bytes();
         let max_batch_bytes = single_record_bytes * 3;
-        let config = BatchingConfig::new().with_max_batch_bytes(max_batch_bytes)?;
-        let batches = append_record_batches_from_iter(records, config)?;
+        let limits = BatchLimits::new().with_max_batch_bytes(max_batch_bytes)?;
+        let batches = append_record_batches_from_iter(records, limits)?;
 
         assert_eq!(batches.len(), 4);
         assert_eq!(batches[0].metered_bytes(), max_batch_bytes);
@@ -455,8 +503,8 @@ mod tests {
         let record = AppendRecord::new("hello-world")?;
         let record_bytes = record.metered_bytes();
         let max_batch_bytes = 10;
-        let config = BatchingConfig::new().with_max_batch_bytes(max_batch_bytes)?;
-        let err = append_record_batches_from_iter([record], config).unwrap_err();
+        let limits = BatchLimits::new().with_max_batch_bytes(max_batch_bytes)?;
+        let err = append_record_batches_from_iter([record], limits).unwrap_err();
 
         assert_eq!(
             err.to_string(),
