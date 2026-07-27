@@ -8,7 +8,11 @@ use std::{
 
 use futures_core::Stream;
 use futures_util::StreamExt;
-use s2_common::{caps::RECORD_BATCH_MAX, read_extent::CountOrBytes};
+use s2_common::{
+    caps::RECORD_BATCH_MAX,
+    read_extent::CountOrBytes,
+    record::{Metered, MeteredSize},
+};
 use tokio::time::Instant;
 
 use crate::types::{
@@ -224,51 +228,52 @@ pub fn append_record_batches_from_iter(
     limits: BatchLimits,
 ) -> Result<Vec<AppendRecordBatch>, ValidationError> {
     let mut batches = Vec::new();
-    let mut batch = AppendRecordBatch::with_capacity(limits.max_batch_records);
+    let mut batch = Metered::with_capacity(limits.max_batch_records);
 
     for item in records {
         let record = item.into();
-        let record_bytes = record.metered_bytes();
-        if record_bytes > limits.max_batch_bytes {
+        let record = Metered::with_size(record.metered_bytes(), record);
+        if record.metered_size() > limits.max_batch_bytes {
             return Err(ValidationError(format!(
-                "record size in metered bytes ({record_bytes}) exceeds max_batch_bytes ({})",
+                "record size in metered bytes ({}) exceeds max_batch_bytes ({})",
+                record.metered_size(),
                 limits.max_batch_bytes
             )));
         }
 
-        if !batch.is_empty() && would_overflow_batch(&limits, &batch, record_bytes) {
-            batches.push(std::mem::replace(
+        if !batch.is_empty() && would_overflow_batch(&limits, &batch, &record) {
+            batches.push(AppendRecordBatch::from_metered(std::mem::replace(
                 &mut batch,
-                AppendRecordBatch::with_capacity(limits.max_batch_records),
-            ));
+                Metered::with_capacity(limits.max_batch_records),
+            )));
         }
 
-        batch.push_with_metered_bytes(record, record_bytes);
+        batch.push(record);
         if is_batch_full(&limits, &batch) {
-            batches.push(std::mem::replace(
+            batches.push(AppendRecordBatch::from_metered(std::mem::replace(
                 &mut batch,
-                AppendRecordBatch::with_capacity(limits.max_batch_records),
-            ));
+                Metered::with_capacity(limits.max_batch_records),
+            )));
         }
     }
 
     if !batch.is_empty() {
-        batches.push(batch);
+        batches.push(AppendRecordBatch::from_metered(batch));
     }
     Ok(batches)
 }
 
-fn is_batch_full(limits: &BatchLimits, batch: &AppendRecordBatch) -> bool {
-    batch.len() >= limits.max_batch_records || batch.metered_bytes() >= limits.max_batch_bytes
+fn is_batch_full(limits: &BatchLimits, batch: &Metered<Vec<AppendRecord>>) -> bool {
+    batch.len() >= limits.max_batch_records || batch.metered_size() >= limits.max_batch_bytes
 }
 
 fn would_overflow_batch(
     limits: &BatchLimits,
-    batch: &AppendRecordBatch,
-    record_bytes: usize,
+    batch: &Metered<Vec<AppendRecord>>,
+    record: &Metered<AppendRecord>,
 ) -> bool {
     batch.len() + 1 > limits.max_batch_records
-        || batch.metered_bytes() + record_bytes > limits.max_batch_bytes
+        || batch.metered_size() + record.metered_size() > limits.max_batch_bytes
 }
 
 fn append_record_batches(
@@ -276,32 +281,32 @@ fn append_record_batches(
     config: BatchingConfig,
 ) -> impl Stream<Item = Result<AppendRecordBatch, ValidationError>> + Send + 'static {
     async_stream::try_stream! {
-        let mut batch = AppendRecordBatch::with_capacity(config.limits.max_batch_records);
-        let mut overflowed_record: Option<(AppendRecord, usize)> = None;
+        let mut batch = Metered::with_capacity(config.limits.max_batch_records);
+        let mut overflowed_record: Option<Metered<AppendRecord>> = None;
 
         let linger_deadline = tokio::time::sleep(config.linger);
         tokio::pin!(linger_deadline);
 
         'outer: loop {
-            let (first_record, record_bytes) = match overflowed_record.take() {
+            let first_record = match overflowed_record.take() {
                 Some(pair) => pair,
                 None => match records.next().await {
                     Some(item) => {
                         let record = item.into();
-                        let record_bytes = record.metered_bytes();
-                        (record, record_bytes)
+                        Metered::with_size(record.metered_bytes(), record)
                     }
                     None => break,
                 },
             };
 
-            if record_bytes > config.limits.max_batch_bytes {
+            if first_record.metered_size() > config.limits.max_batch_bytes {
                 Err(ValidationError(format!(
-                    "record size in metered bytes ({record_bytes}) exceeds max_batch_bytes ({})",
+                    "record size in metered bytes ({}) exceeds max_batch_bytes ({})",
+                    first_record.metered_size(),
                     config.limits.max_batch_bytes
                 )))?;
             }
-            batch.push_with_metered_bytes(first_record, record_bytes);
+            batch.push(first_record);
 
             while !is_batch_full(&config.limits, &batch) && overflowed_record.is_none() {
                 if batch.len() == 1 {
@@ -315,15 +320,19 @@ fn append_record_batches(
                         match next_record {
                             Some(record) => {
                                 let record: AppendRecord = record.into();
-                                let record_bytes = record.metered_bytes();
-                                if would_overflow_batch(&config.limits, &batch, record_bytes) {
-                                    overflowed_record = Some((record, record_bytes));
+                                let record =
+                                    Metered::with_size(record.metered_bytes(), record);
+                                if would_overflow_batch(&config.limits, &batch, &record) {
+                                    overflowed_record = Some(record);
                                 } else {
-                                    batch.push_with_metered_bytes(record, record_bytes);
+                                    batch.push(record);
                                 }
                             }
                             None => {
-                                yield std::mem::replace(&mut batch, AppendRecordBatch::with_capacity(config.limits.max_batch_records));
+                                yield AppendRecordBatch::from_metered(std::mem::replace(
+                                    &mut batch,
+                                    Metered::with_capacity(config.limits.max_batch_records),
+                                ));
                                 break 'outer;
                             }
                         }
@@ -334,10 +343,10 @@ fn append_record_batches(
                 };
             }
 
-            yield std::mem::replace(
+            yield AppendRecordBatch::from_metered(std::mem::replace(
                 &mut batch,
-                AppendRecordBatch::with_capacity(config.limits.max_batch_records),
-            );
+                Metered::with_capacity(config.limits.max_batch_records),
+            ));
         }
     }
 }

@@ -58,7 +58,11 @@ pub use s2_common::{
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
-use s2_common::{maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH, resources::ProvisionResult};
+use s2_common::{
+    maybe::Maybe,
+    record::{MAX_FENCING_TOKEN_LENGTH, Metered, MeteredSize},
+    resources::ProvisionResult,
+};
 use secrecy::SecretString;
 
 use crate::api::{ApiError, ApiErrorResponse};
@@ -3044,6 +3048,12 @@ macro_rules! metered_bytes_impl {
 
 metered_bytes_impl!(AppendRecord);
 
+impl MeteredSize for AppendRecord {
+    fn metered_size(&self) -> usize {
+        self.metered_bytes()
+    }
+}
+
 #[derive(Debug, Clone)]
 /// A batch of records to append atomically.
 ///
@@ -3059,16 +3069,12 @@ pub struct AppendRecordBatch {
 }
 
 impl AppendRecordBatch {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn from_metered(records: Metered<Vec<AppendRecord>>) -> Self {
+        let metered_bytes = records.metered_size();
         Self {
-            records: Vec::with_capacity(capacity),
-            metered_bytes: 0,
+            records: records.into_inner(),
+            metered_bytes,
         }
-    }
-
-    pub(crate) fn push_with_metered_bytes(&mut self, record: AppendRecord, metered_bytes: usize) {
-        self.metered_bytes += metered_bytes;
-        self.records.push(record);
     }
 
     /// Try to create an [`AppendRecordBatch`] from an iterator of [`AppendRecord`]s.
