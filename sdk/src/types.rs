@@ -3066,8 +3066,8 @@ impl AppendRecordBatch {
         }
     }
 
-    pub(crate) fn push(&mut self, record: AppendRecord) {
-        self.metered_bytes += record.metered_bytes();
+    pub(crate) fn push_with_metered_bytes(&mut self, record: AppendRecord, metered_bytes: usize) {
+        self.metered_bytes += metered_bytes;
         self.records.push(record);
     }
 

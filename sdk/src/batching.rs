@@ -243,7 +243,7 @@ pub fn append_record_batches_from_iter(
             ));
         }
 
-        batch.push(record);
+        batch.push_with_metered_bytes(record, record_bytes);
         if is_batch_full(&limits, &batch) {
             batches.push(std::mem::replace(
                 &mut batch,
@@ -277,28 +277,31 @@ fn append_record_batches(
 ) -> impl Stream<Item = Result<AppendRecordBatch, ValidationError>> + Send + 'static {
     async_stream::try_stream! {
         let mut batch = AppendRecordBatch::with_capacity(config.limits.max_batch_records);
-        let mut overflowed_record: Option<AppendRecord> = None;
+        let mut overflowed_record: Option<(AppendRecord, usize)> = None;
 
         let linger_deadline = tokio::time::sleep(config.linger);
         tokio::pin!(linger_deadline);
 
         'outer: loop {
-            let first_record = match overflowed_record.take() {
-                Some(record) => record,
+            let (first_record, record_bytes) = match overflowed_record.take() {
+                Some(pair) => pair,
                 None => match records.next().await {
-                    Some(item) => item.into(),
+                    Some(item) => {
+                        let record = item.into();
+                        let record_bytes = record.metered_bytes();
+                        (record, record_bytes)
+                    }
                     None => break,
                 },
             };
 
-            let record_bytes = first_record.metered_bytes();
             if record_bytes > config.limits.max_batch_bytes {
                 Err(ValidationError(format!(
                     "record size in metered bytes ({record_bytes}) exceeds max_batch_bytes ({})",
                     config.limits.max_batch_bytes
                 )))?;
             }
-            batch.push(first_record);
+            batch.push_with_metered_bytes(first_record, record_bytes);
 
             while !is_batch_full(&config.limits, &batch) && overflowed_record.is_none() {
                 if batch.len() == 1 {
@@ -314,9 +317,9 @@ fn append_record_batches(
                                 let record: AppendRecord = record.into();
                                 let record_bytes = record.metered_bytes();
                                 if would_overflow_batch(&config.limits, &batch, record_bytes) {
-                                    overflowed_record = Some(record);
+                                    overflowed_record = Some((record, record_bytes));
                                 } else {
-                                    batch.push(record);
+                                    batch.push_with_metered_bytes(record, record_bytes);
                                 }
                             }
                             None => {
