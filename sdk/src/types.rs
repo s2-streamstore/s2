@@ -3063,35 +3063,29 @@ impl MeteredSize for AppendRecord {
 /// See [`AppendRecordBatches`](crate::batching::AppendRecordBatches) and
 /// [`AppendInputs`](crate::batching::AppendInputs) for convenient and automatic batching of records
 /// that takes care of the abovementioned constraints.
-pub struct AppendRecordBatch {
-    records: Vec<AppendRecord>,
-    metered_bytes: usize,
+pub struct AppendRecordBatch(Metered<Vec<AppendRecord>>);
+
+impl From<Metered<Vec<AppendRecord>>> for AppendRecordBatch {
+    fn from(records: Metered<Vec<AppendRecord>>) -> Self {
+        Self(records)
+    }
 }
 
 impl AppendRecordBatch {
-    pub(crate) fn from_metered(records: Metered<Vec<AppendRecord>>) -> Self {
-        let metered_bytes = records.metered_size();
-        Self {
-            records: records.into_inner(),
-            metered_bytes,
-        }
-    }
-
     /// Try to create an [`AppendRecordBatch`] from an iterator of [`AppendRecord`]s.
     pub fn try_from_iter<I>(iter: I) -> Result<Self, ValidationError>
     where
         I: IntoIterator<Item = AppendRecord>,
     {
-        let mut records = Vec::new();
-        let mut metered_bytes = 0;
+        let mut records = Metered::with_capacity(RECORD_BATCH_MAX.count);
 
         for record in iter {
-            metered_bytes += record.metered_bytes();
-            records.push(record);
+            records.push(Metered::from(record));
 
-            if metered_bytes > RECORD_BATCH_MAX.bytes {
+            if records.metered_size() > RECORD_BATCH_MAX.bytes {
                 return Err(ValidationError(format!(
-                    "batch size in metered bytes ({metered_bytes}) exceeds {}",
+                    "batch size in metered bytes ({}) exceeds {}",
+                    records.metered_size(),
                     RECORD_BATCH_MAX.bytes
                 )));
             }
@@ -3108,10 +3102,7 @@ impl AppendRecordBatch {
             return Err(ValidationError("batch is empty".into()));
         }
 
-        Ok(Self {
-            records,
-            metered_bytes,
-        })
+        Ok(records.into())
     }
 }
 
@@ -3119,13 +3110,31 @@ impl Deref for AppendRecordBatch {
     type Target = [AppendRecord];
 
     fn deref(&self) -> &Self::Target {
-        &self.records
+        &self.0[..]
     }
 }
 
 impl MeteredBytes for AppendRecordBatch {
     fn metered_bytes(&self) -> usize {
-        self.metered_bytes
+        self.0.metered_size()
+    }
+}
+
+impl IntoIterator for AppendRecordBatch {
+    type Item = AppendRecord;
+    type IntoIter = std::vec::IntoIter<AppendRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a AppendRecordBatch {
+    type Item = &'a AppendRecord;
+    type IntoIter = std::slice::Iter<'a, AppendRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 

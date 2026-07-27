@@ -230,7 +230,7 @@ impl AppendRecordBatches {
             }
 
             if !batch.is_empty() && would_overflow_batch(&limits, &batch, &record) {
-                batches.push(AppendRecordBatch::from_metered(std::mem::replace(
+                batches.push(AppendRecordBatch::from(std::mem::replace(
                     &mut batch,
                     Metered::with_capacity(limits.max_batch_records),
                 )));
@@ -238,7 +238,7 @@ impl AppendRecordBatches {
 
             batch.push(record);
             if is_batch_full(&limits, &batch) {
-                batches.push(AppendRecordBatch::from_metered(std::mem::replace(
+                batches.push(AppendRecordBatch::from(std::mem::replace(
                     &mut batch,
                     Metered::with_capacity(limits.max_batch_records),
                 )));
@@ -246,7 +246,7 @@ impl AppendRecordBatches {
         }
 
         if !batch.is_empty() {
-            batches.push(AppendRecordBatch::from_metered(batch));
+            batches.push(batch.into());
         }
 
         Ok(Self {
@@ -324,7 +324,7 @@ fn append_record_batches(
                                 }
                             }
                             None => {
-                                yield AppendRecordBatch::from_metered(std::mem::replace(
+                                yield AppendRecordBatch::from(std::mem::replace(
                                     &mut batch,
                                     Metered::with_capacity(config.limits.max_batch_records),
                                 ));
@@ -338,7 +338,7 @@ fn append_record_batches(
                 };
             }
 
-            yield AppendRecordBatch::from_metered(std::mem::replace(
+            yield AppendRecordBatch::from(std::mem::replace(
                 &mut batch,
                 Metered::with_capacity(config.limits.max_batch_records),
             ));
