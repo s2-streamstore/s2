@@ -37,7 +37,7 @@ s2-sdk = { workspace = true, features = ["_hidden"] }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
-sha2 = "0.10"
+sha2 = "0.11"
 strum = { workspace = true, features = ["derive"] }
 tabled = { workspace = true }
 terminal_size = "0.4"
@@ -49,7 +49,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { workspace = true, features = ["v4"] }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # tikv-jemallocator does not build on the MSVC toolchain; on Windows-MSVC
 # Rust falls back to the system allocator (HeapAlloc).
@@ -67,5 +67,5 @@ assert_cmd = "2.2"
 predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }
-serial_test = "3.5"
+serial_test = "4.0"
 tempfile = "3.27"
