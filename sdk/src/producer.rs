@@ -235,11 +235,16 @@ impl Producer {
     ) {
         let (record_tx, record_rx) = mpsc::channel::<AppendRecord>(RECORD_BATCH_MAX.count);
         let mut record_tx = Some(record_tx);
-        let mut inputs = AppendInputs {
-            batches: AppendRecordBatches::new(ReceiverStream::new(record_rx), config.batching),
-            fencing_token: config.fencing_token,
-            match_seq_num: config.match_seq_num,
-        };
+        let mut inputs = AppendInputs::new(AppendRecordBatches::from_stream(
+            ReceiverStream::new(record_rx),
+            config.batching,
+        ));
+        if let Some(fencing_token) = config.fencing_token {
+            inputs = inputs.with_fencing_token(fencing_token);
+        }
+        if let Some(seq_num) = config.match_seq_num {
+            inputs = inputs.with_match_seq_num(seq_num);
+        }
 
         let mut pending_batch_acks = FuturesUnordered::new();
         let mut pending_record_acks = VecDeque::new();

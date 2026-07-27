@@ -7,7 +7,7 @@ use std::{
 };
 
 use futures_core::Stream;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 use s2_common::{
     caps::RECORD_BATCH_MAX,
     read_extent::CountOrBytes,
@@ -133,13 +133,10 @@ pub struct AppendInputs {
 }
 
 impl AppendInputs {
-    /// Create a new [`AppendInputs`] with the given records and config.
-    pub fn new(
-        records: impl Stream<Item = impl Into<AppendRecord> + Send> + Send + Unpin + 'static,
-        config: BatchingConfig,
-    ) -> Self {
+    /// Create a new [`AppendInputs`] from pre-batched records.
+    pub fn new(batches: AppendRecordBatches) -> Self {
         Self {
-            batches: AppendRecordBatches::new(records, config),
+            batches,
             fencing_token: None,
             match_seq_num: None,
         }
@@ -192,14 +189,69 @@ pub struct AppendRecordBatches {
 }
 
 impl AppendRecordBatches {
-    /// Create a new [`AppendRecordBatches`] with the given records and config.
-    pub fn new(
+    /// Create a new [`AppendRecordBatches`] from a record stream and config.
+    pub fn from_stream(
         records: impl Stream<Item = impl Into<AppendRecord> + Send> + Send + Unpin + 'static,
         config: BatchingConfig,
     ) -> Self {
         Self {
             inner: Box::pin(append_record_batches(records, config)),
         }
+    }
+
+    /// Eagerly batch in-memory records with the given limits.
+    ///
+    /// The returned value is a stream of validated batches and can be collected
+    /// into a `Vec<AppendRecordBatch>` when eager results are needed.
+    ///
+    /// ```rust
+    /// # use s2_sdk::batching::{AppendRecordBatches, BatchLimits};
+    /// # use s2_sdk::types::AppendRecord;
+    /// let records = [AppendRecord::new("one")?, AppendRecord::new("two")?];
+    /// let batches = AppendRecordBatches::from_iter(records, BatchLimits::new())?;
+    /// # let _ = batches;
+    /// # Ok::<(), s2_sdk::types::ValidationError>(())
+    /// ```
+    pub fn from_iter(
+        records: impl IntoIterator<Item = impl Into<AppendRecord>>,
+        limits: BatchLimits,
+    ) -> Result<Self, ValidationError> {
+        let mut batches = Vec::new();
+        let mut batch = Metered::with_capacity(limits.max_batch_records);
+
+        for item in records {
+            let record = Metered::from(item.into());
+            if record.metered_size() > limits.max_batch_bytes {
+                return Err(ValidationError(format!(
+                    "record size in metered bytes ({}) exceeds max_batch_bytes ({})",
+                    record.metered_size(),
+                    limits.max_batch_bytes
+                )));
+            }
+
+            if !batch.is_empty() && would_overflow_batch(&limits, &batch, &record) {
+                batches.push(AppendRecordBatch::from_metered(std::mem::replace(
+                    &mut batch,
+                    Metered::with_capacity(limits.max_batch_records),
+                )));
+            }
+
+            batch.push(record);
+            if is_batch_full(&limits, &batch) {
+                batches.push(AppendRecordBatch::from_metered(std::mem::replace(
+                    &mut batch,
+                    Metered::with_capacity(limits.max_batch_records),
+                )));
+            }
+        }
+
+        if !batch.is_empty() {
+            batches.push(AppendRecordBatch::from_metered(batch));
+        }
+
+        Ok(Self {
+            inner: Box::pin(stream::iter(batches.into_iter().map(Ok))),
+        })
     }
 }
 
@@ -209,55 +261,6 @@ impl Stream for AppendRecordBatches {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.inner.as_mut().poll_next(cx)
     }
-}
-
-/// Eagerly split in-memory records into batches respecting count and byte limits.
-///
-/// ```rust
-/// # use s2_sdk::batching::{append_record_batches_from_iter, BatchLimits};
-/// # use s2_sdk::types::AppendRecord;
-/// let records = [AppendRecord::new("one")?, AppendRecord::new("two")?];
-/// let batches = append_record_batches_from_iter(records, BatchLimits::new())?;
-/// assert_eq!(batches.len(), 1);
-/// # Ok::<(), s2_sdk::types::ValidationError>(())
-/// ```
-pub fn append_record_batches_from_iter(
-    records: impl IntoIterator<Item = impl Into<AppendRecord>>,
-    limits: BatchLimits,
-) -> Result<Vec<AppendRecordBatch>, ValidationError> {
-    let mut batches = Vec::new();
-    let mut batch = Metered::with_capacity(limits.max_batch_records);
-
-    for item in records {
-        let record = Metered::from(item.into());
-        if record.metered_size() > limits.max_batch_bytes {
-            return Err(ValidationError(format!(
-                "record size in metered bytes ({}) exceeds max_batch_bytes ({})",
-                record.metered_size(),
-                limits.max_batch_bytes
-            )));
-        }
-
-        if !batch.is_empty() && would_overflow_batch(&limits, &batch, &record) {
-            batches.push(AppendRecordBatch::from_metered(std::mem::replace(
-                &mut batch,
-                Metered::with_capacity(limits.max_batch_records),
-            )));
-        }
-
-        batch.push(record);
-        if is_batch_full(&limits, &batch) {
-            batches.push(AppendRecordBatch::from_metered(std::mem::replace(
-                &mut batch,
-                Metered::with_capacity(limits.max_batch_records),
-            )));
-        }
-    }
-
-    if !batch.is_empty() {
-        batches.push(AppendRecordBatch::from_metered(batch));
-    }
-    Ok(batches)
 }
 
 fn is_batch_full(limits: &BatchLimits, batch: &Metered<Vec<AppendRecord>>) -> bool {
@@ -353,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn batches_should_be_empty_when_record_stream_is_empty() {
-        let batches: Vec<_> = AppendRecordBatches::new(
+        let batches: Vec<_> = AppendRecordBatches::from_stream(
             futures_util::stream::iter::<Vec<AppendRecord>>(vec![]),
             BatchingConfig::default(),
         )
@@ -369,9 +372,10 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let config = BatchingConfig::default()
             .with_limits(BatchLimits::default().with_max_batch_records(3)?);
-        let batches: Vec<_> = AppendRecordBatches::new(futures_util::stream::iter(records), config)
-            .try_collect()
-            .await?;
+        let batches: Vec<_> =
+            AppendRecordBatches::from_stream(futures_util::stream::iter(records), config)
+                .try_collect()
+                .await?;
 
         assert_eq!(batches.len(), 4);
         assert_eq!(batches[0].len(), 3);
@@ -392,9 +396,10 @@ mod tests {
 
         let config = BatchingConfig::default()
             .with_limits(BatchLimits::default().with_max_batch_bytes(max_batch_bytes)?);
-        let batches: Vec<_> = AppendRecordBatches::new(futures_util::stream::iter(records), config)
-            .try_collect()
-            .await?;
+        let batches: Vec<_> =
+            AppendRecordBatches::from_stream(futures_util::stream::iter(records), config)
+                .try_collect()
+                .await?;
 
         assert_eq!(batches.len(), 4);
         assert_eq!(batches[0].metered_bytes(), max_batch_bytes);
@@ -412,7 +417,7 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let records = futures_util::stream::iter(records).chain(futures_util::stream::pending());
         let config = BatchingConfig::default().with_linger(Duration::from_millis(5));
-        let mut batches = AppendRecordBatches::new(records, config);
+        let mut batches = AppendRecordBatches::from_stream(records, config);
         let next_batch = tokio::spawn(async move { batches.next().await });
 
         tokio::task::yield_now().await;
@@ -432,7 +437,7 @@ mod tests {
         let config = BatchingConfig::default()
             .with_limits(BatchLimits::default().with_max_batch_bytes(max_batch_bytes)?);
         let results: Vec<_> =
-            AppendRecordBatches::new(futures_util::stream::iter(vec![record]), config)
+            AppendRecordBatches::from_stream(futures_util::stream::iter(vec![record]), config)
                 .collect()
                 .await;
 
@@ -447,21 +452,26 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn eager_batches_should_be_empty_when_record_iter_is_empty() {
+    #[tokio::test]
+    async fn eager_batches_should_be_empty_when_record_iter_is_empty() {
         let batches =
-            append_record_batches_from_iter(std::iter::empty::<AppendRecord>(), BatchLimits::new())
+            AppendRecordBatches::from_iter(std::iter::empty::<AppendRecord>(), BatchLimits::new())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
                 .unwrap();
         assert!(batches.is_empty());
     }
 
-    #[test]
-    fn eager_batches_respect_count_limit() -> Result<(), ValidationError> {
+    #[tokio::test]
+    async fn eager_batches_respect_count_limit() -> Result<(), ValidationError> {
         let records: Vec<_> = (0..10)
             .map(|i| AppendRecord::new(format!("record{i}")))
             .collect::<Result<_, _>>()?;
         let limits = BatchLimits::new().with_max_batch_records(3)?;
-        let batches = append_record_batches_from_iter(records, limits)?;
+        let batches = AppendRecordBatches::from_iter(records, limits)?
+            .try_collect::<Vec<_>>()
+            .await?;
 
         assert_eq!(batches.len(), 4);
         assert_eq!(batches[0].len(), 3);
@@ -471,15 +481,17 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn eager_batches_respect_bytes_limit() -> Result<(), ValidationError> {
+    #[tokio::test]
+    async fn eager_batches_respect_bytes_limit() -> Result<(), ValidationError> {
         let records: Vec<_> = (0..10)
             .map(|i| AppendRecord::new(format!("record{i}")))
             .collect::<Result<_, _>>()?;
         let single_record_bytes = records[0].metered_bytes();
         let max_batch_bytes = single_record_bytes * 3;
         let limits = BatchLimits::new().with_max_batch_bytes(max_batch_bytes)?;
-        let batches = append_record_batches_from_iter(records, limits)?;
+        let batches = AppendRecordBatches::from_iter(records, limits)?
+            .try_collect::<Vec<_>>()
+            .await?;
 
         assert_eq!(batches.len(), 4);
         assert_eq!(batches[0].metered_bytes(), max_batch_bytes);
@@ -489,13 +501,15 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn eager_batching_should_error_when_record_is_oversized() -> Result<(), ValidationError> {
+    #[tokio::test]
+    async fn eager_batching_should_error_when_record_is_oversized() -> Result<(), ValidationError> {
         let record = AppendRecord::new("hello-world")?;
         let record_bytes = record.metered_bytes();
         let max_batch_bytes = 10;
         let limits = BatchLimits::new().with_max_batch_bytes(max_batch_bytes)?;
-        let err = append_record_batches_from_iter([record], limits).unwrap_err();
+        let err = AppendRecordBatches::from_iter([record], limits)
+            .err()
+            .unwrap();
 
         assert_eq!(
             err.to_string(),
