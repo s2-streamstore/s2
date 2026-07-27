@@ -348,9 +348,8 @@ mod tests {
     use assert_matches::assert_matches;
     use futures_util::TryStreamExt;
 
-    use crate::types::MeteredBytes as _;
-
     use super::*;
+    use crate::types::MeteredBytes as _;
 
     #[tokio::test]
     async fn batches_should_be_empty_when_record_stream_is_empty() {
