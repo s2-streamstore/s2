@@ -226,7 +226,7 @@ impl S2Endpoints {
     /// Create endpoints for a single account and basin endpoint.
     ///
     /// This is useful for S2-compatible services that expose both APIs at one endpoint.
-    pub fn for_single_endpoint(endpoint: &str) -> Result<Self, ValidationError> {
+    pub fn for_unified(endpoint: &str) -> Result<Self, ValidationError> {
         Self::new(
             AccountEndpoint::new(endpoint)?,
             BasinEndpoint::new(endpoint)?,
@@ -3830,8 +3830,8 @@ mod tests {
     }
 
     #[test]
-    fn s2_endpoints_for_single_endpoint_defaults_to_https() {
-        let ep = S2Endpoints::for_single_endpoint("localhost:8080").unwrap();
+    fn s2_endpoints_for_unified_defaults_to_https() {
+        let ep = S2Endpoints::for_unified("localhost:8080").unwrap();
         let authority: Authority = "localhost:8080".parse().unwrap();
         assert_eq!(ep.scheme, Scheme::HTTPS);
         assert_eq!(ep.account_authority, authority);
@@ -3839,14 +3839,14 @@ mod tests {
     }
 
     #[test]
-    fn s2_endpoints_for_single_endpoint_accepts_explicit_scheme() {
-        let ep = S2Endpoints::for_single_endpoint("http://localhost:8080").unwrap();
+    fn s2_endpoints_for_unified_accepts_explicit_scheme() {
+        let ep = S2Endpoints::for_unified("http://localhost:8080").unwrap();
         assert_eq!(ep.scheme, Scheme::HTTP);
     }
 
     #[test]
-    fn s2_endpoints_for_single_endpoint_rejects_invalid_endpoint() {
-        assert!(S2Endpoints::for_single_endpoint("not a valid endpoint").is_err());
+    fn s2_endpoints_for_unified_rejects_invalid_endpoint() {
+        assert!(S2Endpoints::for_unified("not a valid endpoint").is_err());
     }
 
     // -- Compression --
