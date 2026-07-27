@@ -236,7 +236,7 @@ pub fn append_record_batches_from_iter(
             )));
         }
 
-        if !batch.is_empty() && batch.would_overflow(record_bytes, &limits) {
+        if !batch.is_empty() && would_overflow_batch(&limits, &batch, record_bytes) {
             batches.push(std::mem::replace(
                 &mut batch,
                 AppendRecordBatch::with_capacity(limits.max_batch_records),
@@ -244,7 +244,7 @@ pub fn append_record_batches_from_iter(
         }
 
         batch.push(record);
-        if batch.is_full(&limits) {
+        if is_batch_full(&limits, &batch) {
             batches.push(std::mem::replace(
                 &mut batch,
                 AppendRecordBatch::with_capacity(limits.max_batch_records),
@@ -258,15 +258,17 @@ pub fn append_record_batches_from_iter(
     Ok(batches)
 }
 
-impl AppendRecordBatch {
-    fn is_full(&self, limits: &BatchLimits) -> bool {
-        self.len() >= limits.max_batch_records || self.metered_bytes() >= limits.max_batch_bytes
-    }
+fn is_batch_full(limits: &BatchLimits, batch: &AppendRecordBatch) -> bool {
+    batch.len() >= limits.max_batch_records || batch.metered_bytes() >= limits.max_batch_bytes
+}
 
-    fn would_overflow(&self, record_bytes: usize, limits: &BatchLimits) -> bool {
-        self.len() + 1 > limits.max_batch_records
-            || self.metered_bytes() + record_bytes > limits.max_batch_bytes
-    }
+fn would_overflow_batch(
+    limits: &BatchLimits,
+    batch: &AppendRecordBatch,
+    record_bytes: usize,
+) -> bool {
+    batch.len() + 1 > limits.max_batch_records
+        || batch.metered_bytes() + record_bytes > limits.max_batch_bytes
 }
 
 fn append_record_batches(
@@ -298,7 +300,7 @@ fn append_record_batches(
             }
             batch.push(first_record);
 
-            while !batch.is_full(&config.limits) && overflowed_record.is_none() {
+            while !is_batch_full(&config.limits, &batch) && overflowed_record.is_none() {
                 if batch.len() == 1 {
                     linger_deadline
                         .as_mut()
@@ -311,7 +313,7 @@ fn append_record_batches(
                             Some(record) => {
                                 let record: AppendRecord = record.into();
                                 let record_bytes = record.metered_bytes();
-                                if batch.would_overflow(record_bytes, &config.limits) {
+                                if would_overflow_batch(&config.limits, &batch, record_bytes) {
                                     overflowed_record = Some(record);
                                 } else {
                                     batch.push(record);
