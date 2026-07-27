@@ -15,9 +15,7 @@ use s2_common::{
 };
 use tokio::time::Instant;
 
-use crate::types::{
-    AppendInput, AppendRecord, AppendRecordBatch, FencingToken, MeteredBytes, ValidationError,
-};
+use crate::types::{AppendInput, AppendRecord, AppendRecordBatch, FencingToken, ValidationError};
 
 const RECORD_BATCH_MIN: CountOrBytes = CountOrBytes { count: 1, bytes: 8 };
 
@@ -231,8 +229,7 @@ pub fn append_record_batches_from_iter(
     let mut batch = Metered::with_capacity(limits.max_batch_records);
 
     for item in records {
-        let record = item.into();
-        let record = Metered::with_size(record.metered_bytes(), record);
+        let record = Metered::from(item.into());
         if record.metered_size() > limits.max_batch_bytes {
             return Err(ValidationError(format!(
                 "record size in metered bytes ({}) exceeds max_batch_bytes ({})",
@@ -291,10 +288,7 @@ fn append_record_batches(
             let first_record = match overflowed_record.take() {
                 Some(pair) => pair,
                 None => match records.next().await {
-                    Some(item) => {
-                        let record = item.into();
-                        Metered::with_size(record.metered_bytes(), record)
-                    }
+                    Some(item) => Metered::from(item.into()),
                     None => break,
                 },
             };
@@ -319,9 +313,7 @@ fn append_record_batches(
                     next_record = records.next() => {
                         match next_record {
                             Some(record) => {
-                                let record: AppendRecord = record.into();
-                                let record =
-                                    Metered::with_size(record.metered_bytes(), record);
+                                let record = Metered::from(record.into());
                                 if would_overflow_batch(&config.limits, &batch, &record) {
                                     overflowed_record = Some(record);
                                 } else {
@@ -355,6 +347,8 @@ fn append_record_batches(
 mod tests {
     use assert_matches::assert_matches;
     use futures_util::TryStreamExt;
+
+    use crate::types::MeteredBytes as _;
 
     use super::*;
 
