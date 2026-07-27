@@ -7,7 +7,9 @@ use common::{S2Stream, SharedS2Basin, s2_config, unique_basin_name, unique_strea
 use futures_util::StreamExt;
 use rstest::rstest;
 use s2_sdk::{
-    append_session::AppendSessionConfig, batching::BatchingConfig, producer::ProducerConfig,
+    append_session::AppendSessionConfig,
+    batching::{BatchLimits, BatchingConfig},
+    producer::ProducerConfig,
     types::*,
 };
 use test_context::test_context;
@@ -1560,10 +1562,9 @@ async fn producer_close_delivers_all_indexed_acks_from_same_ack(
 async fn producer_close_delivers_all_indexed_acks_from_different_acks(
     stream: &S2Stream,
 ) -> Result<(), S2Error> {
-    let producer = stream.producer(
-        ProducerConfig::default()
-            .with_batching(BatchingConfig::default().with_max_batch_records(1)?),
-    );
+    let producer = stream.producer(ProducerConfig::default().with_batching(
+        BatchingConfig::default().with_limits(BatchLimits::default().with_max_batch_records(1)?),
+    ));
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1863,9 +1864,9 @@ async fn append_session_for_non_existent_stream_errors(
 async fn producer_for_non_existent_stream_errors(basin: &SharedS2Basin) -> Result<(), S2Error> {
     let stream = basin.stream(unique_stream_name());
 
-    let producer = stream.producer(
-        ProducerConfig::new().with_batching(BatchingConfig::new().with_max_batch_records(10)?),
-    );
+    let producer = stream.producer(ProducerConfig::new().with_batching(
+        BatchingConfig::new().with_limits(BatchLimits::new().with_max_batch_records(10)?),
+    ));
     let num_records = 2000;
 
     let mut tickets = Vec::with_capacity(num_records);

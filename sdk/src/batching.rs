@@ -121,32 +121,6 @@ impl BatchingConfig {
     pub fn with_limits(self, limits: BatchLimits) -> Self {
         Self { limits, ..self }
     }
-
-    /// Set the maximum metered bytes per batch.
-    ///
-    /// **Note:** It must be at least `8B` and must not exceed `1MiB`.
-    ///
-    /// Defaults to `1MiB`.
-    pub fn with_max_batch_bytes(self, max_batch_bytes: usize) -> Result<Self, ValidationError> {
-        let Self { linger, limits } = self;
-        Ok(Self {
-            linger,
-            limits: limits.with_max_batch_bytes(max_batch_bytes)?,
-        })
-    }
-
-    /// Set the maximum number of records per batch.
-    ///
-    /// **Note:** It must be at least `1` and must not exceed `1000`.
-    ///
-    /// Defaults to `1000`.
-    pub fn with_max_batch_records(self, max_batch_records: usize) -> Result<Self, ValidationError> {
-        let Self { linger, limits } = self;
-        Ok(Self {
-            linger,
-            limits: limits.with_max_batch_records(max_batch_records)?,
-        })
-    }
 }
 
 /// A [`Stream`] that batches [`AppendRecord`]s into [`AppendInput`]s.
@@ -397,7 +371,8 @@ mod tests {
         let records: Vec<_> = (0..10)
             .map(|i| AppendRecord::new(format!("record{i}")))
             .collect::<Result<_, _>>()?;
-        let config = BatchingConfig::default().with_max_batch_records(3)?;
+        let config = BatchingConfig::default()
+            .with_limits(BatchLimits::default().with_max_batch_records(3)?);
         let batches: Vec<_> = AppendRecordBatches::new(futures_util::stream::iter(records), config)
             .try_collect()
             .await?;
@@ -419,7 +394,8 @@ mod tests {
         let single_record_bytes = records[0].metered_bytes();
         let max_batch_bytes = single_record_bytes * 3;
 
-        let config = BatchingConfig::default().with_max_batch_bytes(max_batch_bytes)?;
+        let config = BatchingConfig::default()
+            .with_limits(BatchLimits::default().with_max_batch_bytes(max_batch_bytes)?);
         let batches: Vec<_> = AppendRecordBatches::new(futures_util::stream::iter(records), config)
             .try_collect()
             .await?;
@@ -439,7 +415,8 @@ mod tests {
         let record_bytes = record.metered_bytes();
         let max_batch_bytes = 10;
 
-        let config = BatchingConfig::default().with_max_batch_bytes(max_batch_bytes)?;
+        let config = BatchingConfig::default()
+            .with_limits(BatchLimits::default().with_max_batch_bytes(max_batch_bytes)?);
         let results: Vec<_> =
             AppendRecordBatches::new(futures_util::stream::iter(vec![record]), config)
                 .collect()
