@@ -3640,10 +3640,136 @@ impl From<api::stream::AppendConditionFailed> for AppendConditionFailed {
     }
 }
 
+/// Errors that can be returned by any network request.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum RequestError {
+    /// A client-side error.
+    #[error(transparent)]
+    Client(#[from] ClientError),
+    /// An error returned by the server.
+    #[error(transparent)]
+    Server(#[from] ErrorResponse),
+    /// The access token could not be used as an HTTP header value.
+    #[error("malformed access token: {0}")]
+    MalformedAccessToken(String),
+    /// Input validation failed.
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+}
+
+impl RequestError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Client(error) => error.is_retryable(),
+            Self::Server(error) => error.is_retryable(),
+            Self::MalformedAccessToken(_) | Self::Validation(_) => false,
+        }
+    }
+
+    /// Whether the operation is guaranteed to have had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            Self::Client(error) => error.has_no_side_effects(),
+            Self::Server(error) => error.has_no_side_effects(),
+            Self::MalformedAccessToken(_) | Self::Validation(_) => false,
+        }
+    }
+}
+
+impl From<ApiError> for RequestError {
+    fn from(error: ApiError) -> Self {
+        match error {
+            ApiError::Client(error) => Self::Client(error),
+            ApiError::MalformedAccessToken(error) => Self::MalformedAccessToken(error),
+            ApiError::Server(status, response) => {
+                Self::Server(ErrorResponse::from_api(status, response))
+            }
+            other => Self::Client(ClientError::Others(other.to_string())),
+        }
+    }
+}
+
+/// Errors returned by unary read operations.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReadError {
+    /// A network request error.
+    #[error(transparent)]
+    Request(#[from] RequestError),
+    /// The requested position has not been written.
+    #[error("read from an unwritten position. current tail: {0}")]
+    ReadUnwritten(StreamPosition),
+}
+
+impl ReadError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Request(error) if error.is_retryable())
+    }
+
+    /// Whether the operation is guaranteed to have had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        matches!(self, Self::Request(error) if error.has_no_side_effects())
+    }
+}
+
+impl From<ApiError> for ReadError {
+    fn from(error: ApiError) -> Self {
+        match error {
+            ApiError::ReadUnwritten(tail) => Self::ReadUnwritten(tail.tail.into()),
+            other => Self::Request(other.into()),
+        }
+    }
+}
+
+/// Errors returned by unary append operations.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum AppendError {
+    /// A network request error.
+    #[error(transparent)]
+    Request(#[from] RequestError),
+    /// The append condition did not match.
+    #[error(transparent)]
+    ConditionFailed(#[from] AppendConditionFailed),
+}
+
+impl AppendError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Request(error) if error.is_retryable())
+    }
+
+    /// Whether the operation is guaranteed to have had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        matches!(self, Self::Request(error) if error.has_no_side_effects())
+    }
+}
+
+impl From<ApiError> for AppendError {
+    fn from(error: ApiError) -> Self {
+        match error {
+            ApiError::AppendConditionFailed(condition) => Self::ConditionFailed(condition.into()),
+            other => Self::Request(other.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 /// Errors from S2 operations.
 #[non_exhaustive]
 pub enum S2Error {
+    /// A request-level error.
+    #[error(transparent)]
+    Request(RequestError),
+    /// A unary read error.
+    #[error(transparent)]
+    Read(ReadError),
+    /// A unary append error.
+    #[error(transparent)]
+    Append(AppendError),
     /// Client-side error.
     #[error(transparent)]
     Client(ClientError),
@@ -3689,10 +3815,31 @@ impl From<ApiError> for S2Error {
     }
 }
 
+impl From<RequestError> for S2Error {
+    fn from(error: RequestError) -> Self {
+        Self::Request(error)
+    }
+}
+
+impl From<ReadError> for S2Error {
+    fn from(error: ReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl From<AppendError> for S2Error {
+    fn from(error: AppendError) -> Self {
+        Self::Append(error)
+    }
+}
+
 impl S2Error {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         match self {
+            S2Error::Request(error) => error.is_retryable(),
+            S2Error::Read(error) => error.is_retryable(),
+            S2Error::Append(error) => error.is_retryable(),
             S2Error::Client(e) => e.is_retryable(),
             S2Error::Server(r) => r.is_retryable(),
             S2Error::Session(e) => e.is_retryable(),
@@ -3707,6 +3854,9 @@ impl S2Error {
     /// Whether the operation is guaranteed to have had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
+            S2Error::Request(error) => error.has_no_side_effects(),
+            S2Error::Read(error) => error.has_no_side_effects(),
+            S2Error::Append(error) => error.has_no_side_effects(),
             S2Error::Client(e) => e.has_no_side_effects(),
             S2Error::Server(r) => r.has_no_side_effects(),
             S2Error::Session(e) => e.has_no_side_effects(),
