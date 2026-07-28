@@ -3770,6 +3770,9 @@ pub enum S2Error {
     /// A unary append error.
     #[error(transparent)]
     Append(AppendError),
+    /// An append-session error.
+    #[error(transparent)]
+    AppendSession(crate::session::append::AppendSessionError),
     /// Client-side error.
     #[error(transparent)]
     Client(ClientError),
@@ -3840,6 +3843,7 @@ impl S2Error {
             S2Error::Request(error) => error.is_retryable(),
             S2Error::Read(error) => error.is_retryable(),
             S2Error::Append(error) => error.is_retryable(),
+            S2Error::AppendSession(error) => error.is_retryable(),
             S2Error::Client(e) => e.is_retryable(),
             S2Error::Server(r) => r.is_retryable(),
             S2Error::Session(e) => e.is_retryable(),
@@ -3857,6 +3861,7 @@ impl S2Error {
             S2Error::Request(error) => error.has_no_side_effects(),
             S2Error::Read(error) => error.has_no_side_effects(),
             S2Error::Append(error) => error.has_no_side_effects(),
+            S2Error::AppendSession(error) => error.has_no_side_effects(),
             S2Error::Client(e) => e.has_no_side_effects(),
             S2Error::Server(r) => r.has_no_side_effects(),
             S2Error::Session(e) => e.has_no_side_effects(),
@@ -3917,6 +3922,9 @@ impl SessionError {
 #[non_exhaustive]
 /// Errors from producer operations.
 pub enum ProducerError {
+    /// An append-session error encountered while producing records.
+    #[error(transparent)]
+    Append(#[from] crate::session::append::AppendSessionError),
     /// The producer was already closed.
     #[error("producer already closed")]
     ProducerClosed,
@@ -3931,12 +3939,15 @@ pub enum ProducerError {
 impl ProducerError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
-        false
+        match self {
+            Self::Append(error) => error.is_retryable(),
+            Self::ProducerClosed | Self::ProducerClosing | Self::ProducerDropped => false,
+        }
     }
 
     /// Whether the operation is guaranteed to have had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
-        false
+        matches!(self, Self::Append(error) if error.has_no_side_effects())
     }
 }
 

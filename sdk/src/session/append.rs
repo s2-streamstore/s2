@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AppendSessionError {
     /// A unary append error.
     #[error(transparent)]

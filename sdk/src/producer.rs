@@ -411,6 +411,7 @@ impl RecordSubmitPermit {
 impl From<ProducerError> for S2Error {
     fn from(err: ProducerError) -> Self {
         match err {
+            ProducerError::Append(error) => S2Error::AppendSession(error),
             ProducerError::ProducerClosed => S2Error::Producer(err),
             ProducerError::ProducerClosing => S2Error::Producer(err),
             ProducerError::ProducerDropped => S2Error::Producer(err),
