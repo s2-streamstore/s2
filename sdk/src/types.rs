@@ -3936,6 +3936,14 @@ pub enum ProducerError {
     ProducerDropped,
 }
 
+impl From<ValidationError> for ProducerError {
+    fn from(error: ValidationError) -> Self {
+        Self::Append(crate::session::append::AppendSessionError::Request(
+            RequestError::Validation(error),
+        ))
+    }
+}
+
 impl ProducerError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {

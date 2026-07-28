@@ -24,7 +24,7 @@ use crate::{
     retry::RetryBackoffBuilder,
     types::{
         AppendAck, AppendError, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
-        ONE_MIB, RequestError, S2Error, SessionError, StreamName, StreamPosition, ValidationError,
+        ONE_MIB, RequestError, SessionError, StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -70,24 +70,14 @@ impl From<ApiError> for AppendSessionError {
     }
 }
 
-impl From<AppendSessionError> for S2Error {
-    fn from(err: AppendSessionError) -> Self {
-        match err {
-            AppendSessionError::Append(error) => S2Error::Append(error),
-            AppendSessionError::Request(error) => S2Error::Request(error),
-            AppendSessionError::Session(error) => S2Error::Session(error),
-        }
-    }
-}
-
 /// A [`Future`] that resolves to an acknowledgement once the batch of records is appended.
 pub struct BatchSubmitTicket {
-    rx: oneshot::Receiver<Result<AppendAck, S2Error>>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    rx: oneshot::Receiver<Result<AppendAck, AppendSessionError>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
 }
 
 impl Future for BatchSubmitTicket {
-    type Output = Result<AppendAck, S2Error>;
+    type Output = Result<AppendAck, AppendSessionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
@@ -154,7 +144,7 @@ struct SessionState {
     cmd_rx: mpsc::Receiver<Command>,
     inflight_appends: VecDeque<InflightAppend>,
     inflight_bytes: usize,
-    close_tx: Option<oneshot::Sender<Result<(), S2Error>>>,
+    close_tx: Option<oneshot::Sender<Result<(), AppendSessionError>>>,
     total_records: usize,
     total_acked_records: usize,
     prev_ack_end: Option<StreamPosition>,
@@ -168,7 +158,7 @@ struct SessionState {
 pub struct AppendSession {
     cmd_tx: mpsc::Sender<Command>,
     permits: AppendPermits,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -213,7 +203,10 @@ impl AppendSession {
     ///
     /// **Note**: After all submits, you must call [`close`](Self::close) to ensure all batches are
     /// appended.
-    pub async fn submit(&self, input: AppendInput) -> Result<BatchSubmitTicket, S2Error> {
+    pub async fn submit(
+        &self,
+        input: AppendInput,
+    ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let permit = self.reserve(input.records.metered_bytes() as u32).await?;
         Ok(permit.submit(input))
     }
@@ -234,7 +227,7 @@ impl AppendSession {
     /// [`Semaphore::acquire_many_owned`](tokio::sync::Semaphore::acquire_many_owned) and
     /// [`Sender::reserve_owned`](tokio::sync::mpsc::Sender::reserve), both of which are cancel
     /// safe.
-    pub async fn reserve(&self, bytes: u32) -> Result<BatchSubmitPermit, S2Error> {
+    pub async fn reserve(&self, bytes: u32) -> Result<BatchSubmitPermit, AppendSessionError> {
         let append_permit = self.permits.acquire(bytes).await;
         let cmd_tx_permit = self
             .cmd_tx
@@ -250,7 +243,7 @@ impl AppendSession {
     }
 
     /// Close the session and wait for all submitted batch of records to be appended.
-    pub async fn close(self) -> Result<(), S2Error> {
+    pub async fn close(self) -> Result<(), AppendSessionError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Close { done_tx })
@@ -260,7 +253,7 @@ impl AppendSession {
         Ok(())
     }
 
-    fn terminal_err(&self) -> S2Error {
+    fn terminal_err(&self) -> AppendSessionError {
         self.terminal_err
             .get()
             .cloned()
@@ -272,7 +265,7 @@ impl AppendSession {
 pub struct BatchSubmitPermit {
     append_permit: AppendPermit,
     cmd_tx_permit: mpsc::OwnedPermit<Command>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
 }
 
 impl BatchSubmitPermit {
@@ -293,7 +286,7 @@ impl BatchSubmitPermit {
 
 pub(crate) struct AppendSessionInternal {
     cmd_tx: mpsc::Sender<Command>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -326,7 +319,7 @@ impl AppendSessionInternal {
     pub(crate) fn submit(
         &self,
         input: AppendInput,
-    ) -> impl Future<Output = Result<BatchSubmitTicket, S2Error>> + Send + 'static {
+    ) -> impl Future<Output = Result<BatchSubmitTicket, AppendSessionError>> + Send + 'static {
         let cmd_tx = self.cmd_tx.clone();
         let terminal_err = self.terminal_err.clone();
         async move {
@@ -350,7 +343,7 @@ impl AppendSessionInternal {
         }
     }
 
-    pub(crate) async fn close(self) -> Result<(), S2Error> {
+    pub(crate) async fn close(self) -> Result<(), AppendSessionError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Close { done_tx })
@@ -360,7 +353,7 @@ impl AppendSessionInternal {
         Ok(())
     }
 
-    fn terminal_err(&self) -> S2Error {
+    fn terminal_err(&self) -> AppendSessionError {
         self.terminal_err
             .get()
             .cloned()
@@ -418,7 +411,7 @@ async fn run_session_with_retry(
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
 ) {
     let frame_signal = match client.config.retry.append_retry_policy {
         AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
@@ -480,7 +473,7 @@ async fn run_session_with_retry(
                         "not retrying append session"
                     );
 
-                    let err: S2Error = err.into();
+                    let err: AppendSessionError = err.into();
 
                     let _ = terminal_err.set(err.clone());
 
@@ -813,14 +806,14 @@ fn process_ack(
 struct StashedSubmission {
     input: AppendInput,
     input_metered_bytes: usize,
-    ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
+    ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
     permit: Option<AppendPermit>,
 }
 
 struct InflightAppend {
     input: AppendInput,
     input_metered_bytes: usize,
-    ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
+    ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
     ack_deadline: Instant,
     _permit: Option<AppendPermit>,
 }
@@ -828,16 +821,16 @@ struct InflightAppend {
 enum Command {
     Submit {
         input: AppendInput,
-        ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
+        ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
         permit: Option<AppendPermit>,
     },
     Close {
-        done_tx: oneshot::Sender<Result<(), S2Error>>,
+        done_tx: oneshot::Sender<Result<(), AppendSessionError>>,
     },
 }
 
 impl Command {
-    fn reject(self, err: S2Error) {
+    fn reject(self, err: AppendSessionError) {
         match self {
             Command::Submit { ack_tx, .. } => {
                 let _ = ack_tx.send(Err(err));

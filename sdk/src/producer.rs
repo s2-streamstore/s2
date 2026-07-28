@@ -10,7 +10,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures_util::{FutureExt, StreamExt, TryFutureExt, stream::FuturesUnordered};
 use s2_common::caps::RECORD_BATCH_MAX;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -22,18 +22,18 @@ use crate::{
     session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
     types::{
         AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, ProducerError,
-        S2Error, StreamName, ValidationError,
+        StreamName, ValidationError,
     },
 };
 
 /// A [`Future`] that resolves to an acknowledgement once the record is appended.
 pub struct RecordSubmitTicket {
-    rx: oneshot::Receiver<Result<IndexedAppendAck, S2Error>>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    rx: oneshot::Receiver<Result<IndexedAppendAck, ProducerError>>,
+    terminal_err: Arc<OnceLock<ProducerError>>,
 }
 
 impl Future for RecordSubmitTicket {
-    type Output = Result<IndexedAppendAck, S2Error>;
+    type Output = Result<IndexedAppendAck, ProducerError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
@@ -136,7 +136,7 @@ impl ProducerConfig {
 pub struct Producer {
     cmd_tx: mpsc::Sender<Command>,
     permits: AppendPermits,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<ProducerError>>,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -174,7 +174,7 @@ impl Producer {
     ///
     /// **Note**: After all submits, you must call [`close`](Self::close) to ensure all records are
     /// appended.
-    pub async fn submit(&self, record: AppendRecord) -> Result<RecordSubmitTicket, S2Error> {
+    pub async fn submit(&self, record: AppendRecord) -> Result<RecordSubmitTicket, ProducerError> {
         let permit = self.reserve(record.metered_bytes() as u32).await?;
         Ok(permit.submit(record))
     }
@@ -195,7 +195,7 @@ impl Producer {
     /// [`Semaphore::acquire_many_owned`](tokio::sync::Semaphore::acquire_many_owned) and
     /// [`Sender::reserve_owned`](tokio::sync::mpsc::Sender::reserve_owned), both of which are
     /// cancel safe.
-    pub async fn reserve(&self, bytes: u32) -> Result<RecordSubmitPermit, S2Error> {
+    pub async fn reserve(&self, bytes: u32) -> Result<RecordSubmitPermit, ProducerError> {
         let append_permit = self.permits.acquire(bytes).await;
         let cmd_tx_permit = self
             .cmd_tx
@@ -211,7 +211,7 @@ impl Producer {
     }
 
     /// Close the producer and wait for all submitted records to be appended.
-    pub async fn close(self) -> Result<(), S2Error> {
+    pub async fn close(self) -> Result<(), ProducerError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Close { done_tx })
@@ -220,7 +220,7 @@ impl Producer {
         done_rx.await.map_err(|_| self.terminal_err())?
     }
 
-    fn terminal_err(&self) -> S2Error {
+    fn terminal_err(&self) -> ProducerError {
         self.terminal_err
             .get()
             .cloned()
@@ -231,7 +231,7 @@ impl Producer {
         session: AppendSessionInternal,
         config: ProducerConfig,
         mut cmd_rx: mpsc::Receiver<Command>,
-        terminal_err: Arc<OnceLock<S2Error>>,
+        terminal_err: Arc<OnceLock<ProducerError>>,
     ) {
         let (record_tx, record_rx) = mpsc::channel::<AppendRecord>(RECORD_BATCH_MAX.count);
         let mut record_tx = Some(record_tx);
@@ -248,7 +248,7 @@ impl Producer {
 
         let mut pending_batch_acks = FuturesUnordered::new();
         let mut pending_record_acks = VecDeque::new();
-        let mut close_tx: Option<oneshot::Sender<Result<(), S2Error>>> = None;
+        let mut close_tx: Option<oneshot::Sender<Result<(), ProducerError>>> = None;
         let mut stashed_submission: Option<StashedSubmission> = None;
         let mut submit_fut: Option<SubmitFuture> = None;
         let mut submit_batch_len: Option<usize> = None;
@@ -302,7 +302,7 @@ impl Producer {
                     match input {
                         Some(Ok(input)) => {
                             submit_batch_len = Some(input.records.len());
-                            submit_fut = Some(Box::pin(session.submit(input)));
+                            submit_fut = Some(Box::pin(session.submit(input).map_err(Into::into)));
                         }
                         Some(Err(err)) => {
                             terminate_producer(
@@ -380,7 +380,7 @@ impl Producer {
         let session_close_res = session.close().await;
 
         if let Some(done_tx) = close_tx.take() {
-            let _ = done_tx.send(session_close_res);
+            let _ = done_tx.send(session_close_res.map_err(Into::into));
         }
     }
 }
@@ -389,7 +389,7 @@ impl Producer {
 pub struct RecordSubmitPermit {
     append_permit: AppendPermit,
     cmd_tx_permit: mpsc::OwnedPermit<Command>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<ProducerError>>,
 }
 
 impl RecordSubmitPermit {
@@ -408,32 +408,21 @@ impl RecordSubmitPermit {
     }
 }
 
-impl From<ProducerError> for S2Error {
-    fn from(err: ProducerError) -> Self {
-        match err {
-            ProducerError::Append(error) => S2Error::AppendSession(error),
-            ProducerError::ProducerClosed => S2Error::Producer(err),
-            ProducerError::ProducerClosing => S2Error::Producer(err),
-            ProducerError::ProducerDropped => S2Error::Producer(err),
-        }
-    }
-}
-
-type SubmitFuture = Pin<Box<dyn Future<Output = Result<BatchSubmitTicket, S2Error>> + Send>>;
+type SubmitFuture = Pin<Box<dyn Future<Output = Result<BatchSubmitTicket, ProducerError>> + Send>>;
 
 enum Command {
     Submit {
         record: AppendRecord,
-        ack_tx: oneshot::Sender<Result<IndexedAppendAck, S2Error>>,
+        ack_tx: oneshot::Sender<Result<IndexedAppendAck, ProducerError>>,
         permit: AppendPermit,
     },
     Close {
-        done_tx: oneshot::Sender<Result<(), S2Error>>,
+        done_tx: oneshot::Sender<Result<(), ProducerError>>,
     },
 }
 
 impl Command {
-    fn reject(self, err: S2Error) {
+    fn reject(self, err: ProducerError) {
         match self {
             Command::Submit { ack_tx, .. } => {
                 let _ = ack_tx.send(Err(err));
@@ -447,12 +436,12 @@ impl Command {
 
 struct StashedSubmission {
     record: AppendRecord,
-    ack_tx: oneshot::Sender<Result<IndexedAppendAck, S2Error>>,
+    ack_tx: oneshot::Sender<Result<IndexedAppendAck, ProducerError>>,
     permit: AppendPermit,
 }
 
 struct PendingRecordAck {
-    ack_tx: oneshot::Sender<Result<IndexedAppendAck, S2Error>>,
+    ack_tx: oneshot::Sender<Result<IndexedAppendAck, ProducerError>>,
     _permit: AppendPermit,
 }
 
@@ -462,12 +451,12 @@ struct PendingBatchAck {
 }
 
 impl Future for PendingBatchAck {
-    type Output = (Result<AppendAck, S2Error>, Vec<PendingRecordAck>);
+    type Output = (Result<AppendAck, ProducerError>, Vec<PendingRecordAck>);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.ticket).poll(cx) {
             Poll::Ready(batch_ack) => Poll::Ready((
-                batch_ack,
+                batch_ack.map_err(Into::into),
                 self.pending_record_acks
                     .take()
                     .expect("pending_record_acks should not be None"),
@@ -478,7 +467,7 @@ impl Future for PendingBatchAck {
 }
 
 fn dispatch_acks(
-    batch_ack: Result<AppendAck, S2Error>,
+    batch_ack: Result<AppendAck, ProducerError>,
     pending_record_acks: Vec<PendingRecordAck>,
 ) {
     match batch_ack {
@@ -500,12 +489,12 @@ fn dispatch_acks(
 }
 
 async fn terminate_producer(
-    err: S2Error,
-    terminal_err: &OnceLock<S2Error>,
+    err: ProducerError,
+    terminal_err: &OnceLock<ProducerError>,
     pending_batch_acks: &mut FuturesUnordered<PendingBatchAck>,
     pending_record_acks: &mut VecDeque<PendingRecordAck>,
     stashed_submission: &mut Option<StashedSubmission>,
-    close_tx: &mut Option<oneshot::Sender<Result<(), S2Error>>>,
+    close_tx: &mut Option<oneshot::Sender<Result<(), ProducerError>>>,
     cmd_rx: &mut mpsc::Receiver<Command>,
 ) {
     while let Some((batch_ack, pending_record_acks)) =
