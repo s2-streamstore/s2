@@ -342,9 +342,11 @@ async fn init_object_store(
                 root = %local_root.display(),
                 "using local filesystem object store"
             );
-            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(
-                local_root,
-            )?)
+            Arc::new(
+                // Match the durability contract of remote object stores: an
+                // acknowledged SlateDB write must survive a host crash.
+                object_store::local::LocalFileSystem::new_with_prefix(local_root)?.with_fsync(true),
+            )
         }
         StoreType::InMemory => {
             info!("using in-memory object store");
