@@ -46,7 +46,7 @@ impl ReadSessionFailure {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReadSessionError {
-    /// A unary read error.
+    /// An error with the read request underlying the session.
     #[error(transparent)]
     Read(#[from] ReadError),
     /// A session lifecycle error.

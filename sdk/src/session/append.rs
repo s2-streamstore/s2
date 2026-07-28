@@ -31,7 +31,7 @@ use crate::{
 /// Errors returned by an append session.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AppendSessionError {
-    /// A unary append error.
+    /// An error with the append request underlying the session.
     #[error(transparent)]
     Append(#[from] AppendError),
     /// A session lifecycle error.
