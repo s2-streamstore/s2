@@ -45,7 +45,7 @@ fn invalid_time_ranges(now: u32) -> [(u32, u32); 3] {
     ]
 }
 
-async fn append_sample(stream: &S2Stream) -> Result<(), S2Error> {
+async fn append_sample(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     let input = AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
         "metrics",
     )?])?);
@@ -53,7 +53,7 @@ async fn append_sample(stream: &S2Stream) -> Result<(), S2Error> {
     Ok(())
 }
 
-async fn read_sample(stream: &S2Stream) -> Result<(), S2Error> {
+async fn read_sample(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     let _ = stream
         .read(
             ReadInput::new()
@@ -123,7 +123,9 @@ where
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_active_basins(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_active_basins(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -174,7 +176,9 @@ async fn account_metrics_active_basins(stream: &S2Stream) -> Result<(), S2Error>
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_default_interval(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_account_ops_default_interval(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -209,7 +213,9 @@ async fn account_metrics_account_ops_default_interval(stream: &S2Stream) -> Resu
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_minute_interval(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_account_ops_minute_interval(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -246,7 +252,9 @@ async fn account_metrics_account_ops_minute_interval(stream: &S2Stream) -> Resul
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_hour_interval(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_account_ops_hour_interval(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -283,7 +291,9 @@ async fn account_metrics_account_ops_hour_interval(stream: &S2Stream) -> Result<
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_day_interval(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_account_ops_day_interval(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -320,7 +330,9 @@ async fn account_metrics_account_ops_day_interval(stream: &S2Stream) -> Result<(
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_empty_time_range(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_empty_time_range(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -340,7 +352,7 @@ async fn account_metrics_empty_time_range(stream: &S2Stream) -> Result<(), S2Err
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_storage(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -389,7 +401,7 @@ async fn basin_metrics_storage(stream: &S2Stream) -> Result<(), S2Error> {
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_append_ops(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_append_ops(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -422,7 +434,7 @@ async fn basin_metrics_append_ops(stream: &S2Stream) -> Result<(), S2Error> {
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_read_ops(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_read_ops(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
     read_sample(stream).await?;
 
@@ -456,7 +468,9 @@ async fn basin_metrics_read_ops(stream: &S2Stream) -> Result<(), S2Error> {
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_read_throughput(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_read_throughput(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
     read_sample(stream).await?;
 
@@ -490,7 +504,9 @@ async fn basin_metrics_read_throughput(stream: &S2Stream) -> Result<(), S2Error>
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_append_throughput(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_append_throughput(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -523,7 +539,7 @@ async fn basin_metrics_append_throughput(stream: &S2Stream) -> Result<(), S2Erro
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_basin_ops(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_basin_ops(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -556,7 +572,7 @@ async fn basin_metrics_basin_ops(stream: &S2Stream) -> Result<(), S2Error> {
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn stream_metrics_storage(stream: &S2Stream) -> Result<(), S2Error> {
+async fn stream_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -607,7 +623,9 @@ async fn stream_metrics_storage(stream: &S2Stream) -> Result<(), S2Error> {
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_invalid_time_ranges(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -636,7 +654,7 @@ async fn account_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_all_sets(stream: &S2Stream) -> Result<(), S2Error> {
+async fn account_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -661,7 +679,9 @@ async fn account_metrics_all_sets(stream: &S2Stream) -> Result<(), S2Error> {
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_empty_time_range(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_empty_time_range(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -682,7 +702,9 @@ async fn basin_metrics_empty_time_range(stream: &S2Stream) -> Result<(), S2Error
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_invalid_time_ranges(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -712,7 +734,7 @@ async fn basin_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2Er
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_all_sets(stream: &S2Stream) -> Result<(), S2Error> {
+async fn basin_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
     read_sample(stream).await?;
 
@@ -742,7 +764,9 @@ async fn basin_metrics_all_sets(stream: &S2Stream) -> Result<(), S2Error> {
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn stream_metrics_empty_time_range(stream: &S2Stream) -> Result<(), S2Error> {
+async fn stream_metrics_empty_time_range(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -764,7 +788,9 @@ async fn stream_metrics_empty_time_range(stream: &S2Stream) -> Result<(), S2Erro
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn stream_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2Error> {
+async fn stream_metrics_invalid_time_ranges(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();

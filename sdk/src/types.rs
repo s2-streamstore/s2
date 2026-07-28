@@ -3613,8 +3613,8 @@ impl ReadBatch {
     }
 }
 
-/// A [`Stream`](futures_core::Stream) of values of type `Result<T, S2Error>`.
-pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, S2Error>>>>;
+/// A stream of values of type `Result<T, RequestError>`.
+pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, RequestError>>>>;
 
 #[derive(Debug, Clone, thiserror::Error)]
 /// Why an append condition check failed.
@@ -3753,143 +3753,6 @@ impl From<ApiError> for AppendError {
         match error {
             ApiError::AppendConditionFailed(condition) => Self::ConditionFailed(condition.into()),
             other => Self::Request(other.into()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-/// Errors from S2 operations.
-#[non_exhaustive]
-pub enum S2Error {
-    /// A request-level error.
-    #[error(transparent)]
-    Request(RequestError),
-    /// A unary read error.
-    #[error(transparent)]
-    Read(ReadError),
-    /// A unary append error.
-    #[error(transparent)]
-    Append(AppendError),
-    /// An append-session error.
-    #[error(transparent)]
-    AppendSession(crate::session::append::AppendSessionError),
-    /// A read-session error.
-    #[error(transparent)]
-    ReadSession(crate::session::read::ReadSessionError),
-    /// Client-side error.
-    #[error(transparent)]
-    Client(ClientError),
-    /// An error from a streaming or session operation.
-    #[error(transparent)]
-    Session(SessionError),
-    /// An error from a producer operation.
-    #[error(transparent)]
-    Producer(ProducerError),
-    #[error("malformed access token: {0}")]
-    /// Access token could not be used as an HTTP header value.
-    MalformedAccessToken(String),
-    #[error(transparent)]
-    /// Validation error.
-    Validation(#[from] ValidationError),
-    #[error("{0}")]
-    /// Append condition check failed. Contains the failure reason.
-    AppendConditionFailed(AppendConditionFailed),
-    #[error("read from an unwritten position. current tail: {0}")]
-    /// Read from an unwritten position. Contains the current tail.
-    ReadUnwritten(StreamPosition),
-    #[error("{0}")]
-    /// Other server-side error.
-    Server(ErrorResponse),
-}
-
-impl From<ApiError> for S2Error {
-    fn from(err: ApiError) -> Self {
-        match err {
-            ApiError::ReadUnwritten(tail_response) => {
-                Self::ReadUnwritten(tail_response.tail.into())
-            }
-            ApiError::AppendConditionFailed(condition_failed) => {
-                Self::AppendConditionFailed(condition_failed.into())
-            }
-            ApiError::Server(status, response) => {
-                Self::Server(ErrorResponse::from_api(status, response))
-            }
-            ApiError::MalformedAccessToken(err) => Self::MalformedAccessToken(err),
-            ApiError::Client(client_err) => Self::Client(client_err),
-            other => Self::Client(ClientError::Others(other.to_string())),
-        }
-    }
-}
-
-impl From<RequestError> for S2Error {
-    fn from(error: RequestError) -> Self {
-        Self::Request(error)
-    }
-}
-
-impl From<ReadError> for S2Error {
-    fn from(error: ReadError) -> Self {
-        Self::Read(error)
-    }
-}
-
-impl From<AppendError> for S2Error {
-    fn from(error: AppendError) -> Self {
-        Self::Append(error)
-    }
-}
-
-impl From<crate::session::append::AppendSessionError> for S2Error {
-    fn from(error: crate::session::append::AppendSessionError) -> Self {
-        Self::AppendSession(error)
-    }
-}
-
-impl From<crate::session::read::ReadSessionError> for S2Error {
-    fn from(error: crate::session::read::ReadSessionError) -> Self {
-        Self::ReadSession(error)
-    }
-}
-
-impl From<ProducerError> for S2Error {
-    fn from(error: ProducerError) -> Self {
-        Self::Producer(error)
-    }
-}
-
-impl S2Error {
-    /// Whether retrying the operation is safe or sensible.
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            S2Error::Request(error) => error.is_retryable(),
-            S2Error::Read(error) => error.is_retryable(),
-            S2Error::Append(error) => error.is_retryable(),
-            S2Error::AppendSession(error) => error.is_retryable(),
-            S2Error::ReadSession(error) => error.is_retryable(),
-            S2Error::Client(e) => e.is_retryable(),
-            S2Error::Server(r) => r.is_retryable(),
-            S2Error::Session(e) => e.is_retryable(),
-            S2Error::Producer(e) => e.is_retryable(),
-            S2Error::MalformedAccessToken(_)
-            | S2Error::Validation(_)
-            | S2Error::AppendConditionFailed(_)
-            | S2Error::ReadUnwritten(_) => false,
-        }
-    }
-
-    /// Whether the operation is guaranteed to have had no side effects.
-    pub fn has_no_side_effects(&self) -> bool {
-        match self {
-            S2Error::Request(error) => error.has_no_side_effects(),
-            S2Error::Read(error) => error.has_no_side_effects(),
-            S2Error::Append(error) => error.has_no_side_effects(),
-            S2Error::AppendSession(error) => error.has_no_side_effects(),
-            S2Error::ReadSession(error) => error.has_no_side_effects(),
-            S2Error::Client(e) => e.has_no_side_effects(),
-            S2Error::Server(r) => r.has_no_side_effects(),
-            S2Error::Session(e) => e.has_no_side_effects(),
-            S2Error::Producer(e) => e.has_no_side_effects(),
-            _ => false,
         }
     }
 }
@@ -4037,7 +3900,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::api::ClientError;
 
     type HeaderParts = (Vec<u8>, Vec<u8>);
     type AppendRecordParts = (Vec<u8>, Vec<HeaderParts>);
@@ -4704,28 +4566,6 @@ mod tests {
         assert_eq!(record.headers[0].name.as_ref(), b"k");
         assert_eq!(record.headers[0].value.as_ref(), b"v");
         assert_eq!(record.timestamp, 1234);
-    }
-
-    // -- S2Error from ApiError --
-
-    #[test]
-    fn s2_error_from_api_error_client() {
-        let err = ApiError::Client(ClientError::Others("client error".to_owned()));
-        let s2_err: S2Error = err.into();
-        assert!(matches!(s2_err, S2Error::Client(_)));
-    }
-
-    #[test]
-    fn producer_error_is_structured_and_non_retryable() {
-        let err = ProducerError::ProducerDropped;
-        assert_eq!(err.to_string(), "producer dropped without calling close");
-        assert!(!err.is_retryable());
-        assert!(!err.has_no_side_effects());
-
-        let s2_err = S2Error::Producer(err);
-        assert_eq!(s2_err.to_string(), "producer dropped without calling close");
-        assert!(!s2_err.is_retryable());
-        assert!(!s2_err.has_no_side_effects());
     }
 
     // -- ErrorResponse --

@@ -20,7 +20,7 @@ use s2_sdk::{
     producer::{IndexedAppendAck, ProducerConfig},
     types::{
         AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput, ReadStart,
-        ReadStop, S2Error, SequencedRecord,
+        ReadStop, SequencedRecord,
     },
 };
 use tokio::{
@@ -45,8 +45,9 @@ const LATENCY_TABLE_GAP: &str = "    ";
 const LATENCY_TABLE_SIDE_BY_SIDE_WIDTH: usize =
     LATENCY_TABLE_COLUMN_WIDTH * 2 + LATENCY_TABLE_GAP.len();
 
-type PendingAck =
-    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
+type PendingAck = Pin<
+    Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, crate::error::SdkError>)> + Send>,
+>;
 
 pub struct BenchWriteSample {
     pub bytes: u64,
@@ -490,7 +491,7 @@ pub fn bench_write(
                             prev_hash = hash;
                             let record = new_record(body, timestamp, hash);
                             pending_acks.push(Box::pin(async move {
-                                let res = permit.submit(record).await.map_err(S2Error::from);
+                                let res = permit.submit(record).await.map_err(Into::into);
                                 (submit_time, res)
                             }));
                             bytes_submitted += record_size;

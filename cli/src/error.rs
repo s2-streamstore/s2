@@ -1,6 +1,10 @@
 use miette::Diagnostic;
 use s2_api::v1::error::ErrorCode;
-use s2_sdk::types::S2Error;
+use s2_sdk::{
+    append_session::AppendSessionError,
+    read_session::ReadSessionError,
+    types::{AppendError, ProducerError, ReadError, RequestError},
+};
 use thiserror::Error;
 
 const HELP: &str = color_print::cstr!(
@@ -17,6 +21,22 @@ const BUG_HELP: &str = color_print::cstr!(
      <bold>https://github.com/s2-streamstore/s2/issues</bold>
 "
 );
+
+#[derive(Error, Debug)]
+pub enum SdkError {
+    #[error(transparent)]
+    Request(#[from] RequestError),
+    #[error(transparent)]
+    Read(#[from] ReadError),
+    #[error(transparent)]
+    Append(#[from] AppendError),
+    #[error(transparent)]
+    AppendSession(#[from] AppendSessionError),
+    #[error(transparent)]
+    ReadSession(#[from] ReadSessionError),
+    #[error(transparent)]
+    Producer(#[from] ProducerError),
+}
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum CliError {
@@ -39,7 +59,7 @@ pub enum CliError {
 
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help("{}", HELP))]
-    SdkInit(#[source] S2Error),
+    SdkInit(#[source] SdkError),
 
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help(
@@ -47,7 +67,7 @@ pub enum CliError {
          Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`.\n\n{}",
         HELP
     ))]
-    MalformedAccessToken(#[source] S2Error, TokenSource),
+    MalformedAccessToken(#[source] SdkError, TokenSource),
 
     #[error(transparent)]
     #[diagnostic(help("{}", BUG_HELP))]
@@ -67,14 +87,14 @@ pub enum CliError {
 
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help("{}", HELP))]
-    Operation(OpKind, #[source] S2Error),
+    Operation(OpKind, #[source] SdkError),
 
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
          Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`."
     ))]
-    UnauthorizedAccessToken(OpKind, #[source] S2Error, TokenSource),
+    UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
@@ -100,7 +120,7 @@ pub enum CliError {
 }
 
 impl CliError {
-    pub fn op<E: Into<S2Error>>(kind: OpKind, source: E) -> Self {
+    pub fn op<E: Into<SdkError>>(kind: OpKind, source: E) -> Self {
         Self::Operation(kind, source.into())
     }
 
@@ -110,7 +130,7 @@ impl CliError {
                 CliError::UnauthorizedAccessToken(kind, source, token_source)
             }
             (CliError::SdkInit(source), Some(token_source))
-                if matches!(source, S2Error::MalformedAccessToken(_)) =>
+                if is_malformed_access_token(&source) =>
             {
                 CliError::MalformedAccessToken(source, token_source)
             }
@@ -190,11 +210,31 @@ impl std::fmt::Display for TokenSource {
     }
 }
 
-fn is_auth_error(err: &S2Error) -> bool {
+fn is_auth_error(err: &SdkError) -> bool {
     match err {
-        S2Error::Server(response) => is_auth_error_code(&response.code),
+        SdkError::Request(RequestError::Server(response))
+        | SdkError::Read(ReadError::Request(RequestError::Server(response)))
+        | SdkError::Append(AppendError::Request(RequestError::Server(response)))
+        | SdkError::AppendSession(AppendSessionError::Append(AppendError::Request(
+            RequestError::Server(response),
+        )))
+        | SdkError::ReadSession(ReadSessionError::Read(ReadError::Request(
+            RequestError::Server(response),
+        )))
+        | SdkError::Producer(ProducerError::Append(AppendSessionError::Append(
+            AppendError::Request(RequestError::Server(response)),
+        ))) => is_auth_error_code(&response.code),
         _ => false,
     }
+}
+
+fn is_malformed_access_token(err: &SdkError) -> bool {
+    matches!(
+        err,
+        SdkError::Request(RequestError::MalformedAccessToken(_))
+            | SdkError::Read(ReadError::Request(RequestError::MalformedAccessToken(_)))
+            | SdkError::Append(AppendError::Request(RequestError::MalformedAccessToken(_)))
+    )
 }
 
 fn is_auth_error_code(code: &str) -> bool {

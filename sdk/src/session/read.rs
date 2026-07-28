@@ -110,12 +110,6 @@ impl From<CaughtUpError> for ReadSessionError {
     }
 }
 
-impl From<CaughtUpError> for crate::types::S2Error {
-    fn from(error: CaughtUpError) -> Self {
-        Self::from(ReadSessionError::from(error))
-    }
-}
-
 type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
 
 #[derive(Clone)]

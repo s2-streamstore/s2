@@ -7,7 +7,7 @@ use common::{s2, unique_basin_name, uuid};
 use s2_sdk::types::*;
 
 #[tokio::test]
-async fn create_list_and_delete_basin() -> Result<(), S2Error> {
+async fn create_list_and_delete_basin() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
 
@@ -61,7 +61,7 @@ async fn create_list_and_delete_basin() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn basin_config_roundtrip() -> Result<(), S2Error> {
+async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
     let config = BasinConfig::new()
@@ -100,7 +100,7 @@ async fn basin_config_roundtrip() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn reconfigure_basin() -> Result<(), S2Error> {
+async fn reconfigure_basin() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
 
@@ -138,7 +138,7 @@ async fn reconfigure_basin() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn ensure_basin_created() -> Result<(), S2Error> {
+async fn ensure_basin_created() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
 
@@ -161,7 +161,7 @@ async fn ensure_basin_created() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn ensure_basin_config_updated() -> Result<(), S2Error> {
+async fn ensure_basin_config_updated() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
 
@@ -193,7 +193,7 @@ async fn ensure_basin_config_updated() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn ensure_basin_config_unchanged() -> Result<(), S2Error> {
+async fn ensure_basin_config_unchanged() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
 
@@ -221,7 +221,7 @@ async fn ensure_basin_config_unchanged() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn list_basins_with_limit() -> Result<(), S2Error> {
+async fn list_basins_with_limit() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name_1 = unique_basin_name();
     let basin_name_2 = unique_basin_name();
@@ -243,7 +243,7 @@ async fn list_basins_with_limit() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn list_basins_with_prefix() -> Result<(), S2Error> {
+async fn list_basins_with_prefix() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
 
     let prefix_1: BasinNamePrefix = uuid().parse().expect("valid basin name prefix");
@@ -272,7 +272,7 @@ async fn list_basins_with_prefix() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn list_basins_with_prefix_and_start_after() -> Result<(), S2Error> {
+async fn list_basins_with_prefix_and_start_after() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
 
     let prefix: BasinNamePrefix = uuid().parse().expect("valid prefix");
@@ -302,7 +302,7 @@ async fn list_basins_with_prefix_and_start_after() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn delete_nonexistent_basin_errors() -> Result<(), S2Error> {
+async fn delete_nonexistent_basin_errors() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let result = s2
         .delete_basin(DeleteBasinInput::new(unique_basin_name()))
@@ -319,7 +319,7 @@ async fn delete_nonexistent_basin_errors() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn delete_nonexistent_basin_with_ignore() -> Result<(), S2Error> {
+async fn delete_nonexistent_basin_with_ignore() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let result = s2
         .delete_basin(DeleteBasinInput::new(unique_basin_name()).with_ignore_not_found(true))
@@ -331,7 +331,7 @@ async fn delete_nonexistent_basin_with_ignore() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn get_basin_config() -> Result<(), S2Error> {
+async fn get_basin_config() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
 
@@ -357,7 +357,7 @@ async fn get_basin_config() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn issue_list_and_revoke_access_token() -> Result<(), S2Error> {
+async fn issue_list_and_revoke_access_token() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
 
@@ -384,7 +384,8 @@ async fn issue_list_and_revoke_access_token() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn issue_access_token_with_expiration_and_auto_prefix_streams() -> Result<(), S2Error> {
+async fn issue_access_token_with_expiration_and_auto_prefix_streams()
+-> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
 
@@ -426,7 +427,7 @@ async fn issue_access_token_with_expiration_and_auto_prefix_streams() -> Result<
 
 #[tokio::test]
 async fn issue_access_token_with_auto_prefix_streams_but_without_prefix_errors()
--> Result<(), S2Error> {
+-> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
 
@@ -450,7 +451,8 @@ async fn issue_access_token_with_auto_prefix_streams_but_without_prefix_errors()
 }
 
 #[tokio::test]
-async fn issue_access_token_with_no_permitted_ops_errors() -> Result<(), S2Error> {
+async fn issue_access_token_with_no_permitted_ops_errors() -> Result<(), Box<dyn std::error::Error>>
+{
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
 
@@ -483,7 +485,7 @@ async fn issue_access_token_with_no_permitted_ops_errors() -> Result<(), S2Error
 }
 
 #[tokio::test]
-async fn list_access_tokens_with_limit() -> Result<(), S2Error> {
+async fn list_access_tokens_with_limit() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
 
     let page = s2
@@ -496,7 +498,7 @@ async fn list_access_tokens_with_limit() -> Result<(), S2Error> {
 }
 
 #[tokio::test]
-async fn list_access_tokens_with_prefix() -> Result<(), S2Error> {
+async fn list_access_tokens_with_prefix() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let prefix = format!("{}", uuid::Uuid::new_v4().simple());
     let token_id_1: AccessTokenId = format!("{}-a", prefix).parse().expect("valid token id");

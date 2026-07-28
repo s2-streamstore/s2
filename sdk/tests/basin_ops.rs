@@ -523,7 +523,9 @@ async fn list_streams_returns_lexicographic_order(
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_all_streams_iterates_with_prefix(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_all_streams_iterates_with_prefix(
+    basin: &SharedS2Basin,
+) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = format!("iter-{}", uuid());
     let stream_names: Vec<StreamName> = (1..=3)
         .map(|idx| {
@@ -558,7 +560,9 @@ async fn list_all_streams_iterates_with_prefix(basin: &SharedS2Basin) -> Result<
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_all_streams_include_deleted(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_all_streams_include_deleted(
+    basin: &SharedS2Basin,
+) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = format!("iter-del-{}", uuid());
     let stream_name: StreamName = format!("{}-0001", prefix)
         .parse()
