@@ -42,7 +42,7 @@ impl Future for RecordSubmitTicket {
                 .terminal_err
                 .get()
                 .cloned()
-                .unwrap_or_else(|| ProducerError::ProducerDropped.into()))),
+                .unwrap_or(ProducerError::ProducerDropped))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -224,7 +224,7 @@ impl Producer {
         self.terminal_err
             .get()
             .cloned()
-            .unwrap_or_else(|| ProducerError::ProducerClosed.into())
+            .unwrap_or(ProducerError::ProducerClosed)
     }
 
     async fn run(
@@ -280,7 +280,7 @@ impl Producer {
                         Some(Command::Submit { record, ack_tx, permit }) => {
                             if close_tx.is_some() {
                                 let _ = ack_tx.send(
-                                    Err(ProducerError::ProducerClosing.into())
+                                    Err(ProducerError::ProducerClosing)
                                 );
                             } else {
                                 stashed_submission = Some(StashedSubmission { record, ack_tx, permit });
@@ -291,7 +291,7 @@ impl Producer {
                         }
                         None => {
                             for pending in pending_record_acks.drain(..) {
-                                let _ = pending.ack_tx.send(Err(ProducerError::ProducerDropped.into()));
+                                let _ = pending.ack_tx.send(Err(ProducerError::ProducerDropped));
                             }
                             return;
                         }

@@ -490,7 +490,7 @@ pub fn bench_write(
                             prev_hash = hash;
                             let record = new_record(body, timestamp, hash);
                             pending_acks.push(Box::pin(async move {
-                                let res = permit.submit(record).await;
+                                let res = permit.submit(record).await.map_err(S2Error::from);
                                 (submit_time, res)
                             }));
                             bytes_submitted += record_size;

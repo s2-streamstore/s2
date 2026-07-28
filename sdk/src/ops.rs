@@ -496,7 +496,7 @@ impl S2Stream {
 
     /// Create a read session.
     pub async fn read_session(&self, input: ReadInput) -> Result<ReadSession, ReadSessionError> {
-        Ok(session::read_session(
+        session::read_session(
             self.client.clone(),
             self.name.clone(),
             self.encryption.clone(),
@@ -504,6 +504,6 @@ impl S2Stream {
             input.stop.into(),
             input.ignore_command_records,
         )
-        .await?)
+        .await
     }
 }

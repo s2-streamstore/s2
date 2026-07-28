@@ -387,7 +387,7 @@ pub async fn read_session(
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
-                        yield Err(err.into());
+                        yield Err(err);
                         break;
                     }
                 }
@@ -434,7 +434,7 @@ pub async fn read_session(
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
-                    yield Err(err.into());
+                    yield Err(err);
                     break;
                 }
                 None => break,

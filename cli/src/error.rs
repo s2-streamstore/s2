@@ -100,8 +100,8 @@ pub enum CliError {
 }
 
 impl CliError {
-    pub fn op(kind: OpKind, source: S2Error) -> Self {
-        Self::Operation(kind, source)
+    pub fn op<E: Into<S2Error>>(kind: OpKind, source: E) -> Self {
+        Self::Operation(kind, source.into())
     }
 
     pub fn with_token_source(self, token_source: Option<TokenSource>) -> Self {

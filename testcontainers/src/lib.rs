@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use s2_sdk::{
     S2,
-    types::{AccountEndpoint, BasinEndpoint, S2Config, S2Endpoints, S2Error, ValidationError},
+    types::{
+        AccountEndpoint, BasinEndpoint, RequestError, S2Config, S2Endpoints, S2Error,
+        ValidationError,
+    },
 };
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
@@ -38,6 +41,9 @@ pub enum Error {
     /// Error from the S2 SDK.
     #[error("s2 sdk error: {0}")]
     S2(#[from] S2Error),
+    /// Request error from the S2 SDK.
+    #[error("s2 sdk request error: {0}")]
+    Request(#[from] RequestError),
     /// S2 endpoint or resource name validation error.
     #[error("validation error: {0}")]
     Validation(#[from] ValidationError),
@@ -72,7 +78,8 @@ impl S2Lite {
 
         wait_until_healthy(&endpoint).await?;
 
-        let client = S2::new(s2_config_for_endpoint(&endpoint, DEFAULT_ACCESS_TOKEN)?)?;
+        let client = S2::new(s2_config_for_endpoint(&endpoint, DEFAULT_ACCESS_TOKEN)?)
+            .map_err(S2Error::from)?;
 
         Ok(Self {
             container,

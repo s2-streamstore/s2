@@ -86,9 +86,9 @@ impl Future for BatchSubmitTicket {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(res)) => Poll::Ready(res),
             Poll::Ready(Err(_)) => {
-                Poll::Ready(Err(self.terminal_err.get().cloned().unwrap_or_else(|| {
-                    AppendSessionError::Session(SessionError::SessionDropped).into()
-                })))
+                Poll::Ready(Err(self.terminal_err.get().cloned().unwrap_or(
+                    AppendSessionError::Session(SessionError::SessionDropped),
+                )))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -260,7 +260,7 @@ impl AppendSession {
         self.terminal_err
             .get()
             .cloned()
-            .unwrap_or_else(|| AppendSessionError::Session(SessionError::SessionClosed).into())
+            .unwrap_or(AppendSessionError::Session(SessionError::SessionClosed))
     }
 }
 
@@ -335,9 +335,10 @@ impl AppendSessionInternal {
                 })
                 .await
                 .map_err(|_| {
-                    terminal_err.get().cloned().unwrap_or_else(|| {
-                        AppendSessionError::Session(SessionError::SessionClosed).into()
-                    })
+                    terminal_err
+                        .get()
+                        .cloned()
+                        .unwrap_or(AppendSessionError::Session(SessionError::SessionClosed))
                 })?;
             Ok(BatchSubmitTicket {
                 rx: ack_rx,
@@ -360,7 +361,7 @@ impl AppendSessionInternal {
         self.terminal_err
             .get()
             .cloned()
-            .unwrap_or_else(|| AppendSessionError::Session(SessionError::SessionClosed).into())
+            .unwrap_or(AppendSessionError::Session(SessionError::SessionClosed))
     }
 }
 
@@ -476,7 +477,7 @@ async fn run_session_with_retry(
                         "not retrying append session"
                     );
 
-                    let err: AppendSessionError = err.into();
+                    let err: AppendSessionError = err;
 
                     let _ = terminal_err.set(err.clone());
 
@@ -585,7 +586,7 @@ async fn run_session(
                     Some(Command::Submit { input, ack_tx, permit }) => {
                         if state.close_tx.is_some() {
                             let _ = ack_tx.send(
-                                Err(AppendSessionError::Session(SessionError::SessionClosing).into())
+                                Err(AppendSessionError::Session(SessionError::SessionClosing))
                             );
                         } else {
                             let input_metered_bytes = input.records.metered_bytes();

@@ -299,8 +299,8 @@ struct FieldDiff {
     new: String,
 }
 
-fn is_not_found_error(e: &s2_sdk::types::S2Error) -> bool {
-    matches!(e, s2_sdk::types::S2Error::Server(s2_sdk::types::ErrorResponse { code, .. }) if code == "basin_not_found" || code == "stream_not_found")
+fn is_not_found_error<E: Clone + Into<s2_sdk::types::S2Error>>(e: &E) -> bool {
+    matches!(e.clone().into(), s2_sdk::types::S2Error::Server(s2_sdk::types::ErrorResponse { code, .. }) if code == "basin_not_found" || code == "stream_not_found")
 }
 
 fn format_storage_class(sc: StorageClass) -> &'static str {
