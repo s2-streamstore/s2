@@ -28,6 +28,7 @@ use crate::{
     },
 };
 
+/// Errors returned by an append session.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AppendSessionError {
     /// A unary append error.
@@ -42,6 +43,7 @@ pub enum AppendSessionError {
 }
 
 impl AppendSessionError {
+    /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Append(error) => error.is_retryable(),
@@ -50,6 +52,7 @@ impl AppendSessionError {
         }
     }
 
+    /// Whether the operation is guaranteed to have had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Append(error) => error.has_no_side_effects(),
@@ -893,17 +896,17 @@ mod tests {
     use crate::{
         api::{ApiError, ApiErrorResponse},
         frame_signal::FrameSignal,
-        types::AppendRetryPolicy,
+        types::{AppendRetryPolicy, RequestError, SessionError},
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
-        AppendSessionError::Api(ApiError::Server(
+        AppendSessionError::Request(RequestError::from(ApiError::Server(
             status,
             ApiErrorResponse {
                 code: code.to_owned(),
                 message: "test".to_owned(),
             },
-        ))
+        )))
     }
 
     #[test]

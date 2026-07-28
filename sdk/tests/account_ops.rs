@@ -310,7 +310,7 @@ async fn delete_nonexistent_basin_errors() -> Result<(), S2Error> {
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ErrorResponse { code, .. })) => {
             assert_eq!(code, "basin_not_found")
         }
     );
@@ -442,7 +442,7 @@ async fn issue_access_token_with_auto_prefix_streams_but_without_prefix_errors()
         )
         .await;
 
-    assert_matches!(result, Err(S2Error::Server(ErrorResponse { code, message, .. })) => {
+    assert_matches!(result, Err(RequestError::Server(ErrorResponse { code, message, .. })) => {
         assert_eq!(code, "invalid");
         assert_eq!(message, "Auto prefixing is only allowed for streams with prefix matching");
     });
@@ -454,8 +454,8 @@ async fn issue_access_token_with_no_permitted_ops_errors() -> Result<(), S2Error
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
 
-    let result_matches = |result: Result<String, S2Error>| {
-        assert_matches!(result, Err(S2Error::Server(ErrorResponse { code, message, .. })) => {
+    let result_matches = |result: Result<String, RequestError>| {
+        assert_matches!(result, Err(RequestError::Server(ErrorResponse { code, message, .. })) => {
             assert_eq!(code, "invalid");
             assert_eq!(message, "Access token permissions cannot be empty");
         });

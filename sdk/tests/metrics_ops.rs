@@ -85,14 +85,14 @@ async fn poll_metrics<Fetch, Fut, Ready>(
     interval: Duration,
     mut fetch: Fetch,
     mut ready: Ready,
-) -> Result<Vec<Metric>, S2Error>
+) -> Result<Vec<Metric>, RequestError>
 where
     Fetch: FnMut() -> Fut,
-    Fut: Future<Output = Result<Vec<Metric>, S2Error>>,
+    Fut: Future<Output = Result<Vec<Metric>, RequestError>>,
     Ready: FnMut(&[Metric]) -> bool,
 {
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut last_err: Option<S2Error> = None;
+    let mut last_err: Option<RequestError> = None;
 
     loop {
         match fetch().await {
@@ -114,7 +114,7 @@ where
     }
 
     Err(last_err.unwrap_or_else(|| {
-        S2Error::Client(ClientError::Others(format!(
+        RequestError::Client(ClientError::Others(format!(
             "metrics not ready after {}s",
             timeout.as_secs()
         )))
@@ -625,7 +625,7 @@ async fn account_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2
 
         assert_matches!(
             result,
-            Err(S2Error::Server(ErrorResponse { code, .. })) => {
+            Err(RequestError::Server(ErrorResponse { code, .. })) => {
                 assert_eq!(code, "invalid");
             }
         );
@@ -701,7 +701,7 @@ async fn basin_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2Er
 
         assert_matches!(
             result,
-            Err(S2Error::Server(ErrorResponse { code, .. })) => {
+            Err(RequestError::Server(ErrorResponse { code, .. })) => {
                 assert_eq!(code, "invalid");
             }
         );
@@ -784,7 +784,7 @@ async fn stream_metrics_invalid_time_ranges(stream: &S2Stream) -> Result<(), S2E
 
         assert_matches!(
             result,
-            Err(S2Error::Server(ErrorResponse { code, .. })) => {
+            Err(RequestError::Server(ErrorResponse { code, .. })) => {
                 assert_eq!(code, "invalid");
             }
         );

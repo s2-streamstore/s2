@@ -7,9 +7,10 @@ use common::{S2Stream, SharedS2Basin, s2_config, unique_basin_name, unique_strea
 use futures_util::StreamExt;
 use rstest::rstest;
 use s2_sdk::{
-    append_session::AppendSessionConfig,
+    append_session::{AppendSessionConfig, AppendSessionError},
     batching::{BatchLimits, BatchingConfig},
     producer::ProducerConfig,
+    read_session::ReadSessionError,
     types::*,
 };
 use test_context::test_context;
@@ -42,7 +43,7 @@ async fn tail_of_nonexistent_stream_errors(basin: &SharedS2Basin) -> Result<(), 
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(ReadError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -475,7 +476,7 @@ async fn append_with_mismatched_seq_num_errors(stream: &S2Stream) -> Result<(), 
 
     assert_matches!(
         result,
-        Err(S2Error::AppendConditionFailed(
+        Err(AppendError::ConditionFailed(
             AppendConditionFailed::SeqNumMismatch(1)
         ))
     );
@@ -506,9 +507,9 @@ async fn append_session_with_mismatched_seq_num_errors(stream: &S2Stream) -> Res
 
     assert_matches!(
         result,
-        Err(S2Error::AppendConditionFailed(
+        Err(AppendSessionError::Append(AppendError::ConditionFailed(
             AppendConditionFailed::SeqNumMismatch(1)
-        ))
+        )))
     );
 
     Ok(())
@@ -565,7 +566,7 @@ async fn append_with_mismatched_fencing_token_errors(stream: &S2Stream) -> Resul
 
     assert_matches!(
         result,
-        Err(S2Error::AppendConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token))) => {
+        Err(AppendError::ConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token))) => {
             assert_eq!(fencing_token, fencing_token_1)
         }
     );
@@ -601,7 +602,7 @@ async fn append_session_with_mismatched_fencing_token_errors(
 
     assert_matches!(
         result,
-        Err(S2Error::AppendConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token))) => {
+        Err(AppendSessionError::Append(AppendError::ConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token)))) => {
             assert_eq!(fencing_token, fencing_token_1)
         }
     );
@@ -616,7 +617,7 @@ async fn read_empty_stream_errors(stream: &S2Stream) -> Result<(), S2Error> {
 
     assert_matches!(
         result,
-        Err(S2Error::ReadUnwritten(StreamPosition {
+        Err(ReadError::ReadUnwritten(StreamPosition {
             seq_num: 0,
             timestamp: 0,
             ..
@@ -644,7 +645,7 @@ async fn read_beyond_tail_errors(stream: &S2Stream) -> Result<(), S2Error> {
 
     assert_matches!(
         result,
-        Err(S2Error::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        Err(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
     );
 
     Ok(())
@@ -674,7 +675,7 @@ async fn read_beyond_tail_with_clamp_to_tail_errors(stream: &S2Stream) -> Result
 
     assert_matches!(
         result,
-        Err(S2Error::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        Err(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
     );
 
     Ok(())
@@ -730,7 +731,7 @@ async fn read_session_beyond_tail_errors(stream: &S2Stream) -> Result<(), S2Erro
     assert!(result.is_err());
     assert_matches!(
         result.err().expect("should be err"),
-        S2Error::ReadUnwritten(StreamPosition { seq_num: 1, .. })
+        ReadSessionError::Read(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
     );
 
     Ok(())
@@ -1029,7 +1030,7 @@ async fn read_from_timestamp_in_future_errors(stream: &S2Stream) -> Result<(), S
         )
         .await;
 
-    assert_matches!(result, Err(S2Error::ReadUnwritten(tail)) => {
+    assert_matches!(result, Err(ReadError::ReadUnwritten(tail)) => {
         assert_eq!(tail.seq_num, 2);
         assert_eq!(tail.timestamp, base_timestamp + 1);
     });
@@ -1127,7 +1128,7 @@ async fn append_without_timestamp_client_require_errors(
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1239,7 +1240,7 @@ async fn append_to_nonexistent_stream_errors(basin: &SharedS2Basin) -> Result<()
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -1257,7 +1258,7 @@ async fn append_invalid_command_header_errors(stream: &S2Stream) -> Result<(), S
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1278,7 +1279,7 @@ async fn append_invalid_command_header_with_extra_headers_errors(
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1425,7 +1426,7 @@ async fn read_from_tail_offset_variants(stream: &S2Stream) -> Result<(), S2Error
     let result = stream
         .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(0))))
         .await;
-    assert_matches!(result, Err(S2Error::ReadUnwritten(StreamPosition { .. })));
+    assert_matches!(result, Err(ReadError::ReadUnwritten(StreamPosition { .. })));
 
     let batch = stream
         .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(3))))
@@ -1484,7 +1485,7 @@ async fn read_start_timestamp_ge_until_errors(stream: &S2Stream) -> Result<(), S
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(ReadError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1500,7 +1501,7 @@ async fn read_nonexistent_stream_errors(basin: &SharedS2Basin) -> Result<(), S2E
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(ReadError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -1664,9 +1665,9 @@ async fn producer_drop_errors_all_claimable_tickets(stream: &S2Stream) -> Result
     let result1 = ticket1.await;
     let result2 = ticket2.await;
 
-    assert_matches!(result1, Err(S2Error::Producer(ProducerError::ProducerDropped)) => {
+    assert_matches!(result1, Err(ProducerError::ProducerDropped) => {
     });
-    assert_matches!(result2, Err(S2Error::Producer(ProducerError::ProducerDropped)) => {
+    assert_matches!(result2, Err(ProducerError::ProducerDropped) => {
     });
 
     Ok(())
@@ -1912,7 +1913,7 @@ async fn append_session_for_non_existent_stream_errors(
 
     let result = session.submit(input).await?.await;
 
-    assert_matches!(result, Err(S2Error::Server(err)) => {
+    assert_matches!(result, Err(AppendSessionError::Request(RequestError::Server(err))) => {
         assert_eq!(err.code, "stream_not_found");
     });
 
@@ -1936,16 +1937,16 @@ async fn producer_for_non_existent_stream_errors(basin: &SharedS2Basin) -> Resul
             .await
         {
             Ok(ticket) => tickets.push(ticket),
-            Err(S2Error::Server(err)) => {
+            Err(ProducerError::Append(AppendSessionError::Request(RequestError::Server(err)))) => {
                 assert_eq!(err.code, "stream_not_found");
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
     }
 
     for ticket in tickets {
         let result = ticket.await;
-        assert_matches!(result, Err(S2Error::Server(err)) => {
+        assert_matches!(result, Err(ProducerError::Append(AppendSessionError::Request(RequestError::Server(err)))) => {
             assert_eq!(err.code, "stream_not_found");
         });
     }

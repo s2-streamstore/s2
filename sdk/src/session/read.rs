@@ -107,6 +107,21 @@ pub enum CaughtUpError {
     Read(#[from] ReadSessionError),
 }
 
+impl From<CaughtUpError> for ReadSessionError {
+    fn from(error: CaughtUpError) -> Self {
+        match error {
+            CaughtUpError::SessionClosed => Self::Session(SessionError::SessionClosed),
+            CaughtUpError::Read(error) => error,
+        }
+    }
+}
+
+impl From<CaughtUpError> for crate::types::S2Error {
+    fn from(error: CaughtUpError) -> Self {
+        Self::from(ReadSessionError::from(error))
+    }
+}
+
 type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
 
 #[derive(Clone)]
@@ -690,14 +705,14 @@ mod tests {
 
     #[tokio::test]
     async fn read_error_rejects_wait() {
-        let mut session = test_session(stream::iter([Err(ReadSessionError::HeartbeatTimeout)]));
+        let mut session = test_session(stream::iter([Err(ReadSessionFailure::HeartbeatTimeout)]));
         let caught_up = session.caught_up();
 
         let error = session.next().await.unwrap().unwrap_err();
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
-            Err(CaughtUpError::Read(S2Error::Session(
+            Err(CaughtUpError::Read(ReadSessionError::Session(
                 SessionError::HeartbeatTimeout,
             )))
         ));
@@ -711,7 +726,7 @@ mod tests {
                 batch(vec![record(0, false)], Some(tail)),
                 false,
             )),
-            Err(ReadSessionError::HeartbeatTimeout),
+            Err(ReadSessionFailure::HeartbeatTimeout),
         ]));
 
         session.next().await.unwrap().unwrap();
@@ -723,7 +738,7 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CaughtUpError::Read(S2Error::Session(
+            Err(CaughtUpError::Read(ReadSessionError::Session(
                 SessionError::HeartbeatTimeout,
             )))
         ));

@@ -3773,6 +3773,9 @@ pub enum S2Error {
     /// An append-session error.
     #[error(transparent)]
     AppendSession(crate::session::append::AppendSessionError),
+    /// A read-session error.
+    #[error(transparent)]
+    ReadSession(crate::session::read::ReadSessionError),
     /// Client-side error.
     #[error(transparent)]
     Client(ClientError),
@@ -3836,6 +3839,24 @@ impl From<AppendError> for S2Error {
     }
 }
 
+impl From<crate::session::append::AppendSessionError> for S2Error {
+    fn from(error: crate::session::append::AppendSessionError) -> Self {
+        Self::AppendSession(error)
+    }
+}
+
+impl From<crate::session::read::ReadSessionError> for S2Error {
+    fn from(error: crate::session::read::ReadSessionError) -> Self {
+        Self::ReadSession(error)
+    }
+}
+
+impl From<ProducerError> for S2Error {
+    fn from(error: ProducerError) -> Self {
+        Self::Producer(error)
+    }
+}
+
 impl S2Error {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
@@ -3844,6 +3865,7 @@ impl S2Error {
             S2Error::Read(error) => error.is_retryable(),
             S2Error::Append(error) => error.is_retryable(),
             S2Error::AppendSession(error) => error.is_retryable(),
+            S2Error::ReadSession(error) => error.is_retryable(),
             S2Error::Client(e) => e.is_retryable(),
             S2Error::Server(r) => r.is_retryable(),
             S2Error::Session(e) => e.is_retryable(),
@@ -3862,6 +3884,7 @@ impl S2Error {
             S2Error::Read(error) => error.has_no_side_effects(),
             S2Error::Append(error) => error.has_no_side_effects(),
             S2Error::AppendSession(error) => error.has_no_side_effects(),
+            S2Error::ReadSession(error) => error.has_no_side_effects(),
             S2Error::Client(e) => e.has_no_side_effects(),
             S2Error::Server(r) => r.has_no_side_effects(),
             S2Error::Session(e) => e.has_no_side_effects(),
