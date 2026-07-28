@@ -21,8 +21,8 @@ use crate::{
     batching::{AppendInputs, AppendRecordBatches, BatchingConfig},
     session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
     types::{
-        AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, S2Error,
-        SessionError, StreamName, ValidationError,
+        AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, ProducerError,
+        S2Error, StreamName, ValidationError,
     },
 };
 
@@ -42,7 +42,7 @@ impl Future for RecordSubmitTicket {
                 .terminal_err
                 .get()
                 .cloned()
-                .unwrap_or_else(|| ProducerError::Dropped.into()))),
+                .unwrap_or_else(|| ProducerError::ProducerDropped.into()))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -224,7 +224,7 @@ impl Producer {
         self.terminal_err
             .get()
             .cloned()
-            .unwrap_or_else(|| ProducerError::Closed.into())
+            .unwrap_or_else(|| ProducerError::ProducerClosed.into())
     }
 
     async fn run(
@@ -280,7 +280,7 @@ impl Producer {
                         Some(Command::Submit { record, ack_tx, permit }) => {
                             if close_tx.is_some() {
                                 let _ = ack_tx.send(
-                                    Err(ProducerError::Closing.into())
+                                    Err(ProducerError::ProducerClosing.into())
                                 );
                             } else {
                                 stashed_submission = Some(StashedSubmission { record, ack_tx, permit });
@@ -291,7 +291,7 @@ impl Producer {
                         }
                         None => {
                             for pending in pending_record_acks.drain(..) {
-                                let _ = pending.ack_tx.send(Err(ProducerError::Dropped.into()));
+                                let _ = pending.ack_tx.send(Err(ProducerError::ProducerDropped.into()));
                             }
                             return;
                         }
@@ -408,22 +408,12 @@ impl RecordSubmitPermit {
     }
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
-enum ProducerError {
-    #[error("producer already closed")]
-    Closed,
-    #[error("producer is closing")]
-    Closing,
-    #[error("producer dropped without calling close")]
-    Dropped,
-}
-
 impl From<ProducerError> for S2Error {
     fn from(err: ProducerError) -> Self {
         match err {
-            ProducerError::Closed => S2Error::Session(SessionError::ProducerClosed),
-            ProducerError::Closing => S2Error::Session(SessionError::ProducerClosing),
-            ProducerError::Dropped => S2Error::Session(SessionError::ProducerDropped),
+            ProducerError::ProducerClosed => S2Error::Producer(err),
+            ProducerError::ProducerClosing => S2Error::Producer(err),
+            ProducerError::ProducerDropped => S2Error::Producer(err),
         }
     }
 }

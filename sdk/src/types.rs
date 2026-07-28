@@ -3650,6 +3650,9 @@ pub enum S2Error {
     /// An error from a streaming or session operation.
     #[error(transparent)]
     Session(SessionError),
+    /// An error from a producer operation.
+    #[error(transparent)]
+    Producer(ProducerError),
     #[error("malformed access token: {0}")]
     /// Access token could not be used as an HTTP header value.
     MalformedAccessToken(String),
@@ -3693,6 +3696,7 @@ impl S2Error {
             S2Error::Client(e) => e.is_retryable(),
             S2Error::Server(r) => r.is_retryable(),
             S2Error::Session(e) => e.is_retryable(),
+            S2Error::Producer(e) => e.is_retryable(),
             S2Error::MalformedAccessToken(_)
             | S2Error::Validation(_)
             | S2Error::AppendConditionFailed(_)
@@ -3706,6 +3710,7 @@ impl S2Error {
             S2Error::Client(e) => e.has_no_side_effects(),
             S2Error::Server(r) => r.has_no_side_effects(),
             S2Error::Session(e) => e.has_no_side_effects(),
+            S2Error::Producer(e) => e.has_no_side_effects(),
             _ => false,
         }
     }
@@ -3715,13 +3720,15 @@ impl S2Error {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum SessionError {
-    /// The read session heartbeat timed out.
+    /// Heartbeat timed out.
+    ///
+    /// This condition is produced by read sessions.
     #[error("heartbeat timeout")]
     HeartbeatTimeout,
     /// An append acknowledgement timed out.
     #[error("append acknowledgement timed out")]
     AckTimeout,
-    /// The server disconnected.
+    /// The server disconnected during the session.
     #[error("server disconnected")]
     ServerDisconnected,
     /// The response stream closed while appends were in flight.
@@ -3733,21 +3740,12 @@ pub enum SessionError {
     /// The session is closing.
     #[error("session is closing")]
     SessionClosing,
-    /// The session was dropped without calling close.
+    /// The session was dropped without being closed.
     #[error("session dropped without calling close")]
     SessionDropped,
-    /// An append acknowledgement was invalid.
+    /// The server returned an invalid append acknowledgement.
     #[error("invalid append acknowledgement: {0}")]
     InvalidAck(String),
-    /// The producer was already closed.
-    #[error("producer already closed")]
-    ProducerClosed,
-    /// The producer is closing.
-    #[error("producer is closing")]
-    ProducerClosing,
-    /// The producer was dropped without calling close.
-    #[error("producer dropped without calling close")]
-    ProducerDropped,
 }
 
 impl SessionError {
@@ -3757,6 +3755,33 @@ impl SessionError {
             self,
             Self::HeartbeatTimeout | Self::AckTimeout | Self::ServerDisconnected
         )
+    }
+
+    /// Whether the operation is guaranteed to have had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+/// Errors from producer operations.
+pub enum ProducerError {
+    /// The producer was already closed.
+    #[error("producer already closed")]
+    ProducerClosed,
+    /// The producer is closing.
+    #[error("producer is closing")]
+    ProducerClosing,
+    /// The producer was dropped without being closed.
+    #[error("producer dropped without calling close")]
+    ProducerDropped,
+}
+
+impl ProducerError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        false
     }
 
     /// Whether the operation is guaranteed to have had no side effects.
@@ -4496,6 +4521,19 @@ mod tests {
         let err = ApiError::Client(ClientError::Others("client error".to_owned()));
         let s2_err: S2Error = err.into();
         assert!(matches!(s2_err, S2Error::Client(_)));
+    }
+
+    #[test]
+    fn producer_error_is_structured_and_non_retryable() {
+        let err = ProducerError::ProducerDropped;
+        assert_eq!(err.to_string(), "producer dropped without calling close");
+        assert!(!err.is_retryable());
+        assert!(!err.has_no_side_effects());
+
+        let s2_err = S2Error::Producer(err);
+        assert_eq!(s2_err.to_string(), "producer dropped without calling close");
+        assert!(!s2_err.is_retryable());
+        assert!(!s2_err.has_no_side_effects());
     }
 
     // -- ErrorResponse --

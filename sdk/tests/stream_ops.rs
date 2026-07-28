@@ -1664,9 +1664,9 @@ async fn producer_drop_errors_all_claimable_tickets(stream: &S2Stream) -> Result
     let result1 = ticket1.await;
     let result2 = ticket2.await;
 
-    assert_matches!(result1, Err(S2Error::Session(SessionError::ProducerDropped)) => {
+    assert_matches!(result1, Err(S2Error::Producer(ProducerError::ProducerDropped)) => {
     });
-    assert_matches!(result2, Err(S2Error::Session(SessionError::ProducerDropped)) => {
+    assert_matches!(result2, Err(S2Error::Producer(ProducerError::ProducerDropped)) => {
     });
 
     Ok(())
