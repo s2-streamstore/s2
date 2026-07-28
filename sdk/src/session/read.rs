@@ -21,19 +21,20 @@ use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
     types::{
-        EncryptionKey, MeteredBytes, ReadBatch, S2Error, SessionError, StreamName, StreamPosition,
+        EncryptionKey, MeteredBytes, ReadBatch, ReadError, RequestError, SessionError, StreamName,
+        StreamPosition,
     },
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadSessionError {
+enum ReadSessionFailure {
     #[error(transparent)]
     Api(#[from] ApiError),
     #[error("heartbeat timeout")]
     HeartbeatTimeout,
 }
 
-impl ReadSessionError {
+impl ReadSessionFailure {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Api(err) => err.is_retryable(),
@@ -42,17 +43,57 @@ impl ReadSessionError {
     }
 }
 
-impl From<ReadSessionError> for S2Error {
-    fn from(err: ReadSessionError) -> Self {
-        match err {
-            ReadSessionError::Api(api_err) => api_err.into(),
-            ReadSessionError::HeartbeatTimeout => S2Error::Session(SessionError::HeartbeatTimeout),
+/// Errors returned by a read session.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReadSessionError {
+    /// An error returned by a read request.
+    #[error(transparent)]
+    Request(#[from] RequestError),
+    /// A unary read error.
+    #[error(transparent)]
+    Read(#[from] ReadError),
+    /// A session lifecycle error.
+    #[error(transparent)]
+    Session(#[from] SessionError),
+}
+
+impl ReadSessionError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Request(error) => error.is_retryable(),
+            Self::Read(error) => error.is_retryable(),
+            Self::Session(error) => error.is_retryable(),
+        }
+    }
+
+    /// Whether the operation is guaranteed to have had no side effects.
+    pub fn has_no_side_effects(&self) -> bool {
+        match self {
+            Self::Request(error) => error.has_no_side_effects(),
+            Self::Read(error) => error.has_no_side_effects(),
+            Self::Session(error) => error.has_no_side_effects(),
         }
     }
 }
 
-pub type Streaming<R> =
-    Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionError>>>>;
+impl From<ReadSessionFailure> for ReadSessionError {
+    fn from(error: ReadSessionFailure) -> Self {
+        match error {
+            ReadSessionFailure::Api(error) => match error {
+                ApiError::ReadUnwritten(tail) => {
+                    Self::Read(ReadError::ReadUnwritten(tail.tail.into()))
+                }
+                other => Self::Request(other.into()),
+            },
+            ReadSessionFailure::HeartbeatTimeout => Self::Session(SessionError::HeartbeatTimeout),
+        }
+    }
+}
+
+type InternalStreaming<R> =
+    Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionFailure>>>>;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -63,18 +104,7 @@ pub enum CaughtUpError {
     SessionClosed,
     #[error(transparent)]
     /// The read failed.
-    Read(#[from] S2Error),
-}
-
-impl From<CaughtUpError> for S2Error {
-    fn from(err: CaughtUpError) -> Self {
-        match err {
-            CaughtUpError::SessionClosed => Self::Client(crate::api::ClientError::Others(
-                "read session ended before catching up".into(),
-            )),
-            CaughtUpError::Read(err) => err,
-        }
-    }
+    Read(#[from] ReadSessionError),
 }
 
 type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
@@ -147,7 +177,7 @@ impl CaughtUpState {
         self.complete(Ok(tail));
     }
 
-    fn end(&mut self, error: Option<S2Error>) {
+    fn end(&mut self, error: Option<ReadSessionError>) {
         if self.terminal {
             return;
         }
@@ -209,12 +239,12 @@ impl ReadUpdate {
 
 /// A continuous stream of read batches.
 pub struct ReadSession {
-    updates: Streaming<ReadUpdate>,
+    updates: InternalStreaming<ReadUpdate>,
     state: CaughtUpState,
 }
 
 impl ReadSession {
-    fn new(updates: Streaming<ReadUpdate>) -> Self {
+    fn new(updates: InternalStreaming<ReadUpdate>) -> Self {
         Self {
             updates,
             state: CaughtUpState::new(),
@@ -250,7 +280,7 @@ impl ReadSession {
 }
 
 impl futures_core::Stream for ReadSession {
-    type Item = Result<ReadBatch, S2Error>;
+    type Item = Result<ReadBatch, ReadSessionError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -267,7 +297,7 @@ impl futures_core::Stream for ReadSession {
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
-                    let error = S2Error::from(error);
+                    let error = ReadSessionError::from(error);
                     self.state.end(Some(error.clone()));
                     return Poll::Ready(Some(Err(error)));
                 }
@@ -318,13 +348,13 @@ pub async fn read_session(
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
-                return Err(err);
+                return Err(err.into());
             }
         }
     };
 
     let updates = Box::pin(stream! {
-        let mut batches: Option<Streaming<ReadBatch>> = Some(batches);
+        let mut batches: Option<InternalStreaming<ReadBatch>> = Some(batches);
 
         loop {
             if batches.is_none() {
@@ -342,7 +372,7 @@ pub async fn read_session(
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
-                        yield Err(err);
+                        yield Err(err.into());
                         break;
                     }
                 }
@@ -389,7 +419,7 @@ pub async fn read_session(
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
-                    yield Err(err);
+                    yield Err(err.into());
                     break;
                 }
                 None => break,
@@ -405,7 +435,7 @@ async fn session_inner(
     encryption: Option<EncryptionKey>,
     start: ReadStart,
     end: ReadEnd,
-) -> Result<Streaming<ReadBatch>, ReadSessionError> {
+) -> Result<InternalStreaming<ReadBatch>, ReadSessionFailure> {
     let mut batches = client
         .read_session(&name, start, end, encryption.as_ref())
         .await?;
@@ -416,7 +446,7 @@ async fn session_inner(
                     yield ReadBatch::from_api(batch?);
                 }
                 Ok(None) => break,
-                Err(_) => Err(ReadSessionError::HeartbeatTimeout)?,
+                Err(_) => Err(ReadSessionFailure::HeartbeatTimeout)?,
             }
         }
     }))
@@ -435,7 +465,7 @@ fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> 
     })
 }
 
-fn retry_delay(err: &ReadSessionError, backoffs: &mut RetryBackoff) -> Option<Duration> {
+fn retry_delay(err: &ReadSessionFailure, backoffs: &mut RetryBackoff) -> Option<Duration> {
     if err.is_retryable()
         && let Some(backoff) = backoffs.next()
     {
@@ -492,7 +522,9 @@ mod tests {
     }
 
     fn test_session(
-        updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionError>> + Send + 'static,
+        updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionFailure>>
+        + Send
+        + 'static,
     ) -> ReadSession {
         ReadSession::new(Box::pin(updates))
     }
