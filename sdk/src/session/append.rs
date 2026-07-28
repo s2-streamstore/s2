@@ -24,7 +24,7 @@ use crate::{
     retry::RetryBackoffBuilder,
     types::{
         AppendAck, AppendError, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
-        ONE_MIB, RequestError, SessionError, StreamName, StreamPosition, ValidationError,
+        ONE_MIB, SessionError, StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -34,9 +34,6 @@ pub enum AppendSessionError {
     /// A unary append error.
     #[error(transparent)]
     Append(#[from] AppendError),
-    /// A request-level error.
-    #[error(transparent)]
-    Request(#[from] RequestError),
     /// A session lifecycle error.
     #[error(transparent)]
     Session(#[from] SessionError),
@@ -47,7 +44,6 @@ impl AppendSessionError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Append(error) => error.is_retryable(),
-            Self::Request(error) => error.is_retryable(),
             Self::Session(error) => error.is_retryable(),
         }
     }
@@ -56,7 +52,6 @@ impl AppendSessionError {
     pub fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Append(error) => error.has_no_side_effects(),
-            Self::Request(error) => error.has_no_side_effects(),
             Self::Session(error) => error.has_no_side_effects(),
         }
     }
@@ -68,7 +63,7 @@ impl From<ApiError> for AppendSessionError {
             ApiError::AppendConditionFailed(condition) => {
                 Self::Append(AppendError::ConditionFailed(condition.into()))
             }
-            other => Self::Request(other.into()),
+            other => Self::Append(AppendError::Request(other.into())),
         }
     }
 }
@@ -897,17 +892,17 @@ mod tests {
     use crate::{
         api::{ApiError, ApiErrorResponse},
         frame_signal::FrameSignal,
-        types::{AppendRetryPolicy, RequestError, SessionError},
+        types::{AppendError, AppendRetryPolicy, RequestError, SessionError},
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
-        AppendSessionError::Request(RequestError::from(ApiError::Server(
+        AppendSessionError::Append(AppendError::Request(RequestError::from(ApiError::Server(
             status,
             ApiErrorResponse {
                 code: code.to_owned(),
                 message: "test".to_owned(),
             },
-        )))
+        ))))
     }
 
     #[test]

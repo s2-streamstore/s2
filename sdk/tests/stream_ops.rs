@@ -1665,10 +1665,8 @@ async fn producer_drop_errors_all_claimable_tickets(stream: &S2Stream) -> Result
     let result1 = ticket1.await;
     let result2 = ticket2.await;
 
-    assert_matches!(result1, Err(ProducerError::ProducerDropped) => {
-    });
-    assert_matches!(result2, Err(ProducerError::ProducerDropped) => {
-    });
+    assert_matches!(result1, Err(ProducerError::ProducerDropped) => {});
+    assert_matches!(result2, Err(ProducerError::ProducerDropped) => {});
 
     Ok(())
 }
@@ -1913,7 +1911,7 @@ async fn append_session_for_non_existent_stream_errors(
 
     let result = session.submit(input).await?.await;
 
-    assert_matches!(result, Err(AppendSessionError::Request(RequestError::Server(err))) => {
+    assert_matches!(result, Err(AppendSessionError::Append(AppendError::Request(RequestError::Server(err)))) => {
         assert_eq!(err.code, "stream_not_found");
     });
 
@@ -1937,7 +1935,9 @@ async fn producer_for_non_existent_stream_errors(basin: &SharedS2Basin) -> Resul
             .await
         {
             Ok(ticket) => tickets.push(ticket),
-            Err(ProducerError::Append(AppendSessionError::Request(RequestError::Server(err)))) => {
+            Err(ProducerError::Append(AppendSessionError::Append(AppendError::Request(
+                RequestError::Server(err),
+            )))) => {
                 assert_eq!(err.code, "stream_not_found");
             }
             Err(e) => return Err(e.into()),
@@ -1946,7 +1946,7 @@ async fn producer_for_non_existent_stream_errors(basin: &SharedS2Basin) -> Resul
 
     for ticket in tickets {
         let result = ticket.await;
-        assert_matches!(result, Err(ProducerError::Append(AppendSessionError::Request(RequestError::Server(err)))) => {
+        assert_matches!(result, Err(ProducerError::Append(AppendSessionError::Append(AppendError::Request(RequestError::Server(err))))) => {
             assert_eq!(err.code, "stream_not_found");
         });
     }

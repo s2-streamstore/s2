@@ -21,8 +21,7 @@ use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
     types::{
-        EncryptionKey, MeteredBytes, ReadBatch, ReadError, RequestError, SessionError, StreamName,
-        StreamPosition,
+        EncryptionKey, MeteredBytes, ReadBatch, ReadError, SessionError, StreamName, StreamPosition,
     },
 };
 
@@ -47,9 +46,6 @@ impl ReadSessionFailure {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReadSessionError {
-    /// An error returned by a read request.
-    #[error(transparent)]
-    Request(#[from] RequestError),
     /// A unary read error.
     #[error(transparent)]
     Read(#[from] ReadError),
@@ -62,7 +58,6 @@ impl ReadSessionError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Request(error) => error.is_retryable(),
             Self::Read(error) => error.is_retryable(),
             Self::Session(error) => error.is_retryable(),
         }
@@ -71,7 +66,6 @@ impl ReadSessionError {
     /// Whether the operation is guaranteed to have had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
-            Self::Request(error) => error.has_no_side_effects(),
             Self::Read(error) => error.has_no_side_effects(),
             Self::Session(error) => error.has_no_side_effects(),
         }
@@ -85,7 +79,7 @@ impl From<ReadSessionFailure> for ReadSessionError {
                 ApiError::ReadUnwritten(tail) => {
                     Self::Read(ReadError::ReadUnwritten(tail.tail.into()))
                 }
-                other => Self::Request(other.into()),
+                other => Self::Read(ReadError::Request(other.into())),
             },
             ReadSessionFailure::HeartbeatTimeout => Self::Session(SessionError::HeartbeatTimeout),
         }

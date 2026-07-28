@@ -3961,8 +3961,8 @@ pub enum ProducerError {
 
 impl From<ValidationError> for ProducerError {
     fn from(error: ValidationError) -> Self {
-        Self::Append(crate::session::append::AppendSessionError::Request(
-            RequestError::Validation(error),
+        Self::Append(crate::session::append::AppendSessionError::Append(
+            AppendError::Request(RequestError::Validation(error)),
         ))
     }
 }

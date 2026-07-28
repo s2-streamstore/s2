@@ -136,7 +136,7 @@ impl S2 {
     pub async fn get_basin_config_api(
         &self,
         name: BasinName,
-    ) -> Result<s2_api::v1::config::BasinConfig, S2Error> {
+    ) -> Result<s2_api::v1::config::BasinConfig, crate::types::S2Error> {
         Ok(self.client.get_basin_config(name).await?)
     }
 
@@ -183,7 +183,7 @@ impl S2 {
     pub async fn list_access_tokens_api(
         &self,
         input: ListAccessTokensInput,
-    ) -> Result<s2_api::v1::access::ListAccessTokensResponse, S2Error> {
+    ) -> Result<s2_api::v1::access::ListAccessTokensResponse, crate::types::S2Error> {
         Ok(self.client.list_access_tokens(input.into()).await?)
     }
 
@@ -392,7 +392,7 @@ impl S2Basin {
     pub async fn get_stream_config_api(
         &self,
         name: StreamName,
-    ) -> Result<s2_api::v1::config::StreamConfig, S2Error> {
+    ) -> Result<s2_api::v1::config::StreamConfig, crate::types::S2Error> {
         Ok(self.client.get_stream_config(name).await?)
     }
 
