@@ -73,8 +73,7 @@ impl S2Lite {
 
         wait_until_healthy(&endpoint).await?;
 
-        let client = S2::new(s2_config_for_endpoint(&endpoint, DEFAULT_ACCESS_TOKEN)?)
-            .map_err(Error::Request)?;
+        let client = S2::new(s2_config_for_endpoint(&endpoint, DEFAULT_ACCESS_TOKEN)?)?;
 
         Ok(Self {
             container,

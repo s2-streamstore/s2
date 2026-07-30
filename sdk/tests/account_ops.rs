@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use assert_matches::assert_matches;
 use common::{s2, unique_basin_name, uuid};
-use s2_sdk::types::*;
+use s2_sdk::{
+    error::{ErrorResponse, RequestError},
+    types::*,
+};
 
 #[tokio::test]
 async fn create_list_and_delete_basin() -> Result<(), Box<dyn std::error::Error>> {

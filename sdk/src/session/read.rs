@@ -19,11 +19,9 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
+    error::{ErrorResponse, ReadError, RequestError},
     retry::RetryBackoff,
-    types::{
-        EncryptionKey, ErrorResponse, MeteredBytes, ReadBatch, ReadError, RequestError, StreamName,
-        StreamPosition,
-    },
+    types::{EncryptionKey, MeteredBytes, ReadBatch, StreamName, StreamPosition},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -53,9 +51,6 @@ pub enum ReadSessionError {
     /// The session heartbeat timed out.
     #[error("heartbeat timeout")]
     HeartbeatTimeout,
-    /// The session ended before an awaited condition was reached.
-    #[error("read session ended before catching up")]
-    SessionClosed,
 }
 
 impl ReadSessionError {
@@ -64,7 +59,6 @@ impl ReadSessionError {
         match self {
             Self::Read(error) => error.is_retryable(),
             Self::HeartbeatTimeout => true,
-            Self::SessionClosed => false,
         }
     }
 
@@ -77,7 +71,7 @@ impl ReadSessionError {
     pub fn request_error(&self) -> Option<&RequestError> {
         match self {
             Self::Read(error) => error.request_error(),
-            Self::HeartbeatTimeout | Self::SessionClosed => None,
+            Self::HeartbeatTimeout => None,
         }
     }
 
@@ -90,12 +84,7 @@ impl ReadSessionError {
 impl From<ReadSessionFailure> for ReadSessionError {
     fn from(error: ReadSessionFailure) -> Self {
         match error {
-            ReadSessionFailure::Api(error) => match error {
-                ApiError::ReadUnwritten(tail) => {
-                    Self::Read(ReadError::ReadUnwritten(tail.tail.into()))
-                }
-                other => Self::Read(ReadError::Request(other.into())),
-            },
+            ReadSessionFailure::Api(error) => Self::Read(error.into()),
             ReadSessionFailure::HeartbeatTimeout => Self::HeartbeatTimeout,
         }
     }
@@ -141,15 +130,6 @@ impl CaughtUpError {
     /// Return the server response, if this error came from the server.
     pub fn server_error(&self) -> Option<&ErrorResponse> {
         self.request_error().and_then(RequestError::server_error)
-    }
-}
-
-impl From<CaughtUpError> for ReadSessionError {
-    fn from(error: CaughtUpError) -> Self {
-        match error {
-            CaughtUpError::SessionClosed => Self::SessionClosed,
-            CaughtUpError::Read(error) => error,
-        }
     }
 }
 
@@ -573,23 +553,6 @@ mod tests {
         + 'static,
     ) -> ReadSession {
         ReadSession::new(Box::pin(updates))
-    }
-
-    #[test]
-    fn read_session_error_classification_contract() {
-        assert!(ReadSessionError::HeartbeatTimeout.is_retryable());
-        assert!(ReadSessionError::HeartbeatTimeout.has_no_side_effects());
-        assert!(!ReadSessionError::SessionClosed.is_retryable());
-        assert!(ReadSessionError::SessionClosed.has_no_side_effects());
-
-        let request = RequestError::Client(crate::api::ClientError::Timeout);
-        let error = ReadSessionError::Read(ReadError::Request(request));
-        assert!(error.is_retryable());
-        assert!(error.has_no_side_effects());
-        assert!(matches!(
-            error.request_error(),
-            Some(RequestError::Client(crate::api::ClientError::Timeout))
-        ));
     }
 
     #[tokio::test]

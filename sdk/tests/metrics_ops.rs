@@ -4,7 +4,10 @@ use std::{future::Future, time::Duration};
 
 use assert_matches::assert_matches;
 use common::{S2Stream, s2};
-use s2_sdk::types::*;
+use s2_sdk::{
+    error::{ClientError, ErrorResponse, RequestError},
+    types::*,
+};
 use test_context::test_context;
 use time::OffsetDateTime;
 

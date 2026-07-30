@@ -2,17 +2,18 @@
 use crate::client::Connect;
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
+    error::{AppendError, ReadError, RequestError},
     producer::{Producer, ProducerConfig},
     session::{self, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError},
     types::{
-        AccessTokenId, AccessTokenInfo, AppendAck, AppendError, AppendInput, BasinConfig,
-        BasinInfo, BasinName, CreateBasinInput, CreateStreamInput, DeleteBasinInput,
-        DeleteStreamInput, EncryptionKey, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
-        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput,
-        ListBasinsInput, ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch,
-        ReadError, ReadInput, ReconfigureBasinInput, ReconfigureStreamInput, RequestError,
-        S2Config, StreamConfig, StreamInfo, StreamName, StreamPosition, Streaming,
+        AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
+        CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
+        EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
+        GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
+        ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
+        ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
+        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
+        StreamName, StreamPosition, Streaming,
     },
 };
 

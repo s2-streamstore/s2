@@ -9,7 +9,7 @@ use rstest::rstest;
 use s2_sdk::{
     append_session::AppendSessionConfig,
     batching::{BatchLimits, BatchingConfig},
-    error::{AppendSessionError, ReadSessionError},
+    error::*,
     producer::ProducerConfig,
     types::*,
 };
@@ -818,7 +818,7 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     let caught_up_tail = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             tokio::select! {
-                tail = &mut caught_up => break tail.map_err(ReadSessionError::from),
+                tail = &mut caught_up => break tail,
                 batch = session.next() => {
                     let batch = batch.expect("session should reach the tail")?;
                     seq_nums.extend(batch.records.into_iter().map(|record| record.seq_num));

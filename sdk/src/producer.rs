@@ -19,10 +19,11 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::{
     api::BasinClient,
     batching::{AppendInputs, AppendRecordBatches, BatchingConfig},
+    error::ProducerError,
     session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
     types::{
-        AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, ProducerError,
-        StreamName, ValidationError,
+        AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, StreamName,
+        ValidationError,
     },
 };
 

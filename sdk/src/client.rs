@@ -73,16 +73,16 @@ pub enum Error {
     Send(#[from] hyper_util::client::legacy::Error),
     #[error("receive error: {0}")]
     Receive(#[from] hyper::Error),
-    #[error("http error: {0}")]
-    Http(#[from] http::Error),
-    #[error("json error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("url encoding error: {0}")]
-    UrlEncoded(#[from] serde_urlencoded::ser::Error),
+    #[error("request build error: {0}")]
+    RequestBuild(String),
+    #[error("response decode error: {0}")]
+    ResponseDecode(#[source] serde_json::Error),
     #[error("timeout")]
     Timeout,
-    #[error("compression error: {0}")]
-    Compression(String),
+    #[error("request compression error: {0}")]
+    RequestCompression(String),
+    #[error("response compression error: {0}")]
+    ResponseCompression(String),
 }
 
 enum BodyInner {
@@ -255,13 +255,13 @@ impl RequestBuilder {
                     self.uri = match uri_with_query(&self.uri, &query_string) {
                         Ok(uri) => uri,
                         Err(e) => {
-                            self.error = Some(Error::Http(e.into()));
+                            self.error = Some(Error::RequestBuild(e.to_string()));
                             return self;
                         }
                     };
                 }
             }
-            Err(e) => self.error = Some(Error::UrlEncoded(e)),
+            Err(e) => self.error = Some(Error::RequestBuild(e.to_string())),
         }
         self
     }
@@ -276,7 +276,7 @@ impl RequestBuilder {
                 self.headers.insert(CONTENT_TYPE, APPLICATION_JSON);
                 self.body = Some(Body::from(data));
             }
-            Err(e) => self.error = Some(Error::Json(e)),
+            Err(e) => self.error = Some(Error::RequestBuild(e.to_string())),
         }
         self
     }
@@ -297,8 +297,8 @@ impl RequestBuilder {
             (Ok(name), Ok(value)) => {
                 self.headers.insert(name, value);
             }
-            (Err(e), _) => self.error = Some(Error::Http(e.into())),
-            (_, Err(e)) => self.error = Some(Error::Http(e.into())),
+            (Err(e), _) => self.error = Some(Error::RequestBuild(e.into().to_string())),
+            (_, Err(e)) => self.error = Some(Error::RequestBuild(e.into().to_string())),
         }
         self
     }
@@ -356,7 +356,7 @@ impl UnaryResponse {
     }
 
     pub fn json<T: DeserializeOwned>(self) -> Result<T, Error> {
-        Ok(serde_json::from_slice(&self.bytes)?)
+        serde_json::from_slice(&self.bytes).map_err(Error::ResponseDecode)
     }
 }
 
@@ -515,7 +515,9 @@ fn build_http_request(
         }
     }
 
-    Ok(builder.body(body)?)
+    builder
+        .body(body)
+        .map_err(|error| Error::RequestBuild(error.to_string()))
 }
 
 async fn execute_unary_with<C>(
@@ -634,7 +636,7 @@ async fn compress_body(
         Compression::None => Ok((body, None)),
         Compression::Gzip => {
             let Some(data) = body.as_bytes() else {
-                return Err(Error::Compression(
+                return Err(Error::RequestCompression(
                     "streaming request bodies cannot be compressed".into(),
                 ));
             };
@@ -642,11 +644,11 @@ async fn compress_body(
             encoder
                 .write_all(data)
                 .await
-                .map_err(|e| Error::Compression(e.to_string()))?;
+                .map_err(|e| Error::RequestCompression(e.to_string()))?;
             encoder
                 .shutdown()
                 .await
-                .map_err(|e| Error::Compression(e.to_string()))?;
+                .map_err(|e| Error::RequestCompression(e.to_string()))?;
             let compressed = encoder.into_inner();
             Ok((
                 Body::from(compressed),
@@ -655,7 +657,7 @@ async fn compress_body(
         }
         Compression::Zstd => {
             let Some(data) = body.as_bytes() else {
-                return Err(Error::Compression(
+                return Err(Error::RequestCompression(
                     "streaming request bodies cannot be compressed".into(),
                 ));
             };
@@ -663,11 +665,11 @@ async fn compress_body(
             encoder
                 .write_all(data)
                 .await
-                .map_err(|e| Error::Compression(e.to_string()))?;
+                .map_err(|e| Error::RequestCompression(e.to_string()))?;
             encoder
                 .shutdown()
                 .await
-                .map_err(|e| Error::Compression(e.to_string()))?;
+                .map_err(|e| Error::RequestCompression(e.to_string()))?;
             let compressed = encoder.into_inner();
             Ok((
                 Body::from(compressed),
@@ -687,7 +689,7 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Err
             decoder
                 .read_to_end(&mut decompressed)
                 .await
-                .map_err(|e| Error::Compression(e.to_string()))?;
+                .map_err(|e| Error::ResponseCompression(e.to_string()))?;
             Ok(Bytes::from(decompressed))
         }
         Some("zstd") => {
@@ -696,7 +698,7 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Err
             decoder
                 .read_to_end(&mut decompressed)
                 .await
-                .map_err(|e| Error::Compression(e.to_string()))?;
+                .map_err(|e| Error::ResponseCompression(e.to_string()))?;
             Ok(Bytes::from(decompressed))
         }
         _ => Ok(bytes),

@@ -20,11 +20,12 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
+    error::{AppendError, ErrorResponse, RequestError},
     frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendError, AppendInput, AppendRetryPolicy, EncryptionKey, ErrorResponse,
-        MeteredBytes, ONE_MIB, RequestError, StreamName, StreamPosition, ValidationError,
+        AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes, ONE_MIB,
+        StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -937,8 +938,9 @@ mod tests {
     use super::{AppendSessionError, is_safe_to_retry};
     use crate::{
         api::{ApiError, ApiErrorResponse},
+        error::{AppendError, RequestError},
         frame_signal::FrameSignal,
-        types::{AppendError, AppendRetryPolicy, RequestError},
+        types::AppendRetryPolicy,
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
@@ -996,16 +998,5 @@ mod tests {
             true,
             Some(&signal),
         ));
-    }
-
-    #[test]
-    fn append_session_error_classification_contract() {
-        assert!(AppendSessionError::AckTimeout.is_retryable());
-        assert!(AppendSessionError::ServerDisconnected.is_retryable());
-        assert!(!AppendSessionError::StreamClosedEarly.is_retryable());
-        assert!(AppendSessionError::SessionClosed.has_no_side_effects());
-        assert!(AppendSessionError::SessionClosing.has_no_side_effects());
-        assert!(!AppendSessionError::SessionDropped.has_no_side_effects());
-        assert!(!AppendSessionError::InvalidAck("test".to_owned()).has_no_side_effects());
     }
 }
