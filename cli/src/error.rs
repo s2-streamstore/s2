@@ -1,9 +1,7 @@
 use miette::Diagnostic;
-use s2_api::v1::error::ErrorCode;
-use s2_sdk::{
-    append_session::AppendSessionError,
-    read_session::ReadSessionError,
-    types::{AppendError, ProducerError, ReadError, RequestError},
+use s2_sdk::error::{
+    AppendError, AppendSessionError, ErrorCode, ErrorResponse, ProducerError, ReadError,
+    ReadSessionError, RequestError,
 };
 use thiserror::Error;
 
@@ -36,6 +34,23 @@ pub enum SdkError {
     ReadSession(#[from] ReadSessionError),
     #[error(transparent)]
     Producer(#[from] ProducerError),
+}
+
+impl SdkError {
+    fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::Request(error) => Some(error),
+            Self::Read(error) => error.request_error(),
+            Self::Append(error) => error.request_error(),
+            Self::AppendSession(error) => error.request_error(),
+            Self::ReadSession(error) => error.request_error(),
+            Self::Producer(error) => error.request_error(),
+        }
+    }
+
+    fn server_error(&self) -> Option<&ErrorResponse> {
+        self.request_error().and_then(RequestError::server_error)
+    }
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -211,37 +226,16 @@ impl std::fmt::Display for TokenSource {
 }
 
 fn is_auth_error(err: &SdkError) -> bool {
-    match err {
-        SdkError::Request(RequestError::Server(response))
-        | SdkError::Read(ReadError::Request(RequestError::Server(response)))
-        | SdkError::Append(AppendError::Request(RequestError::Server(response)))
-        | SdkError::AppendSession(AppendSessionError::Append(AppendError::Request(
-            RequestError::Server(response),
-        )))
-        | SdkError::ReadSession(ReadSessionError::Read(ReadError::Request(
-            RequestError::Server(response),
-        )))
-        | SdkError::Producer(ProducerError::Append(AppendSessionError::Append(
-            AppendError::Request(RequestError::Server(response)),
-        ))) => is_auth_error_code(&response.code),
-        _ => false,
-    }
+    err.server_error()
+        .and_then(ErrorResponse::known_code)
+        .is_some_and(ErrorCode::is_auth_error)
 }
 
 fn is_malformed_access_token(err: &SdkError) -> bool {
     matches!(
-        err,
-        SdkError::Request(RequestError::MalformedAccessToken(_))
-            | SdkError::Read(ReadError::Request(RequestError::MalformedAccessToken(_)))
-            | SdkError::Append(AppendError::Request(RequestError::MalformedAccessToken(_)))
+        err.request_error(),
+        Some(RequestError::MalformedAccessToken(_))
     )
-}
-
-fn is_auth_error_code(code: &str) -> bool {
-    match code.parse::<ErrorCode>() {
-        Ok(code) => code.is_auth_error(),
-        Err(_) => false,
-    }
 }
 
 #[cfg(test)]

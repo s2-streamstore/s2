@@ -621,15 +621,7 @@ impl ApiError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Server(status, err_resp) => {
-                matches!(
-                    *status,
-                    StatusCode::REQUEST_TIMEOUT
-                        | StatusCode::TOO_MANY_REQUESTS
-                        | StatusCode::INTERNAL_SERVER_ERROR
-                        | StatusCode::BAD_GATEWAY
-                        | StatusCode::SERVICE_UNAVAILABLE
-                        | StatusCode::GATEWAY_TIMEOUT
-                ) || (*status == StatusCode::CONFLICT && err_resp.code == "transaction_conflict")
+                crate::types::server_error_is_retryable(*status, &err_resp.code)
             }
             Self::Client(err) => err.is_retryable(),
             _ => false,
@@ -638,11 +630,9 @@ impl ApiError {
 
     pub fn has_no_side_effects(&self) -> bool {
         match self {
-            Self::Server(status, err_resp) => matches!(
-                (*status, err_resp.code.as_str()),
-                (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
-                    | (StatusCode::BAD_GATEWAY, "hot_server")
-            ),
+            Self::Server(status, err_resp) => {
+                crate::types::server_error_has_no_side_effects(*status, &err_resp.code)
+            }
             Self::Client(err) => err.has_no_side_effects(),
             _ => false,
         }
@@ -683,29 +673,46 @@ pub enum ClientError {
     /// The connection was refused.
     #[error("connection refused: {0}")]
     ConnectionRefused(String),
+    /// The response body could not be decoded.
+    #[error("{0}")]
+    ResponseDecode(String),
+    /// A streaming protocol message could not be decoded.
+    #[error("{0}")]
+    SessionProtocol(String),
+    /// Request or response compression failed.
+    #[error("{0}")]
+    Compression(String),
     /// An otherwise-unclassified client error.
     #[error("{0}")]
-    Others(String),
+    Other(String),
 }
 
 impl ClientError {
     /// Whether retrying the request is safe or sensible.
     pub fn is_retryable(&self) -> bool {
-        !matches!(self, ClientError::Others(_))
+        !matches!(
+            self,
+            Self::ResponseDecode(_)
+                | Self::SessionProtocol(_)
+                | Self::Compression(_)
+                | Self::Other(_)
+        )
     }
 
-    /// Whether the request is guaranteed to have had no side effects.
+    /// Whether retrying the request cannot duplicate a mutation.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
-            ClientError::Connect(_)
-            | ClientError::Timeout
-            | ClientError::ConnectionClosedEarly(_)
-            | ClientError::RequestCanceled(_)
-            | ClientError::UnexpectedEof(_)
-            | ClientError::ConnectionReset(_)
-            | ClientError::ConnectionAborted(_)
-            | ClientError::Others(_) => false,
-            ClientError::ConnectionRefused(_) => true,
+            Self::Connect(_) | Self::ConnectionRefused(_) => true,
+            Self::Timeout
+            | Self::ConnectionClosedEarly(_)
+            | Self::RequestCanceled(_)
+            | Self::UnexpectedEof(_)
+            | Self::ConnectionReset(_)
+            | Self::ConnectionAborted(_)
+            | Self::ResponseDecode(_)
+            | Self::SessionProtocol(_)
+            | Self::Compression(_)
+            | Self::Other(_) => false,
         }
     }
 }
@@ -722,10 +729,10 @@ impl From<client::Error> for ClientError {
             client::Error::Send(_) | client::Error::Receive(_) => {
                 classify_hyper_source(&err, &err_msg)
                     .or_else(|| classify_io_source(&err, &err_msg))
-                    .unwrap_or(Self::Others(err_msg))
+                    .unwrap_or(Self::Other(err_msg))
             }
             client::Error::Timeout => Self::Timeout,
-            _ => Self::Others(err_msg),
+            _ => Self::Other(err_msg),
         }
     }
 }
@@ -857,7 +864,7 @@ impl BaseClient {
             config.insecure_skip_cert_verification,
             config.rustls_crypto_provider.clone(),
         )
-        .map_err(|e| ClientError::Others(format!("failed to initialize TLS connector: {e}")))?;
+        .map_err(|e| ClientError::Other(format!("failed to initialize TLS connector: {e}")))?;
         Self::init_with_connector(config, connector)
     }
 
@@ -1199,7 +1206,7 @@ impl StreamingResult for StreamingResponse {
         }
         match serde_json::from_slice::<ApiErrorResponse>(&bytes) {
             Ok(response) => Err(ApiError::Server(status, response)),
-            Err(_) => Err(ApiError::Client(ClientError::Others(format!(
+            Err(_) => Err(ApiError::Client(ClientError::Other(format!(
                 "server error {status}: {}",
                 String::from_utf8_lossy(&bytes)
             )))),
@@ -1279,17 +1286,30 @@ mod tests {
     #[test]
     fn client_error_has_no_side_effects() {
         // Connection was never established.
+        assert!(ClientError::Connect("test".into()).has_no_side_effects());
         assert!(ClientError::ConnectionRefused("test".into()).has_no_side_effects());
 
         // May have side effects — data could have been sent/processed.
-        assert!(!ClientError::Connect("test".into()).has_no_side_effects());
         assert!(!ClientError::Timeout.has_no_side_effects());
         assert!(!ClientError::ConnectionClosedEarly("test".into()).has_no_side_effects());
         assert!(!ClientError::RequestCanceled("test".into()).has_no_side_effects());
         assert!(!ClientError::UnexpectedEof("test".into()).has_no_side_effects());
         assert!(!ClientError::ConnectionReset("test".into()).has_no_side_effects());
         assert!(!ClientError::ConnectionAborted("test".into()).has_no_side_effects());
-        assert!(!ClientError::Others("test".into()).has_no_side_effects());
+        assert!(!ClientError::ResponseDecode("test".into()).has_no_side_effects());
+        assert!(!ClientError::SessionProtocol("test".into()).has_no_side_effects());
+        assert!(!ClientError::Compression("test".into()).has_no_side_effects());
+        assert!(!ClientError::Other("test".into()).has_no_side_effects());
+    }
+
+    #[test]
+    fn client_error_retryability_is_fail_closed_for_unclassified_failures() {
+        assert!(ClientError::Connect("test".into()).is_retryable());
+        assert!(ClientError::Timeout.is_retryable());
+        assert!(!ClientError::ResponseDecode("test".into()).is_retryable());
+        assert!(!ClientError::SessionProtocol("test".into()).is_retryable());
+        assert!(!ClientError::Compression("test".into()).is_retryable());
+        assert!(!ClientError::Other("test".into()).is_retryable());
     }
 
     #[test]

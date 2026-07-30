@@ -7,10 +7,10 @@ use common::{S2Stream, SharedS2Basin, s2_config, unique_basin_name, unique_strea
 use futures_util::StreamExt;
 use rstest::rstest;
 use s2_sdk::{
-    append_session::{AppendSessionConfig, AppendSessionError},
+    append_session::AppendSessionConfig,
     batching::{BatchLimits, BatchingConfig},
+    error::{AppendSessionError, ReadSessionError},
     producer::ProducerConfig,
-    read_session::ReadSessionError,
     types::*,
 };
 use test_context::test_context;

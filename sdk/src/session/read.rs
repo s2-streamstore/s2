@@ -21,7 +21,8 @@ use crate::{
     api::{ApiError, BasinClient, retry_builder},
     retry::RetryBackoff,
     types::{
-        EncryptionKey, MeteredBytes, ReadBatch, ReadError, SessionError, StreamName, StreamPosition,
+        EncryptionKey, ErrorResponse, MeteredBytes, ReadBatch, ReadError, RequestError, StreamName,
+        StreamPosition,
     },
 };
 
@@ -49,9 +50,12 @@ pub enum ReadSessionError {
     /// An error with the read request underlying the session.
     #[error(transparent)]
     Read(#[from] ReadError),
-    /// A session lifecycle error.
-    #[error(transparent)]
-    Session(#[from] SessionError),
+    /// The session heartbeat timed out.
+    #[error("heartbeat timeout")]
+    HeartbeatTimeout,
+    /// The session ended before an awaited condition was reached.
+    #[error("read session ended before catching up")]
+    SessionClosed,
 }
 
 impl ReadSessionError {
@@ -59,16 +63,27 @@ impl ReadSessionError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Read(error) => error.is_retryable(),
-            Self::Session(error) => error.is_retryable(),
+            Self::HeartbeatTimeout => true,
+            Self::SessionClosed => false,
         }
     }
 
-    /// Whether the operation is guaranteed to have had no side effects.
+    /// Whether retrying the operation cannot duplicate a mutation.
     pub fn has_no_side_effects(&self) -> bool {
+        true
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
         match self {
-            Self::Read(error) => error.has_no_side_effects(),
-            Self::Session(error) => error.has_no_side_effects(),
+            Self::Read(error) => error.request_error(),
+            Self::HeartbeatTimeout | Self::SessionClosed => None,
         }
+    }
+
+    /// Return the server response, if this error came from the server.
+    pub fn server_error(&self) -> Option<&ErrorResponse> {
+        self.request_error().and_then(RequestError::server_error)
     }
 }
 
@@ -81,7 +96,7 @@ impl From<ReadSessionFailure> for ReadSessionError {
                 }
                 other => Self::Read(ReadError::Request(other.into())),
             },
-            ReadSessionFailure::HeartbeatTimeout => Self::Session(SessionError::HeartbeatTimeout),
+            ReadSessionFailure::HeartbeatTimeout => Self::HeartbeatTimeout,
         }
     }
 }
@@ -101,10 +116,38 @@ pub enum CaughtUpError {
     Read(#[from] ReadSessionError),
 }
 
+impl CaughtUpError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::SessionClosed => false,
+            Self::Read(error) => error.is_retryable(),
+        }
+    }
+
+    /// Whether retrying the operation cannot duplicate a mutation.
+    pub fn has_no_side_effects(&self) -> bool {
+        true
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::SessionClosed => None,
+            Self::Read(error) => error.request_error(),
+        }
+    }
+
+    /// Return the server response, if this error came from the server.
+    pub fn server_error(&self) -> Option<&ErrorResponse> {
+        self.request_error().and_then(RequestError::server_error)
+    }
+}
+
 impl From<CaughtUpError> for ReadSessionError {
     fn from(error: CaughtUpError) -> Self {
         match error {
-            CaughtUpError::SessionClosed => Self::Session(SessionError::SessionClosed),
+            CaughtUpError::SessionClosed => Self::SessionClosed,
             CaughtUpError::Read(error) => error,
         }
     }
@@ -532,6 +575,23 @@ mod tests {
         ReadSession::new(Box::pin(updates))
     }
 
+    #[test]
+    fn read_session_error_classification_contract() {
+        assert!(ReadSessionError::HeartbeatTimeout.is_retryable());
+        assert!(ReadSessionError::HeartbeatTimeout.has_no_side_effects());
+        assert!(!ReadSessionError::SessionClosed.is_retryable());
+        assert!(ReadSessionError::SessionClosed.has_no_side_effects());
+
+        let request = RequestError::Client(crate::api::ClientError::Timeout);
+        let error = ReadSessionError::Read(ReadError::Request(request));
+        assert!(error.is_retryable());
+        assert!(error.has_no_side_effects());
+        assert!(matches!(
+            error.request_error(),
+            Some(RequestError::Client(crate::api::ClientError::Timeout))
+        ));
+    }
+
     #[tokio::test]
     async fn caught_up_follows_delivery_and_pins_tail() {
         let tail = position(2);
@@ -700,9 +760,7 @@ mod tests {
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
-            Err(CaughtUpError::Read(ReadSessionError::Session(
-                SessionError::HeartbeatTimeout,
-            )))
+            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 
@@ -726,9 +784,7 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CaughtUpError::Read(ReadSessionError::Session(
-                SessionError::HeartbeatTimeout,
-            )))
+            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 

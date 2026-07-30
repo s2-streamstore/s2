@@ -19,7 +19,10 @@ use http::{
     uri::{Authority, Scheme},
 };
 use rand::RngExt;
-use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
+use s2_api::{
+    v1 as api,
+    v1::{error::ErrorCode, stream::s2s::CompressionAlgorithm},
+};
 /// Validation error.
 pub use s2_common::ValidationError;
 /// Access token ID.
@@ -3617,6 +3620,7 @@ impl ReadBatch {
 pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, RequestError>>>>;
 
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 /// Why an append condition check failed.
 pub enum AppendConditionFailed {
     #[error("fencing token mismatch, expected: {0}")]
@@ -3668,12 +3672,25 @@ impl RequestError {
         }
     }
 
-    /// Whether the operation is guaranteed to have had no side effects.
+    /// Whether retrying the operation cannot duplicate a mutation.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Client(error) => error.has_no_side_effects(),
             Self::Server(error) => error.has_no_side_effects(),
-            Self::MalformedAccessToken(_) | Self::Validation(_) => false,
+            Self::MalformedAccessToken(_) | Self::Validation(_) => true,
+        }
+    }
+
+    /// Return this request error.
+    pub fn request_error(&self) -> &Self {
+        self
+    }
+
+    /// Return the server response, if this error came from the server.
+    pub fn server_error(&self) -> Option<&ErrorResponse> {
+        match self {
+            Self::Server(error) => Some(error),
+            _ => None,
         }
     }
 }
@@ -3682,11 +3699,20 @@ impl From<ApiError> for RequestError {
     fn from(error: ApiError) -> Self {
         match error {
             ApiError::Client(error) => Self::Client(error),
+            ApiError::ProtoDecode(error) => {
+                Self::Client(ClientError::ResponseDecode(error.to_string()))
+            }
+            ApiError::S2STerminalDecode(error) => {
+                Self::Client(ClientError::SessionProtocol(error.to_string()))
+            }
             ApiError::MalformedAccessToken(error) => Self::MalformedAccessToken(error),
+            ApiError::Compression(error) => {
+                Self::Client(ClientError::Compression(error.to_string()))
+            }
             ApiError::Server(status, response) => {
                 Self::Server(ErrorResponse::from_api(status, response))
             }
-            other => Self::Client(ClientError::Others(other.to_string())),
+            other => Self::Client(ClientError::Other(other.to_string())),
         }
     }
 }
@@ -3709,9 +3735,22 @@ impl ReadError {
         matches!(self, Self::Request(error) if error.is_retryable())
     }
 
-    /// Whether the operation is guaranteed to have had no side effects.
+    /// Whether retrying the operation cannot duplicate a mutation.
     pub fn has_no_side_effects(&self) -> bool {
-        matches!(self, Self::Request(error) if error.has_no_side_effects())
+        true
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::Request(error) => Some(error),
+            Self::ReadUnwritten(_) => None,
+        }
+    }
+
+    /// Return the server response, if this error came from the server.
+    pub fn server_error(&self) -> Option<&ErrorResponse> {
+        self.request_error().and_then(RequestError::server_error)
     }
 }
 
@@ -3742,9 +3781,25 @@ impl AppendError {
         matches!(self, Self::Request(error) if error.is_retryable())
     }
 
-    /// Whether the operation is guaranteed to have had no side effects.
+    /// Whether retrying the operation cannot duplicate a mutation.
     pub fn has_no_side_effects(&self) -> bool {
-        matches!(self, Self::Request(error) if error.has_no_side_effects())
+        match self {
+            Self::Request(error) => error.has_no_side_effects(),
+            Self::ConditionFailed(_) => true,
+        }
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::Request(error) => Some(error),
+            Self::ConditionFailed(_) => None,
+        }
+    }
+
+    /// Return the server response, if this error came from the server.
+    pub fn server_error(&self) -> Option<&ErrorResponse> {
+        self.request_error().and_then(RequestError::server_error)
     }
 }
 
@@ -3757,53 +3812,6 @@ impl From<ApiError> for AppendError {
     }
 }
 
-/// Errors from streaming/session operations.
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-pub enum SessionError {
-    /// Heartbeat timed out.
-    ///
-    /// This condition is produced by read sessions.
-    #[error("heartbeat timeout")]
-    HeartbeatTimeout,
-    /// An append acknowledgement timed out.
-    #[error("append acknowledgement timed out")]
-    AckTimeout,
-    /// The server disconnected during the session.
-    #[error("server disconnected")]
-    ServerDisconnected,
-    /// The response stream closed while appends were in flight.
-    #[error("response stream closed early while appends in flight")]
-    StreamClosedEarly,
-    /// The session was already closed.
-    #[error("session already closed")]
-    SessionClosed,
-    /// The session is closing.
-    #[error("session is closing")]
-    SessionClosing,
-    /// The session was dropped without being closed.
-    #[error("session dropped without calling close")]
-    SessionDropped,
-    /// The server returned an invalid append acknowledgement.
-    #[error("invalid append acknowledgement: {0}")]
-    InvalidAck(String),
-}
-
-impl SessionError {
-    /// Whether retrying the operation is safe or sensible.
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::HeartbeatTimeout | Self::AckTimeout | Self::ServerDisconnected
-        )
-    }
-
-    /// Whether the operation is guaranteed to have had no side effects.
-    pub fn has_no_side_effects(&self) -> bool {
-        false
-    }
-}
-
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 /// Errors from producer operations.
@@ -3811,6 +3819,9 @@ pub enum ProducerError {
     /// An append-session error encountered while producing records.
     #[error(transparent)]
     Append(#[from] crate::session::append::AppendSessionError),
+    /// Producer input validation failed before an append was attempted.
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
     /// The producer was already closed.
     #[error("producer already closed")]
     ProducerClosed,
@@ -3822,26 +3833,41 @@ pub enum ProducerError {
     ProducerDropped,
 }
 
-impl From<ValidationError> for ProducerError {
-    fn from(error: ValidationError) -> Self {
-        Self::Append(crate::session::append::AppendSessionError::Append(
-            AppendError::Request(RequestError::Validation(error)),
-        ))
-    }
-}
-
 impl ProducerError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Append(error) => error.is_retryable(),
-            Self::ProducerClosed | Self::ProducerClosing | Self::ProducerDropped => false,
+            Self::Validation(_)
+            | Self::ProducerClosed
+            | Self::ProducerClosing
+            | Self::ProducerDropped => false,
         }
     }
 
-    /// Whether the operation is guaranteed to have had no side effects.
+    /// Whether retrying the operation cannot duplicate a mutation.
     pub fn has_no_side_effects(&self) -> bool {
-        matches!(self, Self::Append(error) if error.has_no_side_effects())
+        match self {
+            Self::Append(error) => error.has_no_side_effects(),
+            Self::Validation(_) | Self::ProducerClosed | Self::ProducerClosing => true,
+            Self::ProducerDropped => false,
+        }
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::Append(error) => error.request_error(),
+            Self::Validation(_)
+            | Self::ProducerClosed
+            | Self::ProducerClosing
+            | Self::ProducerDropped => None,
+        }
+    }
+
+    /// Return the server response, if this error came from the server.
+    pub fn server_error(&self) -> Option<&ErrorResponse> {
+        self.request_error().and_then(RequestError::server_error)
     }
 }
 
@@ -3867,27 +3893,43 @@ impl ErrorResponse {
         }
     }
 
-    /// Whether retrying the request is safe or sensible for this server error.
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self.status,
-            StatusCode::REQUEST_TIMEOUT
-                | StatusCode::TOO_MANY_REQUESTS
-                | StatusCode::INTERNAL_SERVER_ERROR
-                | StatusCode::BAD_GATEWAY
-                | StatusCode::SERVICE_UNAVAILABLE
-                | StatusCode::GATEWAY_TIMEOUT
-        ) || (self.status == StatusCode::CONFLICT && self.code == "transaction_conflict")
+    /// Return the server error code when it is recognized by this SDK version.
+    ///
+    /// The raw [`code`](Self::code) remains available so callers can preserve and report codes
+    /// introduced by newer servers.
+    pub fn known_code(&self) -> Option<ErrorCode> {
+        self.code.parse().ok()
     }
 
-    /// Whether this server error guarantees the request had no side effects.
-    pub fn has_no_side_effects(&self) -> bool {
-        matches!(
-            (self.status, self.code.as_str()),
-            (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
-                | (StatusCode::BAD_GATEWAY, "hot_server")
-        )
+    /// Whether retrying the request is safe or sensible for this server error.
+    pub fn is_retryable(&self) -> bool {
+        server_error_is_retryable(self.status, &self.code)
     }
+
+    /// Whether retrying the request cannot duplicate a mutation.
+    pub fn has_no_side_effects(&self) -> bool {
+        server_error_has_no_side_effects(self.status, &self.code)
+    }
+}
+
+pub(crate) fn server_error_is_retryable(status: StatusCode, code: &str) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    ) || (status == StatusCode::CONFLICT && code.parse() == Ok(ErrorCode::TransactionConflict))
+}
+
+pub(crate) fn server_error_has_no_side_effects(status: StatusCode, code: &str) -> bool {
+    matches!(
+        (status, code.parse()),
+        (StatusCode::TOO_MANY_REQUESTS, Ok(ErrorCode::RateLimited))
+            | (StatusCode::BAD_GATEWAY, Ok(ErrorCode::HotServer))
+    )
 }
 
 fn idempotency_token() -> String {
@@ -4573,13 +4615,75 @@ mod tests {
     #[test]
     fn error_response_from_api() {
         let api_resp = ApiErrorResponse {
-            code: "not_found".to_string(),
+            code: "basin_not_found".to_string(),
             message: "basin not found".to_string(),
         };
         let resp = ErrorResponse::from_api(StatusCode::NOT_FOUND, api_resp);
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
-        assert_eq!(resp.code, "not_found");
+        assert_eq!(resp.code, "basin_not_found");
         assert_eq!(resp.message, "basin not found");
-        assert!(resp.to_string().contains("not_found"));
+        assert_eq!(resp.known_code(), Some(ErrorCode::BasinNotFound));
+        assert!(resp.to_string().contains("basin_not_found"));
+    }
+
+    #[test]
+    fn error_response_preserves_unknown_codes() {
+        let resp = ErrorResponse::from_api(
+            StatusCode::BAD_REQUEST,
+            ApiErrorResponse {
+                code: "introduced_by_a_newer_server".to_owned(),
+                message: "test".to_owned(),
+            },
+        );
+        assert_eq!(resp.known_code(), None);
+        assert_eq!(resp.code, "introduced_by_a_newer_server");
+    }
+
+    #[test]
+    fn surface_errors_classify_mutation_safety() {
+        let malformed = RequestError::MalformedAccessToken("bad".to_owned());
+        let validation = RequestError::Validation(ValidationError("bad".to_owned()));
+        assert!(!malformed.is_retryable());
+        assert!(malformed.has_no_side_effects());
+        assert!(!validation.is_retryable());
+        assert!(validation.has_no_side_effects());
+
+        let read_transport = ReadError::Request(RequestError::Client(ClientError::Timeout));
+        let read_unwritten = ReadError::ReadUnwritten(StreamPosition {
+            seq_num: 1,
+            timestamp: 1,
+        });
+        assert!(read_transport.is_retryable());
+        assert!(read_transport.has_no_side_effects());
+        assert!(!read_unwritten.is_retryable());
+        assert!(read_unwritten.has_no_side_effects());
+
+        let condition_failed =
+            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1));
+        assert!(!condition_failed.is_retryable());
+        assert!(condition_failed.has_no_side_effects());
+
+        let producer_validation = ProducerError::Validation(ValidationError("bad".to_owned()));
+        assert!(!producer_validation.is_retryable());
+        assert!(producer_validation.has_no_side_effects());
+        assert!(ProducerError::ProducerClosed.has_no_side_effects());
+        assert!(ProducerError::ProducerClosing.has_no_side_effects());
+        assert!(!ProducerError::ProducerDropped.has_no_side_effects());
+    }
+
+    #[test]
+    fn nested_errors_expose_request_and_server_errors() {
+        let append = AppendError::Request(RequestError::Server(ErrorResponse::from_api(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorResponse {
+                code: "authn".to_owned(),
+                message: "bad token".to_owned(),
+            },
+        )));
+
+        let request = append.request_error().expect("request error");
+        assert!(matches!(request, RequestError::Server(_)));
+        let server = append.server_error().expect("server error");
+        assert_eq!(server.known_code(), Some(ErrorCode::Authn));
     }
 }

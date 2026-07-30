@@ -40,6 +40,13 @@ The Rust SDK provides ergonomic wrappers and utilities to interact with the
 See [`S2`] for account-level operations, [`S2Basin`] for basin-level operations,
 and [`S2Stream`] for stream-level operations.
 
+# Error handling
+
+Operations return surface-specific errors from [`error`]. Each error classifies whether retrying is
+sensible and whether doing so can duplicate a mutation. Wrapper errors also expose their underlying
+request and server errors directly, so callers do not need to inspect display strings or manually
+unwrap every layer.
+
 # Examples
 
 We have curated a bunch of examples in the
@@ -95,6 +102,7 @@ mod frame_signal;
 mod session;
 
 pub mod batching;
+pub mod error;
 mod ops;
 pub mod producer;
 mod retry;
@@ -106,11 +114,10 @@ pub use ops::{S2, S2Basin, S2Stream};
 /// See [`AppendSession`](append_session::AppendSession).
 pub mod append_session {
     pub use crate::session::append::{
-        AppendSession, AppendSessionConfig, AppendSessionError, BatchSubmitPermit,
-        BatchSubmitTicket,
+        AppendSession, AppendSessionConfig, BatchSubmitPermit, BatchSubmitTicket,
     };
 }
 /// Continuous read sessions.
 pub mod read_session {
-    pub use crate::session::read::{CaughtUpError, ReadSession, ReadSessionError};
+    pub use crate::session::read::ReadSession;
 }

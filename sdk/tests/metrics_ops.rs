@@ -114,7 +114,7 @@ where
     }
 
     Err(last_err.unwrap_or_else(|| {
-        RequestError::Client(ClientError::Others(format!(
+        RequestError::Client(ClientError::Other(format!(
             "metrics not ready after {}s",
             timeout.as_secs()
         )))
