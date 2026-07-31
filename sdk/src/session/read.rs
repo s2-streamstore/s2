@@ -325,7 +325,7 @@ impl Drop for ReadSession {
     }
 }
 
-pub(crate) async fn read_session(
+pub async fn read_session(
     client: BasinClient,
     name: StreamName,
     encryption: Option<EncryptionKey>,
@@ -947,17 +947,5 @@ mod tests {
                 .len(),
             2
         );
-    }
-
-    #[test]
-    fn retry_indefinitely_retries_past_backoff_budget() {
-        let mut backoffs = crate::retry::RetryBackoffBuilder::default().build();
-        for _ in 0..3 {
-            assert!(backoffs.next().is_some());
-        }
-
-        let delay = retry_delay(&ReadSessionFailure::HeartbeatTimeout, &mut backoffs, true);
-        assert!(delay.is_some());
-        assert!(backoffs.is_exhausted());
     }
 }

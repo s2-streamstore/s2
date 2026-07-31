@@ -3517,6 +3517,10 @@ pub struct ReadInput {
 pub struct ReadSessionConfig {
     /// Whether to keep retrying retryable failures after the configured retry budget is exhausted.
     ///
+    /// This also applies while establishing the initial session, so
+    /// [`read_session`](crate::S2Stream::read_session) may remain pending through retryable
+    /// failures until it connects or the future is cancelled.
+    ///
     /// Clean stream ends and non-retryable failures always terminate the session.
     ///
     /// Defaults to `false`.
