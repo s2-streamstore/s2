@@ -43,9 +43,9 @@ and [`S2Stream`] for stream-level operations.
 # Error handling
 
 Operations return surface-specific errors from [`error`]. Each error classifies whether retrying is
-sensible and whether doing so can duplicate a mutation. Wrapper errors also expose their underlying
-request and server errors directly, so callers do not need to inspect display strings or manually
-unwrap every layer.
+sensible. Errors for mutation-capable surfaces also classify whether retrying can duplicate a
+mutation. Wrapper errors expose their underlying request and server errors directly, so callers do
+not need to inspect display strings or manually unwrap every layer.
 
 # Examples
 
