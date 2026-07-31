@@ -10,10 +10,10 @@ pub use s2_api::v1::error::ErrorCode;
 
 pub use crate::session::{
     append::AppendSessionError,
-    read::{CaughtUpError, ReadSessionError},
+    read::{CatchUpError, ReadSessionError},
 };
 use crate::{
-    api::{ApiError, ApiErrorResponse},
+    api::{ApiError, ServerErrorBody},
     client,
     types::{FencingToken, StreamPosition, ValidationError},
 };
@@ -204,7 +204,7 @@ pub enum RequestError {
     Client(#[from] ClientError),
     /// An error returned by the server.
     #[error(transparent)]
-    Server(#[from] ErrorResponse),
+    Server(#[from] ServerError),
     /// The access token could not be used as an HTTP header value.
     #[error("malformed access token: {0}")]
     MalformedAccessToken(String),
@@ -232,8 +232,8 @@ impl RequestError {
         }
     }
 
-    /// Return the server response, if this error came from the server.
-    pub fn server_error(&self) -> Option<&ErrorResponse> {
+    /// Return the server error, if present.
+    pub fn server_error(&self) -> Option<&ServerError> {
         match self {
             Self::Server(error) => Some(error),
             _ => None,
@@ -248,7 +248,7 @@ impl From<ApiError> for RequestError {
             ApiError::ProtoDecode(error) => {
                 Self::Client(ClientError::ResponseDecode(error.to_string()))
             }
-            ApiError::S2STerminalDecode(error) => {
+            ApiError::TerminalDecode(error) => {
                 Self::Client(ClientError::SessionProtocol(error.to_string()))
             }
             ApiError::MalformedAccessToken(error) => Self::MalformedAccessToken(error),
@@ -256,7 +256,7 @@ impl From<ApiError> for RequestError {
                 Self::Client(ClientError::ResponseCompression(error.to_string()))
             }
             ApiError::Server(status, response) => {
-                Self::Server(ErrorResponse::from_api(status, response))
+                Self::Server(ServerError::from_api(status, response))
             }
             other => Self::Client(ClientError::Other(other.to_string())),
         }
@@ -289,8 +289,8 @@ impl ReadError {
         }
     }
 
-    /// Return the server response, if this error came from the server.
-    pub fn server_error(&self) -> Option<&ErrorResponse> {
+    /// Return the server error, if present.
+    pub fn server_error(&self) -> Option<&ServerError> {
         self.request_error().and_then(RequestError::server_error)
     }
 }
@@ -338,8 +338,8 @@ impl AppendError {
         }
     }
 
-    /// Return the server response, if this error came from the server.
-    pub fn server_error(&self) -> Option<&ErrorResponse> {
+    /// Return the server error, if present.
+    pub fn server_error(&self) -> Option<&ServerError> {
         self.request_error().and_then(RequestError::server_error)
     }
 }
@@ -406,17 +406,17 @@ impl ProducerError {
         }
     }
 
-    /// Return the server response, if this error came from the server.
-    pub fn server_error(&self) -> Option<&ErrorResponse> {
+    /// Return the server error, if present.
+    pub fn server_error(&self) -> Option<&ServerError> {
         self.request_error().and_then(RequestError::server_error)
     }
 }
 
-/// Error response from an S2 server.
+/// An error returned by an S2 server.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{code}: {message}")]
 #[non_exhaustive]
-pub struct ErrorResponse {
+pub struct ServerError {
     /// HTTP status returned by the server.
     pub status: StatusCode,
     /// Error code.
@@ -425,8 +425,8 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
-impl ErrorResponse {
-    pub(crate) fn from_api(status: StatusCode, response: ApiErrorResponse) -> Self {
+impl ServerError {
+    pub(crate) fn from_api(status: StatusCode, response: ServerErrorBody) -> Self {
         Self {
             status,
             code: response.code,
@@ -478,10 +478,10 @@ pub(crate) fn server_error_has_no_side_effects(status: StatusCode, code: &str) -
 mod tests {
     use super::*;
 
-    fn response(status: StatusCode, code: &str) -> ErrorResponse {
-        ErrorResponse::from_api(
+    fn response(status: StatusCode, code: &str) -> ServerError {
+        ServerError::from_api(
             status,
-            ApiErrorResponse {
+            ServerErrorBody {
                 code: code.to_owned(),
                 message: "test".to_owned(),
             },

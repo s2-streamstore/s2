@@ -19,7 +19,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
-    error::{ErrorResponse, ReadError, RequestError},
+    error::{ReadError, RequestError, ServerError},
     retry::RetryBackoff,
     types::{EncryptionKey, MeteredBytes, ReadBatch, StreamName, StreamPosition},
 };
@@ -70,8 +70,8 @@ impl ReadSessionError {
         }
     }
 
-    /// Return the server response, if this error came from the server.
-    pub fn server_error(&self) -> Option<&ErrorResponse> {
+    /// Return the server error, if present.
+    pub fn server_error(&self) -> Option<&ServerError> {
         self.request_error().and_then(RequestError::server_error)
     }
 }
@@ -91,7 +91,7 @@ type InternalStreaming<R> =
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 /// Error returned while waiting for a read session to catch up.
-pub enum CaughtUpError {
+pub enum CatchUpError {
     #[error("read session ended before catching up")]
     /// The session ended before reaching a reported tail.
     SessionClosed,
@@ -100,7 +100,7 @@ pub enum CaughtUpError {
     Read(#[from] ReadSessionError),
 }
 
-impl CaughtUpError {
+impl CatchUpError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -117,13 +117,13 @@ impl CaughtUpError {
         }
     }
 
-    /// Return the server response, if this error came from the server.
-    pub fn server_error(&self) -> Option<&ErrorResponse> {
+    /// Return the server error, if present.
+    pub fn server_error(&self) -> Option<&ServerError> {
         self.request_error().and_then(RequestError::server_error)
     }
 }
 
-type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
+type CaughtUpResult = Result<StreamPosition, CatchUpError>;
 
 #[derive(Clone)]
 enum CaughtUpFuture {
@@ -138,7 +138,7 @@ impl Future for CaughtUpFuture {
         match &mut *self {
             Self::Pending(future) => match Pin::new(future).poll(cx) {
                 Poll::Ready(Ok(result)) => Poll::Ready(result),
-                Poll::Ready(Err(_)) => Poll::Ready(Err(CaughtUpError::SessionClosed)),
+                Poll::Ready(Err(_)) => Poll::Ready(Err(CatchUpError::SessionClosed)),
                 Poll::Pending => Poll::Pending,
             },
             Self::Ready(result) => Poll::Ready(result.clone()),
@@ -200,9 +200,9 @@ impl CaughtUpState {
         self.terminal = true;
         if let Some(error) = error {
             self.tail = None;
-            self.complete(Err(CaughtUpError::Read(error)));
+            self.complete(Err(CatchUpError::Read(error)));
         } else if self.tail.is_none() {
-            self.complete(Err(CaughtUpError::SessionClosed));
+            self.complete(Err(CatchUpError::SessionClosed));
         }
     }
 
@@ -282,15 +282,11 @@ impl ReadSession {
     /// reads itself. It is ready immediately when the session is already caught up and remains
     /// pending across retries. Once it resolves, its returned tail never changes. If the session
     /// later falls behind, call `caught_up()` again to wait for the next catch-up. The future
-    /// returns [`CaughtUpError`] if the session fails or closes before catching up.
+    /// returns [`CatchUpError`] if the session fails or closes before catching up.
     pub fn caught_up(
         &self,
-    ) -> impl Future<Output = Result<StreamPosition, CaughtUpError>>
-    + Clone
-    + Send
-    + Sync
-    + Unpin
-    + 'static {
+    ) -> impl Future<Output = Result<StreamPosition, CatchUpError>> + Clone + Send + Sync + Unpin + 'static
+    {
         self.state.future()
     }
 }
@@ -701,7 +697,7 @@ mod tests {
         let caught_up = session.caught_up();
 
         assert!(session.next().await.is_none());
-        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
+        assert!(matches!(caught_up.await, Err(CatchUpError::SessionClosed)));
     }
 
     #[tokio::test]
@@ -713,7 +709,7 @@ mod tests {
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
-            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
+            Err(CatchUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 
@@ -737,7 +733,7 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
+            Err(CatchUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 
@@ -748,6 +744,6 @@ mod tests {
             session.caught_up()
         };
 
-        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
+        assert!(matches!(caught_up.await, Err(CatchUpError::SessionClosed)));
     }
 }

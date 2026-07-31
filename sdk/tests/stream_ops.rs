@@ -45,7 +45,7 @@ async fn tail_of_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
+        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -1170,7 +1170,7 @@ async fn append_without_timestamp_client_require_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
+        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1286,7 +1286,7 @@ async fn append_to_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
+        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -1306,7 +1306,7 @@ async fn append_invalid_command_header_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
+        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1327,7 +1327,7 @@ async fn append_invalid_command_header_with_extra_headers_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
+        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1543,7 +1543,7 @@ async fn read_start_timestamp_ge_until_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
+        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1561,7 +1561,7 @@ async fn read_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ErrorResponse { code, .. }))) => {
+        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
             assert_eq!(code, "stream_not_found");
         }
     );

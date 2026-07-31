@@ -20,7 +20,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
-    error::{AppendError, ErrorResponse, RequestError},
+    error::{AppendError, RequestError, ServerError},
     frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
@@ -100,8 +100,8 @@ impl AppendSessionError {
         }
     }
 
-    /// Return the server response, if this error came from the server.
-    pub fn server_error(&self) -> Option<&ErrorResponse> {
+    /// Return the server error, if present.
+    pub fn server_error(&self) -> Option<&ServerError> {
         self.request_error().and_then(RequestError::server_error)
     }
 }
@@ -937,7 +937,7 @@ mod tests {
 
     use super::{AppendSessionError, is_safe_to_retry};
     use crate::{
-        api::{ApiError, ApiErrorResponse},
+        api::{ApiError, ServerErrorBody},
         error::{AppendError, RequestError},
         frame_signal::FrameSignal,
         types::AppendRetryPolicy,
@@ -946,7 +946,7 @@ mod tests {
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
         AppendSessionError::Append(AppendError::Request(RequestError::from(ApiError::Server(
             status,
-            ApiErrorResponse {
+            ServerErrorBody {
                 code: code.to_owned(),
                 message: "test".to_owned(),
             },

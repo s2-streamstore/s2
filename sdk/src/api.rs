@@ -404,7 +404,7 @@ impl BasinClient {
                 } else {
                     Err(ApiError::Server(
                         status,
-                        response.json::<ApiErrorResponse>()?,
+                        response.json::<ServerErrorBody>()?,
                     ))
                 }
             })
@@ -578,7 +578,7 @@ fn read_response_error_handler(
     } else {
         Err(ApiError::Server(
             status,
-            response.json::<ApiErrorResponse>()?,
+            response.json::<ServerErrorBody>()?,
         ))
     }
 }
@@ -593,19 +593,19 @@ impl Deref for BasinClient {
 
 #[derive(Debug, thiserror::Error, serde::Deserialize)]
 #[error("{code}: {message}")]
-pub struct ApiErrorResponse {
-    pub code: String,
-    pub message: String,
+pub(crate) struct ServerErrorBody {
+    pub(crate) code: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ApiError {
+pub(crate) enum ApiError {
     #[error(transparent)]
     Client(#[from] ClientError),
     #[error(transparent)]
     ProtoDecode(#[from] prost::DecodeError),
     #[error(transparent)]
-    S2STerminalDecode(#[from] S2STerminalDecodeError),
+    TerminalDecode(#[from] TerminalDecodeError),
     #[error("malformed access token: {0}")]
     MalformedAccessToken(String),
     #[error(transparent)]
@@ -615,11 +615,11 @@ pub enum ApiError {
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
     #[error("{1}")]
-    Server(StatusCode, ApiErrorResponse),
+    Server(StatusCode, ServerErrorBody),
 }
 
 impl ApiError {
-    pub fn is_retryable(&self) -> bool {
+    pub(crate) fn is_retryable(&self) -> bool {
         match self {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
@@ -627,7 +627,7 @@ impl ApiError {
         }
     }
 
-    pub fn has_no_side_effects(&self) -> bool {
+    pub(crate) fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Server(status, err_resp) => {
                 server_error_has_no_side_effects(*status, &err_resp.code)
@@ -645,7 +645,7 @@ impl From<client::HttpError> for ApiError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum S2STerminalDecodeError {
+pub(crate) enum TerminalDecodeError {
     #[error("invalid status code: {0}")]
     InvalidStatusCode(#[from] http::status::InvalidStatusCode),
     #[error("failed to parse error response: {0}")]
@@ -656,13 +656,13 @@ impl From<TerminalMessage> for ApiError {
     fn from(msg: TerminalMessage) -> Self {
         let status = match StatusCode::from_u16(msg.status) {
             Ok(status) => status,
-            Err(err) => return ApiError::S2STerminalDecode(err.into()),
+            Err(err) => return ApiError::TerminalDecode(err.into()),
         };
         if status == StatusCode::PRECONDITION_FAILED {
             let condition_failed = match serde_json::from_str::<AppendConditionFailed>(&msg.body) {
                 Ok(condition_failed) => condition_failed,
                 Err(err) => {
-                    return ApiError::S2STerminalDecode(err.into());
+                    return ApiError::TerminalDecode(err.into());
                 }
             };
             ApiError::AppendConditionFailed(condition_failed)
@@ -670,15 +670,15 @@ impl From<TerminalMessage> for ApiError {
             let tail = match serde_json::from_str::<TailResponse>(&msg.body) {
                 Ok(tail) => tail,
                 Err(err) => {
-                    return ApiError::S2STerminalDecode(err.into());
+                    return ApiError::TerminalDecode(err.into());
                 }
             };
             ApiError::ReadUnwritten(tail)
         } else {
-            let response = match serde_json::from_str::<ApiErrorResponse>(&msg.body) {
+            let response = match serde_json::from_str::<ServerErrorBody>(&msg.body) {
                 Ok(response) => response,
                 Err(err) => {
-                    return ApiError::S2STerminalDecode(err.into());
+                    return ApiError::TerminalDecode(err.into());
                 }
             };
             ApiError::Server(status, response)
@@ -1016,7 +1016,7 @@ impl UnaryResult for UnaryResponse {
         if status.is_success() {
             Ok(self)
         } else {
-            Err(ApiError::Server(status, self.json::<ApiErrorResponse>()?))
+            Err(ApiError::Server(status, self.json::<ServerErrorBody>()?))
         }
     }
 
@@ -1052,7 +1052,7 @@ impl StreamingResult for StreamingResponse {
         {
             return Err(ApiError::ReadUnwritten(tail));
         }
-        match serde_json::from_slice::<ApiErrorResponse>(&bytes) {
+        match serde_json::from_slice::<ServerErrorBody>(&bytes) {
             Ok(response) => Err(ApiError::Server(status, response)),
             Err(error) => Err(ApiError::Client(ClientError::ResponseDecode(format!(
                 "could not decode server error {status}: {error}; body: {}",
@@ -1105,7 +1105,7 @@ mod tests {
     fn server_error(status: StatusCode, code: &str) -> ApiError {
         ApiError::Server(
             status,
-            ApiErrorResponse {
+            ServerErrorBody {
                 code: code.to_owned(),
                 message: "test".to_owned(),
             },

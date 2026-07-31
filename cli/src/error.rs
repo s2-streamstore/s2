@@ -1,7 +1,7 @@
 use miette::Diagnostic;
 use s2_sdk::error::{
-    AppendError, AppendSessionError, ErrorCode, ErrorResponse, ProducerError, ReadError,
-    ReadSessionError, RequestError,
+    AppendError, AppendSessionError, ErrorCode, ProducerError, ReadError, ReadSessionError,
+    RequestError, ServerError,
 };
 use thiserror::Error;
 
@@ -48,7 +48,7 @@ impl SdkError {
         }
     }
 
-    fn server_error(&self) -> Option<&ErrorResponse> {
+    fn server_error(&self) -> Option<&ServerError> {
         self.request_error().and_then(RequestError::server_error)
     }
 }
@@ -227,7 +227,7 @@ impl std::fmt::Display for TokenSource {
 
 fn is_auth_error(err: &SdkError) -> bool {
     err.server_error()
-        .and_then(ErrorResponse::known_code)
+        .and_then(ServerError::known_code)
         .is_some_and(ErrorCode::is_auth_error)
 }
 

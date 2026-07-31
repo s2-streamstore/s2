@@ -5,7 +5,7 @@ use std::{future::Future, time::Duration};
 use assert_matches::assert_matches;
 use common::{S2Stream, s2};
 use s2_sdk::{
-    error::{ClientError, ErrorResponse, RequestError},
+    error::{ClientError, RequestError, ServerError},
     types::*,
 };
 use test_context::test_context;
@@ -646,7 +646,7 @@ async fn account_metrics_invalid_time_ranges(
 
         assert_matches!(
             result,
-            Err(RequestError::Server(ErrorResponse { code, .. })) => {
+            Err(RequestError::Server(ServerError { code, .. })) => {
                 assert_eq!(code, "invalid");
             }
         );
@@ -726,7 +726,7 @@ async fn basin_metrics_invalid_time_ranges(
 
         assert_matches!(
             result,
-            Err(RequestError::Server(ErrorResponse { code, .. })) => {
+            Err(RequestError::Server(ServerError { code, .. })) => {
                 assert_eq!(code, "invalid");
             }
         );
@@ -813,7 +813,7 @@ async fn stream_metrics_invalid_time_ranges(
 
         assert_matches!(
             result,
-            Err(RequestError::Server(ErrorResponse { code, .. })) => {
+            Err(RequestError::Server(ServerError { code, .. })) => {
                 assert_eq!(code, "invalid");
             }
         );

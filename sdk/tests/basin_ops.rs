@@ -6,7 +6,7 @@ use assert_matches::assert_matches;
 use common::{S2Basin, SharedS2Basin, unique_stream_name, uuid};
 use futures_util::StreamExt;
 use s2_sdk::{
-    error::{ErrorResponse, RequestError},
+    error::{RequestError, ServerError},
     types::*,
 };
 use test_context::test_context;
@@ -323,7 +323,7 @@ async fn delete_nonexistent_stream_errors(basin: &S2Basin) -> Result<(), Request
 
     assert_matches!(
         result,
-        Err(RequestError::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "stream_not_found")
         }
     );
@@ -817,7 +817,7 @@ async fn create_stream_invalid_retention_age_zero(
 
     assert_matches!(
         result,
-        Err(RequestError::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -832,7 +832,7 @@ async fn get_stream_config_nonexistent_errors(basin: &SharedS2Basin) -> Result<(
 
     assert_matches!(
         result,
-        Err(RequestError::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -1211,7 +1211,7 @@ async fn reconfigure_stream_invalid_retention_age_zero(
 
     assert_matches!(
         result,
-        Err(RequestError::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1235,7 +1235,7 @@ async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<
 
     assert_matches!(
         result,
-        Err(RequestError::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -1258,7 +1258,7 @@ async fn create_stream_duplicate_name_errors(basin: &SharedS2Basin) -> Result<()
 
     assert_matches!(
         result,
-        Err(RequestError::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "resource_already_exists");
         }
     );
@@ -1291,7 +1291,7 @@ async fn delete_stream_already_deleting_is_idempotent(
 
     match result {
         Ok(()) => {}
-        Err(RequestError::Server(ErrorResponse { code, .. })) if code == "stream_not_found" => {}
+        Err(RequestError::Server(ServerError { code, .. })) if code == "stream_not_found" => {}
         Err(err) => return Err(err),
     }
 
@@ -1317,7 +1317,7 @@ async fn get_stream_config_for_deleting_stream_errors(
 
     assert_matches!(
         result,
-        Err(RequestError::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert!(code == "stream_deletion_pending" || code == "stream_not_found");
         }
     );
@@ -1370,7 +1370,7 @@ async fn deleted_stream_has_deleted_at_when_listed(
 
 fn is_free_tier_limitation(err: &RequestError) -> bool {
     match err {
-        RequestError::Server(ErrorResponse { code, message, .. }) if code == "invalid" => {
+        RequestError::Server(ServerError { code, message, .. }) if code == "invalid" => {
             message.to_lowercase().contains("free tier")
         }
         _ => false,
