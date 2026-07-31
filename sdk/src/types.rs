@@ -2895,6 +2895,8 @@ pub struct StreamPosition {
 
 impl StreamPosition {
     /// Construct a stream position.
+    ///
+    /// This is intended for building fixtures in downstream tests.
     pub fn new(seq_num: u64, timestamp: u64) -> Self {
         Self { seq_num, timestamp }
     }
@@ -3601,6 +3603,8 @@ pub struct SequencedRecord {
 
 impl SequencedRecord {
     /// Construct a sequenced record from its plain-data fields.
+    ///
+    /// This is intended for building fixtures in downstream tests.
     pub fn from_parts(
         seq_num: u64,
         timestamp: u64,
@@ -3655,6 +3659,8 @@ pub struct ReadBatch {
 
 impl ReadBatch {
     /// Construct a read batch.
+    ///
+    /// This is intended for building fixtures in downstream tests.
     pub fn new(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> Self {
         Self { records, tail }
     }
