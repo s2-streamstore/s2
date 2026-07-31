@@ -62,11 +62,11 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rkyv = "0.8"
 rstest = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
-s2-api = { path = "api", version = "0.30" }
+s2-api = { path = "api", version = "0.31" }
 s2-common = { path = "common", version = "0.41" }
-s2-lite = { path = "lite", version = "0.41" }
+s2-lite = { path = "lite", version = "0.42" }
 s2-resource-spec = { path = "resource-spec", version = "0.2" }
-s2-sdk = { path = "sdk", version = "0.33" }
+s2-sdk = { path = "sdk", version = "0.34" }
 s2-storage = { path = "storage", version = "0.2" }
 schemars = "1.2"
 secrecy = "0.10.3"
