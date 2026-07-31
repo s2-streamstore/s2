@@ -1164,7 +1164,7 @@ mod tests {
 
     #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     #[tokio::test]
-    async fn dns_error_message_is_clear() {
+    async fn dns_errors_are_classified_as_connect() {
         let config = crate::types::S2Config::new("test-token".to_owned())
             .with_endpoints(
                 crate::types::S2Endpoints::new(
@@ -1185,10 +1185,9 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("should fail with DNS error"),
         };
-        let msg = err.to_string();
         assert!(
-            msg.contains("dns resolution"),
-            "expected 'dns resolution' in error, got: {msg}"
+            matches!(&err, ApiError::Client(ClientError::Connect(_))),
+            "expected a connect error, got: {err}"
         );
     }
 }

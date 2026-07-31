@@ -103,9 +103,7 @@ impl From<client::HttpError> for ClientError {
         let err_msg = err.to_string();
         match err {
             client::HttpError::Send(ref send_err) if send_err.is_connect() => {
-                classify_io_source(&err, &err_msg)
-                    .or_else(|| classify_dns_source(&err))
-                    .unwrap_or(Self::Connect(err_msg))
+                classify_io_source(&err, &err_msg).unwrap_or(Self::Connect(err_msg))
             }
             client::HttpError::Send(_) | client::HttpError::Receive(_) => {
                 classify_hyper_source(&err, &err_msg)
@@ -143,22 +141,6 @@ fn classify_io_source(err: &client::HttpError, err_msg: &str) -> Option<ClientEr
         std::io::ErrorKind::ConnectionRefused => ClientError::ConnectionRefused(err_msg),
         _ => return None,
     })
-}
-
-/// Walk the error source chain looking for hyper-util's private DNS error tag.
-fn classify_dns_source(err: &client::HttpError) -> Option<ClientError> {
-    let mut source = Some(err as &dyn std::error::Error);
-    while let Some(err) = source {
-        if err.to_string() == "dns error" {
-            let detail = match err.source() {
-                Some(cause) => format!("dns resolution: {cause}"),
-                None => "dns resolution failed".to_owned(),
-            };
-            return Some(ClientError::Connect(detail));
-        }
-        source = err.source();
-    }
-    None
 }
 
 fn source_err<T: std::error::Error + 'static>(err: &dyn std::error::Error) -> Option<&T> {
