@@ -3320,6 +3320,15 @@ pub struct AppendAck {
     pub tail: StreamPosition,
 }
 
+impl AppendAck {
+    /// Construct an append acknowledgement.
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    pub fn new(start: StreamPosition, end: StreamPosition, tail: StreamPosition) -> Self {
+        Self { start, end, tail }
+    }
+}
+
 impl From<api::stream::proto::AppendAck> for AppendAck {
     fn from(value: api::stream::proto::AppendAck) -> Self {
         Self {
