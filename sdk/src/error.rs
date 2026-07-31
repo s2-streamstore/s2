@@ -10,7 +10,7 @@ pub use s2_api::v1::error::ErrorCode;
 
 pub use crate::session::{
     append::AppendSessionError,
-    read::{CatchUpError, ReadSessionError},
+    read::{CaughtUpError, ReadSessionError},
 };
 use crate::{
     api::{ApiError, ServerErrorBody},

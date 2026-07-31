@@ -91,7 +91,7 @@ type InternalStreaming<R> =
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 /// Error returned while waiting for a read session to catch up.
-pub enum CatchUpError {
+pub enum CaughtUpError {
     #[error("read session ended before catching up")]
     /// The session ended before reaching a reported tail.
     SessionClosed,
@@ -100,7 +100,7 @@ pub enum CatchUpError {
     Read(#[from] ReadSessionError),
 }
 
-impl CatchUpError {
+impl CaughtUpError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -123,7 +123,7 @@ impl CatchUpError {
     }
 }
 
-type CaughtUpResult = Result<StreamPosition, CatchUpError>;
+type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
 
 #[derive(Clone)]
 enum CaughtUpFuture {
@@ -138,7 +138,7 @@ impl Future for CaughtUpFuture {
         match &mut *self {
             Self::Pending(future) => match Pin::new(future).poll(cx) {
                 Poll::Ready(Ok(result)) => Poll::Ready(result),
-                Poll::Ready(Err(_)) => Poll::Ready(Err(CatchUpError::SessionClosed)),
+                Poll::Ready(Err(_)) => Poll::Ready(Err(CaughtUpError::SessionClosed)),
                 Poll::Pending => Poll::Pending,
             },
             Self::Ready(result) => Poll::Ready(result.clone()),
@@ -200,9 +200,9 @@ impl CaughtUpState {
         self.terminal = true;
         if let Some(error) = error {
             self.tail = None;
-            self.complete(Err(CatchUpError::Read(error)));
+            self.complete(Err(CaughtUpError::Read(error)));
         } else if self.tail.is_none() {
-            self.complete(Err(CatchUpError::SessionClosed));
+            self.complete(Err(CaughtUpError::SessionClosed));
         }
     }
 
@@ -282,11 +282,15 @@ impl ReadSession {
     /// reads itself. It is ready immediately when the session is already caught up and remains
     /// pending across retries. Once it resolves, its returned tail never changes. If the session
     /// later falls behind, call `caught_up()` again to wait for the next catch-up. The future
-    /// returns [`CatchUpError`] if the session fails or closes before catching up.
+    /// returns [`CaughtUpError`] if the session fails or closes before catching up.
     pub fn caught_up(
         &self,
-    ) -> impl Future<Output = Result<StreamPosition, CatchUpError>> + Clone + Send + Sync + Unpin + 'static
-    {
+    ) -> impl Future<Output = Result<StreamPosition, CaughtUpError>>
+    + Clone
+    + Send
+    + Sync
+    + Unpin
+    + 'static {
         self.state.future()
     }
 }
@@ -697,7 +701,7 @@ mod tests {
         let caught_up = session.caught_up();
 
         assert!(session.next().await.is_none());
-        assert!(matches!(caught_up.await, Err(CatchUpError::SessionClosed)));
+        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
     }
 
     #[tokio::test]
@@ -709,7 +713,7 @@ mod tests {
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
-            Err(CatchUpError::Read(ReadSessionError::HeartbeatTimeout))
+            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 
@@ -733,7 +737,7 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CatchUpError::Read(ReadSessionError::HeartbeatTimeout))
+            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 
@@ -744,6 +748,6 @@ mod tests {
             session.caught_up()
         };
 
-        assert!(matches!(caught_up.await, Err(CatchUpError::SessionClosed)));
+        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
     }
 }
