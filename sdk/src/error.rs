@@ -1,9 +1,8 @@
 //! Errors returned by the SDK.
 //!
-//! Operations return the narrowest error type for their surface. Each error exposes
-//! `is_retryable()`, `has_no_side_effects()`, `request_error()`, and `server_error()` as
-//! applicable, so callers do not need to inspect display strings or unwrap the complete error
-//! hierarchy.
+//! Operations return the narrowest error type for their surface. Errors expose classification and
+//! accessors relevant to that surface, so callers do not need to inspect display strings or unwrap
+//! the complete error hierarchy.
 
 pub use http::StatusCode;
 use s2_api::v1 as api;
@@ -280,11 +279,6 @@ impl ReadError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Request(error) if error.is_retryable())
-    }
-
-    /// Whether retrying the operation cannot duplicate a mutation.
-    pub fn has_no_side_effects(&self) -> bool {
-        true
     }
 
     /// Return the underlying request error, if present.

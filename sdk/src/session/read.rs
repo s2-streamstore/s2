@@ -62,11 +62,6 @@ impl ReadSessionError {
         }
     }
 
-    /// Whether retrying the operation cannot duplicate a mutation.
-    pub fn has_no_side_effects(&self) -> bool {
-        true
-    }
-
     /// Return the underlying request error, if present.
     pub fn request_error(&self) -> Option<&RequestError> {
         match self {
@@ -112,11 +107,6 @@ impl CaughtUpError {
             Self::SessionClosed => false,
             Self::Read(error) => error.is_retryable(),
         }
-    }
-
-    /// Whether retrying the operation cannot duplicate a mutation.
-    pub fn has_no_side_effects(&self) -> bool {
-        true
     }
 
     /// Return the underlying request error, if present.
