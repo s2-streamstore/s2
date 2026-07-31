@@ -411,14 +411,7 @@ pub async fn read_session(
                         last_tail_at = Some(Instant::now());
                     }
 
-                    if let Some(record) = batch.records.last() {
-                        start = ReadStart {
-                            seq_num: Some(record.seq_num + 1),
-                            timestamp: None,
-                            tail_offset: None,
-                            clamp: start.clamp,
-                        };
-                    }
+                    update_resume_start(&mut start, &batch);
                     if let Some(count) = end.count.as_mut() {
                         *count = count.saturating_sub(batch.records.len())
                     }
@@ -447,6 +440,27 @@ pub async fn read_session(
         }
     });
     Ok(ReadSession::new(updates))
+}
+
+/// Advance the absolute start used when reconnecting the read session.
+///
+/// An empty batch with a reported tail still resolves a relative or timestamp start. Anchoring it
+/// prevents a reconnect from evaluating the original start against a newer tail.
+fn update_resume_start(start: &mut ReadStart, batch: &ReadBatch) {
+    let next_seq_num = batch
+        .records
+        .last()
+        .map(|record| record.seq_num + 1)
+        .or_else(|| batch.tail.as_ref().map(|tail| tail.seq_num));
+
+    if let Some(seq_num) = next_seq_num {
+        *start = ReadStart {
+            seq_num: Some(seq_num),
+            timestamp: None,
+            tail_offset: None,
+            clamp: start.clamp,
+        };
+    }
 }
 
 async fn session_inner(
@@ -556,6 +570,23 @@ mod tests {
 
     fn batch(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> ReadBatch {
         ReadBatch { records, tail }
+    }
+
+    #[test]
+    fn empty_tail_anchors_relative_resume_start() {
+        let mut start = ReadStart {
+            seq_num: None,
+            timestamp: None,
+            tail_offset: Some(0),
+            clamp: Some(true),
+        };
+
+        update_resume_start(&mut start, &batch(Vec::new(), Some(position(42))));
+
+        assert_eq!(start.seq_num, Some(42));
+        assert_eq!(start.timestamp, None);
+        assert_eq!(start.tail_offset, None);
+        assert_eq!(start.clamp, Some(true));
     }
 
     fn test_session(
