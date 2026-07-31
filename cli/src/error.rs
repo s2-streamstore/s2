@@ -1,6 +1,8 @@
 use miette::Diagnostic;
-use s2_api::v1::error::ErrorCode;
-use s2_sdk::types::S2Error;
+use s2_sdk::error::{
+    AppendError, AppendSessionError, ErrorCode, ProducerError, ReadError, ReadSessionError,
+    RequestError, ServerError,
+};
 use thiserror::Error;
 
 const HELP: &str = color_print::cstr!(
@@ -18,6 +20,39 @@ const BUG_HELP: &str = color_print::cstr!(
 "
 );
 
+#[derive(Error, Debug)]
+pub enum SdkError {
+    #[error(transparent)]
+    Request(#[from] RequestError),
+    #[error(transparent)]
+    Read(#[from] ReadError),
+    #[error(transparent)]
+    Append(#[from] AppendError),
+    #[error(transparent)]
+    AppendSession(#[from] AppendSessionError),
+    #[error(transparent)]
+    ReadSession(#[from] ReadSessionError),
+    #[error(transparent)]
+    Producer(#[from] ProducerError),
+}
+
+impl SdkError {
+    fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::Request(error) => Some(error),
+            Self::Read(error) => error.request_error(),
+            Self::Append(error) => error.request_error(),
+            Self::AppendSession(error) => error.request_error(),
+            Self::ReadSession(error) => error.request_error(),
+            Self::Producer(error) => error.request_error(),
+        }
+    }
+
+    fn server_error(&self) -> Option<&ServerError> {
+        self.request_error().and_then(RequestError::server_error)
+    }
+}
+
 #[derive(Error, Debug, Diagnostic)]
 pub enum CliError {
     #[error(transparent)]
@@ -28,16 +63,18 @@ pub enum CliError {
     #[diagnostic(transparent)]
     InvalidArgs(miette::Report),
 
-    #[error("Unable to load S2 endpoints from environment: {0}")]
+    #[error("Unable to parse S2 endpoints: {0}")]
     #[diagnostic(help(
-        "Are you overriding `S2_ACCOUNT_ENDPOINT` or `S2_BASIN_ENDPOINT`?
-            Make sure the values are in the expected format."
+        "Endpoints can be set in the config file ({}) or via the `S2_ACCOUNT_ENDPOINT` / \
+         `S2_BASIN_ENDPOINT` environment variables. Make sure the values are valid URLs \
+         (e.g., https://a.s2.dev).",
+        crate::config::config_path_string()
     ))]
-    EndpointsFromEnv(String),
+    EndpointsInvalid(String),
 
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help("{}", HELP))]
-    SdkInit(#[source] S2Error),
+    SdkInit(#[source] SdkError),
 
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help(
@@ -45,7 +82,7 @@ pub enum CliError {
          Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`.\n\n{}",
         HELP
     ))]
-    MalformedAccessToken(#[source] S2Error, TokenSource),
+    MalformedAccessToken(#[source] SdkError, TokenSource),
 
     #[error(transparent)]
     #[diagnostic(help("{}", BUG_HELP))]
@@ -65,14 +102,14 @@ pub enum CliError {
 
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help("{}", HELP))]
-    Operation(OpKind, #[source] S2Error),
+    Operation(OpKind, #[source] SdkError),
 
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
          Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`."
     ))]
-    UnauthorizedAccessToken(OpKind, #[source] S2Error, TokenSource),
+    UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
@@ -81,11 +118,25 @@ pub enum CliError {
     #[error("Apply failed: {0}")]
     #[diagnostic(help("{}", HELP))]
     Apply(String),
+
+    #[error("Access token '{0}' not found")]
+    AccessTokenNotFound(String),
+
+    #[error("Invalid configuration returned by S2: {0}")]
+    #[diagnostic(help("{}", BUG_HELP))]
+    InvalidApiConfig(#[from] s2_common::ValidationError),
+
+    #[error("Update failed: {0}")]
+    #[diagnostic(help(
+        "Retry, or install the latest release manually:\n\
+         https://s2.dev/docs/quickstart#get-started-with-the-cli"
+    ))]
+    Update(String),
 }
 
 impl CliError {
-    pub fn op(kind: OpKind, source: S2Error) -> Self {
-        Self::Operation(kind, source)
+    pub fn op<E: Into<SdkError>>(kind: OpKind, source: E) -> Self {
+        Self::Operation(kind, source.into())
     }
 
     pub fn with_token_source(self, token_source: Option<TokenSource>) -> Self {
@@ -94,7 +145,7 @@ impl CliError {
                 CliError::UnauthorizedAccessToken(kind, source, token_source)
             }
             (CliError::SdkInit(source), Some(token_source))
-                if matches!(source, S2Error::MalformedAccessToken(_)) =>
+                if is_malformed_access_token(&source) =>
             {
                 CliError::MalformedAccessToken(source, token_source)
             }
@@ -174,18 +225,17 @@ impl std::fmt::Display for TokenSource {
     }
 }
 
-fn is_auth_error(err: &S2Error) -> bool {
-    match err {
-        S2Error::Server(response) => is_auth_error_code(&response.code),
-        _ => false,
-    }
+fn is_auth_error(err: &SdkError) -> bool {
+    err.server_error()
+        .and_then(ServerError::known_code)
+        .is_some_and(ErrorCode::is_auth_error)
 }
 
-fn is_auth_error_code(code: &str) -> bool {
-    match code.parse::<ErrorCode>() {
-        Ok(code) => code.is_auth_error(),
-        Err(_) => false,
-    }
+fn is_malformed_access_token(err: &SdkError) -> bool {
+    matches!(
+        err.request_error(),
+        Some(RequestError::MalformedAccessToken(_))
+    )
 }
 
 #[cfg(test)]

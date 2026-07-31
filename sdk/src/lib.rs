@@ -95,6 +95,7 @@ mod frame_signal;
 mod session;
 
 pub mod batching;
+pub mod error;
 mod ops;
 pub mod producer;
 mod retry;
@@ -111,5 +112,5 @@ pub mod append_session {
 }
 /// Continuous read sessions.
 pub mod read_session {
-    pub use crate::session::read::{CaughtUpError, ReadSession};
+    pub use crate::session::read::ReadSession;
 }

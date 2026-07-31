@@ -58,10 +58,14 @@ pub use s2_common::{
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
-use s2_common::{maybe::Maybe, record::MAX_FENCING_TOKEN_LENGTH, resources::ProvisionResult};
+use s2_common::{
+    maybe::Maybe,
+    record::{MAX_FENCING_TOKEN_LENGTH, Metered, MeteredSize},
+    resources::ProvisionResult,
+};
 use secrecy::SecretString;
 
-use crate::api::{ApiError, ApiErrorResponse};
+use crate::error::RequestError;
 
 /// An RFC 3339 datetime.
 ///
@@ -223,6 +227,16 @@ impl S2Endpoints {
         })
     }
 
+    /// Create endpoints for a single account and basin endpoint.
+    ///
+    /// This is useful for S2-compatible services that expose both APIs at one endpoint.
+    pub fn for_endpoint(endpoint: &str) -> Result<Self, ValidationError> {
+        Self::new(
+            AccountEndpoint::new(endpoint)?,
+            BasinEndpoint::new(endpoint)?,
+        )
+    }
+
     /// Create a new [`S2Endpoints`] from environment variables.
     ///
     /// The following environment variables are expected to be set:
@@ -258,7 +272,8 @@ impl S2Endpoints {
         })
     }
 
-    pub(crate) fn for_aws() -> Self {
+    /// Return the default S2 Cloud endpoints.
+    pub fn for_cloud() -> Self {
         Self {
             scheme: Scheme::HTTPS,
             account_authority: "a.s2.dev".try_into().expect("valid authority"),
@@ -414,7 +429,7 @@ impl S2Config {
     pub fn new(access_token: impl Into<String>) -> Self {
         Self {
             access_token: access_token.into().into(),
-            endpoints: S2Endpoints::for_aws(),
+            endpoints: S2Endpoints::for_cloud(),
             connection_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(5),
             retry: RetryConfig::new(),
@@ -2825,6 +2840,10 @@ impl ReconfigureStreamInput {
 pub struct FencingToken(String);
 
 impl FencingToken {
+    pub(crate) fn from_server(value: String) -> Self {
+        Self(value)
+    }
+
     /// Generate a random alphanumeric fencing token of `n` bytes.
     pub fn generate(n: usize) -> Result<Self, ValidationError> {
         rand::rng()
@@ -3052,6 +3071,12 @@ macro_rules! metered_bytes_impl {
 
 metered_bytes_impl!(AppendRecord);
 
+impl MeteredSize for AppendRecord {
+    fn metered_size(&self) -> usize {
+        self.metered_bytes()
+    }
+}
+
 #[derive(Debug, Clone)]
 /// A batch of records to append atomically.
 ///
@@ -3061,39 +3086,29 @@ metered_bytes_impl!(AppendRecord);
 /// See [`AppendRecordBatches`](crate::batching::AppendRecordBatches) and
 /// [`AppendInputs`](crate::batching::AppendInputs) for convenient and automatic batching of records
 /// that takes care of the abovementioned constraints.
-pub struct AppendRecordBatch {
-    records: Vec<AppendRecord>,
-    metered_bytes: usize,
+pub struct AppendRecordBatch(Metered<Vec<AppendRecord>>);
+
+impl From<Metered<Vec<AppendRecord>>> for AppendRecordBatch {
+    fn from(records: Metered<Vec<AppendRecord>>) -> Self {
+        Self(records)
+    }
 }
 
 impl AppendRecordBatch {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            records: Vec::with_capacity(capacity),
-            metered_bytes: 0,
-        }
-    }
-
-    pub(crate) fn push(&mut self, record: AppendRecord) {
-        self.metered_bytes += record.metered_bytes();
-        self.records.push(record);
-    }
-
     /// Try to create an [`AppendRecordBatch`] from an iterator of [`AppendRecord`]s.
     pub fn try_from_iter<I>(iter: I) -> Result<Self, ValidationError>
     where
         I: IntoIterator<Item = AppendRecord>,
     {
-        let mut records = Vec::new();
-        let mut metered_bytes = 0;
+        let mut records = Metered::with_capacity(RECORD_BATCH_MAX.count);
 
         for record in iter {
-            metered_bytes += record.metered_bytes();
-            records.push(record);
+            records.push(Metered::from(record));
 
-            if metered_bytes > RECORD_BATCH_MAX.bytes {
+            if records.metered_size() > RECORD_BATCH_MAX.bytes {
                 return Err(ValidationError(format!(
-                    "batch size in metered bytes ({metered_bytes}) exceeds {}",
+                    "batch size in metered bytes ({}) exceeds {}",
+                    records.metered_size(),
                     RECORD_BATCH_MAX.bytes
                 )));
             }
@@ -3110,10 +3125,7 @@ impl AppendRecordBatch {
             return Err(ValidationError("batch is empty".into()));
         }
 
-        Ok(Self {
-            records,
-            metered_bytes,
-        })
+        Ok(records.into())
     }
 }
 
@@ -3121,13 +3133,31 @@ impl Deref for AppendRecordBatch {
     type Target = [AppendRecord];
 
     fn deref(&self) -> &Self::Target {
-        &self.records
+        &self.0[..]
     }
 }
 
 impl MeteredBytes for AppendRecordBatch {
     fn metered_bytes(&self) -> usize {
-        self.metered_bytes
+        self.0.metered_size()
+    }
+}
+
+impl IntoIterator for AppendRecordBatch {
+    type Item = AppendRecord;
+    type IntoIter = std::vec::IntoIter<AppendRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a AppendRecordBatch {
+    type Item = &'a AppendRecord;
+    type IntoIter = std::slice::Iter<'a, AppendRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -3598,91 +3628,8 @@ impl ReadBatch {
     }
 }
 
-/// A [`Stream`](futures_core::Stream) of values of type `Result<T, S2Error>`.
-pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, S2Error>>>>;
-
-#[derive(Debug, Clone, thiserror::Error)]
-/// Why an append condition check failed.
-pub enum AppendConditionFailed {
-    #[error("fencing token mismatch, expected: {0}")]
-    /// Fencing token did not match. Contains the expected fencing token.
-    FencingTokenMismatch(FencingToken),
-    #[error("sequence number mismatch, expected: {0}")]
-    /// Sequence number did not match. Contains the expected sequence number.
-    SeqNumMismatch(u64),
-}
-
-impl From<api::stream::AppendConditionFailed> for AppendConditionFailed {
-    fn from(value: api::stream::AppendConditionFailed) -> Self {
-        match value {
-            api::stream::AppendConditionFailed::FencingTokenMismatch(token) => {
-                AppendConditionFailed::FencingTokenMismatch(FencingToken(token.to_string()))
-            }
-            api::stream::AppendConditionFailed::SeqNumMismatch(seq) => {
-                AppendConditionFailed::SeqNumMismatch(seq)
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-/// Errors from S2 operations.
-pub enum S2Error {
-    #[error("{0}")]
-    /// Client-side error.
-    Client(String),
-    #[error("malformed access token: {0}")]
-    /// Access token could not be used as an HTTP header value.
-    MalformedAccessToken(String),
-    #[error(transparent)]
-    /// Validation error.
-    Validation(#[from] ValidationError),
-    #[error("{0}")]
-    /// Append condition check failed. Contains the failure reason.
-    AppendConditionFailed(AppendConditionFailed),
-    #[error("read from an unwritten position. current tail: {0}")]
-    /// Read from an unwritten position. Contains the current tail.
-    ReadUnwritten(StreamPosition),
-    #[error("{0}")]
-    /// Other server-side error.
-    Server(ErrorResponse),
-}
-
-impl From<ApiError> for S2Error {
-    fn from(err: ApiError) -> Self {
-        match err {
-            ApiError::ReadUnwritten(tail_response) => {
-                Self::ReadUnwritten(tail_response.tail.into())
-            }
-            ApiError::AppendConditionFailed(condition_failed) => {
-                Self::AppendConditionFailed(condition_failed.into())
-            }
-            ApiError::Server(_, response) => Self::Server(response.into()),
-            ApiError::MalformedAccessToken(err) => Self::MalformedAccessToken(err),
-            other => Self::Client(other.to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("{code}: {message}")]
-#[non_exhaustive]
-/// Error response from S2 server.
-pub struct ErrorResponse {
-    /// Error code.
-    pub code: String,
-    /// Error message.
-    pub message: String,
-}
-
-impl From<ApiErrorResponse> for ErrorResponse {
-    fn from(response: ApiErrorResponse) -> Self {
-        Self {
-            code: response.code,
-            message: response.message,
-        }
-    }
-}
+/// A stream of values of type `Result<T, RequestError>`.
+pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, RequestError>>>>;
 
 fn idempotency_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
@@ -3694,7 +3641,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::api::ClientError;
 
     type HeaderParts = (Vec<u8>, Vec<u8>);
     type AppendRecordParts = (Vec<u8>, Vec<HeaderParts>);
@@ -3830,6 +3776,26 @@ mod tests {
         let basin: BasinEndpoint = "https://{basin}.b.s2.dev".parse().unwrap();
         let ep = S2Endpoints::new(account, basin).unwrap();
         assert_eq!(ep.scheme, Scheme::HTTPS);
+    }
+
+    #[test]
+    fn s2_endpoints_for_endpoint_defaults_to_https() {
+        let ep = S2Endpoints::for_endpoint("localhost:8080").unwrap();
+        let authority: Authority = "localhost:8080".parse().unwrap();
+        assert_eq!(ep.scheme, Scheme::HTTPS);
+        assert_eq!(ep.account_authority, authority);
+        assert_eq!(ep.basin_authority, BasinAuthority::Direct(authority));
+    }
+
+    #[test]
+    fn s2_endpoints_for_endpoint_accepts_explicit_scheme() {
+        let ep = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
+        assert_eq!(ep.scheme, Scheme::HTTP);
+    }
+
+    #[test]
+    fn s2_endpoints_for_endpoint_rejects_invalid_endpoint() {
+        assert!(S2Endpoints::for_endpoint("not a valid endpoint").is_err());
     }
 
     // -- Compression --
@@ -4341,28 +4307,5 @@ mod tests {
         assert_eq!(record.headers[0].name.as_ref(), b"k");
         assert_eq!(record.headers[0].value.as_ref(), b"v");
         assert_eq!(record.timestamp, 1234);
-    }
-
-    // -- S2Error from ApiError --
-
-    #[test]
-    fn s2_error_from_api_error_client() {
-        let err = ApiError::Client(ClientError::Others("client error".to_owned()));
-        let s2_err: S2Error = err.into();
-        assert!(matches!(s2_err, S2Error::Client(_)));
-    }
-
-    // -- ErrorResponse --
-
-    #[test]
-    fn error_response_from_api() {
-        let api_resp = ApiErrorResponse {
-            code: "not_found".to_string(),
-            message: "basin not found".to_string(),
-        };
-        let resp: ErrorResponse = api_resp.into();
-        assert_eq!(resp.code, "not_found");
-        assert_eq!(resp.message, "basin not found");
-        assert!(resp.to_string().contains("not_found"));
     }
 }

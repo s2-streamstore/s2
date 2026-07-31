@@ -4,11 +4,11 @@ mod apply;
 mod bench;
 mod cli;
 mod config;
+mod diff;
 mod error;
 mod lite;
 mod ops;
 mod record_format;
-mod tui;
 mod types;
 mod update;
 
@@ -16,7 +16,7 @@ mod update;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{pin::Pin, time::Duration};
+use std::{pin::Pin, process::ExitCode, time::Duration};
 
 use clap::{CommandFactory, Parser};
 use cli::{ApplyArgs, Cli, Command, ConfigCommand, ListBasinsArgs, ListStreamsArgs};
@@ -52,25 +52,27 @@ fn install_rustls_crypto_provider() {
 }
 
 #[tokio::main]
-async fn main() -> miette::Result<()> {
+async fn main() -> miette::Result<ExitCode> {
     install_rustls_crypto_provider();
     miette::set_panic_hook();
-    // don't run update check for `s2 lite`.
-    let update_check = if std::env::args().nth(1).as_deref() == Some("lite") {
-        None
-    } else {
+
+    let cli = parse_cli();
+    let passive_update_check = allows_passive_update_check(cli.command.as_ref());
+    let update_check = if passive_update_check {
         update::spawn_check()
+    } else {
+        None
     };
-    let result = run().await;
-    if result.is_ok() {
+
+    let result = run(cli).await;
+    if passive_update_check && result.is_ok() {
         update::notify(update_check).await;
     }
-    result?;
-    Ok(())
+    Ok(result?)
 }
 
-async fn run() -> Result<(), CliError> {
-    let cli = Cli::try_parse().unwrap_or_else(|e| {
+fn parse_cli() -> Cli {
+    Cli::try_parse().unwrap_or_else(|e| {
         // Customize error message for metric commands to say "metric" instead of "subcommand"
         let msg = e.to_string();
         if msg.contains("requires a subcommand") && msg.contains("get-") && msg.contains("-metrics")
@@ -82,12 +84,14 @@ async fn run() -> Result<(), CliError> {
             std::process::exit(2);
         }
         e.exit()
-    });
+    })
+}
 
-    if cli.interactive {
-        return tui::run().await;
-    }
+fn allows_passive_update_check(command: Option<&Command>) -> bool {
+    !matches!(command, Some(Command::Lite(_) | Command::Update(_)))
+}
 
+async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     let Some(command) = cli.command else {
         Cli::command().print_help().ok();
         std::process::exit(0);
@@ -101,7 +105,7 @@ async fn run() -> Result<(), CliError> {
             )
             .with(tracing_subscriber::fmt::layer())
             .init();
-        return lite::run(args).await;
+        return lite::run(args).await.map(|()| ExitCode::SUCCESS);
     }
 
     tracing_subscriber::registry()
@@ -150,7 +154,14 @@ async fn run() -> Result<(), CliError> {
                 );
             }
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Command::Update(args) = &command {
+        update::apply::run(args)
+            .await
+            .map_err(|e| CliError::Update(e.to_string()))?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     if let Command::Apply(ApplyArgs { schema: true, .. }) = &command {
@@ -159,20 +170,22 @@ async fn run() -> Result<(), CliError> {
             "{}",
             serde_json::to_string_pretty(&schema).expect("valid schema")
         );
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Command::Diff(args) = &command {
+        diff::validate_args(args)?;
     }
 
     let cli_config = load_cli_config()?;
-    let sdk_config = sdk_config(
-        &cli_config,
-        &format!("s2-cli/{}", env!("CARGO_PKG_VERSION")),
-    )?;
+    let sdk_config = sdk_config(&cli_config, update::user_agent())?;
     let token_source = access_token_source(&cli_config);
     let s2 = S2::new(sdk_config.clone())
-        .map_err(|e| CliError::SdkInit(e).with_token_source(token_source))?;
+        .map_err(|e| CliError::SdkInit(e.into()).with_token_source(token_source))?;
+    let mut exit_code = ExitCode::SUCCESS;
     let result: Result<(), CliError> = (async {
         match command {
-        Command::Config(..) | Command::Lite(..) => unreachable!(),
+        Command::Config(..) | Command::Lite(..) | Command::Update(..) => unreachable!(),
 
         Command::Ls(args) => {
             if let Some(ref uri) = args.uri {
@@ -283,9 +296,15 @@ async fn run() -> Result<(), CliError> {
 
         Command::ListAccessTokens(args) => {
             let (tokens, _) = ops::list_access_tokens(&s2, args).await?;
-            for token_info in tokens {
-                let info = AccessTokenInfo::from(token_info);
-                println!("{}", json_to_table(&serde_json::to_value(&info)?));
+            let tokens: Vec<AccessTokenInfo> =
+                tokens.into_iter().map(AccessTokenInfo::from).collect();
+            let id_width = tokens.iter().map(|info| info.id.len()).max().unwrap_or(0);
+            let blocks: Vec<String> = tokens
+                .iter()
+                .map(|info| info.summary_block(id_width))
+                .collect();
+            if !blocks.is_empty() {
+                println!("{}", blocks.join("\n\n"));
             }
         }
 
@@ -300,6 +319,14 @@ async fn run() -> Result<(), CliError> {
                 "{}",
                 format!("✓ Access token '{}' revoked", id).green().bold()
             );
+        }
+
+        Command::Diff(args) => {
+            let use_diff_exit_code = args.exit_code;
+            let outcome = diff::run(&s2, args).await?;
+            if use_diff_exit_code && outcome.has_differences {
+                exit_code = ExitCode::from(1);
+            }
         }
 
         Command::ListLocations => {
@@ -627,7 +654,7 @@ async fn run() -> Result<(), CliError> {
             let s2 = S2::new(sdk_config.clone().with_retry(
                 RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
             ))
-            .map_err(CliError::SdkInit)?;
+            .map_err(|e| CliError::SdkInit(e.into()))?;
 
             let basin = s2.basin(basin_name);
             basin
@@ -661,7 +688,9 @@ async fn run() -> Result<(), CliError> {
     })
     .await;
 
-    result.map_err(|err| err.with_token_source(token_source))
+    result
+        .map(|()| exit_code)
+        .map_err(|err| err.with_token_source(token_source))
 }
 
 fn format_position(seq_num: u64, timestamp: u64) -> String {

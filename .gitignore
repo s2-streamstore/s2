@@ -2,3 +2,4 @@ target/
 .DS_Store
 history.*.jsonl
 porcupine-outputs/
+rustc-ice-*.txt

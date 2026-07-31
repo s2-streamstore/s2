@@ -19,19 +19,20 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
+    error::{ReadError, RequestError},
     retry::RetryBackoff,
-    types::{EncryptionKey, MeteredBytes, ReadBatch, S2Error, StreamName, StreamPosition},
+    types::{EncryptionKey, MeteredBytes, ReadBatch, StreamName, StreamPosition},
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadSessionError {
+enum ReadSessionFailure {
     #[error(transparent)]
     Api(#[from] ApiError),
     #[error("heartbeat timeout")]
     HeartbeatTimeout,
 }
 
-impl ReadSessionError {
+impl ReadSessionFailure {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Api(err) => err.is_retryable(),
@@ -40,17 +41,47 @@ impl ReadSessionError {
     }
 }
 
-impl From<ReadSessionError> for S2Error {
-    fn from(err: ReadSessionError) -> Self {
-        match err {
-            ReadSessionError::Api(api_err) => api_err.into(),
-            other => S2Error::Client(other.to_string()),
+/// Errors returned by a read session.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReadSessionError {
+    /// An error with the read request underlying the session.
+    #[error(transparent)]
+    Read(#[from] ReadError),
+    /// The session heartbeat timed out.
+    #[error("heartbeat timeout")]
+    HeartbeatTimeout,
+}
+
+impl ReadSessionError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Read(error) => error.is_retryable(),
+            Self::HeartbeatTimeout => true,
+        }
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::Read(error) => error.request_error(),
+            Self::HeartbeatTimeout => None,
         }
     }
 }
 
-pub type Streaming<R> =
-    Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionError>>>>;
+impl From<ReadSessionFailure> for ReadSessionError {
+    fn from(error: ReadSessionFailure) -> Self {
+        match error {
+            ReadSessionFailure::Api(error) => Self::Read(error.into()),
+            ReadSessionFailure::HeartbeatTimeout => Self::HeartbeatTimeout,
+        }
+    }
+}
+
+type InternalStreaming<R> =
+    Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionFailure>>>>;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -61,16 +92,23 @@ pub enum CaughtUpError {
     SessionClosed,
     #[error(transparent)]
     /// The read failed.
-    Read(#[from] S2Error),
+    Read(#[from] ReadSessionError),
 }
 
-impl From<CaughtUpError> for S2Error {
-    fn from(err: CaughtUpError) -> Self {
-        match err {
-            CaughtUpError::SessionClosed => {
-                Self::Client("read session ended before catching up".into())
-            }
-            CaughtUpError::Read(err) => err,
+impl CaughtUpError {
+    /// Whether retrying the operation is safe or sensible.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::SessionClosed => false,
+            Self::Read(error) => error.is_retryable(),
+        }
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::SessionClosed => None,
+            Self::Read(error) => error.request_error(),
         }
     }
 }
@@ -145,7 +183,7 @@ impl CaughtUpState {
         self.complete(Ok(tail));
     }
 
-    fn end(&mut self, error: Option<S2Error>) {
+    fn end(&mut self, error: Option<ReadSessionError>) {
         if self.terminal {
             return;
         }
@@ -207,12 +245,12 @@ impl ReadUpdate {
 
 /// A continuous stream of read batches.
 pub struct ReadSession {
-    updates: Streaming<ReadUpdate>,
+    updates: InternalStreaming<ReadUpdate>,
     state: CaughtUpState,
 }
 
 impl ReadSession {
-    fn new(updates: Streaming<ReadUpdate>) -> Self {
+    fn new(updates: InternalStreaming<ReadUpdate>) -> Self {
         Self {
             updates,
             state: CaughtUpState::new(),
@@ -248,7 +286,7 @@ impl ReadSession {
 }
 
 impl futures_core::Stream for ReadSession {
-    type Item = Result<ReadBatch, S2Error>;
+    type Item = Result<ReadBatch, ReadSessionError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -265,7 +303,7 @@ impl futures_core::Stream for ReadSession {
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
-                    let error = S2Error::from(error);
+                    let error = ReadSessionError::from(error);
                     self.state.end(Some(error.clone()));
                     return Poll::Ready(Some(Err(error)));
                 }
@@ -316,13 +354,13 @@ pub async fn read_session(
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
-                return Err(err);
+                return Err(err.into());
             }
         }
     };
 
     let updates = Box::pin(stream! {
-        let mut batches: Option<Streaming<ReadBatch>> = Some(batches);
+        let mut batches: Option<InternalStreaming<ReadBatch>> = Some(batches);
 
         loop {
             if batches.is_none() {
@@ -403,7 +441,7 @@ async fn session_inner(
     encryption: Option<EncryptionKey>,
     start: ReadStart,
     end: ReadEnd,
-) -> Result<Streaming<ReadBatch>, ReadSessionError> {
+) -> Result<InternalStreaming<ReadBatch>, ReadSessionFailure> {
     let mut batches = client
         .read_session(&name, start, end, encryption.as_ref())
         .await?;
@@ -414,7 +452,7 @@ async fn session_inner(
                     yield ReadBatch::from_api(batch?);
                 }
                 Ok(None) => break,
-                Err(_) => Err(ReadSessionError::HeartbeatTimeout)?,
+                Err(_) => Err(ReadSessionFailure::HeartbeatTimeout)?,
             }
         }
     }))
@@ -433,7 +471,7 @@ fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> 
     })
 }
 
-fn retry_delay(err: &ReadSessionError, backoffs: &mut RetryBackoff) -> Option<Duration> {
+fn retry_delay(err: &ReadSessionFailure, backoffs: &mut RetryBackoff) -> Option<Duration> {
     if err.is_retryable()
         && let Some(backoff) = backoffs.next()
     {
@@ -490,7 +528,9 @@ mod tests {
     }
 
     fn test_session(
-        updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionError>> + Send + 'static,
+        updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionFailure>>
+        + Send
+        + 'static,
     ) -> ReadSession {
         ReadSession::new(Box::pin(updates))
     }
@@ -656,15 +696,14 @@ mod tests {
 
     #[tokio::test]
     async fn read_error_rejects_wait() {
-        let mut session = test_session(stream::iter([Err(ReadSessionError::HeartbeatTimeout)]));
+        let mut session = test_session(stream::iter([Err(ReadSessionFailure::HeartbeatTimeout)]));
         let caught_up = session.caught_up();
 
         let error = session.next().await.unwrap().unwrap_err();
         assert_eq!(error.to_string(), "heartbeat timeout");
         assert!(matches!(
             caught_up.await,
-            Err(CaughtUpError::Read(S2Error::Client(message)))
-                if message == "heartbeat timeout"
+            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 
@@ -676,7 +715,7 @@ mod tests {
                 batch(vec![record(0, false)], Some(tail)),
                 false,
             )),
-            Err(ReadSessionError::HeartbeatTimeout),
+            Err(ReadSessionFailure::HeartbeatTimeout),
         ]));
 
         session.next().await.unwrap().unwrap();
@@ -688,8 +727,7 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CaughtUpError::Read(S2Error::Client(message)))
-                if message == "heartbeat timeout"
+            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
         ));
     }
 

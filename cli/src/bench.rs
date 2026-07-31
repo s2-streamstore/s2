@@ -17,10 +17,11 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
+    error::ProducerError,
     producer::{IndexedAppendAck, ProducerConfig},
     types::{
         AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput, ReadStart,
-        ReadStop, S2Error, SequencedRecord,
+        ReadStop, SequencedRecord,
     },
 };
 use tokio::{
@@ -46,7 +47,7 @@ const LATENCY_TABLE_SIDE_BY_SIDE_WIDTH: usize =
     LATENCY_TABLE_COLUMN_WIDTH * 2 + LATENCY_TABLE_GAP.len();
 
 type PendingAck =
-    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, S2Error>)> + Send>>;
+    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, ProducerError>)> + Send>>;
 
 pub struct BenchWriteSample {
     pub bytes: u64,
@@ -218,9 +219,8 @@ enum LatencyTableLayout {
 }
 
 fn latency_table_layout() -> LatencyTableLayout {
-    let width = crossterm::terminal::size()
-        .ok()
-        .map(|(width, _)| width as usize)
+    let width = terminal_size::terminal_size()
+        .map(|(terminal_size::Width(width), _)| width as usize)
         .unwrap_or(usize::MAX);
 
     if width >= LATENCY_TABLE_SIDE_BY_SIDE_WIDTH {

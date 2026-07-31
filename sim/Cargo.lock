@@ -1070,17 +1070,16 @@ dependencies = [
 
 [[package]]
 name = "compact_str"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
 dependencies = [
  "castaway",
  "cfg-if",
  "itoa",
- "rustversion",
- "ryu",
  "serde",
  "static_assertions",
+ "zmij",
 ]
 
 [[package]]
@@ -1475,9 +1474,9 @@ dependencies = [
 
 [[package]]
 name = "fail-parallel"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f4a147ba57fcd64323c54c8f69fd4e045456a99574163010ccf5eea3168aaa"
+checksum = "c29b33a0187823f1fa88b36980227dc96c7504ede2288e7d2a77d9d6d88b260c"
 dependencies = [
  "log",
  "once_cell",
@@ -3655,7 +3654,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.30.9"
+version = "0.30.10"
 dependencies = [
  "axum",
  "base64ct",
@@ -3681,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "axum",
  "base64ct",
@@ -3700,7 +3699,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.39.3"
+version = "0.41.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3754,7 +3753,7 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.31.10"
+version = "0.33.0"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -3824,7 +3823,7 @@ dependencies = [
 
 [[package]]
 name = "s2-storage"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -3840,7 +3839,7 @@ dependencies = [
 [[package]]
 name = "s2-verification"
 version = "0.4.0"
-source = "git+https://github.com/s2-streamstore/s2-verification?rev=113770a40f96cba9c5bfd4eb1f1a46989c813283#113770a40f96cba9c5bfd4eb1f1a46989c813283"
+source = "git+https://github.com/s2-streamstore/s2-verification?rev=c7d0487b3d5482450653944cc5b7cca8aaa94ed5#c7d0487b3d5482450653944cc5b7cca8aaa94ed5"
 dependencies = [
  "antithesis_sdk",
  "clap",
@@ -4206,9 +4205,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slatedb"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6aba890a8fc5d2a3d283a77cfe712c0f27f0501bd75b07e14dece2dfc2cde86"
+checksum = "35ca56b01922b15aa69fe3abb62cadc985d86032c9647e4606e211c4da751a76"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -4253,9 +4252,9 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f3fdad5676b104bec5daa2f367bdb340f4162ef3c1ead16da903297f235fb49"
+checksum = "0aa8de522ff46a0f9b5a66f45e650d125421d4d91990933591092f9d010c40d1"
 dependencies = [
  "chrono",
  "log",
@@ -4269,9 +4268,9 @@ dependencies = [
 
 [[package]]
 name = "slatedb-txn-obj"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5df001443952d76ae7380536b4a050f88b3cc9a7d3dce0f3782ea7ae9a12c29c"
+checksum = "d85fd9c0c86dd4954524fa8238d0548bd80f4a9a66983cbde3728402d339993e"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4583,9 +4582,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "bytes",
  "libc",

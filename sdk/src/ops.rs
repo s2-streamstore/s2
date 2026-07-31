@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use crate::client::Connect;
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
+    error::{AppendError, ReadError, RequestError},
     producer::{Producer, ProducerConfig},
-    session::{self, AppendSession, AppendSessionConfig, ReadSession},
+    session::{self, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
@@ -13,7 +14,7 @@ use crate::{
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
         ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
-        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, S2Error, StreamConfig, StreamInfo,
+        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
         StreamName, StreamPosition, Streaming,
     },
 };
@@ -39,7 +40,7 @@ pub struct S2 {
 
 impl S2 {
     /// Create a new [`S2`].
-    pub fn new(config: S2Config) -> Result<Self, S2Error> {
+    pub fn new(config: S2Config) -> Result<Self, RequestError> {
         let base_client = BaseClient::init(&config)?;
         Ok(Self {
             client: AccountClient::init(config, base_client),
@@ -48,7 +49,7 @@ impl S2 {
 
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
-    pub fn new_with_connector<C>(config: S2Config, connector: C) -> Result<Self, S2Error>
+    pub fn new_with_connector<C>(config: S2Config, connector: C) -> Result<Self, RequestError>
     where
         C: Connect + Clone + Send + Sync + 'static,
     {
@@ -68,7 +69,10 @@ impl S2 {
     /// List a page of basins.
     ///
     /// See [`list_all_basins`](crate::S2::list_all_basins) for automatic pagination.
-    pub async fn list_basins(&self, input: ListBasinsInput) -> Result<Page<BasinInfo>, S2Error> {
+    pub async fn list_basins(
+        &self,
+        input: ListBasinsInput,
+    ) -> Result<Page<BasinInfo>, RequestError> {
         let response = self.client.list_basins(input.into()).await?;
         Ok(Page::new(
             response
@@ -111,7 +115,7 @@ impl S2 {
     }
 
     /// Create a basin.
-    pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, S2Error> {
+    pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, RequestError> {
         let (request, idempotency_token) = input.into();
         let info = self.client.create_basin(request, idempotency_token).await?;
         Ok(info.try_into()?)
@@ -127,7 +131,7 @@ impl S2 {
     pub async fn ensure_basin(
         &self,
         input: EnsureBasinInput,
-    ) -> Result<EnsureOutput<BasinInfo>, S2Error> {
+    ) -> Result<EnsureOutput<BasinInfo>, RequestError> {
         let (name, request) = input.into();
         Ok(self
             .client
@@ -138,13 +142,22 @@ impl S2 {
     }
 
     /// Get basin configuration.
-    pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, S2Error> {
+    pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, RequestError> {
         let config = self.client.get_basin_config(name).await?;
         Ok(config.into())
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub async fn get_basin_config_api(
+        &self,
+        name: BasinName,
+    ) -> Result<s2_api::v1::config::BasinConfig, RequestError> {
+        Ok(self.client.get_basin_config(name).await?)
+    }
+
     /// Delete a basin.
-    pub async fn delete_basin(&self, input: DeleteBasinInput) -> Result<(), S2Error> {
+    pub async fn delete_basin(&self, input: DeleteBasinInput) -> Result<(), RequestError> {
         Ok(self
             .client
             .delete_basin(input.name, input.ignore_not_found)
@@ -155,7 +168,7 @@ impl S2 {
     pub async fn reconfigure_basin(
         &self,
         input: ReconfigureBasinInput,
-    ) -> Result<BasinConfig, S2Error> {
+    ) -> Result<BasinConfig, RequestError> {
         let config = self
             .client
             .reconfigure_basin(input.name, input.config.into())
@@ -169,7 +182,7 @@ impl S2 {
     pub async fn list_access_tokens(
         &self,
         input: ListAccessTokensInput,
-    ) -> Result<Page<AccessTokenInfo>, S2Error> {
+    ) -> Result<Page<AccessTokenInfo>, RequestError> {
         let response = self.client.list_access_tokens(input.into()).await?;
         Ok(Page::new(
             response
@@ -179,6 +192,15 @@ impl S2 {
                 .collect::<Result<Vec<_>, _>>()?,
             response.has_more,
         ))
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub async fn list_access_tokens_api(
+        &self,
+        input: ListAccessTokensInput,
+    ) -> Result<s2_api::v1::access::ListAccessTokensResponse, RequestError> {
+        Ok(self.client.list_access_tokens(input.into()).await?)
     }
 
     /// List all access tokens, paginating automatically.
@@ -214,24 +236,24 @@ impl S2 {
     pub async fn issue_access_token(
         &self,
         input: IssueAccessTokenInput,
-    ) -> Result<String, S2Error> {
+    ) -> Result<String, RequestError> {
         let response = self.client.issue_access_token(input.into()).await?;
         Ok(response.access_token)
     }
 
     /// Revoke an access token.
-    pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), S2Error> {
+    pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), RequestError> {
         Ok(self.client.revoke_access_token(id).await?)
     }
 
     /// List locations.
-    pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, S2Error> {
+    pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, RequestError> {
         let response = self.client.list_locations().await?;
         Ok(response.into_iter().map(Into::into).collect())
     }
 
     /// Get the default location.
-    pub async fn get_default_location(&self) -> Result<LocationInfo, S2Error> {
+    pub async fn get_default_location(&self) -> Result<LocationInfo, RequestError> {
         Ok(self.client.get_default_location().await?.into())
     }
 
@@ -239,7 +261,7 @@ impl S2 {
     pub async fn set_default_location(
         &self,
         location: LocationName,
-    ) -> Result<LocationInfo, S2Error> {
+    ) -> Result<LocationInfo, RequestError> {
         Ok(self.client.set_default_location(location).await?.into())
     }
 
@@ -247,7 +269,7 @@ impl S2 {
     pub async fn get_account_metrics(
         &self,
         input: GetAccountMetricsInput,
-    ) -> Result<Vec<Metric>, S2Error> {
+    ) -> Result<Vec<Metric>, RequestError> {
         let response = self.client.get_account_metrics(input.into()).await?;
         Ok(response.values.into_iter().map(Into::into).collect())
     }
@@ -256,7 +278,7 @@ impl S2 {
     pub async fn get_basin_metrics(
         &self,
         input: GetBasinMetricsInput,
-    ) -> Result<Vec<Metric>, S2Error> {
+    ) -> Result<Vec<Metric>, RequestError> {
         let (name, request) = input.into();
         let response = self.client.get_basin_metrics(name, request).await?;
         Ok(response.values.into_iter().map(Into::into).collect())
@@ -266,7 +288,7 @@ impl S2 {
     pub async fn get_stream_metrics(
         &self,
         input: GetStreamMetricsInput,
-    ) -> Result<Vec<Metric>, S2Error> {
+    ) -> Result<Vec<Metric>, RequestError> {
         let (basin_name, stream_name, request) = input.into();
         let response = self
             .client
@@ -297,7 +319,10 @@ impl S2Basin {
     /// List a page of streams.
     ///
     /// See [`list_all_streams`](crate::S2Basin::list_all_streams) for automatic pagination.
-    pub async fn list_streams(&self, input: ListStreamsInput) -> Result<Page<StreamInfo>, S2Error> {
+    pub async fn list_streams(
+        &self,
+        input: ListStreamsInput,
+    ) -> Result<Page<StreamInfo>, RequestError> {
         let response = self.client.list_streams(input.into()).await?;
         Ok(Page::new(
             response
@@ -340,7 +365,10 @@ impl S2Basin {
     }
 
     /// Create a stream.
-    pub async fn create_stream(&self, input: CreateStreamInput) -> Result<StreamInfo, S2Error> {
+    pub async fn create_stream(
+        &self,
+        input: CreateStreamInput,
+    ) -> Result<StreamInfo, RequestError> {
         let (request, idempotency_token) = input.into();
         let info = self
             .client
@@ -359,7 +387,7 @@ impl S2Basin {
     pub async fn ensure_stream(
         &self,
         input: EnsureStreamInput,
-    ) -> Result<EnsureOutput<StreamInfo>, S2Error> {
+    ) -> Result<EnsureOutput<StreamInfo>, RequestError> {
         let (name, config) = input.into();
         Ok(self
             .client
@@ -370,13 +398,22 @@ impl S2Basin {
     }
 
     /// Get stream configuration.
-    pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, S2Error> {
+    pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, RequestError> {
         let config = self.client.get_stream_config(name).await?;
         Ok(config.into())
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "_hidden")]
+    pub async fn get_stream_config_api(
+        &self,
+        name: StreamName,
+    ) -> Result<s2_api::v1::config::StreamConfig, RequestError> {
+        Ok(self.client.get_stream_config(name).await?)
+    }
+
     /// Delete a stream.
-    pub async fn delete_stream(&self, input: DeleteStreamInput) -> Result<(), S2Error> {
+    pub async fn delete_stream(&self, input: DeleteStreamInput) -> Result<(), RequestError> {
         Ok(self
             .client
             .delete_stream(input.name, input.ignore_not_found)
@@ -387,7 +424,7 @@ impl S2Basin {
     pub async fn reconfigure_stream(
         &self,
         input: ReconfigureStreamInput,
-    ) -> Result<StreamConfig, S2Error> {
+    ) -> Result<StreamConfig, RequestError> {
         let config = self
             .client
             .reconfigure_stream(input.name, input.config.into())
@@ -416,13 +453,13 @@ impl S2Stream {
     }
 
     /// Check tail position.
-    pub async fn check_tail(&self) -> Result<StreamPosition, S2Error> {
+    pub async fn check_tail(&self) -> Result<StreamPosition, ReadError> {
         let response = self.client.check_tail(&self.name).await?;
         Ok(response.tail.into())
     }
 
     /// Append records.
-    pub async fn append(&self, input: AppendInput) -> Result<AppendAck, S2Error> {
+    pub async fn append(&self, input: AppendInput) -> Result<AppendAck, AppendError> {
         let ack = self
             .client
             .append(
@@ -436,7 +473,7 @@ impl S2Stream {
     }
 
     /// Read records.
-    pub async fn read(&self, input: ReadInput) -> Result<ReadBatch, S2Error> {
+    pub async fn read(&self, input: ReadInput) -> Result<ReadBatch, ReadError> {
         let batch = self
             .client
             .read(
@@ -474,8 +511,8 @@ impl S2Stream {
     }
 
     /// Create a read session.
-    pub async fn read_session(&self, input: ReadInput) -> Result<ReadSession, S2Error> {
-        Ok(session::read_session(
+    pub async fn read_session(&self, input: ReadInput) -> Result<ReadSession, ReadSessionError> {
+        session::read_session(
             self.client.clone(),
             self.name.clone(),
             self.encryption.clone(),
@@ -483,7 +520,7 @@ impl S2Stream {
             input.stop.into(),
             input.ignore_command_records,
         )
-        .await?)
+        .await
     }
 }
 

@@ -5,6 +5,11 @@ USER root
 
 WORKDIR /build
 
+# Stamped into the binary (cli/src/update/channel.rs) so it knows it was
+# installed via the Docker image.
+ARG S2_BUILD_CHANNEL=docker
+ARG S2_GIT_REV=unknown
+
 # Use Docker BuildKit cache mounts for faster builds
 RUN --mount=type=bind,source=api,target=/build/api \
     --mount=type=bind,source=common,target=/build/common \
@@ -19,6 +24,8 @@ RUN --mount=type=bind,source=api,target=/build/api \
     --mount=type=cache,id=s2-rust,sharing=locked,target=/build/target \
     --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,sharing=locked,target=/usr/local/cargo/git \
+    S2_BUILD_CHANNEL="${S2_BUILD_CHANNEL}" \
+    S2_GIT_REV="${S2_GIT_REV}" \
     cargo build --locked --release --package s2-cli --bin s2
 
 # Copy the binary from the cache volume

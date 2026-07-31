@@ -40,6 +40,7 @@ use tracing::{debug, warn};
 
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
+    error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
@@ -403,7 +404,7 @@ impl BasinClient {
                 } else {
                     Err(ApiError::Server(
                         status,
-                        response.json::<ApiErrorResponse>()?,
+                        response.json::<ServerErrorBody>()?,
                     ))
                 }
             })
@@ -577,7 +578,7 @@ fn read_response_error_handler(
     } else {
         Err(ApiError::Server(
             status,
-            response.json::<ApiErrorResponse>()?,
+            response.json::<ServerErrorBody>()?,
         ))
     }
 }
@@ -592,19 +593,19 @@ impl Deref for BasinClient {
 
 #[derive(Debug, thiserror::Error, serde::Deserialize)]
 #[error("{code}: {message}")]
-pub struct ApiErrorResponse {
+pub(crate) struct ServerErrorBody {
     pub code: String,
     pub message: String,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ApiError {
+pub(crate) enum ApiError {
     #[error(transparent)]
     Client(#[from] ClientError),
     #[error(transparent)]
     ProtoDecode(#[from] prost::DecodeError),
     #[error(transparent)]
-    S2STerminalDecode(#[from] S2STerminalDecodeError),
+    TerminalDecode(#[from] TerminalDecodeError),
     #[error("malformed access token: {0}")]
     MalformedAccessToken(String),
     #[error(transparent)]
@@ -614,23 +615,13 @@ pub enum ApiError {
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
     #[error("{1}")]
-    Server(StatusCode, ApiErrorResponse),
+    Server(StatusCode, ServerErrorBody),
 }
 
 impl ApiError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Server(status, err_resp) => {
-                matches!(
-                    *status,
-                    StatusCode::REQUEST_TIMEOUT
-                        | StatusCode::TOO_MANY_REQUESTS
-                        | StatusCode::INTERNAL_SERVER_ERROR
-                        | StatusCode::BAD_GATEWAY
-                        | StatusCode::SERVICE_UNAVAILABLE
-                        | StatusCode::GATEWAY_TIMEOUT
-                ) || (*status == StatusCode::CONFLICT && err_resp.code == "transaction_conflict")
-            }
+            Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
             _ => false,
         }
@@ -638,148 +629,23 @@ impl ApiError {
 
     pub fn has_no_side_effects(&self) -> bool {
         match self {
-            Self::Server(status, err_resp) => matches!(
-                (*status, err_resp.code.as_str()),
-                (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
-                    | (StatusCode::BAD_GATEWAY, "hot_server")
-            ),
+            Self::Server(status, err_resp) => {
+                server_error_has_no_side_effects(*status, &err_resp.code)
+            }
             Self::Client(err) => err.has_no_side_effects(),
             _ => false,
         }
     }
 }
 
-impl From<client::Error> for ApiError {
-    fn from(err: client::Error) -> Self {
+impl From<client::HttpError> for ApiError {
+    fn from(err: client::HttpError) -> Self {
         ClientError::from(err).into()
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("connect: {0}")]
-    Connect(String),
-    #[error("timeout")]
-    Timeout,
-    #[error("connection closed early: {0}")]
-    ConnectionClosedEarly(String),
-    #[error("request canceled: {0}")]
-    RequestCanceled(String),
-    #[error("unexpected eof: {0}")]
-    UnexpectedEof(String),
-    #[error("connection reset: {0}")]
-    ConnectionReset(String),
-    #[error("connection aborted: {0}")]
-    ConnectionAborted(String),
-    #[error("connection refused: {0}")]
-    ConnectionRefused(String),
-    #[error("{0}")]
-    Others(String),
-}
-
-impl ClientError {
-    pub fn is_retryable(&self) -> bool {
-        !matches!(self, ClientError::Others(_))
-    }
-
-    pub fn has_no_side_effects(&self) -> bool {
-        match self {
-            ClientError::Connect(_)
-            | ClientError::Timeout
-            | ClientError::ConnectionClosedEarly(_)
-            | ClientError::RequestCanceled(_)
-            | ClientError::UnexpectedEof(_)
-            | ClientError::ConnectionReset(_)
-            | ClientError::ConnectionAborted(_)
-            | ClientError::Others(_) => false,
-            ClientError::ConnectionRefused(_) => true,
-        }
-    }
-}
-
-impl From<client::Error> for ClientError {
-    fn from(err: client::Error) -> Self {
-        let err_msg = err.to_string();
-        match err {
-            client::Error::Send(ref send_err) if send_err.is_connect() => {
-                classify_io_source(&err, &err_msg)
-                    .or_else(|| classify_dns_source(&err, &err_msg))
-                    .unwrap_or(Self::Connect(err_msg))
-            }
-            client::Error::Send(_) | client::Error::Receive(_) => {
-                classify_hyper_source(&err, &err_msg)
-                    .or_else(|| classify_io_source(&err, &err_msg))
-                    .unwrap_or(Self::Others(err_msg))
-            }
-            client::Error::Timeout => Self::Timeout,
-            _ => Self::Others(err_msg),
-        }
-    }
-}
-
-fn classify_hyper_source(err: &client::Error, err_msg: &str) -> Option<ClientError> {
-    let hyper_err = source_err::<hyper::Error>(err)?;
-    let err_msg = format!("{hyper_err} -> {err_msg}");
-    if hyper_err.is_incomplete_message() {
-        Some(ClientError::ConnectionClosedEarly(err_msg))
-    } else if hyper_err.is_canceled() {
-        Some(ClientError::RequestCanceled(err_msg))
-    } else {
-        None
-    }
-}
-
-fn classify_io_source(err: &client::Error, err_msg: &str) -> Option<ClientError> {
-    let io_err = source_err::<std::io::Error>(err)?;
-    let err_msg = format!("{io_err} -> {err_msg}");
-    Some(match io_err.kind() {
-        std::io::ErrorKind::UnexpectedEof => ClientError::UnexpectedEof(err_msg),
-        std::io::ErrorKind::ConnectionReset => ClientError::ConnectionReset(err_msg),
-        std::io::ErrorKind::ConnectionAborted => ClientError::ConnectionAborted(err_msg),
-        std::io::ErrorKind::ConnectionRefused => ClientError::ConnectionRefused(err_msg),
-        _ => return None,
-    })
-}
-
-/// Walk the error source chain looking for a "dns error" tag.
-///
-/// hyper-util's `ConnectError` (not publicly exported, so we can't downcast)
-/// tags DNS failures with the static string "dns error" via `ConnectError::dns()`.
-/// This is not a platform-specific message — it's a structural tag from the
-/// Rust library. If the HTTP client changes, this will harmlessly stop matching
-/// and DNS errors will fall through to the generic `Connect` variant.
-fn classify_dns_source(err: &client::Error, _err_msg: &str) -> Option<ClientError> {
-    let mut source = Some(err as &dyn std::error::Error);
-    while let Some(err) = source {
-        if err.to_string() == "dns error" {
-            // Build the message from the DNS error's source (the actual
-            // resolver error) rather than the top-level hyper wrapper.
-            let detail = match err.source() {
-                Some(cause) => format!("dns resolution: {cause}"),
-                None => "dns resolution failed".to_owned(),
-            };
-            return Some(ClientError::Connect(detail));
-        }
-        source = err.source();
-    }
-    None
-}
-
-fn source_err<T: std::error::Error + 'static>(err: &dyn std::error::Error) -> Option<&T> {
-    let mut source = err.source();
-
-    while let Some(err) = source {
-        if let Some(err) = err.downcast_ref::<T>() {
-            return Some(err);
-        }
-
-        source = err.source();
-    }
-    None
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum S2STerminalDecodeError {
+pub(crate) enum TerminalDecodeError {
     #[error("invalid status code: {0}")]
     InvalidStatusCode(#[from] http::status::InvalidStatusCode),
     #[error("failed to parse error response: {0}")]
@@ -790,13 +656,13 @@ impl From<TerminalMessage> for ApiError {
     fn from(msg: TerminalMessage) -> Self {
         let status = match StatusCode::from_u16(msg.status) {
             Ok(status) => status,
-            Err(err) => return ApiError::S2STerminalDecode(err.into()),
+            Err(err) => return ApiError::TerminalDecode(err.into()),
         };
         if status == StatusCode::PRECONDITION_FAILED {
             let condition_failed = match serde_json::from_str::<AppendConditionFailed>(&msg.body) {
                 Ok(condition_failed) => condition_failed,
                 Err(err) => {
-                    return ApiError::S2STerminalDecode(err.into());
+                    return ApiError::TerminalDecode(err.into());
                 }
             };
             ApiError::AppendConditionFailed(condition_failed)
@@ -804,15 +670,15 @@ impl From<TerminalMessage> for ApiError {
             let tail = match serde_json::from_str::<TailResponse>(&msg.body) {
                 Ok(tail) => tail,
                 Err(err) => {
-                    return ApiError::S2STerminalDecode(err.into());
+                    return ApiError::TerminalDecode(err.into());
                 }
             };
             ApiError::ReadUnwritten(tail)
         } else {
-            let response = match serde_json::from_str::<ApiErrorResponse>(&msg.body) {
+            let response = match serde_json::from_str::<ServerErrorBody>(&msg.body) {
                 Ok(response) => response,
                 Err(err) => {
-                    return ApiError::S2STerminalDecode(err.into());
+                    return ApiError::TerminalDecode(err.into());
                 }
             };
             ApiError::Server(status, response)
@@ -844,7 +710,9 @@ impl BaseClient {
             config.insecure_skip_cert_verification,
             config.rustls_crypto_provider.clone(),
         )
-        .map_err(|e| ClientError::Others(format!("failed to initialize TLS connector: {e}")))?;
+        .map_err(|e| {
+            ClientError::Configuration(format!("failed to initialize TLS connector: {e}"))
+        })?;
         Self::init_with_connector(config, connector)
     }
 
@@ -922,14 +790,14 @@ impl BaseClient {
     pub async fn init_streaming(
         &self,
         request: client::Request,
-    ) -> Result<StreamingResponse, client::Error> {
+    ) -> Result<StreamingResponse, client::HttpError> {
         self.client.init_streaming(request).await
     }
 
     async fn execute_unary(
         &self,
         request: client::Request,
-    ) -> Result<UnaryResponse, client::Error> {
+    ) -> Result<UnaryResponse, client::HttpError> {
         self.client.execute_unary(request).await
     }
 
@@ -1148,7 +1016,7 @@ impl UnaryResult for UnaryResponse {
         if status.is_success() {
             Ok(self)
         } else {
-            Err(ApiError::Server(status, self.json::<ApiErrorResponse>()?))
+            Err(ApiError::Server(status, self.json::<ServerErrorBody>()?))
         }
     }
 
@@ -1184,11 +1052,11 @@ impl StreamingResult for StreamingResponse {
         {
             return Err(ApiError::ReadUnwritten(tail));
         }
-        match serde_json::from_slice::<ApiErrorResponse>(&bytes) {
+        match serde_json::from_slice::<ServerErrorBody>(&bytes) {
             Ok(response) => Err(ApiError::Server(status, response)),
-            Err(_) => Err(ApiError::Client(ClientError::Others(format!(
-                "server error {status}: {}",
-                String::from_utf8_lossy(&bytes)
+            Err(error) => Err(ApiError::Client(ClientError::ResponseDecode(format!(
+                "could not decode server error {status}: {error}; body: {}",
+                String::from_utf8_lossy(&bytes),
             )))),
         }
     }
@@ -1234,49 +1102,14 @@ fn provision_result_from_parts<T>(
 mod tests {
     use super::*;
 
-    /// Verify that DNS resolution failures produce a clear error message
-    /// containing "dns resolution" rather than the opaque hyper wrapper.
-    /// This also serves as a regression test: if hyper-util changes its
-    /// internal "dns error" tag, this test will fail, signaling that
-    /// `classify_dns_source` needs updating.
     fn server_error(status: StatusCode, code: &str) -> ApiError {
         ApiError::Server(
             status,
-            ApiErrorResponse {
+            ServerErrorBody {
                 code: code.to_owned(),
                 message: "test".to_owned(),
             },
         )
-    }
-
-    #[test]
-    fn api_error_has_no_side_effects() {
-        // Server errors that guarantee no mutation.
-        assert!(server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited").has_no_side_effects());
-        assert!(server_error(StatusCode::BAD_GATEWAY, "hot_server").has_no_side_effects());
-
-        // Server errors that do NOT guarantee no mutation.
-        assert!(!server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal").has_no_side_effects());
-        assert!(!server_error(StatusCode::BAD_GATEWAY, "other").has_no_side_effects());
-        assert!(
-            !server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable").has_no_side_effects()
-        );
-    }
-
-    #[test]
-    fn client_error_has_no_side_effects() {
-        // Connection was never established.
-        assert!(ClientError::ConnectionRefused("test".into()).has_no_side_effects());
-
-        // May have side effects — data could have been sent/processed.
-        assert!(!ClientError::Connect("test".into()).has_no_side_effects());
-        assert!(!ClientError::Timeout.has_no_side_effects());
-        assert!(!ClientError::ConnectionClosedEarly("test".into()).has_no_side_effects());
-        assert!(!ClientError::RequestCanceled("test".into()).has_no_side_effects());
-        assert!(!ClientError::UnexpectedEof("test".into()).has_no_side_effects());
-        assert!(!ClientError::ConnectionReset("test".into()).has_no_side_effects());
-        assert!(!ClientError::ConnectionAborted("test".into()).has_no_side_effects());
-        assert!(!ClientError::Others("test".into()).has_no_side_effects());
     }
 
     #[test]
@@ -1305,6 +1138,8 @@ mod tests {
         let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
         let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
         let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        let transaction_conflict =
+            server_error(StatusCode::CONFLICT, "transaction_conflict");
         let policy = Some(AppendRetryPolicy::NoSideEffects);
         let signal = FrameSignal::new();
 
@@ -1317,6 +1152,11 @@ mod tests {
 
         // Signal set + no-side-effect error — safe.
         assert!(is_safe_to_retry(&no_side_effect, policy, Some(&signal)));
+        assert!(is_safe_to_retry(
+            &transaction_conflict,
+            policy,
+            Some(&signal)
+        ));
 
         // Signal set + non-retryable — never safe.
         assert!(!is_safe_to_retry(&non_retryable, policy, Some(&signal)));
@@ -1324,7 +1164,7 @@ mod tests {
 
     #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     #[tokio::test]
-    async fn dns_error_message_is_clear() {
+    async fn dns_errors_are_classified_as_connect() {
         let config = crate::types::S2Config::new("test-token".to_owned())
             .with_endpoints(
                 crate::types::S2Endpoints::new(
@@ -1345,10 +1185,9 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("should fail with DNS error"),
         };
-        let msg = err.to_string();
         assert!(
-            msg.contains("dns resolution"),
-            "expected 'dns resolution' in error, got: {msg}"
+            matches!(&err, ApiError::Client(ClientError::Connect(_))),
+            "expected a connect error, got: {err}"
         );
     }
 }

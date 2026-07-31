@@ -1,6 +1,6 @@
 [package]
 name = "s2-cli"
-version = "0.40.0"
+version = "0.41.2"
 description = "CLI for S2"
 edition.workspace = true
 license.workspace = true
@@ -16,12 +16,10 @@ path = "src/main.rs"
 async-stream = { workspace = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-chrono = "0.4"
 clap = { workspace = true, features = ["derive"] }
 color-print = { workspace = true }
 colored = { workspace = true }
 config = { workspace = true }
-crossterm = "0.29"
 dirs = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
@@ -29,7 +27,6 @@ indicatif = { workspace = true }
 json_to_table = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 rand = { workspace = true }
-ratatui = "0.30"
 reqwest = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true }
@@ -40,8 +37,10 @@ s2-sdk = { workspace = true, features = ["_hidden"] }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
+sha2 = "0.11"
 strum = { workspace = true, features = ["derive"] }
 tabled = { workspace = true }
+terminal_size = "0.4"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true, features = ["io-util"] }
@@ -50,16 +49,23 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { workspace = true, features = ["v4"] }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # tikv-jemallocator does not build on the MSVC toolchain; on Windows-MSVC
 # Rust falls back to the system allocator (HeapAlloc).
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { workspace = true }
 
+[target.'cfg(not(windows))'.dependencies]
+self-replace = "1.5"
+
+[build-dependencies]
+serde_json = { workspace = true }
+
 [dev-dependencies]
 assert_cmd = "2.2"
 predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }
-serial_test = "3.5"
+serial_test = "4.0"
 tempfile = "3.27"
