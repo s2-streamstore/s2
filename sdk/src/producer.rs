@@ -59,6 +59,15 @@ pub struct IndexedAppendAck {
     pub batch: AppendAck,
 }
 
+impl IndexedAppendAck {
+    /// Construct an acknowledgement for an appended record.
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    pub fn new(seq_num: u64, batch: AppendAck) -> Self {
+        Self { seq_num, batch }
+    }
+}
+
 /// Configuration for a [`Producer`].
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
