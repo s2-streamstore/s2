@@ -1,21 +1,24 @@
 #![cfg(feature = "test-util")]
 
+use std::pin::Pin;
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use s2_sdk::{
     StreamReadOps,
-    types::{ReadBatch, ReadInput, S2Error, SequencedRecord, StreamPosition, Streaming},
+    error::{ReadError, ReadSessionError},
+    types::{ReadBatch, ReadInput, SequencedRecord, StreamPosition},
 };
 
 struct MockReader;
 
 #[async_trait]
 impl StreamReadOps for MockReader {
-    async fn check_tail(&self) -> Result<StreamPosition, S2Error> {
+    async fn check_tail(&self) -> Result<StreamPosition, ReadError> {
         Ok(StreamPosition::new(1, 2))
     }
 
-    async fn read(&self, _input: ReadInput) -> Result<ReadBatch, S2Error> {
+    async fn read(&self, _input: ReadInput) -> Result<ReadBatch, ReadError> {
         let record = SequencedRecord::from_parts(0, 1, Vec::new(), "record");
         Ok(ReadBatch::new(
             vec![record],
@@ -23,7 +26,13 @@ impl StreamReadOps for MockReader {
         ))
     }
 
-    async fn read_session(&self, _input: ReadInput) -> Result<Streaming<ReadBatch>, S2Error> {
+    async fn read_session(
+        &self,
+        _input: ReadInput,
+    ) -> Result<
+        Pin<Box<dyn Send + futures_core::Stream<Item = Result<ReadBatch, ReadSessionError>>>>,
+        ReadSessionError,
+    > {
         let record = SequencedRecord::from_parts(0, 1, Vec::new(), "record");
         let batch = ReadBatch::new(vec![record], Some(StreamPosition::new(1, 2)));
         Ok(Box::pin(futures_util::stream::iter([Ok(batch)])))

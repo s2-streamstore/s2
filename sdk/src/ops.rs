@@ -1,3 +1,5 @@
+use std::pin::Pin;
+
 use async_trait::async_trait;
 
 #[cfg(feature = "_hidden")]
@@ -23,13 +25,19 @@ use crate::{
 #[async_trait]
 pub trait StreamReadOps: Send + Sync {
     /// Check the current tail position.
-    async fn check_tail(&self) -> Result<StreamPosition, S2Error>;
+    async fn check_tail(&self) -> Result<StreamPosition, ReadError>;
 
     /// Read a batch of records.
-    async fn read(&self, input: ReadInput) -> Result<ReadBatch, S2Error>;
+    async fn read(&self, input: ReadInput) -> Result<ReadBatch, ReadError>;
 
     /// Open a read session stream.
-    async fn read_session(&self, input: ReadInput) -> Result<Streaming<ReadBatch>, S2Error>;
+    async fn read_session(
+        &self,
+        input: ReadInput,
+    ) -> Result<
+        Pin<Box<dyn Send + futures_core::Stream<Item = Result<ReadBatch, ReadSessionError>>>>,
+        ReadSessionError,
+    >;
 }
 
 #[derive(Debug, Clone)]
@@ -526,15 +534,21 @@ impl S2Stream {
 
 #[async_trait]
 impl StreamReadOps for S2Stream {
-    async fn check_tail(&self) -> Result<StreamPosition, S2Error> {
+    async fn check_tail(&self) -> Result<StreamPosition, ReadError> {
         S2Stream::check_tail(self).await
     }
 
-    async fn read(&self, input: ReadInput) -> Result<ReadBatch, S2Error> {
+    async fn read(&self, input: ReadInput) -> Result<ReadBatch, ReadError> {
         S2Stream::read(self, input).await
     }
 
-    async fn read_session(&self, input: ReadInput) -> Result<Streaming<ReadBatch>, S2Error> {
+    async fn read_session(
+        &self,
+        input: ReadInput,
+    ) -> Result<
+        Pin<Box<dyn Send + futures_core::Stream<Item = Result<ReadBatch, ReadSessionError>>>>,
+        ReadSessionError,
+    > {
         Ok(Box::pin(S2Stream::read_session(self, input).await?))
     }
 }
