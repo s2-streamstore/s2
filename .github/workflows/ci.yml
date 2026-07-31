@@ -173,7 +173,7 @@ jobs:
       RUSTFLAGS: --cfg tokio_unstable
       # The Go linearizability checker must be built from the same rev as the
       # s2-verification dependency pinned in sim/Cargo.toml.
-      S2_VERIFICATION_REV: 6616b1de63923d9d2db32718e81b2dd8aba717bc
+      S2_VERIFICATION_REV: b4af8c8ef4965d9b335101c422eadb33f3169004
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
