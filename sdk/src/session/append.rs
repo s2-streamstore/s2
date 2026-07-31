@@ -20,69 +20,106 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
+    error::{AppendError, RequestError},
     frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes, ONE_MIB, S2Error,
+        AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes, ONE_MIB,
         StreamName, StreamPosition, ValidationError,
     },
 };
 
-#[derive(Debug, thiserror::Error)]
+/// Errors returned by an append session.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum AppendSessionError {
+    /// An error with the append request underlying the session.
     #[error(transparent)]
-    Api(#[from] ApiError),
+    Append(#[from] AppendError),
+    /// An append acknowledgement timed out.
     #[error("append acknowledgement timed out")]
     AckTimeout,
+    /// The server disconnected during the session.
     #[error("server disconnected")]
     ServerDisconnected,
+    /// The response stream closed while appends were in flight.
     #[error("response stream closed early while appends in flight")]
     StreamClosedEarly,
+    /// The session was already closed.
     #[error("session already closed")]
     SessionClosed,
+    /// The session is closing.
     #[error("session is closing")]
     SessionClosing,
+    /// The session was dropped without being closed.
     #[error("session dropped without calling close")]
     SessionDropped,
+    /// The server returned an invalid append acknowledgement.
     #[error("invalid append acknowledgement: {0}")]
     InvalidAck(String),
 }
 
 impl AppendSessionError {
+    /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Api(err) => err.is_retryable(),
-            Self::AckTimeout => true,
-            Self::ServerDisconnected => true,
-            _ => false,
+            Self::Append(error) => error.is_retryable(),
+            Self::AckTimeout | Self::ServerDisconnected => true,
+            Self::StreamClosedEarly
+            | Self::SessionClosed
+            | Self::SessionClosing
+            | Self::SessionDropped
+            | Self::InvalidAck(_) => false,
         }
     }
 
+    /// Whether retrying the operation cannot duplicate a mutation.
     pub fn has_no_side_effects(&self) -> bool {
         match self {
-            Self::Api(err) => err.has_no_side_effects(),
-            _ => false,
+            Self::Append(error) => error.has_no_side_effects(),
+            Self::SessionClosed | Self::SessionClosing => true,
+            Self::AckTimeout
+            | Self::ServerDisconnected
+            | Self::StreamClosedEarly
+            | Self::SessionDropped
+            | Self::InvalidAck(_) => false,
+        }
+    }
+
+    /// Return the underlying request error, if present.
+    pub fn request_error(&self) -> Option<&RequestError> {
+        match self {
+            Self::Append(error) => error.request_error(),
+            Self::AckTimeout
+            | Self::ServerDisconnected
+            | Self::StreamClosedEarly
+            | Self::SessionClosed
+            | Self::SessionClosing
+            | Self::SessionDropped
+            | Self::InvalidAck(_) => None,
         }
     }
 }
 
-impl From<AppendSessionError> for S2Error {
-    fn from(err: AppendSessionError) -> Self {
-        match err {
-            AppendSessionError::Api(api_err) => api_err.into(),
-            other => S2Error::Client(other.to_string()),
+impl From<ApiError> for AppendSessionError {
+    fn from(error: ApiError) -> Self {
+        match error {
+            ApiError::AppendConditionFailed(condition) => {
+                Self::Append(AppendError::ConditionFailed(condition.into()))
+            }
+            other => Self::Append(AppendError::Request(other.into())),
         }
     }
 }
 
 /// A [`Future`] that resolves to an acknowledgement once the batch of records is appended.
 pub struct BatchSubmitTicket {
-    rx: oneshot::Receiver<Result<AppendAck, S2Error>>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    rx: oneshot::Receiver<Result<AppendAck, AppendSessionError>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
 }
 
 impl Future for BatchSubmitTicket {
-    type Output = Result<AppendAck, S2Error>;
+    type Output = Result<AppendAck, AppendSessionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
@@ -91,7 +128,7 @@ impl Future for BatchSubmitTicket {
                 .terminal_err
                 .get()
                 .cloned()
-                .unwrap_or_else(|| AppendSessionError::SessionDropped.into()))),
+                .unwrap_or(AppendSessionError::SessionDropped))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -149,7 +186,7 @@ struct SessionState {
     cmd_rx: mpsc::Receiver<Command>,
     inflight_appends: VecDeque<InflightAppend>,
     inflight_bytes: usize,
-    close_tx: Option<oneshot::Sender<Result<(), S2Error>>>,
+    close_tx: Option<oneshot::Sender<Result<(), AppendSessionError>>>,
     total_records: usize,
     total_acked_records: usize,
     prev_ack_end: Option<StreamPosition>,
@@ -163,7 +200,7 @@ struct SessionState {
 pub struct AppendSession {
     cmd_tx: mpsc::Sender<Command>,
     permits: AppendPermits,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -208,7 +245,10 @@ impl AppendSession {
     ///
     /// **Note**: After all submits, you must call [`close`](Self::close) to ensure all batches are
     /// appended.
-    pub async fn submit(&self, input: AppendInput) -> Result<BatchSubmitTicket, S2Error> {
+    pub async fn submit(
+        &self,
+        input: AppendInput,
+    ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let permit = self.reserve(input.records.metered_bytes() as u32).await?;
         Ok(permit.submit(input))
     }
@@ -229,7 +269,7 @@ impl AppendSession {
     /// [`Semaphore::acquire_many_owned`](tokio::sync::Semaphore::acquire_many_owned) and
     /// [`Sender::reserve_owned`](tokio::sync::mpsc::Sender::reserve), both of which are cancel
     /// safe.
-    pub async fn reserve(&self, bytes: u32) -> Result<BatchSubmitPermit, S2Error> {
+    pub async fn reserve(&self, bytes: u32) -> Result<BatchSubmitPermit, AppendSessionError> {
         let append_permit = self.permits.acquire(bytes).await;
         let cmd_tx_permit = self
             .cmd_tx
@@ -245,7 +285,7 @@ impl AppendSession {
     }
 
     /// Close the session and wait for all submitted batch of records to be appended.
-    pub async fn close(self) -> Result<(), S2Error> {
+    pub async fn close(self) -> Result<(), AppendSessionError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Close { done_tx })
@@ -255,11 +295,11 @@ impl AppendSession {
         Ok(())
     }
 
-    fn terminal_err(&self) -> S2Error {
+    fn terminal_err(&self) -> AppendSessionError {
         self.terminal_err
             .get()
             .cloned()
-            .unwrap_or_else(|| AppendSessionError::SessionClosed.into())
+            .unwrap_or(AppendSessionError::SessionClosed)
     }
 }
 
@@ -267,7 +307,7 @@ impl AppendSession {
 pub struct BatchSubmitPermit {
     append_permit: AppendPermit,
     cmd_tx_permit: mpsc::OwnedPermit<Command>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
 }
 
 impl BatchSubmitPermit {
@@ -288,7 +328,7 @@ impl BatchSubmitPermit {
 
 pub(crate) struct AppendSessionInternal {
     cmd_tx: mpsc::Sender<Command>,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -321,7 +361,7 @@ impl AppendSessionInternal {
     pub(crate) fn submit(
         &self,
         input: AppendInput,
-    ) -> impl Future<Output = Result<BatchSubmitTicket, S2Error>> + Send + 'static {
+    ) -> impl Future<Output = Result<BatchSubmitTicket, AppendSessionError>> + Send + 'static {
         let cmd_tx = self.cmd_tx.clone();
         let terminal_err = self.terminal_err.clone();
         async move {
@@ -337,7 +377,7 @@ impl AppendSessionInternal {
                     terminal_err
                         .get()
                         .cloned()
-                        .unwrap_or_else(|| AppendSessionError::SessionClosed.into())
+                        .unwrap_or(AppendSessionError::SessionClosed)
                 })?;
             Ok(BatchSubmitTicket {
                 rx: ack_rx,
@@ -346,7 +386,7 @@ impl AppendSessionInternal {
         }
     }
 
-    pub(crate) async fn close(self) -> Result<(), S2Error> {
+    pub(crate) async fn close(self) -> Result<(), AppendSessionError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Close { done_tx })
@@ -356,11 +396,11 @@ impl AppendSessionInternal {
         Ok(())
     }
 
-    fn terminal_err(&self) -> S2Error {
+    fn terminal_err(&self) -> AppendSessionError {
         self.terminal_err
             .get()
             .cloned()
-            .unwrap_or_else(|| AppendSessionError::SessionClosed.into())
+            .unwrap_or(AppendSessionError::SessionClosed)
     }
 }
 
@@ -414,7 +454,7 @@ async fn run_session_with_retry(
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
-    terminal_err: Arc<OnceLock<S2Error>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
 ) {
     let frame_signal = match client.config.retry.append_retry_policy {
         AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
@@ -476,7 +516,7 @@ async fn run_session_with_retry(
                         "not retrying append session"
                     );
 
-                    let err: S2Error = err.into();
+                    let err: AppendSessionError = err;
 
                     let _ = terminal_err.set(err.clone());
 
@@ -585,7 +625,7 @@ async fn run_session(
                     Some(Command::Submit { input, ack_tx, permit }) => {
                         if state.close_tx.is_some() {
                             let _ = ack_tx.send(
-                                Err(AppendSessionError::SessionClosing.into())
+                                Err(AppendSessionError::SessionClosing)
                             );
                         } else {
                             let input_metered_bytes = input.records.metered_bytes();
@@ -807,14 +847,14 @@ fn process_ack(
 struct StashedSubmission {
     input: AppendInput,
     input_metered_bytes: usize,
-    ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
+    ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
     permit: Option<AppendPermit>,
 }
 
 struct InflightAppend {
     input: AppendInput,
     input_metered_bytes: usize,
-    ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
+    ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
     ack_deadline: Instant,
     _permit: Option<AppendPermit>,
 }
@@ -822,16 +862,16 @@ struct InflightAppend {
 enum Command {
     Submit {
         input: AppendInput,
-        ack_tx: oneshot::Sender<Result<AppendAck, S2Error>>,
+        ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
         permit: Option<AppendPermit>,
     },
     Close {
-        done_tx: oneshot::Sender<Result<(), S2Error>>,
+        done_tx: oneshot::Sender<Result<(), AppendSessionError>>,
     },
 }
 
 impl Command {
-    fn reject(self, err: S2Error) {
+    fn reject(self, err: AppendSessionError) {
         match self {
             Command::Submit { ack_tx, .. } => {
                 let _ = ack_tx.send(Err(err));
@@ -892,19 +932,20 @@ mod tests {
 
     use super::{AppendSessionError, is_safe_to_retry};
     use crate::{
-        api::{ApiError, ApiErrorResponse},
+        api::{ApiError, ServerErrorBody},
+        error::{AppendError, RequestError},
         frame_signal::FrameSignal,
         types::AppendRetryPolicy,
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
-        AppendSessionError::Api(ApiError::Server(
+        AppendSessionError::Append(AppendError::Request(RequestError::from(ApiError::Server(
             status,
-            ApiErrorResponse {
+            ServerErrorBody {
                 code: code.to_owned(),
                 message: "test".to_owned(),
             },
-        ))
+        ))))
     }
 
     #[test]

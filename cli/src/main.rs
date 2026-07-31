@@ -181,7 +181,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     let sdk_config = sdk_config(&cli_config, update::user_agent())?;
     let token_source = access_token_source(&cli_config);
     let s2 = S2::new(sdk_config.clone())
-        .map_err(|e| CliError::SdkInit(e).with_token_source(token_source))?;
+        .map_err(|e| CliError::SdkInit(e.into()).with_token_source(token_source))?;
     let mut exit_code = ExitCode::SUCCESS;
     let result: Result<(), CliError> = (async {
         match command {
@@ -654,7 +654,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             let s2 = S2::new(sdk_config.clone().with_retry(
                 RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
             ))
-            .map_err(CliError::SdkInit)?;
+            .map_err(|e| CliError::SdkInit(e.into()))?;
 
             let basin = s2.basin(basin_name);
             basin

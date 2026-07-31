@@ -12,6 +12,7 @@ use s2_common::{
     encryption::EncryptionAlgorithm,
     stream::StreamName,
 };
+use s2_sdk::error::{ErrorCode, RequestError};
 
 fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> BasinConfig {
     BasinConfig {
@@ -299,8 +300,11 @@ struct FieldDiff {
     new: String,
 }
 
-fn is_not_found_error(e: &s2_sdk::types::S2Error) -> bool {
-    matches!(e, s2_sdk::types::S2Error::Server(s2_sdk::types::ErrorResponse { code, .. }) if code == "basin_not_found" || code == "stream_not_found")
+fn is_not_found_error(error: &RequestError) -> bool {
+    error
+        .server_error()
+        .and_then(|error| error.known_code())
+        .is_some_and(|code| matches!(code, ErrorCode::BasinNotFound | ErrorCode::StreamNotFound))
 }
 
 fn format_storage_class(sc: StorageClass) -> &'static str {

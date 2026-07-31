@@ -65,7 +65,7 @@ use s2_common::{
 };
 use secrecy::SecretString;
 
-use crate::api::{ApiError, ApiErrorResponse};
+use crate::error::RequestError;
 
 /// An RFC 3339 datetime.
 ///
@@ -2840,6 +2840,10 @@ impl ReconfigureStreamInput {
 pub struct FencingToken(String);
 
 impl FencingToken {
+    pub(crate) fn from_server(value: String) -> Self {
+        Self(value)
+    }
+
     /// Generate a random alphanumeric fencing token of `n` bytes.
     pub fn generate(n: usize) -> Result<Self, ValidationError> {
         rand::rng()
@@ -3610,91 +3614,8 @@ impl ReadBatch {
     }
 }
 
-/// A [`Stream`](futures_core::Stream) of values of type `Result<T, S2Error>`.
-pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, S2Error>>>>;
-
-#[derive(Debug, Clone, thiserror::Error)]
-/// Why an append condition check failed.
-pub enum AppendConditionFailed {
-    #[error("fencing token mismatch, expected: {0}")]
-    /// Fencing token did not match. Contains the expected fencing token.
-    FencingTokenMismatch(FencingToken),
-    #[error("sequence number mismatch, expected: {0}")]
-    /// Sequence number did not match. Contains the expected sequence number.
-    SeqNumMismatch(u64),
-}
-
-impl From<api::stream::AppendConditionFailed> for AppendConditionFailed {
-    fn from(value: api::stream::AppendConditionFailed) -> Self {
-        match value {
-            api::stream::AppendConditionFailed::FencingTokenMismatch(token) => {
-                AppendConditionFailed::FencingTokenMismatch(FencingToken(token.to_string()))
-            }
-            api::stream::AppendConditionFailed::SeqNumMismatch(seq) => {
-                AppendConditionFailed::SeqNumMismatch(seq)
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-/// Errors from S2 operations.
-pub enum S2Error {
-    #[error("{0}")]
-    /// Client-side error.
-    Client(String),
-    #[error("malformed access token: {0}")]
-    /// Access token could not be used as an HTTP header value.
-    MalformedAccessToken(String),
-    #[error(transparent)]
-    /// Validation error.
-    Validation(#[from] ValidationError),
-    #[error("{0}")]
-    /// Append condition check failed. Contains the failure reason.
-    AppendConditionFailed(AppendConditionFailed),
-    #[error("read from an unwritten position. current tail: {0}")]
-    /// Read from an unwritten position. Contains the current tail.
-    ReadUnwritten(StreamPosition),
-    #[error("{0}")]
-    /// Other server-side error.
-    Server(ErrorResponse),
-}
-
-impl From<ApiError> for S2Error {
-    fn from(err: ApiError) -> Self {
-        match err {
-            ApiError::ReadUnwritten(tail_response) => {
-                Self::ReadUnwritten(tail_response.tail.into())
-            }
-            ApiError::AppendConditionFailed(condition_failed) => {
-                Self::AppendConditionFailed(condition_failed.into())
-            }
-            ApiError::Server(_, response) => Self::Server(response.into()),
-            ApiError::MalformedAccessToken(err) => Self::MalformedAccessToken(err),
-            other => Self::Client(other.to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("{code}: {message}")]
-#[non_exhaustive]
-/// Error response from S2 server.
-pub struct ErrorResponse {
-    /// Error code.
-    pub code: String,
-    /// Error message.
-    pub message: String,
-}
-
-impl From<ApiErrorResponse> for ErrorResponse {
-    fn from(response: ApiErrorResponse) -> Self {
-        Self {
-            code: response.code,
-            message: response.message,
-        }
-    }
-}
+/// A stream of values of type `Result<T, RequestError>`.
+pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, RequestError>>>>;
 
 fn idempotency_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
@@ -3706,7 +3627,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::api::ClientError;
 
     type HeaderParts = (Vec<u8>, Vec<u8>);
     type AppendRecordParts = (Vec<u8>, Vec<HeaderParts>);
@@ -4373,28 +4293,5 @@ mod tests {
         assert_eq!(record.headers[0].name.as_ref(), b"k");
         assert_eq!(record.headers[0].value.as_ref(), b"v");
         assert_eq!(record.timestamp, 1234);
-    }
-
-    // -- S2Error from ApiError --
-
-    #[test]
-    fn s2_error_from_api_error_client() {
-        let err = ApiError::Client(ClientError::Others("client error".to_owned()));
-        let s2_err: S2Error = err.into();
-        assert!(matches!(s2_err, S2Error::Client(_)));
-    }
-
-    // -- ErrorResponse --
-
-    #[test]
-    fn error_response_from_api() {
-        let api_resp = ApiErrorResponse {
-            code: "not_found".to_string(),
-            message: "basin not found".to_string(),
-        };
-        let resp: ErrorResponse = api_resp.into();
-        assert_eq!(resp.code, "not_found");
-        assert_eq!(resp.message, "basin not found");
-        assert!(resp.to_string().contains("not_found"));
     }
 }

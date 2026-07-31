@@ -5,12 +5,15 @@ use std::time::Duration;
 use assert_matches::assert_matches;
 use common::{S2Basin, SharedS2Basin, unique_stream_name, uuid};
 use futures_util::StreamExt;
-use s2_sdk::types::*;
+use s2_sdk::{
+    error::{RequestError, ServerError},
+    types::*,
+};
 use test_context::test_context;
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), S2Error> {
+async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     let stream_info = basin
@@ -49,7 +52,7 @@ async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn stream_config_roundtrip(basin: &S2Basin) -> Result<(), S2Error> {
+async fn stream_config_roundtrip(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new()
         .with_storage_class(StorageClass::Standard)
@@ -80,7 +83,7 @@ async fn stream_config_roundtrip(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream(basin: &S2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     basin
@@ -108,7 +111,7 @@ async fn reconfigure_stream(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn ensure_stream_created(basin: &S2Basin) -> Result<(), S2Error> {
+async fn ensure_stream_created(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     let delete_on_empty_config = DeleteOnEmptyConfig::new().with_min_age(Duration::from_hours(24));
@@ -133,7 +136,7 @@ async fn ensure_stream_created(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn ensure_stream_config_updated(basin: &S2Basin) -> Result<(), S2Error> {
+async fn ensure_stream_config_updated(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     let output = basin
@@ -174,7 +177,7 @@ async fn ensure_stream_config_updated(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn ensure_basin_config_unchanged(basin: &S2Basin) -> Result<(), S2Error> {
+async fn ensure_basin_config_unchanged(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     let output = basin
@@ -202,7 +205,7 @@ async fn ensure_basin_config_unchanged(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_limit(basin: &S2Basin) -> Result<(), S2Error> {
+async fn list_streams_with_limit(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name_1 = unique_stream_name();
     let stream_name_2 = unique_stream_name();
     let stream_name_3 = unique_stream_name();
@@ -230,7 +233,7 @@ async fn list_streams_with_limit(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_prefix(basin: &S2Basin) -> Result<(), S2Error> {
+async fn list_streams_with_prefix(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name_1: StreamName = "users/eu/0001".parse().expect("valid stream name");
     let stream_name_2: StreamName = "users/ca/0001".parse().expect("valid stream name");
     let stream_name_3: StreamName = "users/ca/0002".parse().expect("valid stream name");
@@ -259,7 +262,7 @@ async fn list_streams_with_prefix(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_start_after(basin: &S2Basin) -> Result<(), S2Error> {
+async fn list_streams_with_start_after(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name_1 = unique_stream_name();
     let stream_name_2 = unique_stream_name();
 
@@ -285,7 +288,9 @@ async fn list_streams_with_start_after(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_start_after_returns_empty_page(basin: &S2Basin) -> Result<(), S2Error> {
+async fn list_streams_with_start_after_returns_empty_page(
+    basin: &S2Basin,
+) -> Result<(), RequestError> {
     let stream_name_1 = unique_stream_name();
     let stream_name_2 = unique_stream_name();
 
@@ -311,14 +316,14 @@ async fn list_streams_with_start_after_returns_empty_page(basin: &S2Basin) -> Re
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn delete_nonexistent_stream_errors(basin: &S2Basin) -> Result<(), S2Error> {
+async fn delete_nonexistent_stream_errors(basin: &S2Basin) -> Result<(), RequestError> {
     let result = basin
         .delete_stream(DeleteStreamInput::new(unique_stream_name()))
         .await;
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "stream_not_found")
         }
     );
@@ -328,7 +333,7 @@ async fn delete_nonexistent_stream_errors(basin: &S2Basin) -> Result<(), S2Error
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn delete_nonexistent_stream_with_ignore(basin: &S2Basin) -> Result<(), S2Error> {
+async fn delete_nonexistent_stream_with_ignore(basin: &S2Basin) -> Result<(), RequestError> {
     let result = basin
         .delete_stream(DeleteStreamInput::new(unique_stream_name()).with_ignore_not_found(true))
         .await;
@@ -340,7 +345,7 @@ async fn delete_nonexistent_stream_with_ignore(basin: &S2Basin) -> Result<(), S2
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn get_stream_config(basin: &S2Basin) -> Result<(), S2Error> {
+async fn get_stream_config(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     let config = StreamConfig::new().with_storage_class(StorageClass::Express);
@@ -358,7 +363,7 @@ async fn get_stream_config(basin: &S2Basin) -> Result<(), S2Error> {
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_limit_zero(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_streams_with_limit_zero(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let prefix = format!("limit0-{}", uuid());
     let stream_name: StreamName = format!("{}-0001", prefix)
         .parse()
@@ -388,7 +393,7 @@ async fn list_streams_with_limit_zero(basin: &SharedS2Basin) -> Result<(), S2Err
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_limit_over_max(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_streams_with_limit_over_max(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let prefix = format!("limitmax-{}", uuid());
     let stream_name: StreamName = format!("{}-0001", prefix)
         .parse()
@@ -418,7 +423,7 @@ async fn list_streams_with_limit_over_max(basin: &SharedS2Basin) -> Result<(), S
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_with_pagination(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_streams_with_pagination(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let prefix = format!("page-{}", uuid());
     let stream_names: Vec<StreamName> = (0..3)
         .map(|idx| {
@@ -487,7 +492,9 @@ async fn list_streams_with_pagination(basin: &SharedS2Basin) -> Result<(), S2Err
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_streams_returns_lexicographic_order(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_streams_returns_lexicographic_order(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let prefix = format!("order-{}", uuid());
     let stream_names: Vec<StreamName> = (1..=3)
         .map(|idx| {
@@ -519,7 +526,9 @@ async fn list_streams_returns_lexicographic_order(basin: &SharedS2Basin) -> Resu
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_all_streams_iterates_with_prefix(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_all_streams_iterates_with_prefix(
+    basin: &SharedS2Basin,
+) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = format!("iter-{}", uuid());
     let stream_names: Vec<StreamName> = (1..=3)
         .map(|idx| {
@@ -554,7 +563,9 @@ async fn list_all_streams_iterates_with_prefix(basin: &SharedS2Basin) -> Result<
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn list_all_streams_include_deleted(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn list_all_streams_include_deleted(
+    basin: &SharedS2Basin,
+) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = format!("iter-del-{}", uuid());
     let stream_name: StreamName = format!("{}-0001", prefix)
         .parse()
@@ -591,7 +602,7 @@ async fn list_all_streams_include_deleted(basin: &SharedS2Basin) -> Result<(), S
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new()
         .with_storage_class(StorageClass::Standard)
@@ -636,7 +647,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), S2E
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_storage_class_express(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_storage_class_express(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new().with_storage_class(StorageClass::Express);
 
@@ -664,7 +675,9 @@ async fn create_stream_storage_class_express(basin: &SharedS2Basin) -> Result<()
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_retention_policy_infinite(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_retention_policy_infinite(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new().with_retention_policy(RetentionPolicy::Infinite);
 
@@ -692,7 +705,7 @@ async fn create_stream_retention_policy_infinite(basin: &SharedS2Basin) -> Resul
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let modes = [
         TimestampingMode::ClientPrefer,
         TimestampingMode::ClientRequire,
@@ -739,7 +752,7 @@ async fn create_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<(), S
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<(), RequestError> {
     for uncapped in [true, false] {
         let stream_name = unique_stream_name();
         let config = StreamConfig::new()
@@ -765,7 +778,7 @@ async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<()
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_delete_on_empty_min_age(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_delete_on_empty_min_age(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new()
         .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600)));
@@ -792,7 +805,9 @@ async fn create_stream_delete_on_empty_min_age(basin: &SharedS2Basin) -> Result<
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_invalid_retention_age_zero(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_invalid_retention_age_zero(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new().with_retention_policy(RetentionPolicy::Age(0));
 
@@ -802,7 +817,7 @@ async fn create_stream_invalid_retention_age_zero(basin: &SharedS2Basin) -> Resu
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -812,12 +827,12 @@ async fn create_stream_invalid_retention_age_zero(basin: &SharedS2Basin) -> Resu
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn get_stream_config_nonexistent_errors(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn get_stream_config_nonexistent_errors(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let result = basin.get_stream_config(unique_stream_name()).await;
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -827,7 +842,9 @@ async fn get_stream_config_nonexistent_errors(basin: &SharedS2Basin) -> Result<(
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_storage_class_standard(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_storage_class_standard(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
@@ -851,7 +868,9 @@ async fn reconfigure_stream_storage_class_standard(basin: &SharedS2Basin) -> Res
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_storage_class_express(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_storage_class_express(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
@@ -886,7 +905,9 @@ async fn reconfigure_stream_storage_class_express(basin: &SharedS2Basin) -> Resu
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_retention_policy_age(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_retention_policy_age(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
@@ -912,7 +933,7 @@ async fn reconfigure_stream_retention_policy_age(basin: &SharedS2Basin) -> Resul
 #[tokio_shared_rt::test(shared)]
 async fn reconfigure_stream_retention_policy_infinite(
     basin: &SharedS2Basin,
-) -> Result<(), S2Error> {
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
@@ -947,7 +968,7 @@ async fn reconfigure_stream_retention_policy_infinite(
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let modes = [
         TimestampingMode::ClientPrefer,
         TimestampingMode::ClientRequire,
@@ -998,7 +1019,9 @@ async fn reconfigure_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_timestamping_uncapped(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     for uncapped in [true, false] {
         let stream_name = unique_stream_name();
         basin
@@ -1028,7 +1051,7 @@ async fn reconfigure_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Resu
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_delete_on_empty(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_delete_on_empty(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
@@ -1060,7 +1083,9 @@ async fn reconfigure_stream_delete_on_empty(basin: &SharedS2Basin) -> Result<(),
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_disable_delete_on_empty(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_disable_delete_on_empty(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(
@@ -1093,7 +1118,9 @@ async fn reconfigure_stream_disable_delete_on_empty(basin: &SharedS2Basin) -> Re
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_empty_config_no_change(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_empty_config_no_change(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(
@@ -1125,7 +1152,7 @@ async fn reconfigure_stream_empty_config_no_change(basin: &SharedS2Basin) -> Res
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_partial_update(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_partial_update(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(
@@ -1169,7 +1196,7 @@ async fn reconfigure_stream_partial_update(basin: &SharedS2Basin) -> Result<(), 
 #[tokio_shared_rt::test(shared)]
 async fn reconfigure_stream_invalid_retention_age_zero(
     basin: &SharedS2Basin,
-) -> Result<(), S2Error> {
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
@@ -1184,7 +1211,7 @@ async fn reconfigure_stream_invalid_retention_age_zero(
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "invalid");
         }
     );
@@ -1198,7 +1225,7 @@ async fn reconfigure_stream_invalid_retention_age_zero(
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let result = basin
         .reconfigure_stream(ReconfigureStreamInput::new(
             unique_stream_name(),
@@ -1208,7 +1235,7 @@ async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "stream_not_found");
         }
     );
@@ -1218,7 +1245,7 @@ async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn create_stream_duplicate_name_errors(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn create_stream_duplicate_name_errors(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     basin
@@ -1231,7 +1258,7 @@ async fn create_stream_duplicate_name_errors(basin: &SharedS2Basin) -> Result<()
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert_eq!(code, "resource_already_exists");
         }
     );
@@ -1247,7 +1274,7 @@ async fn create_stream_duplicate_name_errors(basin: &SharedS2Basin) -> Result<()
 #[tokio_shared_rt::test(shared)]
 async fn delete_stream_already_deleting_is_idempotent(
     basin: &SharedS2Basin,
-) -> Result<(), S2Error> {
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     basin
@@ -1264,7 +1291,7 @@ async fn delete_stream_already_deleting_is_idempotent(
 
     match result {
         Ok(()) => {}
-        Err(S2Error::Server(ErrorResponse { code, .. })) if code == "stream_not_found" => {}
+        Err(RequestError::Server(ServerError { code, .. })) if code == "stream_not_found" => {}
         Err(err) => return Err(err),
     }
 
@@ -1275,7 +1302,7 @@ async fn delete_stream_already_deleting_is_idempotent(
 #[tokio_shared_rt::test(shared)]
 async fn get_stream_config_for_deleting_stream_errors(
     basin: &SharedS2Basin,
-) -> Result<(), S2Error> {
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     basin
@@ -1290,7 +1317,7 @@ async fn get_stream_config_for_deleting_stream_errors(
 
     assert_matches!(
         result,
-        Err(S2Error::Server(ErrorResponse { code, .. })) => {
+        Err(RequestError::Server(ServerError { code, .. })) => {
             assert!(code == "stream_deletion_pending" || code == "stream_not_found");
         }
     );
@@ -1300,7 +1327,9 @@ async fn get_stream_config_for_deleting_stream_errors(
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn deleted_stream_has_deleted_at_when_listed(basin: &SharedS2Basin) -> Result<(), S2Error> {
+async fn deleted_stream_has_deleted_at_when_listed(
+    basin: &SharedS2Basin,
+) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     basin
@@ -1339,9 +1368,9 @@ async fn deleted_stream_has_deleted_at_when_listed(basin: &SharedS2Basin) -> Res
     panic!("deleted stream still listed without deleted_at after timeout");
 }
 
-fn is_free_tier_limitation(err: &S2Error) -> bool {
+fn is_free_tier_limitation(err: &RequestError) -> bool {
     match err {
-        S2Error::Server(ErrorResponse { code, message, .. }) if code == "invalid" => {
+        RequestError::Server(ServerError { code, message, .. }) if code == "invalid" => {
             message.to_lowercase().contains("free tier")
         }
         _ => false,

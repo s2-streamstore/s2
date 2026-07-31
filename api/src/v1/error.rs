@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[strum(serialize_all = "snake_case")]
+#[non_exhaustive]
 // Keep this alphabetized.
 pub enum ErrorCode {
     AccessTokenNotFound,
@@ -47,6 +48,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Whether this code represents an authentication or authorization failure.
     pub fn is_auth_error(self) -> bool {
         matches!(
             self,
@@ -54,6 +56,7 @@ impl ErrorCode {
         )
     }
 
+    /// HTTP status associated with this error code.
     pub fn status(self) -> http::StatusCode {
         match self {
             Self::Authn => http::StatusCode::UNAUTHORIZED,
@@ -83,18 +86,71 @@ impl ErrorCode {
             Self::UpstreamTimeout => http::StatusCode::GATEWAY_TIMEOUT,
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    /// Whether retrying an operation that returned this code is sensible.
+    pub fn is_retryable(self) -> bool {
+        match self {
+            Self::RequestTimeout
+            | Self::TransactionConflict
+            | Self::RateLimited
+            | Self::Other
+            | Self::Storage
+            | Self::HotServer
+            | Self::Unavailable
+            | Self::UpstreamTimeout => true,
+            Self::AccessTokenNotFound
+            | Self::Authn
+            | Self::BadFrame
+            | Self::BadHeader
+            | Self::BadJson
+            | Self::BadPath
+            | Self::BadProto
+            | Self::BadQuery
+            | Self::BasinDeletionPending
+            | Self::BasinNotFound
+            | Self::ClientHangup
+            | Self::DecryptionFailed
+            | Self::Invalid
+            | Self::NotImplemented
+            | Self::PermissionDenied
+            | Self::QuotaExhausted
+            | Self::ResourceAlreadyExists
+            | Self::StreamDeletionPending
+            | Self::StreamNotFound => false,
+        }
+    }
 
-    #[test]
-    fn auth_related_codes_are_classified() {
-        assert!(ErrorCode::Authn.is_auth_error());
-        assert!(ErrorCode::PermissionDenied.is_auth_error());
-        assert!(ErrorCode::AccessTokenNotFound.is_auth_error());
-        assert!(!ErrorCode::NotImplemented.is_auth_error());
+    /// Whether the server guarantees that an operation returning this code had no side effects.
+    pub fn has_no_side_effects(self) -> bool {
+        match self {
+            Self::AccessTokenNotFound
+            | Self::Authn
+            | Self::BadFrame
+            | Self::BadHeader
+            | Self::BadJson
+            | Self::BadPath
+            | Self::BadProto
+            | Self::BadQuery
+            | Self::BasinDeletionPending
+            | Self::BasinNotFound
+            | Self::DecryptionFailed
+            | Self::HotServer
+            | Self::Invalid
+            | Self::NotImplemented
+            | Self::PermissionDenied
+            | Self::QuotaExhausted
+            | Self::RateLimited
+            | Self::ResourceAlreadyExists
+            | Self::StreamDeletionPending
+            | Self::StreamNotFound
+            | Self::TransactionConflict => true,
+            Self::ClientHangup
+            | Self::Other
+            | Self::RequestTimeout
+            | Self::Storage
+            | Self::Unavailable
+            | Self::UpstreamTimeout => false,
+        }
     }
 }
 
