@@ -3515,10 +3515,9 @@ pub struct ReadInput {
 #[non_exhaustive]
 /// Configuration for a continuous read session.
 pub struct ReadSessionConfig {
-    /// Reconnect indefinitely after retryable errors and fully open-ended clean stream ends.
+    /// Whether to keep retrying retryable failures after the configured retry budget is exhausted.
     ///
-    /// Clean stream ends for reads with any count, byte, timestamp, or wait limit terminate
-    /// normally; retryable failures still retry indefinitely.
+    /// Clean stream ends and non-retryable failures always terminate the session.
     ///
     /// Defaults to `false`.
     pub retry_indefinitely: bool,

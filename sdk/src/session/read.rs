@@ -447,22 +447,7 @@ where
                     yield Err(err);
                     break;
                 }
-                None => {
-                    if retry_indefinitely && is_open_ended(&end) {
-                        batches = None;
-                        let retrying_indefinitely = retry_backoff.is_exhausted();
-                        let backoff = retry_backoff.next_or_max();
-                        debug!(
-                            ?backoff,
-                            retrying_indefinitely,
-                            "reconnecting read session after clean stream end"
-                        );
-                        yield Ok(ReadUpdate::behind());
-                        tokio::time::sleep(backoff).await;
-                        continue;
-                    }
-                    break;
-                }
+                None => break,
             }
         }
     });
@@ -503,10 +488,6 @@ fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> 
         Some(since) => w.saturating_sub(since.elapsed().as_secs() as u32),
         None => w,
     })
-}
-
-fn is_open_ended(end: &ReadEnd) -> bool {
-    end.count.is_none() && end.bytes.is_none() && end.until.is_none() && end.wait.is_none()
 }
 
 fn retry_delay(
@@ -569,9 +550,7 @@ mod tests {
     use crate::{
         api::ApiError,
         retry::RetryBackoffBuilder,
-        types::{
-            Header, ReadFrom, ReadLimits, ReadStart as PublicReadStart, ReadStop, SequencedRecord,
-        },
+        types::{Header, ReadFrom, ReadStart as PublicReadStart, SequencedRecord},
     };
 
     enum OpenAction {
@@ -626,15 +605,6 @@ mod tests {
 
     fn session_config(retry_indefinitely: bool) -> ReadSessionConfig {
         ReadSessionConfig::new().with_retry_indefinitely(retry_indefinitely)
-    }
-
-    fn open_end() -> ReadEnd {
-        ReadEnd {
-            count: None,
-            bytes: None,
-            until: None,
-            wait: None,
-        }
     }
 
     fn position(seq_num: u64) -> StreamPosition {
@@ -907,11 +877,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_indefinitely_reconnects_after_open_ended_clean_end() {
-        let (opener, calls) = scripted_opener(vec![
-            OpenAction::Batches(Vec::new()),
-            OpenAction::Batches(vec![Ok(batch(vec![record(0, false)], None))]),
-        ]);
+    async fn retry_indefinitely_preserves_clean_end() {
+        let (opener, calls) = scripted_opener(vec![OpenAction::Batches(Vec::new())]);
         let mut session = read_session_with_opener(
             opener,
             immediate_backoff(0),
@@ -920,55 +887,6 @@ mod tests {
         )
         .await
         .unwrap();
-
-        assert_eq!(session.next().await.unwrap().unwrap().records[0].seq_num, 0);
-        assert_eq!(
-            calls
-                .lock()
-                .expect("scripted opener call lock should not be poisoned")
-                .len(),
-            2
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn clean_end_reconnect_marks_session_behind() {
-        let tail = position(1);
-        let (opener, _) = scripted_opener(vec![OpenAction::Batches(vec![Ok(batch(
-            vec![record(0, false)],
-            Some(tail),
-        ))])]);
-        let retry_backoff = RetryBackoffBuilder::default()
-            .with_min_base_delay(Duration::from_secs(1))
-            .with_max_base_delay(Duration::from_secs(1))
-            .with_max_retries(0)
-            .build();
-        let mut session =
-            read_session_with_opener(opener, retry_backoff, read_input(0), session_config(true))
-                .await
-                .unwrap();
-
-        session.next().await.unwrap().unwrap();
-        assert!(session.is_caught_up());
-
-        let mut next = Box::pin(session.next());
-        assert!(poll!(next.as_mut()).is_pending());
-        drop(next);
-        assert!(!session.is_caught_up());
-
-        let mut caught_up = Box::pin(session.caught_up());
-        assert!(poll!(caught_up.as_mut()).is_pending());
-    }
-
-    #[tokio::test]
-    async fn retry_indefinitely_preserves_bounded_clean_end() {
-        let (opener, calls) = scripted_opener(vec![OpenAction::Batches(Vec::new())]);
-        let input =
-            read_input(0).with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(1)));
-        let mut session =
-            read_session_with_opener(opener, immediate_backoff(0), input, session_config(true))
-                .await
-                .unwrap();
 
         assert!(session.next().await.is_none());
         assert_eq!(
@@ -1029,36 +947,6 @@ mod tests {
                 .len(),
             2
         );
-    }
-
-    #[test]
-    fn open_ended_read_has_no_limits() {
-        let open_ended = open_end();
-        assert!(is_open_ended(&open_ended));
-        assert!(!is_open_ended(&ReadEnd {
-            count: Some(1),
-            bytes: None,
-            until: None,
-            wait: None,
-        }));
-        assert!(!is_open_ended(&ReadEnd {
-            count: None,
-            bytes: None,
-            until: Some(1),
-            wait: None,
-        }));
-        assert!(!is_open_ended(&ReadEnd {
-            count: None,
-            bytes: None,
-            until: None,
-            wait: Some(1),
-        }));
-        assert!(!is_open_ended(&ReadEnd {
-            count: None,
-            bytes: Some(1),
-            until: None,
-            wait: None,
-        }));
     }
 
     #[test]
