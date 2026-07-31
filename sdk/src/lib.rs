@@ -40,13 +40,6 @@ The Rust SDK provides ergonomic wrappers and utilities to interact with the
 See [`S2`] for account-level operations, [`S2Basin`] for basin-level operations,
 and [`S2Stream`] for stream-level operations.
 
-# Error handling
-
-Operations return surface-specific errors from [`error`]. Each error classifies whether retrying is
-sensible. Errors for mutation-capable surfaces also classify whether retrying can duplicate a
-mutation. Wrapper errors expose their underlying request and server errors directly, so callers do
-not need to inspect display strings or manually unwrap every layer.
-
 # Examples
 
 We have curated a bunch of examples in the
