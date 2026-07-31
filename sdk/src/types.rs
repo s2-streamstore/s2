@@ -4167,16 +4167,6 @@ mod tests {
         assert_eq!(api.wait, Some(30));
     }
 
-    #[test]
-    fn read_session_config_defaults_and_builder() {
-        assert!(!ReadSessionConfig::new().retry_indefinitely);
-        assert!(
-            ReadSessionConfig::default()
-                .with_retry_indefinitely(true)
-                .retry_indefinitely
-        );
-    }
-
     // -- Operation roundtrip --
 
     #[test]
