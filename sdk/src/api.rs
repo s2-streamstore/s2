@@ -594,8 +594,8 @@ impl Deref for BasinClient {
 #[derive(Debug, thiserror::Error, serde::Deserialize)]
 #[error("{code}: {message}")]
 pub(crate) struct ServerErrorBody {
-    pub(crate) code: String,
-    pub(crate) message: String,
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, thiserror::Error)]
