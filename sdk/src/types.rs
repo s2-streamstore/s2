@@ -2893,6 +2893,16 @@ pub struct StreamPosition {
     pub timestamp: u64,
 }
 
+impl StreamPosition {
+    /// Construct a stream position for use in downstream tests.
+    ///
+    /// Available with the `test-util` crate feature.
+    #[cfg(any(feature = "_hidden", feature = "test-util"))]
+    pub fn new(seq_num: u64, timestamp: u64) -> Self {
+        Self { seq_num, timestamp }
+    }
+}
+
 impl std::fmt::Display for StreamPosition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "seq_num={}, timestamp={}", self.seq_num, self.timestamp)
@@ -3593,8 +3603,10 @@ pub struct SequencedRecord {
 }
 
 impl SequencedRecord {
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
+    /// Construct a sequenced record from its plain-data fields for use in downstream tests.
+    ///
+    /// Available with the `test-util` crate feature.
+    #[cfg(any(feature = "_hidden", feature = "test-util"))]
     pub fn from_parts(
         seq_num: u64,
         timestamp: u64,
@@ -3648,6 +3660,14 @@ pub struct ReadBatch {
 }
 
 impl ReadBatch {
+    /// Construct a read batch for use in downstream tests.
+    ///
+    /// Available with the `test-util` crate feature.
+    #[cfg(any(feature = "_hidden", feature = "test-util"))]
+    pub fn new(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> Self {
+        Self { records, tail }
+    }
+
     pub(crate) fn from_api(batch: api::stream::proto::ReadBatch) -> Self {
         Self {
             records: batch.records.into_iter().map(Into::into).collect(),

@@ -12,11 +12,13 @@ categories = ["api-bindings", "database"]
 
 [package.metadata.docs.rs]
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
-features = ["rustls-aws-lc-rs", "rustls-ring"]
+features = ["rustls-aws-lc-rs", "rustls-ring", "test-util"]
 
 [features]
 default = ["rustls-aws-lc-rs"]
 _hidden = []
+# Public constructors for building SDK fixtures in downstream tests.
+test-util = []
 rustls-aws-lc-rs = ["hyper-rustls/aws-lc-rs", "rustls/aws-lc-rs"]
 rustls-ring = ["hyper-rustls/ring", "rustls/ring"]
 
