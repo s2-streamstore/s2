@@ -1,9 +1,7 @@
-#![cfg(feature = "test-util")]
-
 use s2_sdk::types::{Header, ReadBatch, SequencedRecord, StreamPosition};
 
 #[test]
-fn downstream_tests_can_construct_read_fixtures() {
+fn read_types_can_be_constructed_from_parts() {
     let record =
         SequencedRecord::from_parts(41, 1_234, vec![Header::new("source", "fixture")], "record");
     let tail = StreamPosition::new(42, 1_234);

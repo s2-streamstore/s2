@@ -2894,10 +2894,7 @@ pub struct StreamPosition {
 }
 
 impl StreamPosition {
-    /// Construct a stream position for use in downstream tests.
-    ///
-    /// Available with the `test-util` crate feature.
-    #[cfg(any(feature = "_hidden", feature = "test-util"))]
+    /// Construct a stream position.
     pub fn new(seq_num: u64, timestamp: u64) -> Self {
         Self { seq_num, timestamp }
     }
@@ -3603,10 +3600,7 @@ pub struct SequencedRecord {
 }
 
 impl SequencedRecord {
-    /// Construct a sequenced record from its plain-data fields for use in downstream tests.
-    ///
-    /// Available with the `test-util` crate feature.
-    #[cfg(any(feature = "_hidden", feature = "test-util"))]
+    /// Construct a sequenced record from its plain-data fields.
     pub fn from_parts(
         seq_num: u64,
         timestamp: u64,
@@ -3660,10 +3654,7 @@ pub struct ReadBatch {
 }
 
 impl ReadBatch {
-    /// Construct a read batch for use in downstream tests.
-    ///
-    /// Available with the `test-util` crate feature.
-    #[cfg(any(feature = "_hidden", feature = "test-util"))]
+    /// Construct a read batch.
     pub fn new(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> Self {
         Self { records, tail }
     }
