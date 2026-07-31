@@ -326,26 +326,47 @@ pub async fn read_session(
     client: BasinClient,
     name: StreamName,
     encryption: Option<EncryptionKey>,
+    start: ReadStart,
+    end: ReadEnd,
+    ignore_command_records: bool,
+    retry_indefinitely: bool,
+) -> Result<ReadSession, ReadSessionError> {
+    let retry_backoff = retry_builder(&client.config.retry).build();
+    let open_session = move |start, end| {
+        let client = client.clone();
+        let name = name.clone();
+        let encryption = encryption.clone();
+        async move { session_inner(client, name, encryption, start, end).await }
+    };
+    read_session_with_opener(
+        open_session,
+        retry_backoff,
+        start,
+        end,
+        ignore_command_records,
+        retry_indefinitely,
+    )
+    .await
+}
+
+async fn read_session_with_opener<F, Fut>(
+    open_session: F,
+    mut retry_backoff: RetryBackoff,
     mut start: ReadStart,
     mut end: ReadEnd,
     ignore_command_records: bool,
     retry_indefinitely: bool,
-) -> Result<ReadSession, ReadSessionError> {
-    let mut retry_backoff = retry_builder(&client.config.retry).build();
+) -> Result<ReadSession, ReadSessionError>
+where
+    F: Fn(ReadStart, ReadEnd) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<InternalStreaming<ReadBatch>, ReadSessionFailure>> + Send + 'static,
+{
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
 
     let batches = loop {
         end.wait = remaining_wait(baseline_wait, last_tail_at);
-        match session_inner(
-            client.clone(),
-            name.clone(),
-            encryption.clone(),
-            start.clone(),
-            end.clone(),
-        )
-        .await
-        {
+        match open_session(start.clone(), end.clone()).await {
             Ok(batches) => {
                 retry_backoff.reset();
                 break batches;
@@ -366,13 +387,7 @@ pub async fn read_session(
         loop {
             if batches.is_none() {
                 end.wait = remaining_wait(baseline_wait, last_tail_at);
-                match session_inner(
-                    client.clone(),
-                    name.clone(),
-                    encryption.clone(),
-                    start.clone(),
-                    end.clone(),
-                ).await {
+                match open_session(start.clone(), end.clone()).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
                         if let Some(backoff) =
@@ -436,8 +451,13 @@ pub async fn read_session(
                 None => {
                     if retry_indefinitely && is_open_ended(&end) {
                         batches = None;
-                        let backoff = next_retry_delay(&mut retry_backoff, true)
-                            .expect("auto reconnect supplies a capped retry delay");
+                        let retrying_indefinitely = retry_backoff.is_exhausted();
+                        let backoff = retry_backoff.next_or_max();
+                        debug!(
+                            ?backoff,
+                            retrying_indefinitely,
+                            "reconnecting read session after clean stream end"
+                        );
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
@@ -504,11 +524,13 @@ fn retry_delay(
         return None;
     }
 
+    let retrying_indefinitely = retry_indefinitely && backoffs.is_exhausted();
     if let Some(backoff) = next_retry_delay(backoffs, retry_indefinitely) {
         debug!(
             %err,
             ?backoff,
             num_retries_remaining = backoffs.remaining(),
+            retrying_indefinitely,
             "retrying read session"
         );
         Some(backoff)
@@ -524,20 +546,95 @@ fn retry_delay(
 }
 
 fn next_retry_delay(backoffs: &mut RetryBackoff, retry_indefinitely: bool) -> Option<Duration> {
-    backoffs
-        .next()
-        .or_else(|| retry_indefinitely.then(|| backoffs.max_base_delay()))
+    if retry_indefinitely {
+        Some(backoffs.next_or_max())
+    } else {
+        backoffs.next()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
     use bytes::Bytes;
     use futures_util::{StreamExt, poll, stream};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
     use super::*;
-    use crate::types::{Header, SequencedRecord};
+    use crate::{
+        api::ApiError,
+        retry::RetryBackoffBuilder,
+        types::{Header, SequencedRecord},
+    };
+
+    enum OpenAction {
+        Error(ReadSessionFailure),
+        Batches(Vec<Result<ReadBatch, ReadSessionFailure>>),
+    }
+
+    type OpenSessionFuture = Pin<
+        Box<dyn Future<Output = Result<InternalStreaming<ReadBatch>, ReadSessionFailure>> + Send>,
+    >;
+    type SessionOpener = Box<dyn Fn(ReadStart, ReadEnd) -> OpenSessionFuture + Send + Sync>;
+    type OpenCalls = Arc<Mutex<Vec<(ReadStart, ReadEnd)>>>;
+
+    fn scripted_opener(actions: Vec<OpenAction>) -> (SessionOpener, OpenCalls) {
+        let actions = Arc::new(Mutex::new(VecDeque::from(actions)));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_opener = calls.clone();
+        let opener: SessionOpener = Box::new(move |start, end| {
+            calls_for_opener
+                .lock()
+                .expect("scripted opener call lock should not be poisoned")
+                .push((start, end));
+            let action = actions
+                .lock()
+                .expect("scripted opener action lock should not be poisoned")
+                .pop_front()
+                .expect("scripted opener should have another action");
+            Box::pin(async move {
+                match action {
+                    OpenAction::Error(error) => Err(error),
+                    OpenAction::Batches(batches) => {
+                        let batches: InternalStreaming<ReadBatch> = Box::pin(stream::iter(batches));
+                        Ok(batches)
+                    }
+                }
+            })
+        });
+        (opener, calls)
+    }
+
+    fn immediate_backoff(max_retries: u32) -> RetryBackoff {
+        RetryBackoffBuilder::default()
+            .with_min_base_delay(Duration::ZERO)
+            .with_max_base_delay(Duration::ZERO)
+            .with_max_retries(max_retries)
+            .build()
+    }
+
+    fn start_at(seq_num: u64) -> ReadStart {
+        ReadStart {
+            seq_num: Some(seq_num),
+            timestamp: None,
+            tail_offset: None,
+            clamp: None,
+        }
+    }
+
+    fn open_end() -> ReadEnd {
+        ReadEnd {
+            count: None,
+            bytes: None,
+            until: None,
+            wait: None,
+        }
+    }
 
     fn position(seq_num: u64) -> StreamPosition {
         StreamPosition {
@@ -777,14 +874,144 @@ mod tests {
         assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
     }
 
+    #[tokio::test]
+    async fn retry_indefinitely_reconnects_after_budget_and_resumes() {
+        let (opener, calls) = scripted_opener(vec![
+            OpenAction::Batches(vec![
+                Ok(batch(vec![record(0, false)], None)),
+                Err(ReadSessionFailure::HeartbeatTimeout),
+            ]),
+            OpenAction::Error(ReadSessionFailure::HeartbeatTimeout),
+            OpenAction::Error(ReadSessionFailure::HeartbeatTimeout),
+            OpenAction::Batches(vec![Ok(batch(vec![record(1, false)], None))]),
+        ]);
+        let mut session = read_session_with_opener(
+            opener,
+            immediate_backoff(1),
+            start_at(0),
+            open_end(),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.next().await.unwrap().unwrap().records[0].seq_num, 0);
+        assert_eq!(session.next().await.unwrap().unwrap().records[0].seq_num, 1);
+
+        let calls = calls
+            .lock()
+            .expect("scripted opener call lock should not be poisoned");
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].0.seq_num, Some(0));
+        assert!(calls[1..].iter().all(|(start, _)| start.seq_num == Some(1)));
+    }
+
+    #[tokio::test]
+    async fn retry_indefinitely_reconnects_after_open_ended_clean_end() {
+        let (opener, calls) = scripted_opener(vec![
+            OpenAction::Batches(Vec::new()),
+            OpenAction::Batches(vec![Ok(batch(vec![record(0, false)], None))]),
+        ]);
+        let mut session = read_session_with_opener(
+            opener,
+            immediate_backoff(0),
+            start_at(0),
+            open_end(),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.next().await.unwrap().unwrap().records[0].seq_num, 0);
+        assert_eq!(
+            calls
+                .lock()
+                .expect("scripted opener call lock should not be poisoned")
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_indefinitely_preserves_bounded_clean_end() {
+        let (opener, calls) = scripted_opener(vec![OpenAction::Batches(Vec::new())]);
+        let mut end = open_end();
+        end.bytes = Some(1);
+        let mut session =
+            read_session_with_opener(opener, immediate_backoff(0), start_at(0), end, false, true)
+                .await
+                .unwrap();
+
+        assert!(session.next().await.is_none());
+        assert_eq!(
+            calls
+                .lock()
+                .expect("scripted opener call lock should not be poisoned")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_indefinitely_stops_on_non_retryable_error() {
+        let (opener, calls) = scripted_opener(vec![OpenAction::Batches(vec![Err(
+            ReadSessionFailure::Api(ApiError::MalformedAccessToken("bad token".to_owned())),
+        )])]);
+        let mut session = read_session_with_opener(
+            opener,
+            immediate_backoff(0),
+            start_at(0),
+            open_end(),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let error = session.next().await.unwrap().unwrap_err();
+        assert!(!error.is_retryable());
+        assert_eq!(
+            calls
+                .lock()
+                .expect("scripted opener call lock should not be poisoned")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn finite_retry_mode_still_stops_after_budget() {
+        let (opener, calls) = scripted_opener(vec![
+            OpenAction::Error(ReadSessionFailure::HeartbeatTimeout),
+            OpenAction::Error(ReadSessionFailure::HeartbeatTimeout),
+        ]);
+        let error = read_session_with_opener(
+            opener,
+            immediate_backoff(1),
+            start_at(0),
+            open_end(),
+            false,
+            false,
+        )
+        .await
+        .err()
+        .expect("finite retry mode should return an error");
+
+        assert!(matches!(error, ReadSessionError::HeartbeatTimeout));
+        assert_eq!(
+            calls
+                .lock()
+                .expect("scripted opener call lock should not be poisoned")
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn open_ended_read_has_no_limits() {
-        let open_ended = ReadEnd {
-            count: None,
-            bytes: None,
-            until: None,
-            wait: None,
-        };
+        let open_ended = open_end();
         assert!(is_open_ended(&open_ended));
         assert!(!is_open_ended(&ReadEnd {
             count: Some(1),
@@ -804,6 +1031,12 @@ mod tests {
             until: None,
             wait: Some(1),
         }));
+        assert!(!is_open_ended(&ReadEnd {
+            count: None,
+            bytes: Some(1),
+            until: None,
+            wait: None,
+        }));
     }
 
     #[test]
@@ -814,6 +1047,7 @@ mod tests {
         }
 
         let delay = retry_delay(&ReadSessionFailure::HeartbeatTimeout, &mut backoffs, true);
-        assert_eq!(delay, Some(backoffs.max_base_delay()));
+        assert!(delay.is_some());
+        assert!(backoffs.is_exhausted());
     }
 }
