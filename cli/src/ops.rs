@@ -18,9 +18,9 @@ use s2_sdk::{
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
         ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric, ReadFrom, ReadInput,
-        ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime,
-        SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition, StreamReconfiguration,
-        TimeRange, TimeRangeAndInterval,
+        ReadLimits, ReadSessionConfig, ReadStart, ReadStop, ReconfigureBasinInput,
+        ReconfigureStreamInput, S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet,
+        StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval,
     },
 };
 
@@ -571,7 +571,10 @@ pub async fn read(
     }
 
     stream
-        .read_session(ReadInput::new().with_start(start).with_stop(stop))
+        .read_session(
+            ReadInput::new().with_start(start).with_stop(stop),
+            ReadSessionConfig::default(),
+        )
         .await
         .map_err(|e| CliError::op(OpKind::Read, e))
 }
@@ -694,7 +697,10 @@ pub async fn tail(
     };
 
     let batches = stream
-        .read_session(ReadInput::new().with_start(start).with_stop(stop))
+        .read_session(
+            ReadInput::new().with_start(start).with_stop(stop),
+            ReadSessionConfig::default(),
+        )
         .await
         .map_err(|e| CliError::op(OpKind::Tail, e))?;
 

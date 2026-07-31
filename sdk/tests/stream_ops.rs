@@ -753,7 +753,10 @@ async fn read_session_beyond_tail_errors(
     assert_eq!(ack.end.seq_num, 1);
 
     let result = stream
-        .read_session(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(10))))
+        .read_session(
+            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(10))),
+            ReadSessionConfig::default(),
+        )
         .await;
 
     assert!(result.is_err());
@@ -786,6 +789,7 @@ async fn read_session_beyond_tail_with_clamp_to_tail(
                     .with_from(ReadFrom::SeqNum(10))
                     .with_clamp_to_tail(true),
             ),
+            ReadSessionConfig::default(),
         )
         .await?;
 
@@ -809,6 +813,7 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     let mut session = stream
         .read_session(
             ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
+            ReadSessionConfig::default(),
         )
         .await?;
     let mut caught_up = session.caught_up();
@@ -1953,7 +1958,9 @@ async fn compression_roundtrip_session(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let mut batches = stream.read_session(ReadInput::new()).await?;
+    let mut batches = stream
+        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .await?;
     let batch = batches.next().await.expect("should have batch")?;
     assert_eq!(batch.records.len(), 1);
     assert_eq!(batch.records[0].body.len(), 20480);

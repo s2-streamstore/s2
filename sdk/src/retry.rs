@@ -59,6 +59,12 @@ pub struct RetryBackoff {
 }
 
 impl RetryBackoff {
+    /// Return the next delay, continuing at the jittered maximum base delay after exhaustion.
+    pub fn next_or_max(&mut self) -> Duration {
+        self.next()
+            .unwrap_or_else(|| jittered_delay(self.max_base_delay))
+    }
+
     pub fn remaining(&self) -> u32 {
         self.max_retries.saturating_sub(self.cur_retry)
     }
@@ -80,20 +86,23 @@ impl Iterator for RetryBackoff {
     type Item = Duration;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur_retry == self.max_retries {
+        if self.cur_retry >= self.max_retries {
             return None;
         }
         let base_delay = (self
             .min_base_delay
             .saturating_mul(2u32.saturating_pow(self.cur_retry)))
         .min(self.max_base_delay);
-        let jitter =
-            Duration::try_from_secs_f64(base_delay.as_secs_f64() * rng().random_range(0.0..=1.0))
-                .unwrap_or(Duration::MAX);
-        let delay = base_delay.saturating_add(jitter);
         self.cur_retry += 1;
-        Some(delay)
+        Some(jittered_delay(base_delay))
     }
+}
+
+fn jittered_delay(base_delay: Duration) -> Duration {
+    let jitter =
+        Duration::try_from_secs_f64(base_delay.as_secs_f64() * rng().random_range(0.0..=1.0))
+            .unwrap_or(Duration::MAX);
+    base_delay.saturating_add(jitter)
 }
 
 #[cfg(test)]
@@ -160,5 +169,23 @@ mod tests {
         assert!(backoff.is_exhausted());
 
         assert!(backoff.next().is_none());
+    }
+
+    #[test]
+    fn next_or_max_continues_with_capped_jitter() {
+        let delay = Duration::from_secs(7);
+        let mut backoff = RetryBackoffBuilder::default()
+            .with_max_base_delay(delay)
+            .with_max_retries(1)
+            .build();
+        assert!(backoff.next().is_some());
+        assert!(backoff.next().is_none());
+
+        for _ in 0..10 {
+            let next = backoff.next_or_max();
+            assert!(next >= delay);
+            assert!(next <= delay * 2);
+        }
+        assert!(backoff.is_exhausted());
     }
 }

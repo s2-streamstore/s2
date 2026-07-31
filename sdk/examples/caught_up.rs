@@ -4,7 +4,7 @@ use s2_sdk::{
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput,
         CreateStreamInput, DeleteBasinInput, DeleteStreamInput, ReadBatch, ReadFrom, ReadInput,
-        ReadStart, S2Config, S2Endpoints, StreamName,
+        ReadSessionConfig, ReadStart, S2Config, S2Endpoints, StreamName,
     },
 };
 
@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = stream
         .read_session(
             ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
+            ReadSessionConfig::default(),
         )
         .await?;
     let mut caught_up = session.caught_up();

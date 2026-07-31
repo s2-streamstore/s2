@@ -21,7 +21,10 @@ use crate::{
     api::{ApiError, BasinClient, retry_builder},
     error::{ReadError, RequestError},
     retry::RetryBackoff,
-    types::{EncryptionKey, MeteredBytes, ReadBatch, StreamName, StreamPosition},
+    types::{
+        EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
+        ReadSessionRetryPolicy, StreamName, StreamPosition,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -326,10 +329,17 @@ pub async fn read_session(
     client: BasinClient,
     name: StreamName,
     encryption: Option<EncryptionKey>,
-    mut start: ReadStart,
-    mut end: ReadEnd,
-    ignore_command_records: bool,
+    input: ReadInput,
+    config: ReadSessionConfig,
 ) -> Result<ReadSession, ReadSessionError> {
+    let ReadInput {
+        start,
+        stop,
+        ignore_command_records,
+    } = input;
+    let mut start: ReadStart = start.into();
+    let mut end: ReadEnd = stop.into();
+    let retry_policy = config.retry_policy;
     let mut retry_backoff = retry_builder(&client.config.retry).build();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
@@ -350,7 +360,7 @@ pub async fn read_session(
                 break batches;
             }
             Err(err) => {
-                if let Some(backoff) = retry_delay(&err, &mut retry_backoff) {
+                if let Some(backoff) = retry_delay(&err, &mut retry_backoff, retry_policy) {
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -374,7 +384,9 @@ pub async fn read_session(
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
-                        if let Some(backoff) = retry_delay(&err, &mut retry_backoff) {
+                        if let Some(backoff) =
+                            retry_delay(&err, &mut retry_backoff, retry_policy)
+                        {
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
@@ -420,7 +432,9 @@ pub async fn read_session(
                 }
                 Some(Err(err)) => {
                     batches = None;
-                    if let Some(backoff) = retry_delay(&err, &mut retry_backoff) {
+                    if let Some(backoff) =
+                        retry_delay(&err, &mut retry_backoff, retry_policy)
+                    {
                         yield Ok(ReadUpdate::behind());
                         tokio::time::sleep(backoff).await;
                         continue;
@@ -471,13 +485,30 @@ fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> 
     })
 }
 
-fn retry_delay(err: &ReadSessionFailure, backoffs: &mut RetryBackoff) -> Option<Duration> {
-    if err.is_retryable()
-        && let Some(backoff) = backoffs.next()
-    {
+fn retry_delay(
+    err: &ReadSessionFailure,
+    backoffs: &mut RetryBackoff,
+    retry_policy: ReadSessionRetryPolicy,
+) -> Option<Duration> {
+    if !err.is_retryable() {
+        debug!(
+            %err,
+            is_retryable = false,
+            retries_exhausted = backoffs.is_exhausted(),
+            "not retrying read session"
+        );
+        return None;
+    }
+
+    let backoff = match retry_policy {
+        ReadSessionRetryPolicy::Budgeted => backoffs.next(),
+        ReadSessionRetryPolicy::Indefinite => Some(backoffs.next_or_max()),
+    };
+    if let Some(backoff) = backoff {
         debug!(
             %err,
             ?backoff,
+            ?retry_policy,
             num_retries_remaining = backoffs.remaining(),
             "retrying read session"
         );
