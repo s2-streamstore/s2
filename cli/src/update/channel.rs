@@ -177,7 +177,11 @@ fn receipt_matches(exe: &Path) -> bool {
 /// standard prefixes, `$HOMEBREW_CELLAR` when relocated) and symlinks into
 /// `bin`, so a resolved path under the cellar is brew by definition.
 fn is_homebrew(exe: &Path, cellar: Option<PathBuf>) -> bool {
-    if cellar.is_some_and(|c| exe.starts_with(c)) {
+    // An empty `HOMEBREW_CELLAR` (e.g. `export HOMEBREW_CELLAR=""`) must not
+    // match every path: `Path::starts_with("")` is `true` for any `exe`, so
+    // treat an empty cellar the same as an absent one and fall through to the
+    // keg-shape heuristic below.
+    if cellar.is_some_and(|c| !c.as_os_str().is_empty() && exe.starts_with(c)) {
         return true;
     }
     // Require the keg shape `Cellar/<formula>/<version>/.../<binary>` rather than any
@@ -297,6 +301,31 @@ mod tests {
         // A directory merely named "Cellar" is not a keg without formula/version beneath it.
         assert!(!is_homebrew(Path::new("/Users/me/Cellar/s2"), None));
         assert!(!is_homebrew(Path::new("/home/me/Cellar/projects/s2"), None));
+    }
+
+    #[test]
+    fn empty_cellar_does_not_match_all_paths() {
+        // `HOMEBREW_CELLAR=""` yields `Some(PathBuf::from(""))`, and
+        // `Path::starts_with("")` is `true` for any path. Without the guard
+        // this would misclassify every binary as Homebrew-installed.
+        assert!(!is_homebrew(
+            Path::new("/usr/bin/s2"),
+            Some(PathBuf::from(""))
+        ));
+        assert!(!is_homebrew(
+            Path::new("/Users/me/.cargo/bin/s2"),
+            Some(PathBuf::from(""))
+        ));
+        assert!(!is_homebrew(
+            Path::new("/weird/place/s2"),
+            Some(PathBuf::from(""))
+        ));
+        // Even an actual Homebrew path must fall through to the keg-shape
+        // heuristic rather than matching on the empty prefix.
+        assert!(is_homebrew(
+            Path::new("/opt/homebrew/Cellar/s2/0.40.1/bin/s2"),
+            Some(PathBuf::from(""))
+        ));
     }
 
     #[test]
