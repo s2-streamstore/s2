@@ -20,7 +20,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
-    error::{AppendError, RequestError, ServerError},
+    error::{AppendError, RequestError},
     frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
@@ -98,11 +98,6 @@ impl AppendSessionError {
             | Self::SessionDropped
             | Self::InvalidAck(_) => None,
         }
-    }
-
-    /// Return the server error, if present.
-    pub fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
     }
 }
 

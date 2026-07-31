@@ -19,7 +19,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
-    error::{ReadError, RequestError, ServerError},
+    error::{ReadError, RequestError},
     retry::RetryBackoff,
     types::{EncryptionKey, MeteredBytes, ReadBatch, StreamName, StreamPosition},
 };
@@ -69,11 +69,6 @@ impl ReadSessionError {
             Self::HeartbeatTimeout => None,
         }
     }
-
-    /// Return the server error, if present.
-    pub fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
-    }
 }
 
 impl From<ReadSessionFailure> for ReadSessionError {
@@ -115,11 +110,6 @@ impl CaughtUpError {
             Self::SessionClosed => None,
             Self::Read(error) => error.request_error(),
         }
-    }
-
-    /// Return the server error, if present.
-    pub fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
     }
 }
 

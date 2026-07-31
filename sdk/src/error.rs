@@ -270,11 +270,6 @@ impl ReadError {
             Self::ReadUnwritten(_) => None,
         }
     }
-
-    /// Return the server error, if present.
-    pub fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
-    }
 }
 
 impl From<ApiError> for ReadError {
@@ -318,11 +313,6 @@ impl AppendError {
             Self::Request(error) => Some(error),
             Self::ConditionFailed(_) => None,
         }
-    }
-
-    /// Return the server error, if present.
-    pub fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
     }
 }
 
@@ -386,11 +376,6 @@ impl ProducerError {
             | Self::ProducerClosing
             | Self::ProducerDropped => None,
         }
-    }
-
-    /// Return the server error, if present.
-    pub fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
     }
 }
 
@@ -531,7 +516,7 @@ mod tests {
         assert!(append.has_no_side_effects());
         let request = append.request_error().expect("request error");
         assert!(matches!(request, RequestError::Server(_)));
-        let server = append.server_error().expect("server error");
+        let server = request.server_error().expect("server error");
         assert_eq!(server.known_code(), Some(ErrorCode::TransactionConflict));
     }
 }
