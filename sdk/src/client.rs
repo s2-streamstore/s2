@@ -68,7 +68,7 @@ impl From<crate::types::Compression> for Compression {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub(crate) enum HttpError {
     #[error("send error: {0}")]
     Send(#[from] hyper_util::client::legacy::Error),
     #[error("receive error: {0}")]
@@ -165,7 +165,7 @@ impl Request {
         }
     }
 
-    pub async fn compress(self) -> Result<Self, Error> {
+    pub async fn compress(self) -> Result<Self, HttpError> {
         let (body, content_encoding) = compress_body(self.body, self.compression).await?;
         let mut headers = self.headers;
         if let Some(encoding) = content_encoding {
@@ -208,7 +208,7 @@ pub struct RequestBuilder {
     body: Option<Body>,
     timeout: Option<Duration>,
     compression: Compression,
-    error: Option<Error>,
+    error: Option<HttpError>,
 }
 
 impl RequestBuilder {
@@ -255,13 +255,13 @@ impl RequestBuilder {
                     self.uri = match uri_with_query(&self.uri, &query_string) {
                         Ok(uri) => uri,
                         Err(e) => {
-                            self.error = Some(Error::RequestBuild(e.to_string()));
+                            self.error = Some(HttpError::RequestBuild(e.to_string()));
                             return self;
                         }
                     };
                 }
             }
-            Err(e) => self.error = Some(Error::RequestBuild(e.to_string())),
+            Err(e) => self.error = Some(HttpError::RequestBuild(e.to_string())),
         }
         self
     }
@@ -276,7 +276,7 @@ impl RequestBuilder {
                 self.headers.insert(CONTENT_TYPE, APPLICATION_JSON);
                 self.body = Some(Body::from(data));
             }
-            Err(e) => self.error = Some(Error::RequestBuild(e.to_string())),
+            Err(e) => self.error = Some(HttpError::RequestBuild(e.to_string())),
         }
         self
     }
@@ -297,8 +297,8 @@ impl RequestBuilder {
             (Ok(name), Ok(value)) => {
                 self.headers.insert(name, value);
             }
-            (Err(e), _) => self.error = Some(Error::RequestBuild(e.into().to_string())),
-            (_, Err(e)) => self.error = Some(Error::RequestBuild(e.into().to_string())),
+            (Err(e), _) => self.error = Some(HttpError::RequestBuild(e.into().to_string())),
+            (_, Err(e)) => self.error = Some(HttpError::RequestBuild(e.into().to_string())),
         }
         self
     }
@@ -320,7 +320,7 @@ impl RequestBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Request, Error> {
+    pub fn build(self) -> Result<Request, HttpError> {
         if let Some(e) = self.error {
             return Err(e);
         }
@@ -355,8 +355,8 @@ impl UnaryResponse {
         self.bytes
     }
 
-    pub fn json<T: DeserializeOwned>(self) -> Result<T, Error> {
-        serde_json::from_slice(&self.bytes).map_err(Error::ResponseDecode)
+    pub fn json<T: DeserializeOwned>(self) -> Result<T, HttpError> {
+        serde_json::from_slice(&self.bytes).map_err(HttpError::ResponseDecode)
     }
 }
 
@@ -381,18 +381,18 @@ impl StreamingResponse {
         self.status
     }
 
-    pub async fn into_bytes(self) -> Result<Bytes, Error> {
+    pub async fn into_bytes(self) -> Result<Bytes, HttpError> {
         let bytes = self.body.collect().await?.to_bytes();
         decompress_body(&self.headers, bytes).await
     }
 
-    pub fn stream(self) -> impl Stream<Item = Result<Bytes, Error>> {
+    pub fn stream(self) -> impl Stream<Item = Result<Bytes, HttpError>> {
         let permit = self.permit;
         http_body_util::BodyStream::new(self.body).filter_map(move |result| {
             let _ = &permit;
             std::future::ready(match result {
                 Ok(frame) => frame.into_data().ok().map(Ok),
-                Err(e) => Some(Err(Error::Receive(e))),
+                Err(e) => Some(Err(HttpError::Receive(e))),
             })
         })
     }
@@ -400,8 +400,8 @@ impl StreamingResponse {
 
 #[async_trait]
 pub trait RequestExecutor: Send + Sync {
-    async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, Error>;
-    async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, Error>;
+    async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
+    async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
 }
 
 pub fn default_connector(
@@ -501,7 +501,7 @@ fn build_http_request(
     headers: HeaderMap,
     body: BoxBody,
     content_encoding: Option<HeaderValue>,
-) -> Result<http::Request<BoxBody>, Error> {
+) -> Result<http::Request<BoxBody>, HttpError> {
     let mut builder = http::Request::builder().method(method).uri(uri.clone());
 
     if let Some(req_headers) = builder.headers_mut() {
@@ -517,13 +517,13 @@ fn build_http_request(
 
     builder
         .body(body)
-        .map_err(|error| Error::RequestBuild(error.to_string()))
+        .map_err(|error| HttpError::RequestBuild(error.to_string()))
 }
 
 async fn execute_unary_with<C>(
     client: &HyperClient<C, BoxBody>,
     request: Request,
-) -> Result<UnaryResponse, Error>
+) -> Result<UnaryResponse, HttpError>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
@@ -544,13 +544,13 @@ where
         let (parts, body) = response.into_parts();
         let bytes = body.collect().await?.to_bytes();
 
-        Ok::<_, Error>((parts.status, parts.headers, bytes))
+        Ok::<_, HttpError>((parts.status, parts.headers, bytes))
     };
 
     let (status, headers, bytes) = if let Some(timeout_duration) = request_timeout {
         timeout(timeout_duration, operation)
             .await
-            .map_err(|_| Error::Timeout)??
+            .map_err(|_| HttpError::Timeout)??
     } else {
         operation.await?
     };
@@ -568,7 +568,7 @@ async fn init_streaming_with<C>(
     client: &HyperClient<C, BoxBody>,
     request: Request,
     permit: RequestPermit,
-) -> Result<StreamingResponse, Error>
+) -> Result<StreamingResponse, HttpError>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
@@ -586,7 +586,7 @@ where
         let response = client.request(http_request).await?;
         let (parts, body) = response.into_parts();
 
-        Ok::<_, Error>(StreamingResponse::new(
+        Ok::<_, HttpError>(StreamingResponse::new(
             parts.status,
             parts.headers,
             body,
@@ -597,7 +597,7 @@ where
     if let Some(duration) = request_timeout {
         timeout(duration, operation)
             .await
-            .map_err(|_| Error::Timeout)?
+            .map_err(|_| HttpError::Timeout)?
     } else {
         operation.await
     }
@@ -631,12 +631,12 @@ fn uri_with_path_and_query(uri: &Uri, path_and_query: &str) -> Result<Uri, http:
 async fn compress_body(
     body: Body,
     compression: Compression,
-) -> Result<(Body, Option<HeaderValue>), Error> {
+) -> Result<(Body, Option<HeaderValue>), HttpError> {
     match compression {
         Compression::None => Ok((body, None)),
         Compression::Gzip => {
             let Some(data) = body.as_bytes() else {
-                return Err(Error::RequestCompression(
+                return Err(HttpError::RequestCompression(
                     "streaming request bodies cannot be compressed".into(),
                 ));
             };
@@ -644,11 +644,11 @@ async fn compress_body(
             encoder
                 .write_all(data)
                 .await
-                .map_err(|e| Error::RequestCompression(e.to_string()))?;
+                .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
             encoder
                 .shutdown()
                 .await
-                .map_err(|e| Error::RequestCompression(e.to_string()))?;
+                .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
             let compressed = encoder.into_inner();
             Ok((
                 Body::from(compressed),
@@ -657,7 +657,7 @@ async fn compress_body(
         }
         Compression::Zstd => {
             let Some(data) = body.as_bytes() else {
-                return Err(Error::RequestCompression(
+                return Err(HttpError::RequestCompression(
                     "streaming request bodies cannot be compressed".into(),
                 ));
             };
@@ -665,11 +665,11 @@ async fn compress_body(
             encoder
                 .write_all(data)
                 .await
-                .map_err(|e| Error::RequestCompression(e.to_string()))?;
+                .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
             encoder
                 .shutdown()
                 .await
-                .map_err(|e| Error::RequestCompression(e.to_string()))?;
+                .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
             let compressed = encoder.into_inner();
             Ok((
                 Body::from(compressed),
@@ -679,7 +679,7 @@ async fn compress_body(
     }
 }
 
-async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Error> {
+async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, HttpError> {
     let content_encoding = headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok());
 
     match content_encoding {
@@ -689,7 +689,7 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Err
             decoder
                 .read_to_end(&mut decompressed)
                 .await
-                .map_err(|e| Error::ResponseCompression(e.to_string()))?;
+                .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
             Ok(Bytes::from(decompressed))
         }
         Some("zstd") => {
@@ -698,7 +698,7 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Err
             decoder
                 .read_to_end(&mut decompressed)
                 .await
-                .map_err(|e| Error::ResponseCompression(e.to_string()))?;
+                .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
             Ok(Bytes::from(decompressed))
         }
         _ => Ok(bytes),
@@ -888,12 +888,12 @@ impl<C> RequestExecutor for Pool<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, Error> {
+    async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
         let (client, _permit) = self.checkout(request.authority()).await;
         execute_unary_with(&client, request).await
     }
 
-    async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, Error> {
+    async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
         let (client, permit) = self.checkout(request.authority()).await;
         init_streaming_with(&client, request, permit).await
     }

@@ -98,30 +98,30 @@ impl ClientError {
     }
 }
 
-impl From<client::Error> for ClientError {
-    fn from(err: client::Error) -> Self {
+impl From<client::HttpError> for ClientError {
+    fn from(err: client::HttpError) -> Self {
         let err_msg = err.to_string();
         match err {
-            client::Error::Send(ref send_err) if send_err.is_connect() => {
+            client::HttpError::Send(ref send_err) if send_err.is_connect() => {
                 classify_io_source(&err, &err_msg)
                     .or_else(|| classify_dns_source(&err))
                     .unwrap_or(Self::Connect(err_msg))
             }
-            client::Error::Send(_) | client::Error::Receive(_) => {
+            client::HttpError::Send(_) | client::HttpError::Receive(_) => {
                 classify_hyper_source(&err, &err_msg)
                     .or_else(|| classify_io_source(&err, &err_msg))
                     .unwrap_or(Self::Other(err_msg))
             }
-            client::Error::RequestBuild(message) => Self::RequestBuild(message),
-            client::Error::RequestCompression(message) => Self::RequestCompression(message),
-            client::Error::ResponseCompression(message) => Self::ResponseCompression(message),
-            client::Error::ResponseDecode(error) => Self::ResponseDecode(error.to_string()),
-            client::Error::Timeout => Self::Timeout,
+            client::HttpError::RequestBuild(message) => Self::RequestBuild(message),
+            client::HttpError::RequestCompression(message) => Self::RequestCompression(message),
+            client::HttpError::ResponseCompression(message) => Self::ResponseCompression(message),
+            client::HttpError::ResponseDecode(error) => Self::ResponseDecode(error.to_string()),
+            client::HttpError::Timeout => Self::Timeout,
         }
     }
 }
 
-fn classify_hyper_source(err: &client::Error, err_msg: &str) -> Option<ClientError> {
+fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<ClientError> {
     let hyper_err = source_err::<hyper::Error>(err)?;
     let err_msg = format!("{hyper_err} -> {err_msg}");
     if hyper_err.is_incomplete_message() {
@@ -133,7 +133,7 @@ fn classify_hyper_source(err: &client::Error, err_msg: &str) -> Option<ClientErr
     }
 }
 
-fn classify_io_source(err: &client::Error, err_msg: &str) -> Option<ClientError> {
+fn classify_io_source(err: &client::HttpError, err_msg: &str) -> Option<ClientError> {
     let io_err = source_err::<std::io::Error>(err)?;
     let err_msg = format!("{io_err} -> {err_msg}");
     Some(match io_err.kind() {
@@ -146,7 +146,7 @@ fn classify_io_source(err: &client::Error, err_msg: &str) -> Option<ClientError>
 }
 
 /// Walk the error source chain looking for hyper-util's private DNS error tag.
-fn classify_dns_source(err: &client::Error) -> Option<ClientError> {
+fn classify_dns_source(err: &client::HttpError) -> Option<ClientError> {
     let mut source = Some(err as &dyn std::error::Error);
     while let Some(err) = source {
         if err.to_string() == "dns error" {
@@ -518,22 +518,22 @@ mod tests {
     #[test]
     fn internal_client_errors_preserve_the_failure_stage() {
         assert!(matches!(
-            ClientError::from(client::Error::RequestBuild("bad request".to_owned())),
+            ClientError::from(client::HttpError::RequestBuild("bad request".to_owned())),
             ClientError::RequestBuild(message) if message == "bad request"
         ));
         assert!(matches!(
-            ClientError::from(client::Error::RequestCompression("encode".to_owned())),
+            ClientError::from(client::HttpError::RequestCompression("encode".to_owned())),
             ClientError::RequestCompression(message) if message == "encode"
         ));
         assert!(matches!(
-            ClientError::from(client::Error::ResponseCompression("decode".to_owned())),
+            ClientError::from(client::HttpError::ResponseCompression("decode".to_owned())),
             ClientError::ResponseCompression(message) if message == "decode"
         ));
 
         let json_error = serde_json::from_slice::<serde_json::Value>(b"{")
             .expect_err("invalid JSON should fail");
         assert!(matches!(
-            ClientError::from(client::Error::ResponseDecode(json_error)),
+            ClientError::from(client::HttpError::ResponseDecode(json_error)),
             ClientError::ResponseDecode(_)
         ));
     }

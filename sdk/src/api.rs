@@ -638,8 +638,8 @@ impl ApiError {
     }
 }
 
-impl From<client::Error> for ApiError {
-    fn from(err: client::Error) -> Self {
+impl From<client::HttpError> for ApiError {
+    fn from(err: client::HttpError) -> Self {
         ClientError::from(err).into()
     }
 }
@@ -790,14 +790,14 @@ impl BaseClient {
     pub async fn init_streaming(
         &self,
         request: client::Request,
-    ) -> Result<StreamingResponse, client::Error> {
+    ) -> Result<StreamingResponse, client::HttpError> {
         self.client.init_streaming(request).await
     }
 
     async fn execute_unary(
         &self,
         request: client::Request,
-    ) -> Result<UnaryResponse, client::Error> {
+    ) -> Result<UnaryResponse, client::HttpError> {
         self.client.execute_unary(request).await
     }
 
