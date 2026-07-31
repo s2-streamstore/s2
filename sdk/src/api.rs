@@ -619,7 +619,7 @@ pub(crate) enum ApiError {
 }
 
 impl ApiError {
-    pub(crate) fn is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         match self {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
@@ -627,7 +627,7 @@ impl ApiError {
         }
     }
 
-    pub(crate) fn has_no_side_effects(&self) -> bool {
+    pub fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Server(status, err_resp) => {
                 server_error_has_no_side_effects(*status, &err_resp.code)
