@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use s2_sdk::{
     S2,
-    types::{BasinName, ReadInput, S2Config, StreamName},
+    types::{BasinName, ReadInput, ReadSessionConfig, S2Config, StreamName},
 };
 use tokio::select;
 
@@ -15,7 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = s2.basin(basin_name).stream(stream_name);
 
     let input = ReadInput::new();
-    let mut batches = stream.read_session(input).await?;
+    let mut batches = stream
+        .read_session(input, ReadSessionConfig::default())
+        .await?;
     loop {
         select! {
             batch = batches.next() => {

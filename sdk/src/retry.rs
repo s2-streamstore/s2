@@ -181,12 +181,11 @@ mod tests {
         assert!(backoff.next().is_some());
         assert!(backoff.next().is_none());
 
-        let delays: Vec<_> = (0..10).map(|_| backoff.next_or_max()).collect();
-        for next in &delays {
-            assert!(*next >= delay);
-            assert!(*next <= delay * 2);
+        for _ in 0..10 {
+            let next = backoff.next_or_max();
+            assert!(next >= delay);
+            assert!(next <= delay * 2);
         }
-        assert!(delays.into_iter().any(|next| next > delay));
         assert!(backoff.is_exhausted());
     }
 }

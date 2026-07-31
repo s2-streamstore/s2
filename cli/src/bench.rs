@@ -20,8 +20,8 @@ use s2_sdk::{
     error::ProducerError,
     producer::{IndexedAppendAck, ProducerConfig},
     types::{
-        AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput, ReadStart,
-        ReadStop, SequencedRecord,
+        AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput,
+        ReadSessionConfig, ReadStart, ReadStop, SequencedRecord,
     },
 };
 use tokio::{
@@ -557,7 +557,7 @@ fn bench_read_inner(
             .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
             .with_stop(stop);
         let mut read_session = stream
-            .read_session(read_input)
+            .read_session(read_input, ReadSessionConfig::default())
             .await
             .map_err(|e| CliError::op(OpKind::Bench, e))?;
 

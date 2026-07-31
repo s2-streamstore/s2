@@ -21,7 +21,10 @@ use crate::{
     api::{ApiError, BasinClient, retry_builder},
     error::{ReadError, RequestError},
     retry::RetryBackoff,
-    types::{EncryptionKey, MeteredBytes, ReadBatch, StreamName, StreamPosition},
+    types::{
+        EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig, StreamName,
+        StreamPosition,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -322,14 +325,12 @@ impl Drop for ReadSession {
     }
 }
 
-pub async fn read_session(
+pub(crate) async fn read_session(
     client: BasinClient,
     name: StreamName,
     encryption: Option<EncryptionKey>,
-    start: ReadStart,
-    end: ReadEnd,
-    ignore_command_records: bool,
-    retry_indefinitely: bool,
+    input: ReadInput,
+    config: ReadSessionConfig,
 ) -> Result<ReadSession, ReadSessionError> {
     let retry_backoff = retry_builder(&client.config.retry).build();
     let open_session = move |start, end| {
@@ -338,29 +339,27 @@ pub async fn read_session(
         let encryption = encryption.clone();
         async move { session_inner(client, name, encryption, start, end).await }
     };
-    read_session_with_opener(
-        open_session,
-        retry_backoff,
-        start,
-        end,
-        ignore_command_records,
-        retry_indefinitely,
-    )
-    .await
+    read_session_with_opener(open_session, retry_backoff, input, config).await
 }
 
 async fn read_session_with_opener<F, Fut>(
     open_session: F,
     mut retry_backoff: RetryBackoff,
-    mut start: ReadStart,
-    mut end: ReadEnd,
-    ignore_command_records: bool,
-    retry_indefinitely: bool,
+    input: ReadInput,
+    config: ReadSessionConfig,
 ) -> Result<ReadSession, ReadSessionError>
 where
     F: Fn(ReadStart, ReadEnd) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<InternalStreaming<ReadBatch>, ReadSessionFailure>> + Send + 'static,
 {
+    let ReadInput {
+        start,
+        stop,
+        ignore_command_records,
+    } = input;
+    let mut start: ReadStart = start.into();
+    let mut end: ReadEnd = stop.into();
+    let retry_indefinitely = config.retry_indefinitely;
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
 
@@ -458,6 +457,7 @@ where
                             retrying_indefinitely,
                             "reconnecting read session after clean stream end"
                         );
+                        yield Ok(ReadUpdate::behind());
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
@@ -569,7 +569,9 @@ mod tests {
     use crate::{
         api::ApiError,
         retry::RetryBackoffBuilder,
-        types::{Header, SequencedRecord},
+        types::{
+            Header, ReadFrom, ReadLimits, ReadStart as PublicReadStart, ReadStop, SequencedRecord,
+        },
     };
 
     enum OpenAction {
@@ -618,13 +620,12 @@ mod tests {
             .build()
     }
 
-    fn start_at(seq_num: u64) -> ReadStart {
-        ReadStart {
-            seq_num: Some(seq_num),
-            timestamp: None,
-            tail_offset: None,
-            clamp: None,
-        }
+    fn read_input(seq_num: u64) -> ReadInput {
+        ReadInput::new().with_start(PublicReadStart::new().with_from(ReadFrom::SeqNum(seq_num)))
+    }
+
+    fn session_config(retry_indefinitely: bool) -> ReadSessionConfig {
+        ReadSessionConfig::new().with_retry_indefinitely(retry_indefinitely)
     }
 
     fn open_end() -> ReadEnd {
@@ -888,10 +889,8 @@ mod tests {
         let mut session = read_session_with_opener(
             opener,
             immediate_backoff(1),
-            start_at(0),
-            open_end(),
-            false,
-            true,
+            read_input(0),
+            session_config(true),
         )
         .await
         .unwrap();
@@ -916,10 +915,8 @@ mod tests {
         let mut session = read_session_with_opener(
             opener,
             immediate_backoff(0),
-            start_at(0),
-            open_end(),
-            false,
-            true,
+            read_input(0),
+            session_config(true),
         )
         .await
         .unwrap();
@@ -934,13 +931,42 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn clean_end_reconnect_marks_session_behind() {
+        let tail = position(1);
+        let (opener, _) = scripted_opener(vec![OpenAction::Batches(vec![Ok(batch(
+            vec![record(0, false)],
+            Some(tail),
+        ))])]);
+        let retry_backoff = RetryBackoffBuilder::default()
+            .with_min_base_delay(Duration::from_secs(1))
+            .with_max_base_delay(Duration::from_secs(1))
+            .with_max_retries(0)
+            .build();
+        let mut session =
+            read_session_with_opener(opener, retry_backoff, read_input(0), session_config(true))
+                .await
+                .unwrap();
+
+        session.next().await.unwrap().unwrap();
+        assert!(session.is_caught_up());
+
+        let mut next = Box::pin(session.next());
+        assert!(poll!(next.as_mut()).is_pending());
+        drop(next);
+        assert!(!session.is_caught_up());
+
+        let mut caught_up = Box::pin(session.caught_up());
+        assert!(poll!(caught_up.as_mut()).is_pending());
+    }
+
     #[tokio::test]
     async fn retry_indefinitely_preserves_bounded_clean_end() {
         let (opener, calls) = scripted_opener(vec![OpenAction::Batches(Vec::new())]);
-        let mut end = open_end();
-        end.bytes = Some(1);
+        let input =
+            read_input(0).with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(1)));
         let mut session =
-            read_session_with_opener(opener, immediate_backoff(0), start_at(0), end, false, true)
+            read_session_with_opener(opener, immediate_backoff(0), input, session_config(true))
                 .await
                 .unwrap();
 
@@ -962,10 +988,8 @@ mod tests {
         let mut session = read_session_with_opener(
             opener,
             immediate_backoff(0),
-            start_at(0),
-            open_end(),
-            false,
-            true,
+            read_input(0),
+            session_config(true),
         )
         .await
         .unwrap();
@@ -990,10 +1014,8 @@ mod tests {
         let error = read_session_with_opener(
             opener,
             immediate_backoff(1),
-            start_at(0),
-            open_end(),
-            false,
-            false,
+            read_input(0),
+            session_config(false),
         )
         .await
         .err()

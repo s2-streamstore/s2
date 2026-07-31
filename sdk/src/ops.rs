@@ -496,13 +496,7 @@ impl S2Stream {
     }
 
     /// Create a read session.
-    pub async fn read_session(&self, input: ReadInput) -> Result<ReadSession, ReadSessionError> {
-        self.read_session_with_config(input, ReadSessionConfig::default())
-            .await
-    }
-
-    /// Create a read session with the given configuration.
-    pub async fn read_session_with_config(
+    pub async fn read_session(
         &self,
         input: ReadInput,
         config: ReadSessionConfig,
@@ -511,10 +505,8 @@ impl S2Stream {
             self.client.clone(),
             self.name.clone(),
             self.encryption.clone(),
-            input.start.into(),
-            input.stop.into(),
-            input.ignore_command_records,
-            config.retry_indefinitely,
+            input,
+            config,
         )
         .await
     }
