@@ -3511,20 +3511,31 @@ pub struct ReadInput {
     pub ignore_command_records: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 #[non_exhaustive]
-/// Configuration for a continuous read session.
-pub struct ReadSessionConfig {
-    /// Whether to keep retrying retryable failures after the configured retry budget is exhausted.
+/// Retry policy for a continuous read session.
+pub enum ReadSessionRetryPolicy {
+    /// Stop after the retry budget configured by [`RetryConfig`] is exhausted.
+    #[default]
+    Budgeted,
+    /// Keep retrying retryable failures after the configured retry budget is exhausted.
     ///
     /// This also applies while establishing the initial session, so
     /// [`read_session`](crate::S2Stream::read_session) may remain pending through retryable
     /// failures until it connects or the future is cancelled.
+    Indefinite,
+}
+
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+/// Configuration for a continuous read session.
+pub struct ReadSessionConfig {
+    /// Policy for retrying retryable failures.
     ///
     /// Clean stream ends and non-retryable failures always terminate the session.
     ///
-    /// Defaults to `false`.
-    pub retry_indefinitely: bool,
+    /// Defaults to [`ReadSessionRetryPolicy::Budgeted`].
+    pub retry_policy: ReadSessionRetryPolicy,
 }
 
 impl ReadSessionConfig {
@@ -3533,10 +3544,10 @@ impl ReadSessionConfig {
         Self::default()
     }
 
-    /// Set whether the read session should retry indefinitely.
-    pub fn with_retry_indefinitely(self, retry_indefinitely: bool) -> Self {
+    /// Set the policy for retrying retryable failures.
+    pub fn with_retry_policy(self, retry_policy: ReadSessionRetryPolicy) -> Self {
         Self {
-            retry_indefinitely,
+            retry_policy,
             ..self
         }
     }
