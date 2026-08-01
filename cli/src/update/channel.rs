@@ -177,7 +177,11 @@ fn receipt_matches(exe: &Path) -> bool {
 /// standard prefixes, `$HOMEBREW_CELLAR` when relocated) and symlinks into
 /// `bin`, so a resolved path under the cellar is brew by definition.
 fn is_homebrew(exe: &Path, cellar: Option<PathBuf>) -> bool {
-    if cellar.is_some_and(|c| exe.starts_with(c)) {
+    // An empty `HOMEBREW_CELLAR` (e.g. `export HOMEBREW_CELLAR=""`) must not
+    // match every path: `Path::starts_with("")` is `true` for any `exe`, so
+    // treat an empty cellar the same as an absent one and fall through to the
+    // keg-shape heuristic below.
+    if cellar.is_some_and(|c| !c.as_os_str().is_empty() && exe.starts_with(c)) {
         return true;
     }
     // Require the keg shape `Cellar/<formula>/<version>/.../<binary>` rather than any
