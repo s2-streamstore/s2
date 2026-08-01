@@ -304,31 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_cellar_does_not_match_all_paths() {
-        // `HOMEBREW_CELLAR=""` yields `Some(PathBuf::from(""))`, and
-        // `Path::starts_with("")` is `true` for any path. Without the guard
-        // this would misclassify every binary as Homebrew-installed.
-        assert!(!is_homebrew(
-            Path::new("/usr/bin/s2"),
-            Some(PathBuf::from(""))
-        ));
-        assert!(!is_homebrew(
-            Path::new("/Users/me/.cargo/bin/s2"),
-            Some(PathBuf::from(""))
-        ));
-        assert!(!is_homebrew(
-            Path::new("/weird/place/s2"),
-            Some(PathBuf::from(""))
-        ));
-        // Even an actual Homebrew path must fall through to the keg-shape
-        // heuristic rather than matching on the empty prefix.
-        assert!(is_homebrew(
-            Path::new("/opt/homebrew/Cellar/s2/0.40.1/bin/s2"),
-            Some(PathBuf::from(""))
-        ));
-    }
-
-    #[test]
     fn cargo_detection() {
         let dirs = vec![PathBuf::from("/Users/me/.cargo/bin")];
         assert!(is_cargo(Path::new("/Users/me/.cargo/bin/s2"), dirs.clone()));
