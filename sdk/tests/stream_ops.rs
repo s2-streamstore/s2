@@ -782,7 +782,7 @@ async fn read_session_beyond_tail_with_clamp_to_tail(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let mut batches = stream
+    let mut session = stream
         .read_session(
             ReadInput::new().with_start(
                 ReadStart::new()
@@ -793,8 +793,10 @@ async fn read_session_beyond_tail_with_clamp_to_tail(
         )
         .await?;
 
-    let result = tokio::time::timeout(Duration::from_secs(1), batches.next()).await;
+    assert_eq!(session.resume_seq_num(), None);
+    let result = tokio::time::timeout(Duration::from_secs(1), session.next()).await;
     assert_matches!(result, Err(tokio::time::error::Elapsed { .. }));
+    assert_eq!(session.resume_seq_num(), Some(ack.tail.seq_num));
 
     Ok(())
 }
@@ -820,6 +822,7 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     let mut seq_nums = Vec::new();
 
     assert!(!session.is_caught_up());
+    assert_eq!(session.resume_seq_num(), None);
     let caught_up_tail = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             tokio::select! {
@@ -837,6 +840,7 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     assert!(session.is_caught_up());
     assert_eq!(seq_nums, [ack.tail.seq_num - 2, ack.tail.seq_num - 1]);
     assert_eq!(caught_up_tail, ack.tail);
+    assert_eq!(session.resume_seq_num(), Some(ack.tail.seq_num));
 
     let next_ack = stream
         .append(AppendInput::new(AppendRecordBatch::try_from_iter([

@@ -216,6 +216,7 @@ fn pending_catch_up() -> (oneshot::Sender<CaughtUpResult>, CaughtUpFuture) {
 struct ReadUpdate {
     batch: Option<ReadBatch>,
     caught_up_tail: Option<StreamPosition>,
+    resume_seq_num: Option<u64>,
 }
 
 impl ReadUpdate {
@@ -223,10 +224,12 @@ impl ReadUpdate {
         Self {
             batch: None,
             caught_up_tail: None,
+            resume_seq_num: None,
         }
     }
 
     fn from_batch(mut batch: ReadBatch, ignore_command_records: bool) -> Self {
+        let resume_seq_num = resume_seq_num_after_batch(&batch);
         let caught_up_tail = batch.tail.filter(|tail| {
             batch.records.is_empty()
                 || batch
@@ -242,6 +245,7 @@ impl ReadUpdate {
         Self {
             batch: (!batch.records.is_empty()).then_some(batch),
             caught_up_tail,
+            resume_seq_num,
         }
     }
 }
@@ -250,14 +254,27 @@ impl ReadUpdate {
 pub struct ReadSession {
     updates: InternalStreaming<ReadUpdate>,
     state: CaughtUpState,
+    resume_seq_num: Option<u64>,
 }
 
 impl ReadSession {
-    fn new(updates: InternalStreaming<ReadUpdate>) -> Self {
+    fn new(updates: InternalStreaming<ReadUpdate>, resume_seq_num: Option<u64>) -> Self {
         Self {
             updates,
             state: CaughtUpState::new(),
+            resume_seq_num,
         }
+    }
+
+    /// Return the absolute sequence number from which the session would resume after a retry.
+    ///
+    /// An unclamped absolute starting sequence number is available immediately. A timestamp,
+    /// tail-relative, or clamped start returns `None` until the session receives a record or a
+    /// reported tail. The returned value is the sequence number of the next record the session
+    /// expects. It advances as the session is polled, including across records hidden by
+    /// [`ReadInput::ignore_command_records`](crate::types::ReadInput::ignore_command_records).
+    pub fn resume_seq_num(&self) -> Option<u64> {
+        self.resume_seq_num
     }
 
     /// Return whether all records through the latest reported tail were delivered.
@@ -296,6 +313,9 @@ impl futures_core::Stream for ReadSession {
             match self.updates.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(update))) => {
+                    if let Some(resume_seq_num) = update.resume_seq_num {
+                        self.resume_seq_num = Some(resume_seq_num);
+                    }
                     if let Some(tail) = update.caught_up_tail {
                         self.state.set_caught_up(tail);
                     } else {
@@ -343,6 +363,11 @@ pub async fn read_session(
     let mut retry_backoff = retry_builder(&client.config.retry).build();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
+    let initial_resume_seq_num = if start.clamp == Some(true) {
+        None
+    } else {
+        start.seq_num
+    };
 
     let batches = loop {
         end.wait = remaining_wait(baseline_wait, last_tail_at);
@@ -411,14 +436,7 @@ pub async fn read_session(
                         last_tail_at = Some(Instant::now());
                     }
 
-                    if let Some(record) = batch.records.last() {
-                        start = ReadStart {
-                            seq_num: Some(record.seq_num + 1),
-                            timestamp: None,
-                            tail_offset: None,
-                            clamp: start.clamp,
-                        };
-                    }
+                    update_resume_start(&mut start, &batch);
                     if let Some(count) = end.count.as_mut() {
                         *count = count.saturating_sub(batch.records.len())
                     }
@@ -446,7 +464,30 @@ pub async fn read_session(
             }
         }
     });
-    Ok(ReadSession::new(updates))
+    Ok(ReadSession::new(updates, initial_resume_seq_num))
+}
+
+fn resume_seq_num_after_batch(batch: &ReadBatch) -> Option<u64> {
+    batch
+        .records
+        .last()
+        .map(|record| record.seq_num + 1)
+        .or_else(|| batch.tail.as_ref().map(|tail| tail.seq_num))
+}
+
+/// Advance the absolute start used when reconnecting the read session.
+///
+/// An empty batch with a reported tail still resolves a relative or timestamp start. Anchoring it
+/// prevents a reconnect from evaluating the original start against a newer tail.
+fn update_resume_start(start: &mut ReadStart, batch: &ReadBatch) {
+    if let Some(seq_num) = resume_seq_num_after_batch(batch) {
+        *start = ReadStart {
+            seq_num: Some(seq_num),
+            timestamp: None,
+            tail_offset: None,
+            clamp: start.clamp,
+        };
+    }
 }
 
 async fn session_inner(
@@ -558,12 +599,48 @@ mod tests {
         ReadBatch { records, tail }
     }
 
+    #[test]
+    fn empty_tail_anchors_relative_resume_start() {
+        let mut start = ReadStart {
+            seq_num: None,
+            timestamp: None,
+            tail_offset: Some(0),
+            clamp: Some(true),
+        };
+
+        update_resume_start(&mut start, &batch(Vec::new(), Some(position(42))));
+
+        assert_eq!(start.seq_num, Some(42));
+        assert_eq!(start.timestamp, None);
+        assert_eq!(start.tail_offset, None);
+        assert_eq!(start.clamp, Some(true));
+    }
+
     fn test_session(
         updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionFailure>>
         + Send
         + 'static,
     ) -> ReadSession {
-        ReadSession::new(Box::pin(updates))
+        ReadSession::new(Box::pin(updates), None)
+    }
+
+    #[tokio::test]
+    async fn empty_tail_exposes_absolute_resume_seq_num() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut session = test_session(UnboundedReceiverStream::new(rx));
+
+        assert_eq!(session.resume_seq_num(), None);
+        tx.send(Ok(ReadUpdate::from_batch(
+            batch(Vec::new(), Some(position(42))),
+            false,
+        )))
+        .unwrap();
+
+        let mut next = Box::pin(session.next());
+        assert!(poll!(next.as_mut()).is_pending());
+        drop(next);
+
+        assert_eq!(session.resume_seq_num(), Some(42));
     }
 
     #[tokio::test]
@@ -588,10 +665,12 @@ mod tests {
         let first = session.next().await.unwrap().unwrap();
         assert_eq!(first.records.len(), 2);
         assert!(session.is_caught_up());
+        assert_eq!(session.resume_seq_num(), Some(2));
         let caught_up_while_caught = session.caught_up();
 
         session.next().await.unwrap().unwrap();
         assert!(!session.is_caught_up());
+        assert_eq!(session.resume_seq_num(), Some(3));
         assert_eq!(caught_up.await.unwrap(), tail);
         assert_eq!(caught_up_while_caught.await.unwrap(), tail);
     }
@@ -678,6 +757,7 @@ mod tests {
 
         assert!(session.next().await.is_none());
         assert!(session.is_caught_up());
+        assert_eq!(session.resume_seq_num(), Some(2));
         assert_eq!(caught_up.await.unwrap(), tail);
     }
 
