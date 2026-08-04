@@ -22,7 +22,7 @@ use crate::{
     error::{ReadError, RequestError},
     retry::RetryBackoff,
     types::{
-        EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
+        AccessTokenMode, EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
         ReadSessionRetryPolicy, StreamName, StreamPosition,
     },
 };
@@ -41,6 +41,10 @@ impl ReadSessionFailure {
             Self::Api(err) => err.is_retryable(),
             Self::HeartbeatTimeout => true,
         }
+    }
+
+    fn is_authentication_error(&self) -> bool {
+        matches!(self, Self::Api(error) if error.is_authentication_error())
     }
 }
 
@@ -361,6 +365,7 @@ pub async fn read_session(
     let mut end: ReadEnd = stop.into();
     let retry_policy = config.retry_policy;
     let mut retry_backoff = retry_builder(&client.config.retry).build();
+    let access_token_mode = client.config.access_token.mode();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
     let initial_resume_seq_num = if start.clamp == Some(true) {
@@ -385,7 +390,9 @@ pub async fn read_session(
                 break batches;
             }
             Err(err) => {
-                if let Some(backoff) = retry_delay(&err, &mut retry_backoff, retry_policy) {
+                if let Some(backoff) =
+                    retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
+                {
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -410,7 +417,12 @@ pub async fn read_session(
                     Ok(b) => batches = Some(b),
                     Err(err) => {
                         if let Some(backoff) =
-                            retry_delay(&err, &mut retry_backoff, retry_policy)
+                            retry_delay(
+                                &err,
+                                &mut retry_backoff,
+                                retry_policy,
+                                access_token_mode,
+                            )
                         {
                             tokio::time::sleep(backoff).await;
                             continue;
@@ -451,7 +463,12 @@ pub async fn read_session(
                 Some(Err(err)) => {
                     batches = None;
                     if let Some(backoff) =
-                        retry_delay(&err, &mut retry_backoff, retry_policy)
+                        retry_delay(
+                            &err,
+                            &mut retry_backoff,
+                            retry_policy,
+                            access_token_mode,
+                        )
                     {
                         yield Ok(ReadUpdate::behind());
                         tokio::time::sleep(backoff).await;
@@ -530,8 +547,11 @@ fn retry_delay(
     err: &ReadSessionFailure,
     backoffs: &mut RetryBackoff,
     retry_policy: ReadSessionRetryPolicy,
+    access_token_mode: AccessTokenMode,
 ) -> Option<Duration> {
-    if !err.is_retryable() {
+    let is_retryable =
+        err.is_retryable() || (access_token_mode.is_refreshable() && err.is_authentication_error());
+    if !is_retryable {
         debug!(
             %err,
             is_retryable = false,
@@ -557,7 +577,7 @@ fn retry_delay(
     } else {
         debug!(
             %err,
-            is_retryable = err.is_retryable(),
+            is_retryable,
             retries_exhausted = backoffs.is_exhausted(),
             "not retrying read session"
         );
