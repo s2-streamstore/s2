@@ -119,12 +119,29 @@ pub(crate) enum AccessToken {
     Provider(Arc<dyn AccessTokenProvider>),
 }
 
-impl AccessToken {
-    pub(crate) fn is_dynamic(&self) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessTokenMode {
+    Static,
+    #[cfg(feature = "_hidden")]
+    Refreshable,
+}
+
+impl AccessTokenMode {
+    pub(crate) fn is_refreshable(self) -> bool {
         match self {
-            Self::Static(_) => false,
+            Self::Static => false,
             #[cfg(feature = "_hidden")]
-            Self::Provider(_) => true,
+            Self::Refreshable => true,
+        }
+    }
+}
+
+impl AccessToken {
+    pub(crate) fn mode(&self) -> AccessTokenMode {
+        match self {
+            Self::Static(_) => AccessTokenMode::Static,
+            #[cfg(feature = "_hidden")]
+            Self::Provider(_) => AccessTokenMode::Refreshable,
         }
     }
 }

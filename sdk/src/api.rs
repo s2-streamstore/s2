@@ -44,8 +44,8 @@ use crate::{
     frame_signal::FrameSignal,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
-        AccessToken, AccessTokenId, AppendRetryPolicy, BasinAuthority, BasinName, Compression,
-        EncryptionKey, LocationName, RetryConfig, S2Config, S2Endpoints, StreamName,
+        AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
+        Compression, EncryptionKey, LocationName, RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
@@ -731,6 +731,7 @@ fn authorization_header(access_token: &str) -> Result<HeaderValue, ApiError> {
 pub struct BaseClient {
     client: Arc<dyn client::RequestExecutor>,
     default_headers: HeaderMap,
+    access_token_mode: AccessTokenMode,
     #[cfg(feature = "_hidden")]
     access_token_provider: Option<Arc<dyn crate::types::AccessTokenProvider>>,
     request_timeout: Duration,
@@ -761,6 +762,7 @@ impl BaseClient {
     where
         C: client::Connect + Clone + Send + Sync + 'static,
     {
+        let access_token_mode = config.access_token.mode();
         let mut default_headers = HeaderMap::new();
         #[cfg(feature = "_hidden")]
         let mut access_token_provider = None;
@@ -798,6 +800,7 @@ impl BaseClient {
         Ok(Self {
             client: Arc::new(client),
             default_headers,
+            access_token_mode,
             #[cfg(feature = "_hidden")]
             access_token_provider,
             request_timeout: config.request_timeout,
@@ -1037,7 +1040,7 @@ impl<'a> RequestBuilder<'a> {
             };
 
             let refreshable_authentication_error =
-                access_token.is_some() && err.is_authentication_error();
+                self.client.access_token_mode.is_refreshable() && err.is_authentication_error();
             if refreshable_authentication_error {
                 self.client.invalidate_access_token(access_token.as_deref());
             }
@@ -1046,7 +1049,7 @@ impl<'a> RequestBuilder<'a> {
                 &err,
                 self.append_retry_policy,
                 self.frame_signal.as_ref(),
-                refreshable_authentication_error,
+                self.client.access_token_mode,
             ) && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
             {
                 let backoff = retry_after.map_or(backoff, |ra| ra.max(backoff));
@@ -1075,7 +1078,7 @@ fn is_safe_to_retry(
     err: &ApiError,
     policy: Option<AppendRetryPolicy>,
     frame_signal: Option<&FrameSignal>,
-    refreshable_authentication_error: bool,
+    access_token_mode: AccessTokenMode,
 ) -> bool {
     let policy_compliant = match policy {
         None | Some(AppendRetryPolicy::All) => true,
@@ -1083,7 +1086,9 @@ fn is_safe_to_retry(
             !frame_signal.is_none_or(|s| s.is_signalled()) || err.has_no_side_effects()
         }
     };
-    policy_compliant && (err.is_retryable() || refreshable_authentication_error)
+    policy_compliant
+        && (err.is_retryable()
+            || (access_token_mode.is_refreshable() && err.is_authentication_error()))
 }
 
 fn add_basin_header_if_required(
@@ -1331,10 +1336,11 @@ mod tests {
     fn safe_to_retry_unary_no_policy() {
         let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
         let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let mode = AccessTokenMode::Static;
 
         // Non-append requests (no policy) — retry if retryable.
-        assert!(is_safe_to_retry(&retryable, None, None, false));
-        assert!(!is_safe_to_retry(&non_retryable, None, None, false));
+        assert!(is_safe_to_retry(&retryable, None, None, mode));
+        assert!(!is_safe_to_retry(&non_retryable, None, None, mode));
     }
 
     #[test]
@@ -1342,10 +1348,11 @@ mod tests {
         let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
         let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
         let policy = Some(AppendRetryPolicy::All);
+        let mode = AccessTokenMode::Static;
 
         // All policy — retry if retryable, no frame signal checks.
-        assert!(is_safe_to_retry(&retryable, policy, None, false));
-        assert!(!is_safe_to_retry(&non_retryable, policy, None, false));
+        assert!(is_safe_to_retry(&retryable, policy, None, mode));
+        assert!(!is_safe_to_retry(&non_retryable, policy, None, mode));
     }
 
     #[test]
@@ -1356,26 +1363,27 @@ mod tests {
         let transaction_conflict = server_error(StatusCode::CONFLICT, "transaction_conflict");
         let policy = Some(AppendRetryPolicy::NoSideEffects);
         let signal = FrameSignal::new();
+        let mode = AccessTokenMode::Static;
 
         // Signal not set — safe to retry.
-        assert!(is_safe_to_retry(&retryable, policy, Some(&signal), false));
+        assert!(is_safe_to_retry(&retryable, policy, Some(&signal), mode));
 
         // Signal set + error with possible side effects — not safe.
         signal.signal();
-        assert!(!is_safe_to_retry(&retryable, policy, Some(&signal), false));
+        assert!(!is_safe_to_retry(&retryable, policy, Some(&signal), mode));
 
         // Signal set + no-side-effect error — safe.
         assert!(is_safe_to_retry(
             &no_side_effect,
             policy,
             Some(&signal),
-            false,
+            mode,
         ));
         assert!(is_safe_to_retry(
             &transaction_conflict,
             policy,
             Some(&signal),
-            false,
+            mode,
         ));
 
         // Signal set + non-retryable — never safe.
@@ -1383,7 +1391,7 @@ mod tests {
             &non_retryable,
             policy,
             Some(&signal),
-            false,
+            mode,
         ));
     }
 
@@ -1421,6 +1429,7 @@ mod tests {
         let client = BaseClient {
             client: executor.clone(),
             default_headers: HeaderMap::new(),
+            access_token_mode: AccessTokenMode::Refreshable,
             access_token_provider: Some(provider.clone()),
             request_timeout: Duration::from_secs(1),
             retry_builder: RetryBackoffBuilder::default()

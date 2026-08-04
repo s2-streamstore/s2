@@ -24,8 +24,8 @@ use crate::{
     frame_signal::FrameSignal,
     retry::RetryBackoffBuilder,
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes, ONE_MIB,
-        StreamName, StreamPosition, ValidationError,
+        AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
+        ONE_MIB, StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -463,7 +463,7 @@ async fn run_session_with_retry(
     buffer_size: usize,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
 ) {
-    let refreshable_auth = client.config.access_token.is_dynamic();
+    let access_token_mode = client.config.access_token.mode();
     let frame_signal = match client.config.retry.append_retry_policy {
         AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
         AppendRetryPolicy::All => None,
@@ -508,7 +508,7 @@ async fn run_session_with_retry(
                     client.config.retry.append_retry_policy,
                     !state.inflight_appends.is_empty(),
                     frame_signal.as_ref(),
-                    refreshable_auth,
+                    access_token_mode,
                 ) && let Some(backoff) = retry_backoff.next()
                 {
                     debug!(
@@ -897,7 +897,7 @@ fn is_safe_to_retry(
     policy: AppendRetryPolicy,
     has_inflight: bool,
     frame_signal: Option<&FrameSignal>,
-    refreshable_auth: bool,
+    access_token_mode: AccessTokenMode,
 ) -> bool {
     let policy_compliant = match policy {
         AppendRetryPolicy::All => true,
@@ -907,7 +907,9 @@ fn is_safe_to_retry(
                 || err.has_no_side_effects()
         }
     };
-    policy_compliant && (err.is_retryable() || (refreshable_auth && err.is_authentication_error()))
+    policy_compliant
+        && (err.is_retryable()
+            || (access_token_mode.is_refreshable() && err.is_authentication_error()))
 }
 
 const DEFAULT_CHANNEL_BUFFER_SIZE: usize = 100;
@@ -945,7 +947,7 @@ mod tests {
         api::{ApiError, ServerErrorBody},
         error::{AppendError, RequestError},
         frame_signal::FrameSignal,
-        types::AppendRetryPolicy,
+        types::{AccessTokenMode, AppendRetryPolicy},
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
@@ -963,22 +965,50 @@ mod tests {
         let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
         let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
         let policy = AppendRetryPolicy::All;
+        let static_mode = AccessTokenMode::Static;
 
         // All policy — always policy-compliant, just needs retryable.
-        assert!(is_safe_to_retry(&retryable, policy, true, None, false));
-        assert!(!is_safe_to_retry(&non_retryable, policy, true, None, false,));
+        assert!(is_safe_to_retry(
+            &retryable,
+            policy,
+            true,
+            None,
+            static_mode
+        ));
+        assert!(!is_safe_to_retry(
+            &non_retryable,
+            policy,
+            true,
+            None,
+            static_mode,
+        ));
 
         let unauthorized = server_error(StatusCode::UNAUTHORIZED, "authn");
-        assert!(is_safe_to_retry(&unauthorized, policy, true, None, true,));
-        assert!(!is_safe_to_retry(&unauthorized, policy, true, None, false,));
+        #[cfg(feature = "_hidden")]
+        assert!(is_safe_to_retry(
+            &unauthorized,
+            policy,
+            true,
+            None,
+            AccessTokenMode::Refreshable,
+        ));
+        assert!(!is_safe_to_retry(
+            &unauthorized,
+            policy,
+            true,
+            None,
+            static_mode,
+        ));
 
+        #[cfg(feature = "_hidden")]
         let unrelated_unauthorized = server_error(StatusCode::UNAUTHORIZED, "other");
+        #[cfg(feature = "_hidden")]
         assert!(!is_safe_to_retry(
             &unrelated_unauthorized,
             policy,
             true,
             None,
-            true,
+            AccessTokenMode::Refreshable,
         ));
     }
 
@@ -988,6 +1018,7 @@ mod tests {
         let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
         let policy = AppendRetryPolicy::NoSideEffects;
         let signal = FrameSignal::new();
+        let mode = AccessTokenMode::Static;
 
         // No inflight — always safe.
         signal.signal();
@@ -996,7 +1027,7 @@ mod tests {
             policy,
             false,
             Some(&signal),
-            false,
+            mode,
         ));
 
         // Inflight + signal not set — safe (no data sent this attempt).
@@ -1006,7 +1037,7 @@ mod tests {
             policy,
             true,
             Some(&signal),
-            false,
+            mode,
         ));
 
         // Inflight + signal set + error with possible side effects — not safe.
@@ -1016,7 +1047,7 @@ mod tests {
             policy,
             true,
             Some(&signal),
-            false,
+            mode,
         ));
 
         // Inflight + signal set + no-side-effect error — safe.
@@ -1025,7 +1056,7 @@ mod tests {
             policy,
             true,
             Some(&signal),
-            false,
+            mode,
         ));
 
         // AckTimeout — retryable but has possible side effects.
@@ -1034,7 +1065,7 @@ mod tests {
             policy,
             true,
             Some(&signal),
-            false,
+            mode,
         ));
     }
 }
