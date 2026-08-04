@@ -12,7 +12,11 @@ keywords = ["s2", "durable", "streams", "client", "cli"]
 name = "s2"
 path = "src/main.rs"
 
+[features]
+antithesis = ["dep:antithesis-instrumentation"]
+
 [dependencies]
+antithesis-instrumentation = { workspace = true, optional = true }
 async-stream = { workspace = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }

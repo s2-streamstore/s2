@@ -1,5 +1,8 @@
 //! S2 command-line interface.
 
+#[cfg(feature = "antithesis")]
+use antithesis_instrumentation as _;
+
 mod apply;
 mod bench;
 mod cli;
