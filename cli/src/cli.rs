@@ -26,7 +26,7 @@ const STYLES: styling::Styles = styling::Styles::styled()
 
 const GENERAL_USAGE: &str = color_print::cstr!(
     r#"
-    <dim>$</dim> <bold>s2 config set access_token YOUR_ACCESS_TOKEN</bold>
+    <dim>$</dim> <bold>printf '%s' "$S2_ACCESS_TOKEN" | s2 auth access-token set --stdin</bold>
     <dim>$</dim> <bold>s2 list-basins --prefix "foo" --limit 100</bold>
     "#
 );
@@ -40,6 +40,10 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Manage CLI authentication.
+    #[command(subcommand)]
+    Auth(AuthCommand),
+
     /// Manage CLI configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -227,6 +231,47 @@ pub struct UpdateArgs {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum AuthCommand {
+    /// Manage a stored S2-issued access token.
+    AccessToken {
+        #[command(subcommand)]
+        command: AuthAccessTokenCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuthAccessTokenCommand {
+    /// Read an S2-issued access token from standard input and store it.
+    Set(AuthAccessTokenSetArgs),
+
+    /// Move a legacy plaintext access token out of the config file.
+    Migrate(AuthAccessTokenMigrateArgs),
+
+    /// Remove the locally stored S2-issued access token.
+    ///
+    /// This does not revoke the access token on S2.
+    Remove,
+}
+
+#[derive(Args, Debug)]
+pub struct AuthAccessTokenSetArgs {
+    /// Read the access token from standard input.
+    #[arg(long, required = true)]
+    pub stdin: bool,
+
+    /// Store the token in a private file instead of the OS credential store.
+    #[arg(long)]
+    pub insecure_storage: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AuthAccessTokenMigrateArgs {
+    /// Store the token in a private file instead of the OS credential store.
+    #[arg(long)]
+    pub insecure_storage: bool,
+}
+
+#[derive(Subcommand)]
 pub enum ConfigCommand {
     /// List all configuration values.
     List,
@@ -247,6 +292,28 @@ pub enum ConfigCommand {
         /// Config key
         key: crate::config::ConfigKey,
     },
+}
+
+impl std::fmt::Debug for ConfigCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::List => formatter.write_str("List"),
+            Self::Get { key } => formatter.debug_struct("Get").field("key", key).finish(),
+            Self::Set { key, value } => formatter
+                .debug_struct("Set")
+                .field("key", key)
+                .field(
+                    "value",
+                    if matches!(key, crate::config::ConfigKey::AccessToken) {
+                        &"<redacted>" as &dyn std::fmt::Debug
+                    } else {
+                        value as &dyn std::fmt::Debug
+                    },
+                )
+                .finish(),
+            Self::Unset { key } => formatter.debug_struct("Unset").field("key", key).finish(),
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -835,7 +902,22 @@ pub struct GetStreamMetricsArgs {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, DiffArgs, DiffOutput, DiffResourceKind, IssueAccessTokenArgs};
+    use super::{
+        Cli, Command, ConfigCommand, DiffArgs, DiffOutput, DiffResourceKind, IssueAccessTokenArgs,
+    };
+    use crate::config::ConfigKey;
+
+    #[test]
+    fn access_token_config_arguments_are_redacted_in_debug_output() {
+        let command = ConfigCommand::Set {
+            key: ConfigKey::AccessToken,
+            value: "secret-access-token".to_owned(),
+        };
+
+        let debug = format!("{command:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret-access-token"));
+    }
 
     fn issue_access_token_args_from<I, T>(args: I) -> IssueAccessTokenArgs
     where

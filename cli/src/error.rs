@@ -79,7 +79,7 @@ pub enum CliError {
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help(
         "Token loaded from {1}. Verify it does not contain invalid characters.\n\
-         Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`.\n\n{}",
+         Store one with `s2 auth access-token set --stdin`, or set `S2_ACCESS_TOKEN`.\n\n{}",
         HELP
     ))]
     MalformedAccessToken(#[source] SdkError, TokenSource),
@@ -107,7 +107,7 @@ pub enum CliError {
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
-         Update it with `s2 config set access_token <token>` or set `S2_ACCESS_TOKEN`."
+         Store one with `s2 auth access-token set --stdin`, or set `S2_ACCESS_TOKEN`."
     ))]
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
@@ -121,6 +121,10 @@ pub enum CliError {
 
     #[error("Access token '{0}' not found")]
     AccessTokenNotFound(String),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    AccessToken(#[from] crate::access_token::AccessTokenError),
 
     #[error("Invalid configuration returned by S2: {0}")]
     #[diagnostic(help("{}", BUG_HELP))]
@@ -213,6 +217,7 @@ pub enum S2UriParseError {
 #[derive(Debug, Clone, Copy)]
 pub enum TokenSource {
     Environment,
+    StoredAccessToken,
     ConfigFile,
 }
 
@@ -220,6 +225,7 @@ impl std::fmt::Display for TokenSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenSource::Environment => write!(f, "environment (S2_ACCESS_TOKEN)"),
+            TokenSource::StoredAccessToken => write!(f, "stored S2 access token"),
             TokenSource::ConfigFile => write!(f, "config file"),
         }
     }
@@ -289,12 +295,18 @@ pub enum CliConfigError {
 
     #[error("Failed to load config file")]
     #[diagnostic(help(
-        "Did you run `s2 config set access_token <token>`? or use `S2_ACCESS_TOKEN` environment variable."
+        "Run `s2 auth access-token set --stdin`, or set the `S2_ACCESS_TOKEN` environment variable."
     ))]
-    Load(#[from] config::ConfigError),
+    Load,
 
     #[error("Failed to write config file")]
     Write(#[source] std::io::Error),
+
+    #[error("Failed to acquire the config lock")]
+    Lock(#[source] std::io::Error),
+
+    #[error("Timed out waiting for another S2 process to update the config")]
+    LockTimedOut,
 
     #[error("Failed to serialize config")]
     Serialize(#[source] toml::ser::Error),
@@ -302,9 +314,29 @@ pub enum CliConfigError {
     #[error("Invalid value '{1}' for config key '{0}'")]
     InvalidValue(String, String),
 
-    #[error("Missing access token")]
+    #[error("Access tokens are managed separately from ordinary configuration")]
     #[diagnostic(help(
-        "Run `s2 config set access_token <token>` or set the `S2_ACCESS_TOKEN` environment variable."
+        "Use `s2 auth access-token set --stdin` to store a token, or `s2 auth access-token remove` to forget it."
     ))]
-    MissingAccessToken,
+    CredentialManagedSeparately,
+
+    #[error("Stored access tokens cannot be read through `s2 config get`")]
+    #[diagnostic(help(
+        "Use the token's source of truth if it must be exported. The CLI intentionally does not print stored credentials."
+    ))]
+    CredentialNotReadable,
+
+    #[error("S2_ACCESS_TOKEN is not valid Unicode")]
+    #[diagnostic(help("Set S2_ACCESS_TOKEN to a valid S2 access token and retry."))]
+    InvalidAccessTokenEnvironment,
+
+    #[error("{0} is not valid Unicode")]
+    InvalidEnvironmentValue(&'static str),
+}
+
+impl From<config::ConfigError> for CliConfigError {
+    fn from(_error: config::ConfigError) -> Self {
+        // Parser errors can include source excerpts containing a legacy plaintext token.
+        Self::Load
+    }
 }

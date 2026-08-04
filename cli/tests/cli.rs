@@ -1,3 +1,9 @@
+use std::{
+    io::{Read as _, Write as _},
+    net::TcpListener,
+    thread::JoinHandle,
+};
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -17,6 +23,46 @@ struct TestEnv {
     home: TempDir,
 }
 
+struct TestServer {
+    endpoint: String,
+    handle: JoinHandle<String>,
+}
+
+impl TestServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let bytes_read = stream.read(&mut buffer).expect("read request");
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"basins":[],"has_more":false}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write response");
+            String::from_utf8(request).expect("request is UTF-8")
+        });
+        Self { endpoint, handle }
+    }
+
+    fn finish(self) -> String {
+        self.handle.join().expect("test server")
+    }
+}
+
 impl TestEnv {
     fn new() -> Self {
         Self {
@@ -28,6 +74,8 @@ impl TestEnv {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("s2"));
         cmd.env("HOME", self.home.path());
         cmd.env("XDG_CONFIG_HOME", self.home.path().join(".config"));
+        cmd.env("APPDATA", self.home.path());
+        cmd.env("USERPROFILE", self.home.path());
         for key in [
             "S2_ACCESS_TOKEN",
             "S2_ACCOUNT_ENDPOINT",
@@ -38,6 +86,27 @@ impl TestEnv {
             cmd.env_remove(key);
         }
         cmd
+    }
+
+    fn config_dir(&self) -> std::path::PathBuf {
+        #[cfg(windows)]
+        return self.home.path().join("s2");
+        #[cfg(not(windows))]
+        return self.home.path().join(".config/s2");
+    }
+
+    fn remember_access_token(&self, token: &str) {
+        self.s2()
+            .args([
+                "auth",
+                "access-token",
+                "set",
+                "--stdin",
+                "--insecure-storage",
+            ])
+            .write_stdin(token)
+            .assert()
+            .success();
     }
 }
 
@@ -77,6 +146,159 @@ fn missing_access_token() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("access token"));
+}
+
+#[test]
+fn private_file_access_token_authenticates_without_leaking_to_config() {
+    let env = TestEnv::new();
+    env.remember_access_token("remembered-secret");
+
+    let config_dir = env.config_dir();
+    let config = std::fs::read_to_string(config_dir.join("config.toml")).expect("read config");
+    assert!(!config.contains("remembered-secret"));
+    assert!(config.contains("stored_access_token"));
+
+    let server = TestServer::start();
+    env.s2()
+        .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
+        .env("S2_BASIN_ENDPOINT", &server.endpoint)
+        .args(["list-basins", "--limit", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("remembered-secret").not())
+        .stderr(predicate::str::contains("remembered-secret").not());
+    let request = server.finish().to_ascii_lowercase();
+    assert!(request.contains("authorization: bearer remembered-secret"));
+}
+
+#[test]
+fn environment_access_token_overrides_a_stored_token() {
+    let env = TestEnv::new();
+    env.remember_access_token("stored-secret");
+    let server = TestServer::start();
+
+    env.s2()
+        .env("S2_ACCESS_TOKEN", "environment-secret")
+        .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
+        .env("S2_BASIN_ENDPOINT", &server.endpoint)
+        .args(["list-basins", "--limit", "1"])
+        .assert()
+        .success();
+
+    let request = server.finish().to_ascii_lowercase();
+    assert!(request.contains("authorization: bearer environment-secret"));
+    assert!(!request.contains("stored-secret"));
+}
+
+#[test]
+fn legacy_plaintext_access_token_can_be_migrated_to_a_private_file() {
+    let env = TestEnv::new();
+    let config_dir = env.config_dir();
+    std::fs::create_dir_all(&config_dir).expect("create config directory");
+    let config_path = config_dir.join("config.toml");
+    std::fs::write(&config_path, "access_token = \"legacy-secret\"\n").expect("write config");
+
+    env.s2()
+        .args(["auth", "access-token", "migrate", "--insecure-storage"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Legacy access token migrated")
+                .and(predicate::str::contains("legacy-secret").not()),
+        );
+
+    let config = std::fs::read_to_string(&config_path).expect("read migrated config");
+    assert!(!config.contains("legacy-secret"));
+    assert!(!config.contains("access_token ="));
+    assert!(config.contains("stored_access_token"));
+    let credential = std::fs::read_dir(&config_dir)
+        .expect("list config directory")
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("access-token-")
+        })
+        .expect("stored access-token file");
+    assert!(
+        std::fs::read_to_string(credential.path())
+            .expect("read credential")
+            .contains("legacy-secret")
+    );
+}
+
+#[test]
+fn removing_a_stored_access_token_deletes_its_local_credential() {
+    let env = TestEnv::new();
+    env.remember_access_token("removable-secret");
+    let config_dir = env.config_dir();
+
+    env.s2()
+        .args(["auth", "access-token", "remove"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Stored S2 access token removed")
+                .and(predicate::str::contains("removable-secret").not())
+                .and(predicate::str::contains(
+                    "remains valid until it is revoked",
+                )),
+        );
+
+    let config = std::fs::read_to_string(config_dir.join("config.toml")).expect("read config");
+    assert!(!config.contains("stored_access_token"));
+    assert!(
+        std::fs::read_dir(config_dir)
+            .expect("list config directory")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("access-token-"))
+    );
+}
+
+#[test]
+fn config_commands_never_print_stored_or_legacy_tokens() {
+    let stored = TestEnv::new();
+    stored.remember_access_token("never-print-stored");
+    stored
+        .s2()
+        .args(["config", "list"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("access_token = <redacted>")
+                .and(predicate::str::contains("never-print-stored").not()),
+        );
+    stored
+        .s2()
+        .args(["config", "get", "access_token"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("cannot be read")
+                .and(predicate::str::contains("never-print-stored").not()),
+        );
+
+    let legacy = TestEnv::new();
+    let config_dir = legacy.config_dir();
+    std::fs::create_dir_all(&config_dir).expect("create config directory");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "access_token = \"never-print-legacy\"\n",
+    )
+    .expect("write config");
+    legacy
+        .s2()
+        .args(["config", "list"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("access_token = <redacted>")
+                .and(predicate::str::contains("never-print-legacy").not()),
+        );
 }
 
 #[test]
@@ -135,11 +357,11 @@ fn config_set_and_get() {
 fn config_set_writes_private_config() {
     let env = TestEnv::new();
     env.s2()
-        .args(["config", "set", "access_token", "secret"])
+        .args(["config", "set", "compression", "zstd"])
         .assert()
         .success();
 
-    let config_dir = env.home.path().join(".config/s2");
+    let config_dir = env.config_dir();
     assert_eq!(mode(&config_dir), 0o700);
     assert_eq!(mode(&config_dir.join("config.toml")), 0o600);
 }
@@ -171,10 +393,7 @@ fn invalid_endpoint_from_config_file() {
 
     // Set up a token and malformed endpoints in the config file (realistic
     // typo: "https//" instead of "https://").
-    env.s2()
-        .args(["config", "set", "access_token", "test-token"])
-        .assert()
-        .success();
+    env.remember_access_token("test-token");
     env.s2()
         .args(["config", "set", "account_endpoint", "https//a.s2.dev"])
         .assert()
@@ -251,10 +470,7 @@ fn invalid_endpoint_from_env() {
 fn invalid_basin_endpoint_from_config_file() {
     let env = TestEnv::new();
 
-    env.s2()
-        .args(["config", "set", "access_token", "test-token"])
-        .assert()
-        .success();
+    env.remember_access_token("test-token");
     env.s2()
         .args(["config", "set", "account_endpoint", "https://a.s2.dev"])
         .assert()
@@ -288,10 +504,7 @@ fn invalid_basin_endpoint_from_config_file() {
 fn mismatched_endpoint_schemes_from_config_file() {
     let env = TestEnv::new();
 
-    env.s2()
-        .args(["config", "set", "access_token", "test-token"])
-        .assert()
-        .success();
+    env.remember_access_token("test-token");
     env.s2()
         .args(["config", "set", "account_endpoint", "https://a.s2.dev"])
         .assert()
@@ -325,10 +538,7 @@ fn mismatched_endpoint_schemes_from_config_file() {
 fn only_account_endpoint_set_warns_and_uses_defaults() {
     let env = TestEnv::new();
 
-    env.s2()
-        .args(["config", "set", "access_token", "test-token"])
-        .assert()
-        .success();
+    env.remember_access_token("test-token");
     env.s2()
         .args(["config", "set", "account_endpoint", "https://a.s2.dev"])
         .assert()

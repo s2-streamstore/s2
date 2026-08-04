@@ -52,6 +52,35 @@ Or specify a version with `VERSION=x.y.z` before the command. See all [releases]
 docker pull ghcr.io/s2-streamstore/s2
 ```
 
+## Authentication
+
+Store an S2-issued access token in the operating system credential store:
+
+```bash
+printf '%s' "$S2_ACCESS_TOKEN" | s2 auth access-token set --stdin
+unset S2_ACCESS_TOKEN
+```
+
+PowerShell:
+
+```powershell
+$env:S2_ACCESS_TOKEN | s2 auth access-token set --stdin
+Remove-Item Env:S2_ACCESS_TOKEN
+```
+
+For CI and other ephemeral automation, inject `S2_ACCESS_TOKEN` without storing it. On a
+headless host without a credential store, explicitly opt into a private plaintext file (mode
+`0600` on Unix):
+
+```bash
+printf '%s' "$S2_ACCESS_TOKEN" |
+  s2 auth access-token set --stdin --insecure-storage
+unset S2_ACCESS_TOKEN
+```
+
+Existing plaintext `access_token` values in `config.toml` remain compatible and can be moved with
+`s2 auth access-token migrate`.
+
 ## s2-lite
 
 `s2-lite` is embedded as the `s2 lite` subcommand of the CLI. It's a self-hostable server implementation of the S2 API.
