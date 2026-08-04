@@ -343,6 +343,15 @@ pub struct UnaryResponse {
 }
 
 impl UnaryResponse {
+    #[cfg(all(test, feature = "_hidden"))]
+    pub(crate) fn new_for_test(status: StatusCode, bytes: impl Into<Bytes>) -> Self {
+        Self {
+            status,
+            headers: HeaderMap::new(),
+            bytes: bytes.into(),
+        }
+    }
+
     pub fn status(&self) -> StatusCode {
         self.status
     }

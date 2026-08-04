@@ -99,6 +99,13 @@ impl AppendSessionError {
             | Self::InvalidAck(_) => None,
         }
     }
+
+    fn is_authentication_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Append(AppendError::Request(error)) if error.is_authentication_error()
+        )
+    }
 }
 
 impl From<ApiError> for AppendSessionError {
@@ -456,6 +463,7 @@ async fn run_session_with_retry(
     buffer_size: usize,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
 ) {
+    let refreshable_auth = client.config.access_token.is_dynamic();
     let frame_signal = match client.config.retry.append_retry_policy {
         AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
         AppendRetryPolicy::All => None,
@@ -500,6 +508,7 @@ async fn run_session_with_retry(
                     client.config.retry.append_retry_policy,
                     !state.inflight_appends.is_empty(),
                     frame_signal.as_ref(),
+                    refreshable_auth,
                 ) && let Some(backoff) = retry_backoff.next()
                 {
                     debug!(
@@ -888,6 +897,7 @@ fn is_safe_to_retry(
     policy: AppendRetryPolicy,
     has_inflight: bool,
     frame_signal: Option<&FrameSignal>,
+    refreshable_auth: bool,
 ) -> bool {
     let policy_compliant = match policy {
         AppendRetryPolicy::All => true,
@@ -897,7 +907,7 @@ fn is_safe_to_retry(
                 || err.has_no_side_effects()
         }
     };
-    policy_compliant && err.is_retryable()
+    policy_compliant && (err.is_retryable() || (refreshable_auth && err.is_authentication_error()))
 }
 
 const DEFAULT_CHANNEL_BUFFER_SIZE: usize = 100;
@@ -955,8 +965,21 @@ mod tests {
         let policy = AppendRetryPolicy::All;
 
         // All policy — always policy-compliant, just needs retryable.
-        assert!(is_safe_to_retry(&retryable, policy, true, None));
-        assert!(!is_safe_to_retry(&non_retryable, policy, true, None));
+        assert!(is_safe_to_retry(&retryable, policy, true, None, false));
+        assert!(!is_safe_to_retry(&non_retryable, policy, true, None, false,));
+
+        let unauthorized = server_error(StatusCode::UNAUTHORIZED, "authn");
+        assert!(is_safe_to_retry(&unauthorized, policy, true, None, true,));
+        assert!(!is_safe_to_retry(&unauthorized, policy, true, None, false,));
+
+        let unrelated_unauthorized = server_error(StatusCode::UNAUTHORIZED, "other");
+        assert!(!is_safe_to_retry(
+            &unrelated_unauthorized,
+            policy,
+            true,
+            None,
+            true,
+        ));
     }
 
     #[test]
@@ -968,22 +991,41 @@ mod tests {
 
         // No inflight — always safe.
         signal.signal();
-        assert!(is_safe_to_retry(&retryable, policy, false, Some(&signal)));
+        assert!(is_safe_to_retry(
+            &retryable,
+            policy,
+            false,
+            Some(&signal),
+            false,
+        ));
 
         // Inflight + signal not set — safe (no data sent this attempt).
         signal.reset();
-        assert!(is_safe_to_retry(&retryable, policy, true, Some(&signal)));
+        assert!(is_safe_to_retry(
+            &retryable,
+            policy,
+            true,
+            Some(&signal),
+            false,
+        ));
 
         // Inflight + signal set + error with possible side effects — not safe.
         signal.signal();
-        assert!(!is_safe_to_retry(&retryable, policy, true, Some(&signal)));
+        assert!(!is_safe_to_retry(
+            &retryable,
+            policy,
+            true,
+            Some(&signal),
+            false,
+        ));
 
         // Inflight + signal set + no-side-effect error — safe.
         assert!(is_safe_to_retry(
             &no_side_effect,
             policy,
             true,
-            Some(&signal)
+            Some(&signal),
+            false,
         ));
 
         // AckTimeout — retryable but has possible side effects.
@@ -992,6 +1034,7 @@ mod tests {
             policy,
             true,
             Some(&signal),
+            false,
         ));
     }
 }

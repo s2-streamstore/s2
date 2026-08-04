@@ -42,6 +42,10 @@ impl ReadSessionFailure {
             Self::HeartbeatTimeout => true,
         }
     }
+
+    fn is_authentication_error(&self) -> bool {
+        matches!(self, Self::Api(error) if error.is_authentication_error())
+    }
 }
 
 /// Errors returned by a read session.
@@ -361,6 +365,7 @@ pub async fn read_session(
     let mut end: ReadEnd = stop.into();
     let retry_policy = config.retry_policy;
     let mut retry_backoff = retry_builder(&client.config.retry).build();
+    let refreshable_auth = client.config.access_token.is_dynamic();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
     let initial_resume_seq_num = if start.clamp == Some(true) {
@@ -385,7 +390,9 @@ pub async fn read_session(
                 break batches;
             }
             Err(err) => {
-                if let Some(backoff) = retry_delay(&err, &mut retry_backoff, retry_policy) {
+                if let Some(backoff) =
+                    retry_delay(&err, &mut retry_backoff, retry_policy, refreshable_auth)
+                {
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
@@ -410,7 +417,12 @@ pub async fn read_session(
                     Ok(b) => batches = Some(b),
                     Err(err) => {
                         if let Some(backoff) =
-                            retry_delay(&err, &mut retry_backoff, retry_policy)
+                            retry_delay(
+                                &err,
+                                &mut retry_backoff,
+                                retry_policy,
+                                refreshable_auth,
+                            )
                         {
                             tokio::time::sleep(backoff).await;
                             continue;
@@ -451,7 +463,12 @@ pub async fn read_session(
                 Some(Err(err)) => {
                     batches = None;
                     if let Some(backoff) =
-                        retry_delay(&err, &mut retry_backoff, retry_policy)
+                        retry_delay(
+                            &err,
+                            &mut retry_backoff,
+                            retry_policy,
+                            refreshable_auth,
+                        )
                     {
                         yield Ok(ReadUpdate::behind());
                         tokio::time::sleep(backoff).await;
@@ -530,8 +547,10 @@ fn retry_delay(
     err: &ReadSessionFailure,
     backoffs: &mut RetryBackoff,
     retry_policy: ReadSessionRetryPolicy,
+    refreshable_auth: bool,
 ) -> Option<Duration> {
-    if !err.is_retryable() {
+    let is_retryable = is_retryable_with_auth_refresh(err, refreshable_auth);
+    if !is_retryable {
         debug!(
             %err,
             is_retryable = false,
@@ -557,7 +576,7 @@ fn retry_delay(
     } else {
         debug!(
             %err,
-            is_retryable = err.is_retryable(),
+            is_retryable,
             retries_exhausted = backoffs.is_exhausted(),
             "not retrying read session"
         );
@@ -565,15 +584,46 @@ fn retry_delay(
     }
 }
 
+fn is_retryable_with_auth_refresh(error: &ReadSessionFailure, refreshable_auth: bool) -> bool {
+    error.is_retryable() || (refreshable_auth && error.is_authentication_error())
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use futures_util::{StreamExt, poll, stream};
+    use http::StatusCode;
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
     use super::*;
-    use crate::types::{Header, SequencedRecord};
+    use crate::{
+        api::ServerErrorBody,
+        types::{Header, SequencedRecord},
+    };
+
+    #[test]
+    fn authentication_error_is_retryable_only_with_dynamic_credentials() {
+        let error = ReadSessionFailure::Api(ApiError::Server(
+            StatusCode::UNAUTHORIZED,
+            ServerErrorBody {
+                code: "authn".to_owned(),
+                message: "expired".to_owned(),
+            },
+        ));
+
+        assert!(is_retryable_with_auth_refresh(&error, true));
+        assert!(!is_retryable_with_auth_refresh(&error, false));
+
+        let unrelated = ReadSessionFailure::Api(ApiError::Server(
+            StatusCode::UNAUTHORIZED,
+            ServerErrorBody {
+                code: "other".to_owned(),
+                message: "not refreshable".to_owned(),
+            },
+        ));
+        assert!(!is_retryable_with_auth_refresh(&unrelated, true));
+    }
 
     fn position(seq_num: u64) -> StreamPosition {
         StreamPosition {

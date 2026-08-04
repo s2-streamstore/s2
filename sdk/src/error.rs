@@ -190,6 +190,10 @@ pub enum RequestError {
     /// The access token could not be used as an HTTP header value.
     #[error("malformed access token: {0}")]
     MalformedAccessToken(String),
+    #[cfg(feature = "_hidden")]
+    #[doc(hidden)]
+    #[error("access token provider failed: {0}")]
+    AccessTokenProvider(crate::types::AccessTokenProviderError),
     /// Input validation failed.
     #[error(transparent)]
     Validation(#[from] ValidationError),
@@ -201,6 +205,8 @@ impl RequestError {
         match self {
             Self::Client(error) => error.is_retryable(),
             Self::Server(error) => error.is_retryable(),
+            #[cfg(feature = "_hidden")]
+            Self::AccessTokenProvider(error) => error.is_retryable(),
             Self::MalformedAccessToken(_) | Self::Validation(_) => false,
         }
     }
@@ -210,6 +216,8 @@ impl RequestError {
         match self {
             Self::Client(error) => error.has_no_side_effects(),
             Self::Server(error) => error.has_no_side_effects(),
+            #[cfg(feature = "_hidden")]
+            Self::AccessTokenProvider(_) => true,
             Self::MalformedAccessToken(_) | Self::Validation(_) => true,
         }
     }
@@ -220,6 +228,14 @@ impl RequestError {
             Self::Server(error) => Some(error),
             _ => None,
         }
+    }
+
+    pub(crate) fn is_authentication_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Server(error)
+                if error.status == StatusCode::UNAUTHORIZED && error.code == "authn"
+        )
     }
 }
 
@@ -234,6 +250,8 @@ impl From<ApiError> for RequestError {
                 Self::Client(ClientError::SessionProtocol(error.to_string()))
             }
             ApiError::MalformedAccessToken(error) => Self::MalformedAccessToken(error),
+            #[cfg(feature = "_hidden")]
+            ApiError::AccessTokenProvider(error) => Self::AccessTokenProvider(error),
             ApiError::Compression(error) => {
                 Self::Client(ClientError::ResponseCompression(error.to_string()))
             }

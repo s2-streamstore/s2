@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "_hidden")]
+use async_trait::async_trait;
 use bytes::Bytes;
 use http::{
     header::HeaderValue,
@@ -66,6 +68,76 @@ use s2_common::{
 use secrecy::SecretString;
 
 use crate::error::RequestError;
+
+#[cfg(feature = "_hidden")]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+#[doc(hidden)]
+pub struct AccessTokenProviderError {
+    message: String,
+    retryable: bool,
+}
+
+#[cfg(feature = "_hidden")]
+impl AccessTokenProviderError {
+    /// Create a provider error that should be retried with normal SDK backoff.
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    /// Create a provider error that should be returned immediately.
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    pub(crate) fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+}
+
+#[cfg(feature = "_hidden")]
+#[async_trait]
+#[doc(hidden)]
+pub trait AccessTokenProvider: fmt::Debug + Send + Sync {
+    /// Return an access token for the next request attempt.
+    async fn access_token(&self) -> Result<String, AccessTokenProviderError>;
+
+    /// Notify the provider that S2 rejected an access token.
+    fn invalidate_access_token(&self, _rejected_access_token: &str) {}
+}
+
+#[derive(Clone)]
+pub(crate) enum AccessToken {
+    Static(SecretString),
+    #[cfg(feature = "_hidden")]
+    Provider(Arc<dyn AccessTokenProvider>),
+}
+
+impl AccessToken {
+    pub(crate) fn is_dynamic(&self) -> bool {
+        match self {
+            Self::Static(_) => false,
+            #[cfg(feature = "_hidden")]
+            Self::Provider(_) => true,
+        }
+    }
+}
+
+impl fmt::Debug for AccessToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static(_) => formatter.write_str("Static(<redacted>)"),
+            #[cfg(feature = "_hidden")]
+            Self::Provider(_) => formatter.write_str("Provider(<redacted>)"),
+        }
+    }
+}
 
 /// An RFC 3339 datetime.
 ///
@@ -413,7 +485,7 @@ impl RetryConfig {
 #[non_exhaustive]
 /// Configuration for [`S2`](crate::S2).
 pub struct S2Config {
-    pub(crate) access_token: SecretString,
+    pub(crate) access_token: AccessToken,
     pub(crate) endpoints: S2Endpoints,
     pub(crate) connection_timeout: Duration,
     pub(crate) request_timeout: Duration,
@@ -428,7 +500,7 @@ impl S2Config {
     /// Create a new [`S2Config`] with the given access token and default settings.
     pub fn new(access_token: impl Into<String>) -> Self {
         Self {
-            access_token: access_token.into().into(),
+            access_token: AccessToken::Static(access_token.into().into()),
             endpoints: S2Endpoints::for_cloud(),
             connection_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(5),
@@ -439,6 +511,15 @@ impl S2Config {
                 .expect("valid user agent"),
             insecure_skip_cert_verification: false,
             rustls_crypto_provider: default_rustls_crypto_provider(),
+        }
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[doc(hidden)]
+    pub fn with_access_token_provider(self, provider: impl AccessTokenProvider + 'static) -> Self {
+        Self {
+            access_token: AccessToken::Provider(Arc::new(provider)),
+            ..self
         }
     }
 
