@@ -247,9 +247,9 @@ pub enum AuthAccessTokenCommand {
     /// Move a legacy plaintext access token out of the config file.
     Migrate(AuthAccessTokenMigrateArgs),
 
-    /// Remove the locally stored S2-issued access token.
+    /// Remove the locally stored S2 access token.
     ///
-    /// This does not revoke the access token on S2.
+    /// This does not revoke the access token.
     Remove,
 }
 
