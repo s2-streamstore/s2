@@ -109,41 +109,44 @@ fn print_legacy_access_token_deprecation(config: &config::CliConfig) {
 fn print_token_change(message: &str, change: &access_token::TokenChange) {
     eprintln!("{}", format!("✓ {message}").green().bold());
     if change.replaced {
-        eprintln!("  Previous access token replaced.");
+        eprintln!("  - Previous access token replaced.");
     }
     match change.credential_store {
         CredentialStore::Keyring => {
-            eprintln!("  Access token saved to: {}", "OS credential store".cyan());
+            eprintln!(
+                "  - Access token saved to: {}",
+                "OS credential store".cyan()
+            );
         }
         CredentialStore::File => {
             #[cfg(unix)]
             eprintln!(
                 "{}",
-                "  Warning: the access token is stored in a plaintext file with user-only permissions."
+                "  - Warning: the access token is stored in a plaintext file with user-only permissions."
                     .yellow()
             );
             #[cfg(not(unix))]
             eprintln!(
                 "{}",
-                "  Warning: the access token is stored in a plaintext file using the platform's default user-directory permissions."
+                "  - Warning: the access token is stored in a plaintext file using the platform's default user-directory permissions."
                     .yellow()
             );
             if let Some(path) = change.credential_path.as_ref() {
                 eprintln!(
-                    "  Access token saved to: {}",
+                    "  - Access token saved to: {}",
                     path.display().to_string().cyan()
                 );
             }
         }
     }
     eprintln!(
-        "  Configuration saved to: {}",
+        "  - Configuration saved to: {}",
         change.config_path.display().to_string().cyan()
     );
     if let Some(error) = change.cleanup_warning.as_ref() {
         eprintln!(
             "{}",
-            format!("  Warning: an older local credential remains queued for cleanup: {error}")
+            format!("  - Warning: an older local credential remains queued for cleanup: {error}")
                 .yellow()
         );
     }
@@ -154,7 +157,7 @@ fn print_token_change(message: &str, change: &access_token::TokenChange) {
     {
         eprintln!(
             "{}",
-            "  Warning: S2_ACCESS_TOKEN is set and takes precedence over stored credentials."
+            "  - Warning: S2_ACCESS_TOKEN is set and takes precedence over stored credentials."
                 .yellow()
         );
     }
@@ -163,20 +166,20 @@ fn print_token_change(message: &str, change: &access_token::TokenChange) {
 fn print_token_removal(removal: access_token::TokenRemoval) {
     if removal.removed {
         eprintln!("{}", "✓ Access token removed".green().bold());
-        eprintln!("{}", "  This does not revoke the access token.".yellow());
+        eprintln!("{}", "  - This does not revoke the access token.".yellow());
     } else {
         eprintln!("{}", "✓ No access token to remove".green().bold());
     }
     if let Some(path) = removal.config_path {
         eprintln!(
-            "  Configuration saved to: {}",
+            "  - Configuration saved to: {}",
             path.display().to_string().cyan()
         );
     }
     if let Some(error) = removal.cleanup_warning {
         eprintln!(
             "{}",
-            format!("  Warning: an older local credential remains queued for cleanup: {error}")
+            format!("  - Warning: an older local credential remains queued for cleanup: {error}")
                 .yellow()
         );
     }
@@ -187,7 +190,7 @@ fn print_token_removal(removal: access_token::TokenRemoval) {
     {
         eprintln!(
             "{}",
-            "  Warning: S2_ACCESS_TOKEN remains set and is still active.".yellow()
+            "  - Warning: S2_ACCESS_TOKEN remains set and is still active.".yellow()
         );
     }
 }

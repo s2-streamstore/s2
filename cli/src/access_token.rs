@@ -216,7 +216,11 @@ pub async fn migrate(args: &AuthAccessTokenMigrateArgs) -> Result<TokenChange, A
     }
 
     validate_token(&token)?;
-    store_with_config(config, token.into(), requested_store(args.insecure_storage))
+    let mut change =
+        store_with_config(config, token.into(), requested_store(args.insecure_storage))?;
+    // Migration moves the existing token; it does not replace it with another token.
+    change.replaced = false;
+    Ok(change)
 }
 
 pub async fn remove() -> Result<TokenRemoval, AccessTokenError> {
