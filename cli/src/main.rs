@@ -50,6 +50,8 @@ use tokio::{io::AsyncWriteExt, select};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 use types::{AccessTokenInfo, BasinConfig, S2BasinAndMaybeStreamUri, StreamConfig};
 
+const LEGACY_ACCESS_TOKEN_REMOVAL_VERSION: &str = "v0.50.0";
+
 fn install_rustls_crypto_provider() {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -94,6 +96,18 @@ fn parse_cli() -> Cli {
 
 fn allows_passive_update_check(command: Option<&Command>) -> bool {
     !matches!(command, Some(Command::Lite(_) | Command::Update(_)))
+}
+
+fn print_legacy_access_token_deprecation(config: &config::CliConfig) {
+    if config.has_legacy_access_token() {
+        eprintln!(
+            "{}",
+            format!(
+                "! `access_token` in config.toml is deprecated and will stop working in {LEGACY_ACCESS_TOKEN_REMOVAL_VERSION}.\n  Run `s2 auth access-token migrate` to move it to secure storage."
+            )
+            .yellow()
+        );
+    }
 }
 
 fn print_token_change(message: &str, change: &access_token::TokenChange) {
@@ -237,6 +251,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         match config_cmd {
             ConfigCommand::List => {
                 let config = load_config_file()?;
+                print_legacy_access_token_deprecation(&config);
                 for k in ConfigKey::VARIANTS {
                     if let Ok(key) = k.parse::<ConfigKey>()
                         && let Some(v) = config.get(key)
@@ -258,8 +273,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 if matches!(key, ConfigKey::AccessToken) {
                     eprintln!(
                         "{}",
-                        "Deprecated: `s2 config set access_token` may save the token in shell history. Use `s2 auth access-token set`."
-                            .yellow()
+                        format!(
+                            "! `s2 config set access_token` is deprecated and will be removed in {LEGACY_ACCESS_TOKEN_REMOVAL_VERSION}.\n  It may save the token in shell history; use `s2 auth access-token set`."
+                        )
+                        .yellow()
                     );
                     let change = access_token::set_from_argument(value.clone()).await?;
                     print_token_change("S2 access token stored", &change);
@@ -309,6 +326,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     }
 
     let cli_config = load_cli_config()?;
+    print_legacy_access_token_deprecation(&cli_config);
     let credential = access_token::resolve(&cli_config)?;
     let sdk_config = sdk_config(&cli_config, credential.expose(), update::user_agent())?;
     let token_source = Some(credential.source());

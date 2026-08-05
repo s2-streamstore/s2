@@ -197,12 +197,14 @@ pub enum ConfigKey {
 }
 
 impl CliConfig {
+    pub fn has_legacy_access_token(&self) -> bool {
+        self.access_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty())
+    }
+
     pub fn has_stored_access_token(&self) -> bool {
-        self.stored_access_token.is_some()
-            || self
-                .access_token
-                .as_ref()
-                .is_some_and(|token| !token.is_empty())
+        self.stored_access_token.is_some() || self.has_legacy_access_token()
     }
 
     pub fn get(&self, key: ConfigKey) -> Option<String> {
