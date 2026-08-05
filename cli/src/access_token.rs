@@ -384,15 +384,11 @@ fn store_with_config(
             .access_token
             .as_ref()
             .is_some_and(|token| !token.is_empty());
-    let credential_id = Uuid::new_v4().to_string();
-    let reference = StoredCredentialReference {
-        credential_id: credential_id.clone(),
-        credential_store: store,
-    };
+    let reference = credential_reference_for_write(&config, store);
     let payload = StoredCredential {
         version: CREDENTIAL_VERSION,
         kind: CREDENTIAL_KIND,
-        credential_id: &credential_id,
+        credential_id: &reference.credential_id,
         access_token: token.expose_secret(),
     };
     let bytes = SecretBox::new(Box::new(
@@ -440,6 +436,22 @@ fn store_with_config(
         replaced,
         cleanup_warning,
     })
+}
+
+fn credential_reference_for_write(
+    config: &CliConfig,
+    store: CredentialStore,
+) -> StoredCredentialReference {
+    // Reuse an inactive slot so repeated failed writes cannot grow the cleanup journal forever.
+    config
+        .pending_access_token_cleanup
+        .iter()
+        .find(|reference| reference.credential_store == store)
+        .cloned()
+        .unwrap_or_else(|| StoredCredentialReference {
+            credential_id: Uuid::new_v4().to_string(),
+            credential_store: store,
+        })
 }
 
 fn queue_cleanup(config: &mut CliConfig, reference: &StoredCredentialReference) {
@@ -528,5 +540,20 @@ mod tests {
             Err(AccessTokenError::InvalidInput)
         ));
         assert!(validate_token("s2-token_123").is_ok());
+    }
+
+    #[test]
+    fn failed_write_retries_reuse_the_cleanup_entry() {
+        let mut config = CliConfig::default();
+        let reference = credential_reference_for_write(&config, CredentialStore::Keyring);
+        queue_cleanup(&mut config, &reference);
+
+        for _ in 0..3 {
+            let retry = credential_reference_for_write(&config, CredentialStore::Keyring);
+            assert_eq!(retry, reference);
+            queue_cleanup(&mut config, &retry);
+        }
+
+        assert_eq!(config.pending_access_token_cleanup, [reference]);
     }
 }
