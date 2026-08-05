@@ -50,8 +50,6 @@ use tokio::{io::AsyncWriteExt, select};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 use types::{AccessTokenInfo, BasinConfig, S2BasinAndMaybeStreamUri, StreamConfig};
 
-const LEGACY_ACCESS_TOKEN_REMOVAL_VERSION: &str = "v0.50.0";
-
 fn install_rustls_crypto_provider() {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -103,7 +101,7 @@ fn print_legacy_access_token_deprecation(config: &config::CliConfig) {
         eprintln!(
             "{}",
             format!(
-                "! `access_token` in config.toml is deprecated and will stop working in {LEGACY_ACCESS_TOKEN_REMOVAL_VERSION}.\n  Run `s2 auth access-token migrate` to move it to secure storage."
+                "! `access_token` in config.toml is deprecated.\n  Run `s2 auth access-token migrate` to move it to secure storage."
             )
             .yellow()
         );
@@ -270,7 +268,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     eprintln!(
                         "{}",
                         format!(
-                            "! `s2 config set access_token` is deprecated and will be removed in {LEGACY_ACCESS_TOKEN_REMOVAL_VERSION}.\n  Use `s2 auth access-token set` instead."
+                            "! `s2 config set access_token` is deprecated.\n  Use `s2 auth access-token set` instead."
                         )
                         .yellow()
                     );

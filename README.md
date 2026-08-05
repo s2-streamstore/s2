@@ -74,7 +74,7 @@ printf '%s' "$S2_ACCESS_TOKEN" |
 unset S2_ACCESS_TOKEN
 ```
 
-Plaintext `access_token` values in `config.toml` are deprecated and will stop working in v0.50.0.
+Plaintext `access_token` values in `config.toml` are deprecated.
 Migrate one with `s2 auth access-token migrate`, or re-store it with `--insecure-storage` on a
 headless host that has no credential store.
 
