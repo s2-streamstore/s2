@@ -218,7 +218,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         match auth_cmd {
             AuthCommand::AccessToken { command } => match command {
                 AuthAccessTokenCommand::Set(args) => {
-                    let change = access_token::set_from_stdin(args).await?;
+                    let change = access_token::set(args).await?;
                     print_token_change("S2 access token stored", &change);
                 }
                 AuthAccessTokenCommand::Migrate(args) => {
@@ -258,7 +258,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 if matches!(key, ConfigKey::AccessToken) {
                     eprintln!(
                         "{}",
-                        "Deprecated: `s2 config set access_token` may save the token in shell history. Use `s2 auth access-token set --stdin`."
+                        "Deprecated: `s2 config set access_token` may save the token in shell history. Use `s2 auth access-token set`."
                             .yellow()
                     );
                     let change = access_token::set_from_argument(value.clone()).await?;

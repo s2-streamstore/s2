@@ -26,7 +26,7 @@ const STYLES: styling::Styles = styling::Styles::styled()
 
 const GENERAL_USAGE: &str = color_print::cstr!(
     r#"
-    <dim>$</dim> <bold>printf '%s' "$S2_ACCESS_TOKEN" | s2 auth access-token set --stdin</bold>
+    <dim>$</dim> <bold>s2 auth access-token set</bold>
     <dim>$</dim> <bold>s2 list-basins --prefix "foo" --limit 100</bold>
     "#
 );
@@ -241,7 +241,7 @@ pub enum AuthCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthAccessTokenCommand {
-    /// Read an S2-issued access token from standard input and store it.
+    /// Store an S2-issued access token.
     Set(AuthAccessTokenSetArgs),
 
     /// Move a legacy plaintext access token out of the config file.
@@ -255,8 +255,8 @@ pub enum AuthAccessTokenCommand {
 
 #[derive(Args, Debug)]
 pub struct AuthAccessTokenSetArgs {
-    /// Read the access token from standard input.
-    #[arg(long, required = true)]
+    /// Read the access token from standard input instead of prompting.
+    #[arg(long)]
     pub stdin: bool,
 
     /// Store the token in a private file instead of the OS credential store.

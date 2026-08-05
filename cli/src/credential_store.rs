@@ -29,9 +29,7 @@ pub enum CredentialStoreError {
     CredentialStore(String),
 
     #[error("Stored access token was not found")]
-    #[diagnostic(help(
-        "Run `s2 auth access-token set --stdin` to store an S2 access token again."
-    ))]
+    #[diagnostic(help("Run `s2 auth access-token set` to store an S2 access token again."))]
     CredentialNotFound,
 
     #[error("Failed to {action} the access-token file")]

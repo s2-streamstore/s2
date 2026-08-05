@@ -149,6 +149,20 @@ fn missing_access_token() {
 }
 
 #[test]
+fn access_token_set_requires_stdin_flag_for_non_interactive_input() {
+    TestEnv::new()
+        .s2()
+        .args(["auth", "access-token", "set", "--insecure-storage"])
+        .write_stdin("do-not-print-this-token")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--stdin")
+                .and(predicate::str::contains("do-not-print-this-token").not()),
+        );
+}
+
+#[test]
 fn private_file_access_token_authenticates_without_leaking_to_config() {
     let env = TestEnv::new();
     env.remember_access_token("remembered-secret");

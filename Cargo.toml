@@ -62,6 +62,7 @@ rand = "0.10"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rkyv = "0.8"
+rpassword = "7.5"
 rstest = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 s2-api = { path = "api", version = "0.31" }

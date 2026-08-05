@@ -79,7 +79,7 @@ pub enum CliError {
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help(
         "Token loaded from {1}. Verify it does not contain invalid characters.\n\
-         Store one with `s2 auth access-token set --stdin`, or set `S2_ACCESS_TOKEN`.\n\n{}",
+         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`.\n\n{}",
         HELP
     ))]
     MalformedAccessToken(#[source] SdkError, TokenSource),
@@ -107,7 +107,7 @@ pub enum CliError {
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
-         Store one with `s2 auth access-token set --stdin`, or set `S2_ACCESS_TOKEN`."
+         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`."
     ))]
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
@@ -295,7 +295,7 @@ pub enum CliConfigError {
 
     #[error("Failed to load config file")]
     #[diagnostic(help(
-        "Run `s2 auth access-token set --stdin`, or set the `S2_ACCESS_TOKEN` environment variable."
+        "Run `s2 auth access-token set`, or set the `S2_ACCESS_TOKEN` environment variable."
     ))]
     Load,
 
@@ -316,7 +316,7 @@ pub enum CliConfigError {
 
     #[error("Access tokens are managed separately from ordinary configuration")]
     #[diagnostic(help(
-        "Use `s2 auth access-token set --stdin` to store a token, or `s2 auth access-token remove` to forget it."
+        "Use `s2 auth access-token set` to store a token, or `s2 auth access-token remove` to forget it."
     ))]
     CredentialManagedSeparately,
 

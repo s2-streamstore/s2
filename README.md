@@ -57,15 +57,13 @@ docker pull ghcr.io/s2-streamstore/s2
 Store an S2-issued access token in the operating system credential store:
 
 ```bash
-printf '%s' "$S2_ACCESS_TOKEN" | s2 auth access-token set --stdin
-unset S2_ACCESS_TOKEN
+s2 auth access-token set
 ```
 
-PowerShell:
+The prompt does not echo the token. To read it from a script or secret manager instead:
 
-```powershell
-$env:S2_ACCESS_TOKEN | s2 auth access-token set --stdin
-Remove-Item Env:S2_ACCESS_TOKEN
+```bash
+op read 'op://S2/access-token' | s2 auth access-token set --stdin
 ```
 
 For CI and other ephemeral automation, inject `S2_ACCESS_TOKEN` without storing it. On a

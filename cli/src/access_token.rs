@@ -28,19 +28,28 @@ pub enum AccessTokenError {
     #[error("Failed to read the access token from standard input")]
     Stdin(#[source] std::io::Error),
 
-    #[error("No access token was provided on standard input")]
+    #[error("Failed to read the access token from the terminal")]
+    Prompt(#[source] std::io::Error),
+
+    #[error("No access token was provided")]
     #[diagnostic(help(
-        "Pipe the token into this command, for example: `printf '%s' \"$TOKEN\" | s2 auth access-token set --stdin`."
+        "Paste a token at the prompt, or pipe one into `s2 auth access-token set --stdin`."
     ))]
     EmptyInput,
 
-    #[error("Refusing to read an access token interactively")]
+    #[error("`--stdin` requires piped or redirected input")]
     #[diagnostic(help(
-        "Pipe the token into this command, for example: `printf '%s' \"$TOKEN\" | s2 auth access-token set --stdin`."
+        "Pipe the token into this command, or omit `--stdin` to paste it securely at the prompt."
     ))]
-    InteractiveInput,
+    StdinIsTerminal,
 
-    #[error("The access token provided on standard input is too large")]
+    #[error("Cannot prompt for an access token without an interactive terminal")]
+    #[diagnostic(help(
+        "Pass `--stdin` when piping or redirecting an access token into this command."
+    ))]
+    PromptUnavailable,
+
+    #[error("The access token is too large")]
     #[diagnostic(help("Provide an access token no larger than 1 MiB."))]
     InputTooLarge,
 
@@ -59,17 +68,17 @@ pub enum AccessTokenError {
 
     #[error("No stored S2 access token is configured")]
     #[diagnostic(help(
-        "Run `s2 auth access-token set --stdin`, or set `S2_ACCESS_TOKEN` for a non-persistent override."
+        "Run `s2 auth access-token set`, or set `S2_ACCESS_TOKEN` for a non-persistent override."
     ))]
     NotConfigured,
 
     #[error("No legacy plaintext access token was found in the config file")]
-    #[diagnostic(help("Use `s2 auth access-token set --stdin` to store an access token."))]
+    #[diagnostic(help("Use `s2 auth access-token set` to store an access token."))]
     NoLegacyToken,
 
     #[error("A securely stored access token is already configured")]
     #[diagnostic(help(
-        "Use `s2 auth access-token set --stdin` to replace it. Migration only moves a legacy plaintext token."
+        "Use `s2 auth access-token set` to replace it. Migration only moves a legacy plaintext token."
     ))]
     AlreadyStored,
 
@@ -157,11 +166,13 @@ pub fn resolve(config: &CliConfig) -> Result<ResolvedAccessToken, AccessTokenErr
     })
 }
 
-pub async fn set_from_stdin(
-    args: &AuthAccessTokenSetArgs,
-) -> Result<TokenChange, AccessTokenError> {
-    debug_assert!(args.stdin, "clap requires --stdin");
-    store_token(read_from_stdin()?, requested_store(args.insecure_storage)).await
+pub async fn set(args: &AuthAccessTokenSetArgs) -> Result<TokenChange, AccessTokenError> {
+    let token = if args.stdin {
+        read_from_stdin()?
+    } else {
+        read_from_terminal()?
+    };
+    store_token(token, requested_store(args.insecure_storage)).await
 }
 
 pub async fn set_from_argument(value: String) -> Result<TokenChange, AccessTokenError> {
@@ -298,7 +309,7 @@ fn decode_stored_credential(
 fn read_from_stdin() -> Result<SecretString, AccessTokenError> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        return Err(AccessTokenError::InteractiveInput);
+        return Err(AccessTokenError::StdinIsTerminal);
     }
     let mut bytes = Vec::new();
     stdin
@@ -314,6 +325,19 @@ fn read_from_stdin() -> Result<SecretString, AccessTokenError> {
         token.truncate(token.len() - 2);
     } else if token.ends_with('\n') {
         token.truncate(token.len() - 1);
+    }
+    validate_token(&token)?;
+    Ok(token.into())
+}
+
+fn read_from_terminal() -> Result<SecretString, AccessTokenError> {
+    if !std::io::stdin().is_terminal() {
+        return Err(AccessTokenError::PromptUnavailable);
+    }
+    let token = rpassword::prompt_password("Paste your S2 access token: ")
+        .map_err(AccessTokenError::Prompt)?;
+    if token.len() as u64 > MAX_STDIN_BYTES {
+        return Err(AccessTokenError::InputTooLarge);
     }
     validate_token(&token)?;
     Ok(token.into())
