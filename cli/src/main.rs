@@ -233,7 +233,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             AuthCommand::AccessToken { command } => match command {
                 AuthAccessTokenCommand::Set(args) => {
                     let change = access_token::set(args).await?;
-                    print_token_change("S2 access token stored", &change);
+                    print_token_change("Access token saved", &change);
                 }
                 AuthAccessTokenCommand::Migrate(args) => {
                     let change = access_token::migrate(args).await?;
@@ -279,7 +279,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         .yellow()
                     );
                     let change = access_token::set_from_argument(value.clone()).await?;
-                    print_token_change("S2 access token stored", &change);
+                    print_token_change("Access token saved", &change);
                 } else {
                     let saved_path = set_config_value(*key, value.clone()).await?;
                     eprintln!("{}", format!("✓ {} set", key).green().bold());
