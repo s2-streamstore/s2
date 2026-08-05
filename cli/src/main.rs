@@ -100,10 +100,8 @@ fn print_legacy_access_token_deprecation(config: &config::CliConfig) {
     if config.has_legacy_access_token() {
         eprintln!(
             "{}",
-            format!(
-                "! `access_token` in config.toml is deprecated.\n  Run `s2 auth access-token migrate` to move it to secure storage."
-            )
-            .yellow()
+            "! `access_token` in config.toml is deprecated.\n  Run `s2 auth access-token migrate` to move it to secure storage."
+                .yellow()
         );
     }
 }
@@ -267,10 +265,8 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 if matches!(key, ConfigKey::AccessToken) {
                     eprintln!(
                         "{}",
-                        format!(
-                            "! `s2 config set access_token` is deprecated.\n  Use `s2 auth access-token set` instead."
-                        )
-                        .yellow()
+                        "! `s2 config set access_token` is deprecated.\n  Use `s2 auth access-token set` instead."
+                            .yellow()
                     );
                     let change = access_token::set_from_argument(value.clone()).await?;
                     print_token_change("Access token saved", &change);
