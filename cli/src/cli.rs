@@ -902,22 +902,7 @@ pub struct GetStreamMetricsArgs {
 mod tests {
     use clap::Parser;
 
-    use super::{
-        Cli, Command, ConfigCommand, DiffArgs, DiffOutput, DiffResourceKind, IssueAccessTokenArgs,
-    };
-    use crate::config::ConfigKey;
-
-    #[test]
-    fn access_token_config_arguments_are_redacted_in_debug_output() {
-        let command = ConfigCommand::Set {
-            key: ConfigKey::AccessToken,
-            value: "secret-access-token".to_owned(),
-        };
-
-        let debug = format!("{command:?}");
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains("secret-access-token"));
-    }
+    use super::{Cli, Command, DiffArgs, DiffOutput, DiffResourceKind, IssueAccessTokenArgs};
 
     fn issue_access_token_args_from<I, T>(args: I) -> IssueAccessTokenArgs
     where

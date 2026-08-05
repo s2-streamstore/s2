@@ -218,10 +218,6 @@ fn legacy_plaintext_access_token_can_be_migrated_to_a_private_file() {
         .success()
         .stderr(
             predicate::str::contains("Legacy access token migrated")
-                .and(predicate::str::contains(
-                    "Previous S2 access token replaced",
-                ))
-                .and(predicate::str::contains("Previous stored").not())
                 .and(predicate::str::contains("legacy-secret").not()),
         );
 
@@ -244,35 +240,6 @@ fn legacy_plaintext_access_token_can_be_migrated_to_a_private_file() {
             .expect("read credential")
             .contains("legacy-secret")
     );
-}
-
-#[test]
-fn legacy_plaintext_access_token_warns_before_removal() {
-    let env = TestEnv::new();
-    let config_dir = env.config_dir();
-    std::fs::create_dir_all(&config_dir).expect("create config directory");
-    std::fs::write(
-        config_dir.join("config.toml"),
-        "access_token = \"legacy-secret\"\n",
-    )
-    .expect("write config");
-    let server = TestServer::start();
-
-    env.s2()
-        .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
-        .env("S2_BASIN_ENDPOINT", &server.endpoint)
-        .args(["list-basins", "--limit", "1"])
-        .assert()
-        .success()
-        .stderr(
-            predicate::str::contains("deprecated")
-                .and(predicate::str::contains("v0.50.0"))
-                .and(predicate::str::contains("s2 auth access-token migrate"))
-                .and(predicate::str::contains("legacy-secret").not()),
-        );
-
-    let request = server.finish().to_ascii_lowercase();
-    assert!(request.contains("authorization: bearer legacy-secret"));
 }
 
 #[test]

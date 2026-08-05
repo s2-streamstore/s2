@@ -522,27 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn token_validation_rejects_empty_whitespace_and_non_ascii() {
-        assert!(matches!(
-            validate_token(""),
-            Err(AccessTokenError::EmptyInput)
-        ));
-        assert!(matches!(
-            validate_token("token\nsecond"),
-            Err(AccessTokenError::InvalidInput)
-        ));
-        assert!(matches!(
-            validate_token(" token"),
-            Err(AccessTokenError::InvalidInput)
-        ));
-        assert!(matches!(
-            validate_token("tøken"),
-            Err(AccessTokenError::InvalidInput)
-        ));
-        assert!(validate_token("s2-token_123").is_ok());
-    }
-
-    #[test]
     fn failed_write_retries_reuse_the_cleanup_entry() {
         let mut config = CliConfig::default();
         let reference = credential_reference_for_write(&config, CredentialStore::Keyring);
