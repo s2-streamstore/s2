@@ -218,6 +218,10 @@ fn legacy_plaintext_access_token_can_be_migrated_to_a_private_file() {
         .success()
         .stderr(
             predicate::str::contains("Legacy access token migrated")
+                .and(predicate::str::contains(
+                    "Previous S2 access token replaced",
+                ))
+                .and(predicate::str::contains("Previous stored").not())
                 .and(predicate::str::contains("legacy-secret").not()),
         );
 

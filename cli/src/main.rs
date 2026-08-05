@@ -113,7 +113,7 @@ fn print_legacy_access_token_deprecation(config: &config::CliConfig) {
 fn print_token_change(message: &str, change: &access_token::TokenChange) {
     eprintln!("{}", format!("✓ {message}").green().bold());
     if change.replaced {
-        eprintln!("  Previous stored S2 access token replaced.");
+        eprintln!("  Previous S2 access token replaced.");
     }
     match change.credential_store {
         CredentialStore::Keyring => {
