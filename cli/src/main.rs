@@ -113,7 +113,7 @@ fn print_legacy_access_token_deprecation(config: &config::CliConfig) {
 fn print_token_change(message: &str, change: &access_token::TokenChange) {
     eprintln!("{}", format!("✓ {message}").green().bold());
     if change.replaced {
-        eprintln!("  Previous S2 access token replaced.");
+        eprintln!("  Previous access token replaced.");
     }
     match change.credential_store {
         CredentialStore::Keyring => {
@@ -166,14 +166,10 @@ fn print_token_change(message: &str, change: &access_token::TokenChange) {
 
 fn print_token_removal(removal: access_token::TokenRemoval) {
     if removal.removed {
-        eprintln!("{}", "✓ Stored S2 access token removed".green().bold());
-        eprintln!(
-            "{}",
-            "  This only removed the local credential. The token remains valid until it is revoked on S2."
-                .yellow()
-        );
+        eprintln!("{}", "✓ Access token removed".green().bold());
+        eprintln!("{}", "  This does not revoke the access token.".yellow());
     } else {
-        eprintln!("{}", "✓ No stored S2 access token to remove".green().bold());
+        eprintln!("{}", "✓ No access token to remove".green().bold());
     }
     if let Some(path) = removal.config_path {
         eprintln!(
@@ -274,7 +270,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     eprintln!(
                         "{}",
                         format!(
-                            "! `s2 config set access_token` is deprecated and will be removed in {LEGACY_ACCESS_TOKEN_REMOVAL_VERSION}.\n  It may save the token in shell history; use `s2 auth access-token set`."
+                            "! `s2 config set access_token` is deprecated and will be removed in {LEGACY_ACCESS_TOKEN_REMOVAL_VERSION}.\n  Use `s2 auth access-token set` instead."
                         )
                         .yellow()
                     );

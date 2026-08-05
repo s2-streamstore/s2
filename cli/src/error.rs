@@ -225,7 +225,7 @@ impl std::fmt::Display for TokenSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenSource::Environment => write!(f, "environment (S2_ACCESS_TOKEN)"),
-            TokenSource::StoredAccessToken => write!(f, "stored S2 access token"),
+            TokenSource::StoredAccessToken => write!(f, "stored access token"),
             TokenSource::ConfigFile => write!(f, "config file"),
         }
     }
@@ -327,7 +327,7 @@ pub enum CliConfigError {
     CredentialNotReadable,
 
     #[error("S2_ACCESS_TOKEN is not valid Unicode")]
-    #[diagnostic(help("Set S2_ACCESS_TOKEN to a valid S2 access token and retry."))]
+    #[diagnostic(help("Set S2_ACCESS_TOKEN to a valid access token and retry."))]
     InvalidAccessTokenEnvironment,
 
     #[error("{0} is not valid Unicode")]

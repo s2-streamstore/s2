@@ -66,7 +66,7 @@ pub enum AccessTokenError {
     #[error("The stored access token does not match its configuration")]
     BindingMismatch,
 
-    #[error("No stored S2 access token is configured")]
+    #[error("No access token is configured")]
     #[diagnostic(help(
         "Run `s2 auth access-token set`, or set `S2_ACCESS_TOKEN` for a non-persistent override."
     ))]
@@ -82,9 +82,7 @@ pub enum AccessTokenError {
     ))]
     AlreadyStored,
 
-    #[error(
-        "The stored S2 access token was deactivated, but its local credential could not be deleted"
-    )]
+    #[error("The access token was deactivated, but its local credential could not be deleted")]
     #[diagnostic(help(
         "Retry `s2 auth access-token remove`; the credential remains queued for cleanup at {recovery}."
     ))]
@@ -334,7 +332,7 @@ fn read_from_terminal() -> Result<SecretString, AccessTokenError> {
     if !std::io::stdin().is_terminal() {
         return Err(AccessTokenError::PromptUnavailable);
     }
-    let token = rpassword::prompt_password("Paste your S2 access token: ")
+    let token = rpassword::prompt_password("Enter your access token: ")
         .map_err(AccessTokenError::Prompt)?;
     if token.len() as u64 > MAX_STDIN_BYTES {
         return Err(AccessTokenError::InputTooLarge);

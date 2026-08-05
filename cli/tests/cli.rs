@@ -253,10 +253,10 @@ fn removing_a_stored_access_token_deletes_its_local_credential() {
         .assert()
         .success()
         .stderr(
-            predicate::str::contains("Stored S2 access token removed")
+            predicate::str::contains("Access token removed")
                 .and(predicate::str::contains("removable-secret").not())
                 .and(predicate::str::contains(
-                    "remains valid until it is revoked",
+                    "This does not revoke the access token.",
                 )),
         );
 

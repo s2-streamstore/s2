@@ -232,7 +232,7 @@ pub struct UpdateArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Manage a stored S2-issued access token.
+    /// Manage a stored access token.
     AccessToken {
         #[command(subcommand)]
         command: AuthAccessTokenCommand,
@@ -241,13 +241,13 @@ pub enum AuthCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthAccessTokenCommand {
-    /// Store an S2-issued access token.
+    /// Store an access token.
     Set(AuthAccessTokenSetArgs),
 
     /// Move a legacy plaintext access token out of the config file.
     Migrate(AuthAccessTokenMigrateArgs),
 
-    /// Remove the locally stored S2 access token.
+    /// Remove the locally stored access token.
     ///
     /// This does not revoke the access token.
     Remove,

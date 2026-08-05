@@ -54,7 +54,7 @@ docker pull ghcr.io/s2-streamstore/s2
 
 ## Authentication
 
-Store an S2 access token in the OS credential store:
+Store an access token in the OS credential store:
 
 ```bash
 s2 auth access-token set
