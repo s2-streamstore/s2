@@ -54,21 +54,19 @@ docker pull ghcr.io/s2-streamstore/s2
 
 ## Authentication
 
-Store an S2-issued access token in the operating system credential store:
+Store an S2 access token in the OS credential store:
 
 ```bash
 s2 auth access-token set
 ```
 
-The prompt does not echo the token. To read it from a script or secret manager instead:
+Or pipe it in from a script or a secret manager:
 
 ```bash
 op read 'op://S2/access-token' | s2 auth access-token set --stdin
 ```
 
-For CI and other ephemeral automation, inject `S2_ACCESS_TOKEN` without storing it. On a
-headless host without a credential store, explicitly opt into a private plaintext file (mode
-`0600` on Unix):
+For CI and other ephemeral environments, set `S2_ACCESS_TOKEN` in the environment. On a headless host with no credential store, opt into a private plaintext file instead (mode `0600` on Unix):
 
 ```bash
 printf '%s' "$S2_ACCESS_TOKEN" |
@@ -77,8 +75,8 @@ unset S2_ACCESS_TOKEN
 ```
 
 Plaintext `access_token` values in `config.toml` are deprecated and will stop working in v0.50.0.
-Move one to the OS credential store with `s2 auth access-token migrate`, or add
-`--insecure-storage` on a headless host without a credential store.
+Migrate one with `s2 auth access-token migrate`, or re-store it with `--insecure-storage` on a
+headless host that has no credential store.
 
 ## s2-lite
 
