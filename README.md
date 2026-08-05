@@ -63,7 +63,7 @@ s2 auth access-token set
 Or pipe it in from a script or a secret manager:
 
 ```bash
-op read 'op://S2/access-token' | s2 auth access-token set --stdin
+op read 'op://S2/CLI/access-token' | s2 auth access-token set --stdin
 ```
 
 For CI and other ephemeral environments, set `S2_ACCESS_TOKEN` in the environment. On a headless host with no credential store, opt into a private plaintext file instead (mode `0600` on Unix):
