@@ -21,25 +21,30 @@ color-print = { workspace = true }
 colored = { workspace = true }
 config = { workspace = true }
 dirs = { workspace = true }
+fs2 = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
 indicatif = { workspace = true }
 json_to_table = { workspace = true }
+keyring = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 rand = { workspace = true }
 reqwest = { workspace = true }
+rpassword = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 s2-api = { workspace = true }
 s2-common = { workspace = true }
 s2-lite = { workspace = true }
 s2-resource-spec = { workspace = true }
 s2-sdk = { workspace = true, features = ["_hidden"] }
+secrecy = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2 = "0.11"
 strum = { workspace = true, features = ["derive"] }
 tabled = { workspace = true }
+tempfile = { workspace = true }
 terminal_size = "0.4"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -68,4 +73,3 @@ predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }
 serial_test = "4.0"
-tempfile = "3.27"

@@ -26,7 +26,7 @@ const STYLES: styling::Styles = styling::Styles::styled()
 
 const GENERAL_USAGE: &str = color_print::cstr!(
     r#"
-    <dim>$</dim> <bold>s2 config set access_token YOUR_ACCESS_TOKEN</bold>
+    <dim>$</dim> <bold>s2 auth access-token set</bold>
     <dim>$</dim> <bold>s2 list-basins --prefix "foo" --limit 100</bold>
     "#
 );
@@ -40,6 +40,10 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Manage CLI authentication.
+    #[command(subcommand)]
+    Auth(AuthCommand),
+
     /// Manage CLI configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -227,6 +231,47 @@ pub struct UpdateArgs {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum AuthCommand {
+    /// Manage a stored access token.
+    AccessToken {
+        #[command(subcommand)]
+        command: AuthAccessTokenCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuthAccessTokenCommand {
+    /// Store an access token.
+    Set(AuthAccessTokenSetArgs),
+
+    /// Move a legacy plaintext access token out of the config file.
+    Migrate(AuthAccessTokenMigrateArgs),
+
+    /// Remove the locally stored access token.
+    ///
+    /// This does not revoke the access token.
+    Remove,
+}
+
+#[derive(Args, Debug)]
+pub struct AuthAccessTokenSetArgs {
+    /// Read the access token from standard input instead of prompting.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Store the token in a private file instead of the OS credential store.
+    #[arg(long)]
+    pub insecure_storage: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AuthAccessTokenMigrateArgs {
+    /// Store the token in a private file instead of the OS credential store.
+    #[arg(long)]
+    pub insecure_storage: bool,
+}
+
+#[derive(Subcommand)]
 pub enum ConfigCommand {
     /// List all configuration values.
     List,
@@ -247,6 +292,28 @@ pub enum ConfigCommand {
         /// Config key
         key: crate::config::ConfigKey,
     },
+}
+
+impl std::fmt::Debug for ConfigCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::List => formatter.write_str("List"),
+            Self::Get { key } => formatter.debug_struct("Get").field("key", key).finish(),
+            Self::Set { key, value } => formatter
+                .debug_struct("Set")
+                .field("key", key)
+                .field(
+                    "value",
+                    if matches!(key, crate::config::ConfigKey::AccessToken) {
+                        &"<redacted>" as &dyn std::fmt::Debug
+                    } else {
+                        value as &dyn std::fmt::Debug
+                    },
+                )
+                .finish(),
+            Self::Unset { key } => formatter.debug_struct("Unset").field("key", key).finish(),
+        }
+    }
 }
 
 #[derive(Args, Debug)]
