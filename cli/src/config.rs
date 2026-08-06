@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CliConfigError, CliError};
 
 const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_ACCOUNT_ENDPOINT: &str = "https://a.s2.dev";
+pub const DEFAULT_BASIN_ENDPOINT: &str = "https://{basin}.b.s2.dev";
 
 pub struct ConfigLock {
     file: File,
@@ -52,10 +54,38 @@ pub struct CliConfig {
     pub stored_access_token: Option<StoredCredentialReference>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pending_access_token_cleanup: Vec<StoredCredentialReference>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_oauth_cleanup: Vec<StoredCredentialReference>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_oauth_revocation: Vec<OAuthSession>,
+    pub auth_method: Option<AuthMethod>,
+    pub oauth: Option<OAuthSession>,
     pub account_endpoint: Option<String>,
     pub basin_endpoint: Option<String>,
     pub compression: Option<Compression>,
     pub ssl_no_verify: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+pub enum AuthMethod {
+    /// A stored S2 access token.
+    #[serde(rename = "access_token")]
+    #[value(name = "access-token")]
+    AccessToken,
+    /// Browser login managed by `s2 login`.
+    #[serde(rename = "oauth")]
+    #[value(name = "browser-login")]
+    BrowserLogin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthSession {
+    pub issuer: String,
+    pub client_id: String,
+    pub account_endpoint: String,
+    pub basin_endpoint: String,
+    pub credential_id: String,
+    pub credential_store: CredentialStore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +99,15 @@ pub enum CredentialStore {
 pub struct StoredCredentialReference {
     pub credential_id: String,
     pub credential_store: CredentialStore,
+}
+
+impl OAuthSession {
+    pub fn credential_reference(&self) -> StoredCredentialReference {
+        StoredCredentialReference {
+            credential_id: self.credential_id.clone(),
+            credential_store: self.credential_store,
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -328,6 +367,22 @@ pub async fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigErro
     let _lock = acquire_config_lock().await?;
     let mut config = load_config_file()?;
     config.unset(key)?;
+    save_cli_config(&config)
+}
+
+pub async fn select_auth_method(method: AuthMethod) -> Result<PathBuf, CliConfigError> {
+    let _lock = acquire_config_lock().await?;
+    let mut config = load_config_file()?;
+    match method {
+        AuthMethod::AccessToken if !config.has_stored_access_token() => {
+            return Err(CliConfigError::StoredAccessTokenNotConfigured);
+        }
+        AuthMethod::BrowserLogin if config.oauth.is_none() => {
+            return Err(CliConfigError::BrowserLoginNotConfigured);
+        }
+        _ => {}
+    }
+    config.auth_method = Some(method);
     save_cli_config(&config)
 }
 

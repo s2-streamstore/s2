@@ -9,6 +9,7 @@ mod credential_store;
 mod diff;
 mod error;
 mod lite;
+mod login;
 mod ops;
 mod record_format;
 mod types;
@@ -27,8 +28,8 @@ use cli::{
 };
 use colored::Colorize;
 use config::{
-    ConfigKey, CredentialStore, load_cli_config, load_config_file, sdk_config, set_config_value,
-    unset_config_value,
+    AuthMethod, ConfigKey, CredentialStore, load_config_file, sdk_config, select_auth_method,
+    set_config_value, unset_config_value,
 };
 use error::{CliError, OpKind};
 use futures::{Stream, StreamExt};
@@ -93,7 +94,10 @@ fn parse_cli() -> Cli {
 }
 
 fn allows_passive_update_check(command: Option<&Command>) -> bool {
-    !matches!(command, Some(Command::Lite(_) | Command::Update(_)))
+    !matches!(
+        command,
+        Some(Command::Lite(_) | Command::Login(_) | Command::Logout(_) | Command::Update(_))
+    )
 }
 
 fn print_legacy_access_token_deprecation(config: &config::CliConfig) {
@@ -157,7 +161,7 @@ fn print_token_change(message: &str, change: &access_token::TokenChange) {
     {
         eprintln!(
             "{}",
-            "  - Warning: S2_ACCESS_TOKEN is set and takes precedence over stored credentials."
+            "  - Warning: S2_ACCESS_TOKEN is set and remains active. Unset it to use the selected credential."
                 .yellow()
         );
     }
@@ -223,8 +227,37 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    if let Command::Login(args) = &command {
+        login::login(args).await?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Command::Logout(args) = &command {
+        login::logout(args).await?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     if let Command::Auth(auth_cmd) = &command {
         match auth_cmd {
+            AuthCommand::Use { method } => {
+                let saved_path = select_auth_method(*method).await?;
+                let message = match method {
+                    AuthMethod::AccessToken => "✓ Access token selected",
+                    AuthMethod::BrowserLogin => "✓ Browser login selected",
+                };
+                eprintln!("{}", message.green().bold());
+                eprintln!(
+                    "  - Configuration saved to: {}",
+                    saved_path.display().to_string().cyan()
+                );
+                if login::has_access_token_environment_variable() {
+                    eprintln!(
+                        "{}",
+                        "  - Warning: S2_ACCESS_TOKEN is set and remains active. Unset it to use the selected credential."
+                            .yellow()
+                    );
+                }
+            }
             AuthCommand::AccessToken { command } => match command {
                 AuthAccessTokenCommand::Set(args) => {
                     let change = access_token::set(args).await?;
@@ -318,17 +351,26 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         diff::validate_args(args)?;
     }
 
-    let cli_config = load_cli_config()?;
+    let (cli_config, credential) = login::resolve_access_token().await?;
     print_legacy_access_token_deprecation(&cli_config);
-    let credential = access_token::resolve(&cli_config)?;
-    let sdk_config = sdk_config(&cli_config, credential.expose(), update::user_agent())?;
+    credential.validate_destination(&cli_config)?;
+    let sdk_config = credential.configure_sdk(sdk_config(
+        &cli_config,
+        credential.access_token(),
+        update::user_agent(),
+    )?);
     let token_source = Some(credential.source());
     let s2 = S2::new(sdk_config.clone())
         .map_err(|e| CliError::SdkInit(e.into()).with_token_source(token_source))?;
     let mut exit_code = ExitCode::SUCCESS;
     let result: Result<(), CliError> = (async {
         match command {
-        Command::Auth(..) | Command::Config(..) | Command::Lite(..) | Command::Update(..) => {
+        Command::Login(..)
+        | Command::Logout(..)
+        | Command::Auth(..)
+        | Command::Config(..)
+        | Command::Lite(..)
+        | Command::Update(..) => {
             unreachable!()
         }
 

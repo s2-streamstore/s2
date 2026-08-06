@@ -115,6 +115,10 @@ pub enum CliError {
     #[diagnostic(help("{}", HELP))]
     LiteServer(String),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Login(#[from] crate::login::LoginError),
+
     #[error("Apply failed: {0}")]
     #[diagnostic(help("{}", HELP))]
     Apply(String),
@@ -217,6 +221,7 @@ pub enum S2UriParseError {
 #[derive(Debug, Clone, Copy)]
 pub enum TokenSource {
     Environment,
+    BrowserLogin,
     StoredAccessToken,
     ConfigFile,
 }
@@ -225,6 +230,7 @@ impl std::fmt::Display for TokenSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenSource::Environment => write!(f, "environment (S2_ACCESS_TOKEN)"),
+            TokenSource::BrowserLogin => write!(f, "browser login"),
             TokenSource::StoredAccessToken => write!(f, "stored access token"),
             TokenSource::ConfigFile => write!(f, "config file"),
         }
@@ -326,12 +332,28 @@ pub enum CliConfigError {
     ))]
     CredentialNotReadable,
 
+    #[error("Missing access token")]
+    #[diagnostic(help(
+        "Run `s2 login`, `s2 auth access-token set`, or set the `S2_ACCESS_TOKEN` environment variable."
+    ))]
+    MissingAccessToken,
+
     #[error("S2_ACCESS_TOKEN is not valid Unicode")]
     #[diagnostic(help("Set S2_ACCESS_TOKEN to a valid access token and retry."))]
     InvalidAccessTokenEnvironment,
 
     #[error("{0} is not valid Unicode")]
     InvalidEnvironmentValue(&'static str),
+
+    #[error("No access token is configured")]
+    #[diagnostic(help(
+        "Run `s2 auth access-token set` before selecting `s2 auth use access-token`."
+    ))]
+    StoredAccessTokenNotConfigured,
+
+    #[error("No browser login is configured")]
+    #[diagnostic(help("Run `s2 login` before selecting `s2 auth use browser-login`."))]
+    BrowserLoginNotConfigured,
 }
 
 impl From<config::ConfigError> for CliConfigError {

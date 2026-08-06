@@ -12,11 +12,11 @@ use uuid::Uuid;
 use crate::{
     cli::{AuthAccessTokenMigrateArgs, AuthAccessTokenSetArgs},
     config::{
-        CliConfig, CredentialStore, StoredCredentialReference, access_token_from_environment,
-        acquire_config_lock, load_config_file, save_cli_config,
+        AuthMethod, CliConfig, CredentialStore, StoredCredentialReference, acquire_config_lock,
+        load_config_file, save_cli_config,
     },
-    credential_store::{self, CredentialStoreError},
-    error::{CliConfigError, TokenSource},
+    credential_store::{self, CredentialKind, CredentialStoreError},
+    error::CliConfigError,
 };
 
 const CREDENTIAL_KIND: &str = "s2_access_token";
@@ -97,18 +97,9 @@ pub enum AccessTokenError {
     Config(#[from] CliConfigError),
 }
 
-pub struct ResolvedAccessToken {
-    token: SecretString,
-    source: TokenSource,
-}
-
-impl ResolvedAccessToken {
-    pub fn expose(&self) -> &str {
-        self.token.expose_secret()
-    }
-
-    pub fn source(&self) -> TokenSource {
-        self.source
+impl AccessTokenError {
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Store(CredentialStoreError::CredentialNotFound))
     }
 }
 
@@ -144,24 +135,10 @@ struct LoadedCredential {
     access_token: String,
 }
 
-pub fn resolve(config: &CliConfig) -> Result<ResolvedAccessToken, AccessTokenError> {
-    if let Some(token) = access_token_from_environment()? {
-        validate_token(&token)?;
-        return Ok(ResolvedAccessToken {
-            token: token.into(),
-            source: TokenSource::Environment,
-        });
-    }
-
-    let source = if config.stored_access_token.is_some() {
-        TokenSource::StoredAccessToken
-    } else {
-        TokenSource::ConfigFile
-    };
-    Ok(ResolvedAccessToken {
-        token: load(config)?,
-        source,
-    })
+#[derive(Clone, Copy)]
+enum StoreIntent {
+    Set,
+    Migrate,
 }
 
 pub async fn set(args: &AuthAccessTokenSetArgs) -> Result<TokenChange, AccessTokenError> {
@@ -174,7 +151,7 @@ pub async fn set(args: &AuthAccessTokenSetArgs) -> Result<TokenChange, AccessTok
 }
 
 pub async fn set_from_argument(value: String) -> Result<TokenChange, AccessTokenError> {
-    validate_token(&value)?;
+    validate(&value)?;
     store_token(value.into(), CredentialStore::Keyring).await
 }
 
@@ -203,6 +180,7 @@ pub async fn migrate(args: &AuthAccessTokenMigrateArgs) -> Result<TokenChange, A
         let credential_path = match reference.credential_store {
             CredentialStore::Keyring => None,
             CredentialStore::File => Some(credential_store::credential_file_path(
+                CredentialKind::AccessToken,
                 &reference.credential_id,
             )?),
         };
@@ -215,12 +193,13 @@ pub async fn migrate(args: &AuthAccessTokenMigrateArgs) -> Result<TokenChange, A
         });
     }
 
-    validate_token(&token)?;
-    let mut change =
-        store_with_config(config, token.into(), requested_store(args.insecure_storage))?;
-    // Migration moves the existing token; it does not replace it with another token.
-    change.replaced = false;
-    Ok(change)
+    validate(&token)?;
+    store_with_config(
+        config,
+        token.into(),
+        requested_store(args.insecure_storage),
+        StoreIntent::Migrate,
+    )
 }
 
 pub async fn remove() -> Result<TokenRemoval, AccessTokenError> {
@@ -241,6 +220,9 @@ pub async fn remove() -> Result<TokenRemoval, AccessTokenError> {
 
     config.stored_access_token = None;
     config.access_token = None;
+    if config.auth_method == Some(AuthMethod::AccessToken) {
+        config.auth_method = config.oauth.as_ref().map(|_| AuthMethod::BrowserLogin);
+    }
     // Deactivate durably before deletion so interruption leaves cleanup intent.
     if let Some(reference) = reference.as_ref() {
         queue_cleanup(&mut config, reference);
@@ -259,6 +241,7 @@ pub async fn remove() -> Result<TokenRemoval, AccessTokenError> {
     {
         return Err(AccessTokenError::RemovalIncomplete {
             recovery: credential_store::credential_location(
+                CredentialKind::AccessToken,
                 &reference.credential_id,
                 reference.credential_store,
             ),
@@ -272,9 +255,10 @@ pub async fn remove() -> Result<TokenRemoval, AccessTokenError> {
     })
 }
 
-fn load(config: &CliConfig) -> Result<SecretString, AccessTokenError> {
+pub fn load(config: &CliConfig) -> Result<SecretString, AccessTokenError> {
     if let Some(reference) = config.stored_access_token.as_ref() {
         let bytes = SecretBox::new(Box::new(credential_store::load(
+            CredentialKind::AccessToken,
             &reference.credential_id,
             reference.credential_store,
         )?));
@@ -287,7 +271,7 @@ fn load(config: &CliConfig) -> Result<SecretString, AccessTokenError> {
         .filter(|token| !token.is_empty())
         .cloned()
         .ok_or(AccessTokenError::NotConfigured)?;
-    validate_token(&token)?;
+    validate(&token)?;
     Ok(token.into())
 }
 
@@ -304,7 +288,7 @@ fn decode_stored_credential(
     {
         return Err(AccessTokenError::BindingMismatch);
     }
-    validate_token(&stored.access_token)?;
+    validate(&stored.access_token)?;
     Ok(stored.access_token.into())
 }
 
@@ -328,7 +312,7 @@ fn read_from_stdin() -> Result<SecretString, AccessTokenError> {
     } else if token.ends_with('\n') {
         token.truncate(token.len() - 1);
     }
-    validate_token(&token)?;
+    validate(&token)?;
     Ok(token.into())
 }
 
@@ -341,11 +325,11 @@ fn read_from_terminal() -> Result<SecretString, AccessTokenError> {
     if token.len() as u64 > MAX_STDIN_BYTES {
         return Err(AccessTokenError::InputTooLarge);
     }
-    validate_token(&token)?;
+    validate(&token)?;
     Ok(token.into())
 }
 
-fn validate_token(token: &str) -> Result<(), AccessTokenError> {
+pub(crate) fn validate(token: &str) -> Result<(), AccessTokenError> {
     if token.is_empty() {
         return Err(AccessTokenError::EmptyInput);
     }
@@ -372,20 +356,22 @@ async fn store_token(
 ) -> Result<TokenChange, AccessTokenError> {
     let _lock = acquire_config_lock().await?;
     let config = load_config_file()?;
-    store_with_config(config, token, store)
+    store_with_config(config, token, store, StoreIntent::Set)
 }
 
 fn store_with_config(
     mut config: CliConfig,
     token: SecretString,
     store: CredentialStore,
+    intent: StoreIntent,
 ) -> Result<TokenChange, AccessTokenError> {
     let previous = config.stored_access_token.clone();
-    let replaced = previous.is_some()
-        || config
-            .access_token
-            .as_ref()
-            .is_some_and(|token| !token.is_empty());
+    let replaced = matches!(intent, StoreIntent::Set)
+        && (previous.is_some()
+            || config
+                .access_token
+                .as_ref()
+                .is_some_and(|token| !token.is_empty()));
     let reference = credential_reference_for_write(&config, store);
     let payload = StoredCredential {
         version: CREDENTIAL_VERSION,
@@ -402,6 +388,7 @@ fn store_with_config(
     save_cli_config(&config)?;
 
     credential_store::save(
+        CredentialKind::AccessToken,
         &reference.credential_id,
         reference.credential_store,
         bytes.expose_secret(),
@@ -415,6 +402,9 @@ fn store_with_config(
     if let Some(previous) = previous.as_ref() {
         queue_cleanup(&mut config, previous);
     }
+    if matches!(intent, StoreIntent::Set) {
+        config.auth_method = Some(AuthMethod::AccessToken);
+    }
     let config_path = save_cli_config(&config)?;
 
     let (cleanup_changed, mut cleanup_warning) = cleanup_pending_credentials(&mut config);
@@ -427,6 +417,7 @@ fn store_with_config(
     let credential_path = match store {
         CredentialStore::Keyring => None,
         CredentialStore::File => Some(credential_store::credential_file_path(
+            CredentialKind::AccessToken,
             &reference.credential_id,
         )?),
     };
@@ -468,7 +459,11 @@ fn cleanup_pending_credentials(config: &mut CliConfig) -> (bool, Option<String>)
     let mut errors = Vec::new();
     let mut removed = false;
     for reference in pending {
-        match credential_store::delete(&reference.credential_id, reference.credential_store) {
+        match credential_store::delete(
+            CredentialKind::AccessToken,
+            &reference.credential_id,
+            reference.credential_store,
+        ) {
             Ok(()) => removed = true,
             Err(error) => {
                 errors.push(format!("credential {}: {error}", reference.credential_id));
