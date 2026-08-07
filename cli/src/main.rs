@@ -2,6 +2,7 @@
 
 mod access_token;
 mod apply;
+mod auth;
 mod bench;
 mod cli;
 mod config;
@@ -96,7 +97,15 @@ fn parse_cli() -> Cli {
 fn allows_passive_update_check(command: Option<&Command>) -> bool {
     !matches!(
         command,
-        Some(Command::Lite(_) | Command::Login(_) | Command::Logout(_) | Command::Update(_))
+        Some(
+            Command::Lite(_)
+                | Command::Login(_)
+                | Command::Logout(_)
+                | Command::Auth(
+                    AuthCommand::Login(_) | AuthCommand::Logout(_) | AuthCommand::Status,
+                )
+                | Command::Update(_)
+        )
     )
 }
 
@@ -239,6 +248,9 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
     if let Command::Auth(auth_cmd) = &command {
         match auth_cmd {
+            AuthCommand::Login(args) => login::login(args).await?,
+            AuthCommand::Logout(args) => login::logout(args).await?,
+            AuthCommand::Status => return auth::status().await,
             AuthCommand::Use { method } => {
                 let saved_path = select_auth_method(*method).await?;
                 let message = match method {
