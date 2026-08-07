@@ -2022,17 +2022,16 @@ fn now_unix_seconds() -> Result<u64, LoginError> {
 }
 
 fn is_loopback_host(host: &str) -> bool {
-    if host == "localhost" {
-        return true;
-    }
-    // `Url::host_str()` serializes IPv6 hosts in brackets (e.g. `[::1]`),
-    // which `IpAddr` parsing does not accept.
+    // `url::Url::host_str()` returns IPv6 hosts wrapped in brackets (e.g.
+    // `[::1]`), which `IpAddr::parse` rejects, so strip a matching pair first.
     let host = host
         .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
+        .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
-    host.parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 pub(crate) fn has_access_token_environment_variable() -> bool {

@@ -339,9 +339,96 @@ fn issuer_requires_https_except_on_loopback() {
     assert!(oauth_issuer(Some("https://clerk.s2.dev")).is_ok());
     assert!(oauth_issuer(Some("http://127.0.0.1:3000")).is_ok());
     assert!(oauth_issuer(Some("http://localhost:3000")).is_ok());
+    // The entire 127.0.0.0/8 block is loopback per RFC 3330, not just 127.0.0.1.
+    assert!(oauth_issuer(Some("http://127.0.0.2:3000")).is_ok());
+    assert!(oauth_issuer(Some("http://127.1.2.3:3000")).is_ok());
+    assert!(oauth_issuer(Some("http://127.255.255.255:3000")).is_ok());
+    assert!(oauth_issuer(Some("http://[::1]:3000")).is_ok());
     assert!(oauth_issuer(Some("http://clerk.s2.dev")).is_err());
     assert!(oauth_issuer(Some("https://user@clerk.s2.dev")).is_err());
     assert!(oauth_issuer(Some("https://clerk.s2.dev/path")).is_err());
+    // Non-loopback addresses (including the network address) are rejected over HTTP.
+    assert!(oauth_issuer(Some("http://0.0.0.0:3000")).is_err());
+    assert!(oauth_issuer(Some("http://192.168.1.1:3000")).is_err());
+    assert!(oauth_issuer(Some("http://10.0.0.1:3000")).is_err());
+    assert!(oauth_issuer(Some("http://169.254.169.254:3000")).is_err());
+}
+
+#[test]
+fn is_loopback_host_recognizes_full_loopback_range() {
+    // IPv4: the entire 127.0.0.0/8 block is loopback (RFC 3330).
+    assert!(is_loopback_host("127.0.0.1"));
+    assert!(is_loopback_host("127.0.0.2"));
+    assert!(is_loopback_host("127.0.1.1"));
+    assert!(is_loopback_host("127.1.2.3"));
+    assert!(is_loopback_host("127.100.100.100"));
+    assert!(is_loopback_host("127.255.255.255"));
+    // IPv6 loopback, its canonical equivalent, and the bracketed form produced
+    // by `url::Url::host_str()`.
+    assert!(is_loopback_host("::1"));
+    assert!(is_loopback_host("0:0:0:0:0:0:0:1"));
+    assert!(is_loopback_host("[::1]"));
+    assert!(is_loopback_host("[0:0:0:0:0:0:0:1]"));
+    // Hostname alias.
+    assert!(is_loopback_host("localhost"));
+
+    // Non-loopback addresses must be rejected.
+    assert!(!is_loopback_host("0.0.0.0"));
+    assert!(!is_loopback_host("0.0.0.1"));
+    assert!(!is_loopback_host("::"));
+    assert!(!is_loopback_host("::2"));
+    assert!(!is_loopback_host("192.168.1.1"));
+    assert!(!is_loopback_host("10.0.0.1"));
+    assert!(!is_loopback_host("169.254.169.254"));
+    assert!(!is_loopback_host("8.8.8.8"));
+    assert!(!is_loopback_host("clerk.s2.dev"));
+    assert!(!is_loopback_host(""));
+    assert!(!is_loopback_host("localhost.evil.example"));
+    assert!(!is_loopback_host("127.0.0.1.evil.example"));
+    assert!(!is_loopback_host("127.0.0.1.nip.io"));
+}
+
+#[test]
+fn loopback_endpoint_binding_accepts_non_127_0_0_1_loopback_addresses() {
+    // Endpoints bound to other addresses in 127.0.0.0/8 are valid loopback
+    // destinations and must accept HTTP transport.
+    let issuer = "http://127.0.0.2:3000/";
+    let account = "http://127.0.0.2:4243";
+    let basin = "http://127.0.0.2:4243";
+    assert!(validate_endpoint_binding(issuer, account, basin, false).is_ok());
+    // `ssl_no_verify` is permitted on loopback.
+    assert!(validate_endpoint_binding(issuer, account, basin, true).is_ok());
+
+    // Mixed addresses within 127.0.0.0/8 are still loopback.
+    assert!(
+        validate_endpoint_binding(
+            "http://127.0.0.1:3000/",
+            "http://127.0.0.3:4243",
+            "http://127.0.0.4:4243",
+            false,
+        )
+        .is_ok()
+    );
+
+    // HTTP endpoints outside the loopback range are rejected.
+    assert!(matches!(
+        validate_endpoint_binding(
+            "http://10.0.0.1:3000/",
+            "http://10.0.0.1:4243",
+            "http://10.0.0.1:4243",
+            false
+        ),
+        Err(LoginError::UnsafeBrowserDestination)
+    ));
+    assert!(matches!(
+        validate_endpoint_binding(
+            "http://127.0.0.2:3000/",
+            "http://192.168.1.1:4243",
+            "http://127.0.0.2:4243",
+            false
+        ),
+        Err(LoginError::UnsafeBrowserDestination)
+    ));
 }
 
 #[test]
