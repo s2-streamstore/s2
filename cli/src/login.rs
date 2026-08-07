@@ -46,7 +46,8 @@ use crate::{
 
 mod destination;
 
-use destination::{effective_endpoints, validate_endpoint_binding};
+use destination::validate_endpoint_binding;
+pub(crate) use destination::{effective_endpoints, uses_loopback_endpoints};
 
 const DEFAULT_OAUTH_ISSUER: &str = "https://clerk.s2.dev";
 const DEFAULT_OAUTH_CLIENT_ID: &str = "9zTKDS3tHSmaWl33";
@@ -192,6 +193,7 @@ pub enum LoginError {
         revocation: Box<LoginError>,
     },
 
+    #[cfg(unix)]
     #[error("Failed to {action} the OAuth credentials file")]
     CredentialFile {
         action: &'static str,
@@ -229,7 +231,12 @@ impl LoginError {
                         StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
                     )
             }
-            Self::CredentialFile { source, .. } | Self::RefreshLock(source) => matches!(
+            #[cfg(unix)]
+            Self::CredentialFile { source, .. } => matches!(
+                source.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+            ),
+            Self::RefreshLock(source) => matches!(
                 source.kind(),
                 std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
             ),

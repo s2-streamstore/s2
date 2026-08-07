@@ -238,6 +238,15 @@ pub struct UpdateArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
+    /// Log in to S2 through your browser.
+    Login(LoginArgs),
+
+    /// Log out of the browser-authenticated S2 session.
+    Logout(LogoutArgs),
+
+    /// Show the active authentication method and verify it with S2.
+    Status,
+
     /// Switch authentication methods without deleting either credential.
     Use {
         /// Authentication method to select.

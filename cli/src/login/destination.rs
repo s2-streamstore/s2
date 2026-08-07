@@ -10,7 +10,7 @@ fn is_production_issuer(issuer: &str) -> bool {
     }
 }
 
-pub(super) fn effective_endpoints(config: &CliConfig) -> (String, String) {
+pub(crate) fn effective_endpoints(config: &CliConfig) -> (String, String) {
     match (&config.account_endpoint, &config.basin_endpoint) {
         (Some(account), Some(basin)) => (normalize_endpoint(account), normalize_endpoint(basin)),
         // The SDK ignores an incomplete custom-endpoint pair and uses its defaults.
@@ -19,6 +19,11 @@ pub(super) fn effective_endpoints(config: &CliConfig) -> (String, String) {
             DEFAULT_BASIN_ENDPOINT.to_owned(),
         ),
     }
+}
+
+pub(crate) fn uses_loopback_endpoints(config: &CliConfig) -> bool {
+    let (account, basin) = effective_endpoints(config);
+    endpoint_environment(&account, &basin) == Some(EndpointEnvironment::Loopback)
 }
 
 fn normalize_endpoint(endpoint: &str) -> String {

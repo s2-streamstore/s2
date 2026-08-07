@@ -1,5 +1,7 @@
+#[cfg(unix)]
+use std::fs::File;
 use std::{
-    fs::{self, File},
+    fs,
     io::Write as _,
     path::{Path, PathBuf},
 };
@@ -58,6 +60,7 @@ pub enum CredentialStoreError {
     #[error("Invalid credential path")]
     InvalidPath,
 
+    #[cfg(unix)]
     #[error("The private credential file is not safely protected: {0}")]
     #[diagnostic(help(
         "Restrict the credential directory to the current user and the file to mode 0600, or remove it and authenticate again."

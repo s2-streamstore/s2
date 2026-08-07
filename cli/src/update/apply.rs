@@ -55,6 +55,7 @@ pub enum UpdateError {
     Archive(String),
     #[error("release archive did not contain {0}")]
     BinaryNotInArchive(String),
+    #[cfg(not(windows))]
     #[error(
         "could not replace {path}: {source}\n\
          (need write access to its directory; re-run with sufficient permissions)"
