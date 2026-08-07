@@ -367,7 +367,7 @@ pub async fn read_session(
     let mut retry_backoff = retry_builder(&client.config.retry).build();
     let access_token_mode = client.config.access_token.mode();
     let baseline_wait = end.wait;
-    let mut last_tail_at: Option<Instant> = None;
+    let mut last_batch_at: Option<Instant> = None;
     let initial_resume_seq_num = if start.clamp == Some(true) {
         None
     } else {
@@ -375,7 +375,7 @@ pub async fn read_session(
     };
 
     let batches = loop {
-        end.wait = remaining_wait(baseline_wait, last_tail_at);
+        end.wait = remaining_wait(baseline_wait, last_batch_at);
         match session_inner(
             client.clone(),
             name.clone(),
@@ -406,7 +406,7 @@ pub async fn read_session(
 
         loop {
             if batches.is_none() {
-                end.wait = remaining_wait(baseline_wait, last_tail_at);
+                end.wait = remaining_wait(baseline_wait, last_batch_at);
                 match session_inner(
                     client.clone(),
                     name.clone(),
@@ -444,9 +444,12 @@ pub async fn read_session(
                         retry_backoff.reset();
                     }
 
-                    if batch.tail.is_some() {
-                        last_tail_at = Some(Instant::now());
-                    }
+                    // Track the time of every delivered batch, not just those
+                    // carrying tail info. The server resets its wait deadline
+                    // after each delivered batch (including catchup batches with
+                    // `tail: None`), so the remaining wait budget on a retry
+                    // must be measured from the most recent batch.
+                    last_batch_at = Some(Instant::now());
 
                     update_resume_start(&mut start, &batch);
                     if let Some(count) = end.count.as_mut() {
@@ -532,12 +535,13 @@ async fn session_inner(
 
 /// Compute the remaining wait budget for a retry.
 ///
-/// During catchup (tail not yet observed), the full wait is sent.
-/// Once tailing, the wait budget is depleted based on time since
-/// the last batch with tail info, which approximates how long the
-/// server has been in its long polling state.
-fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> Option<u32> {
-    baseline_wait.map(|w| match last_tail_at {
+/// During catchup (no batch delivered yet), the full wait is sent. Once at
+/// least one batch has been delivered, the wait budget is depleted based on
+/// time since the last delivered batch, approximating how the server resets
+/// its wait deadline after every batch it delivers (including catchup
+/// batches without tail info).
+fn remaining_wait(baseline_wait: Option<u32>, last_batch_at: Option<Instant>) -> Option<u32> {
+    baseline_wait.map(|w| match last_batch_at {
         Some(since) => w.saturating_sub(since.elapsed().as_secs() as u32),
         None => w,
     })
@@ -634,6 +638,61 @@ mod tests {
         assert_eq!(start.timestamp, None);
         assert_eq!(start.tail_offset, None);
         assert_eq!(start.clamp, Some(true));
+    }
+
+    #[test]
+    fn remaining_wait_is_none_without_baseline() {
+        assert_eq!(remaining_wait(None, None), None);
+        assert_eq!(remaining_wait(None, Some(Instant::now())), None);
+    }
+
+    #[test]
+    fn remaining_wait_is_full_before_any_batch() {
+        // No batch delivered yet: the full baseline wait is sent so the server
+        // can arm its wait deadline from scratch.
+        assert_eq!(remaining_wait(Some(10), None), Some(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remaining_wait_depletes_since_last_batch() {
+        let last_batch_at = Instant::now();
+        tokio::time::advance(Duration::from_secs(3)).await;
+
+        assert_eq!(remaining_wait(Some(10), Some(last_batch_at)), Some(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remaining_wait_saturates_at_zero() {
+        let last_batch_at = Instant::now();
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        assert_eq!(remaining_wait(Some(10), Some(last_batch_at)), Some(0));
+    }
+
+    /// Regression test for the lag-recovery budget underestimation bug.
+    ///
+    /// The server resets its wait deadline after every delivered batch,
+    /// including catchup batches with `tail: None`. The client must
+    /// approximate this by measuring remaining wait from the most recent
+    /// batch (regardless of tail), not from the last tail-bearing batch.
+    /// Otherwise a retry after catchup delivery underestimates the wait
+    /// budget and may close the session prematurely.
+    #[tokio::test(start_paused = true)]
+    async fn remaining_wait_uses_last_batch_not_last_tail() {
+        // A tail-bearing batch arrives at t=0; server arms a 10s deadline.
+        let last_tail_batch_at = Instant::now();
+
+        // Lag recovery delivers catchup batches with `tail: None` at t=2.
+        // The server resets its deadline to t=12 (10s from t=2).
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let last_batch_at = Instant::now();
+
+        // Retry at t=5. Measuring from the last batch (t=2) yields ~7s
+        // remaining; measuring from the last tail-bearing batch (t=0) would
+        // incorrectly yield 5s.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(remaining_wait(Some(10), Some(last_batch_at)), Some(7));
+        assert_eq!(remaining_wait(Some(10), Some(last_tail_batch_at)), Some(5));
     }
 
     fn test_session(
