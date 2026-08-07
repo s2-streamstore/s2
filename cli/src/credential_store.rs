@@ -14,8 +14,22 @@ use crate::{
     error::CliConfigError,
 };
 
-const FILE_PREFIX: &str = "access-token";
 const KEYRING_SERVICE: &str = "s2-cli";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    AccessToken,
+    OAuth,
+}
+
+impl CredentialKind {
+    fn storage_key_prefix(self) -> &'static str {
+        match self {
+            Self::AccessToken => "access-token",
+            Self::OAuth => "oauth",
+        }
+    }
+}
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum CredentialStoreError {
@@ -28,23 +42,25 @@ pub enum CredentialStoreError {
     #[error("Failed to access the OS credential store: {0}")]
     CredentialStore(String),
 
-    #[error("Stored access token was not found")]
-    #[diagnostic(help("Run `s2 auth access-token set` to store an access token again."))]
+    #[error("Stored credential was not found")]
+    #[diagnostic(help(
+        "Run `s2 login` again for browser authentication, or `s2 auth access-token set` for an access token."
+    ))]
     CredentialNotFound,
 
-    #[error("Failed to {action} the access-token file")]
+    #[error("Failed to {action} the credentials file")]
     CredentialFile {
         action: &'static str,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("Invalid access-token path")]
+    #[error("Invalid credential path")]
     InvalidPath,
 
-    #[error("The private access-token file is not safely protected: {0}")]
+    #[error("The private credential file is not safely protected: {0}")]
     #[diagnostic(help(
-        "Restrict the credential directory to the current user and the file to mode 0600, or remove it and store the token again."
+        "Restrict the credential directory to the current user and the file to mode 0600, or remove it and authenticate again."
     ))]
     UnsafeCredentialFile(&'static str),
 
@@ -53,7 +69,19 @@ pub enum CredentialStoreError {
     Config(#[from] CliConfigError),
 }
 
+impl CredentialStoreError {
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::SecureStorageUnavailable(_)
+                | Self::CredentialStore(_)
+                | Self::CredentialFile { .. }
+        )
+    }
+}
+
 pub fn save(
+    kind: CredentialKind,
     credential_id: &str,
     store: CredentialStore,
     bytes: &[u8],
@@ -62,21 +90,27 @@ pub fn save(
         CredentialStore::Keyring => {
             let value = std::str::from_utf8(bytes)
                 .expect("credential JSON serialization always produces valid UTF-8");
-            let entry = keyring_entry(credential_id).map_err(|error| {
+            let entry = keyring_entry(kind, credential_id).map_err(|error| {
                 CredentialStoreError::SecureStorageUnavailable(error.to_string())
             })?;
             entry
                 .set_password(value)
                 .map_err(|error| CredentialStoreError::SecureStorageUnavailable(error.to_string()))
         }
-        CredentialStore::File => write_private_file(&credential_file_path(credential_id)?, bytes),
+        CredentialStore::File => {
+            write_private_file(&credential_file_path(kind, credential_id)?, bytes)
+        }
     }
 }
 
-pub fn load(credential_id: &str, store: CredentialStore) -> Result<Vec<u8>, CredentialStoreError> {
+pub fn load(
+    kind: CredentialKind,
+    credential_id: &str,
+    store: CredentialStore,
+) -> Result<Vec<u8>, CredentialStoreError> {
     match store {
         CredentialStore::Keyring => {
-            let entry = keyring_entry(credential_id)
+            let entry = keyring_entry(kind, credential_id)
                 .map_err(|error| CredentialStoreError::CredentialStore(error.to_string()))?;
             entry
                 .get_password()
@@ -87,7 +121,7 @@ pub fn load(credential_id: &str, store: CredentialStore) -> Result<Vec<u8>, Cred
                 })
         }
         CredentialStore::File => {
-            let path = credential_file_path(credential_id)?;
+            let path = credential_file_path(kind, credential_id)?;
             secure_private_file_for_read(&path)?;
             fs::read(path).map_err(|source| {
                 if source.kind() == std::io::ErrorKind::NotFound {
@@ -103,10 +137,14 @@ pub fn load(credential_id: &str, store: CredentialStore) -> Result<Vec<u8>, Cred
     }
 }
 
-pub fn delete(credential_id: &str, store: CredentialStore) -> Result<(), CredentialStoreError> {
+pub fn delete(
+    kind: CredentialKind,
+    credential_id: &str,
+    store: CredentialStore,
+) -> Result<(), CredentialStoreError> {
     match store {
         CredentialStore::Keyring => {
-            let entry = keyring_entry(credential_id)
+            let entry = keyring_entry(kind, credential_id)
                 .map_err(|error| CredentialStoreError::CredentialStore(error.to_string()))?;
             match entry.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -114,7 +152,7 @@ pub fn delete(credential_id: &str, store: CredentialStore) -> Result<(), Credent
             }
         }
         CredentialStore::File => {
-            let path = credential_file_path(credential_id)?;
+            let path = credential_file_path(kind, credential_id)?;
             match fs::remove_file(&path) {
                 Ok(()) => {
                     let parent = path.parent().ok_or(CredentialStoreError::InvalidPath)?;
@@ -132,33 +170,44 @@ pub fn delete(credential_id: &str, store: CredentialStore) -> Result<(), Credent
     }
 }
 
-pub fn credential_file_path(credential_id: &str) -> Result<PathBuf, CredentialStoreError> {
+pub fn credential_file_path(
+    kind: CredentialKind,
+    credential_id: &str,
+) -> Result<PathBuf, CredentialStoreError> {
     let digest = Sha256::digest(credential_id.as_bytes());
     let filename = format!(
-        "{FILE_PREFIX}-{}.json",
+        "{}-{}.json",
+        kind.storage_key_prefix(),
         Base64UrlUnpadded::encode_string(digest.as_slice())
     );
     Ok(config_path()?.with_file_name(filename))
 }
 
-pub fn credential_location(credential_id: &str, store: CredentialStore) -> String {
+pub fn credential_location(
+    kind: CredentialKind,
+    credential_id: &str,
+    store: CredentialStore,
+) -> String {
     match store {
         CredentialStore::Keyring => format!(
             "OS credential store service `{KEYRING_SERVICE}`, account `{}`",
-            keyring_account(credential_id)
+            keyring_account(kind, credential_id)
         ),
-        CredentialStore::File => credential_file_path(credential_id)
+        CredentialStore::File => credential_file_path(kind, credential_id)
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| format!("credential ID `{credential_id}`")),
     }
 }
 
-fn keyring_entry(credential_id: &str) -> Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, &keyring_account(credential_id))
+fn keyring_entry(
+    kind: CredentialKind,
+    credential_id: &str,
+) -> Result<keyring::Entry, keyring::Error> {
+    keyring::Entry::new(KEYRING_SERVICE, &keyring_account(kind, credential_id))
 }
 
-fn keyring_account(credential_id: &str) -> String {
-    format!("access-token:{credential_id}")
+fn keyring_account(kind: CredentialKind, credential_id: &str) -> String {
+    format!("{}:{credential_id}", kind.storage_key_prefix())
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), CredentialStoreError> {
