@@ -23,6 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
 
+    producer.flush().await?;
+
     let ack1 = ticket1.await?;
     let ack2 = ticket2.await?;
     println!("Record 1 seq_num: {}", ack1.seq_num);

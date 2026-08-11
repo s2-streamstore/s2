@@ -94,6 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Submit individual records
     let ticket = producer.submit(AppendRecord::new("my event")?).await?;
 
+    // Force the partial batch and wait for durability without closing the producer
+    producer.flush().await?;
+
     // Get the exact sequence number
     let ack = ticket.await?;
     println!("Record durable at seqNum {}", ack.seq_num);
