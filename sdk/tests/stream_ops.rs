@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use assert_matches::assert_matches;
 use common::{S2Stream, SharedS2Basin, s2_config, unique_basin_name, unique_stream_name};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, poll};
 use rstest::rstest;
 use s2_sdk::{
     append_session::AppendSessionConfig,
@@ -1660,6 +1660,181 @@ async fn producer_delivers_all_acks(stream: &S2Stream) -> Result<(), Box<dyn std
     assert_eq!(ack1.seq_num, 0);
     assert_eq!(ack2.seq_num, 1);
     assert_eq!(ack3.seq_num, 2);
+
+    Ok(())
+}
+
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
+async fn producer_flushes_partial_batch_without_waiting_for_linger(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let producer = stream.producer(
+        ProducerConfig::new()
+            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
+    );
+    let ticket = producer.submit(AppendRecord::new("lorem")?).await?;
+
+    tokio::time::timeout(Duration::from_secs(10), producer.flush())
+        .await
+        .expect("producer flush timed out")?;
+
+    let ack = ticket
+        .now_or_never()
+        .expect("covered ticket should be ready after flush")?;
+    assert_eq!(ack.seq_num, 0);
+
+    producer.close().await?;
+    Ok(())
+}
+
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
+async fn producer_flush_delivers_all_indexed_acks(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let producer = stream.producer(
+        ProducerConfig::new()
+            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
+    );
+    let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
+    let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
+    let ticket3 = producer.submit(AppendRecord::new("dolor")?).await?;
+
+    producer.flush().await?;
+
+    let ack1 = ticket1
+        .now_or_never()
+        .expect("covered ticket1 should be ready after flush")?;
+    let ack2 = ticket2
+        .now_or_never()
+        .expect("covered ticket2 should be ready after flush")?;
+    let ack3 = ticket3
+        .now_or_never()
+        .expect("covered ticket3 should be ready after flush")?;
+
+    assert_eq!(ack1.seq_num, 0);
+    assert_eq!(ack2.seq_num, 1);
+    assert_eq!(ack3.seq_num, 2);
+    assert_eq!(ack1.batch, ack2.batch);
+    assert_eq!(ack2.batch, ack3.batch);
+
+    producer.close().await?;
+    Ok(())
+}
+
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
+async fn producer_flush_is_reusable_and_excludes_later_submission(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let producer = stream.producer(
+        ProducerConfig::new()
+            .with_match_seq_num(0)
+            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
+    );
+    let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
+
+    let record2 = AppendRecord::new("ipsum")?;
+    let permit2 = producer.reserve(record2.metered_bytes() as u32).await?;
+    let mut flush = Box::pin(producer.flush());
+    assert!(poll!(flush.as_mut()).is_pending());
+    let mut ticket2 = Box::pin(permit2.submit(record2));
+
+    tokio::time::timeout(Duration::from_secs(10), flush)
+        .await
+        .expect("first producer flush timed out")?;
+    let ack1 = ticket1
+        .now_or_never()
+        .expect("record before the barrier should be ready")?;
+    assert_eq!(ack1.seq_num, 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), ticket2.as_mut())
+            .await
+            .is_err(),
+        "record after the barrier should not be included in its durability wait"
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), producer.flush())
+        .await
+        .expect("second producer flush timed out")?;
+    let ack2 = ticket2.await?;
+    assert_eq!(ack2.seq_num, 1);
+    assert_ne!(ack1.batch, ack2.batch);
+
+    producer.close().await?;
+    Ok(())
+}
+
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
+async fn producer_empty_flush_is_immediate_and_reusable(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let producer = stream.producer(
+        ProducerConfig::new()
+            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), producer.flush())
+        .await
+        .expect("empty producer flush timed out")?;
+    assert_eq!(stream.check_tail().await?.seq_num, 0);
+
+    let ticket = producer.submit(AppendRecord::new("lorem")?).await?;
+    producer.flush().await?;
+    let ack = ticket
+        .now_or_never()
+        .expect("ticket should be ready after the second flush")?;
+    assert_eq!(ack.seq_num, 0);
+
+    producer.close().await?;
+    Ok(())
+}
+
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
+async fn producer_flush_propagates_condition_failure_to_covered_ticket(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    stream
+        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+            AppendRecord::new("lorem")?,
+        ])?))
+        .await?;
+
+    let producer = stream.producer(
+        ProducerConfig::new()
+            .with_match_seq_num(0)
+            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
+    );
+    let ticket = producer.submit(AppendRecord::new("ipsum")?).await?;
+
+    let flush_result = tokio::time::timeout(Duration::from_secs(10), producer.flush())
+        .await
+        .expect("failing producer flush timed out");
+    assert_matches!(
+        flush_result,
+        Err(ProducerError::Append(AppendSessionError::Append(
+            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
+        )))
+    );
+
+    let ticket_result = ticket
+        .now_or_never()
+        .expect("covered ticket should be ready when flush fails");
+    assert_matches!(
+        ticket_result,
+        Err(ProducerError::Append(AppendSessionError::Append(
+            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
+        )))
+    );
+    assert_matches!(
+        producer.flush().await,
+        Err(ProducerError::Append(AppendSessionError::Append(
+            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
+        )))
+    );
 
     Ok(())
 }
