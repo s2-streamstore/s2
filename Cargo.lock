@@ -4903,7 +4903,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "axum",
  "base64ct",
@@ -4934,7 +4934,7 @@ dependencies = [
 
 [[package]]
 name = "s2-cli"
-version = "0.42.5"
+version = "0.42.6"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -5015,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.42.5"
+version = "0.42.6"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5074,7 +5074,7 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.34.2"
+version = "0.34.3"
 dependencies = [
  "assert_matches",
  "async-compression",
@@ -5133,7 +5133,7 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.42.5"
+version = "0.42.6"
 dependencies = [
  "reqwest",
  "s2-sdk",
