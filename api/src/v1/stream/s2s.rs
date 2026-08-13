@@ -99,7 +99,10 @@ impl CompressedData {
         Self::compress(compression, proto.encode_to_vec())
     }
 
-    /// Whether the server advised reconnecting elsewhere before it terminates.
+    /// Whether this frame carried the reconnect-advised flag.
+    ///
+    /// A server sets the flag on responses when it is about to terminate,
+    /// signaling that the client should proactively reconnect.
     pub fn reconnect_advised(&self) -> bool {
         self.reconnect_advised
     }
