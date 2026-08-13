@@ -39,6 +39,7 @@ pub enum ErrorCode {
     RateLimited,
     RequestTimeout,
     ResourceAlreadyExists,
+    ServerDraining,
     Storage,
     StreamDeletionPending,
     StreamNotFound,
@@ -82,7 +83,7 @@ impl ErrorCode {
             Self::ClientHangup => http::StatusCode::from_u16(499).expect("valid status code"),
             Self::Other | Self::Storage => http::StatusCode::INTERNAL_SERVER_ERROR,
             Self::HotServer => http::StatusCode::BAD_GATEWAY,
-            Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
+            Self::ServerDraining | Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
             Self::UpstreamTimeout => http::StatusCode::GATEWAY_TIMEOUT,
         }
     }
@@ -94,6 +95,7 @@ impl ErrorCode {
             | Self::TransactionConflict
             | Self::RateLimited
             | Self::Other
+            | Self::ServerDraining
             | Self::Storage
             | Self::HotServer
             | Self::Unavailable
@@ -141,6 +143,7 @@ impl ErrorCode {
             | Self::QuotaExhausted
             | Self::RateLimited
             | Self::ResourceAlreadyExists
+            | Self::ServerDraining
             | Self::StreamDeletionPending
             | Self::StreamNotFound
             | Self::TransactionConflict => true,
