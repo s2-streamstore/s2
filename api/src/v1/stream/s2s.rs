@@ -15,7 +15,7 @@ use strum::FromRepr;
   │   LENGTH    │   FLAGS    │        PAYLOAD DATA         │
   │  (3 bytes)  │  (1 byte)  │     (variable length)       │
   ├─────────────┼────────────┼─────────────────────────────┤
-  │ 0x00 00 XX  │ 0 CA XXXXX │  Compressed proto message   │
+  │ 0x00 00 XX  │ 0 CA RXXXX │  Compressed proto message   │
   └─────────────┴────────────┴─────────────────────────────┘
 
   TERMINAL MESSAGE:
@@ -23,7 +23,7 @@ use strum::FromRepr;
   │   LENGTH    │   FLAGS    │ STATUS CODE │   JSON BODY   │
   │  (3 bytes)  │  (1 byte)  │  (2 bytes)  │  (variable)   │
   ├─────────────┼────────────┼─────────────┼───────────────┤
-  │ 0x00 00 XX  │ 1 CA XXXXX │   HTTP Code │   JSON data   │
+  │ 0x00 00 XX  │ 1 CA RXXXX │   HTTP Code │   JSON data   │
   └─────────────┴────────────┴─────────────┴───────────────┘
 
   LENGTH = size of (FLAGS + PAYLOAD), does NOT include length header itself
@@ -39,12 +39,13 @@ const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 Flag byte layout:
   ┌───┬───┬───┬───┬───┬───┬───┬───┐
   │ 7 │ 6 │ 5 │ 4 │ 3 │ 2 │ 1 │ 0 │  Bit positions
-  ├───┼───┴───┼───┴───┴───┴───┴───┤
-  │ T │  C C  │   Reserved (0s)   │  Purpose
-  └───┴───────┴───────────────────┘
+  ├───┼───┴───┼───┼───┴───┴───┴───┤
+  │ T │  C C  │ R │ Reserved (0s) │  Purpose
+  └───┴───────┴───┴───────────────┘
 
   T = Terminal flag (1 bit)
   C = Compression (2 bits, encodes 0-3)
+  R = Reconnect advised (1 bit, set by a server that is about to terminate)
 */
 
 const FLAG_TOTAL_SIZE: usize = 1;
@@ -54,6 +55,7 @@ const MAX_DECOMPRESSED_PAYLOAD_BYTES: usize = MAX_FRAME_PAYLOAD_BYTES;
 const FLAG_TERMINAL: u8 = 0b1000_0000;
 const FLAG_COMPRESSION_MASK: u8 = 0b0110_0000;
 const FLAG_COMPRESSION_SHIFT: u8 = 5;
+const FLAG_RECONNECT_ADVISED: u8 = 0b0001_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromRepr)]
 #[repr(u8)]
@@ -85,6 +87,7 @@ impl CompressionAlgorithm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressedData {
     compression: CompressionAlgorithm,
+    reconnect_advised: bool,
     payload: Bytes,
 }
 
@@ -94,6 +97,11 @@ impl CompressedData {
         proto: &impl prost::Message,
     ) -> std::io::Result<Self> {
         Self::compress(compression, proto.encode_to_vec())
+    }
+
+    /// Whether the server advised reconnecting elsewhere before it terminates.
+    pub fn reconnect_advised(&self) -> bool {
+        self.reconnect_advised
     }
 
     fn compress(compression: CompressionAlgorithm, data: Vec<u8>) -> std::io::Result<Self> {
@@ -107,6 +115,7 @@ impl CompressedData {
         if compression == CompressionAlgorithm::None || data.len() < COMPRESSION_THRESHOLD_BYTES {
             return Ok(Self {
                 compression: CompressionAlgorithm::None,
+                reconnect_advised: false,
                 payload: data.into(),
             });
         }
@@ -131,6 +140,7 @@ impl CompressedData {
         }
         Ok(Self {
             compression,
+            reconnect_advised: false,
             payload,
         })
     }
@@ -234,8 +244,11 @@ impl SessionMessage {
         buf.put_uint(encoded_size as u64, 3);
         match self {
             Self::Regular(msg) => {
-                let flag =
+                let mut flag =
                     ((msg.compression as u8) << FLAG_COMPRESSION_SHIFT) & FLAG_COMPRESSION_MASK;
+                if msg.reconnect_advised {
+                    flag |= FLAG_RECONNECT_ADVISED;
+                }
                 buf.put_u8(flag);
                 buf.extend_from_slice(&msg.payload);
             }
@@ -282,6 +295,7 @@ impl SessionMessage {
 
         Ok(CompressedData {
             compression,
+            reconnect_advised: (flag & FLAG_RECONNECT_ADVISED) != 0,
             payload: buf,
         }
         .into())
@@ -293,6 +307,24 @@ impl SessionMessage {
             Self::Terminal(msg) => STATUS_CODE_SIZE + msg.body.len(),
         }
     }
+}
+
+/// Set the reconnect-advised flag on an already encoded frame.
+///
+/// Terminal frames are returned unchanged.
+pub fn advise_reconnect(frame: Bytes) -> Bytes {
+    if frame
+        .get(LENGTH_PREFIX_SIZE)
+        .is_none_or(|flag| flag & FLAG_TERMINAL != 0)
+    {
+        return frame;
+    }
+
+    let mut frame = frame
+        .try_into_mut()
+        .unwrap_or_else(|frame| BytesMut::from(frame.as_ref()));
+    frame[LENGTH_PREFIX_SIZE] |= FLAG_RECONNECT_ADVISED;
+    frame.freeze()
 }
 
 pub struct FramedMessageStream<S> {
@@ -627,6 +659,7 @@ mod test {
     fn session_message_encode_rejects_frames_over_limit() {
         let data = CompressedData {
             compression: CompressionAlgorithm::None,
+            reconnect_advised: false,
             payload: Bytes::from(vec![0u8; MAX_FRAME_BYTES]),
         };
         let msg = SessionMessage::from(data);
@@ -725,6 +758,7 @@ mod test {
 
             let data = CompressedData {
                 compression: algo,
+                reconnect_advised: false,
                 payload: Bytes::from(compressed),
             };
             assert!(data.payload.len() <= MAX_FRAME_PAYLOAD_BYTES);
