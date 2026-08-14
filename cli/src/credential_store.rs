@@ -215,10 +215,14 @@ fn keyring_account(kind: CredentialKind, credential_id: &str) -> String {
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), CredentialStoreError> {
     let parent = path.parent().ok_or(CredentialStoreError::InvalidPath)?;
+    #[cfg(unix)]
+    ensure_parent_is_directory(parent)?;
     fs::create_dir_all(parent).map_err(|source| CredentialStoreError::CredentialFile {
         action: "create the parent directory for",
         source,
     })?;
+    #[cfg(unix)]
+    ensure_parent_is_directory(parent)?;
     secure_directory(parent)?;
 
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|source| {
@@ -251,6 +255,29 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), CredentialStoreEr
     // Rename committed the credential; a directory-sync failure cannot be rolled back.
     let _ = sync_directory(parent);
     Ok(())
+}
+
+/// Verifies that `path` is a real directory rather than a symlink, using
+/// `symlink_metadata` so that the check itself does not follow symlinks. A
+/// missing path is permitted so that callers can run this before
+/// `create_dir_all` creates the directory.
+///
+/// This mirrors the symlink rejection already performed by the read path
+/// (`secure_private_file_for_read`) so that credentials are never written
+/// through a symlinked parent directory into an attacker-controlled location.
+#[cfg(unix)]
+fn ensure_parent_is_directory(path: &Path) -> Result<(), CredentialStoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(CredentialStoreError::UnsafeCredentialFile(
+            "the parent path is not a directory",
+        )),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CredentialStoreError::CredentialFile {
+            action: "inspect the parent directory for",
+            source,
+        }),
+    }
 }
 
 #[cfg(unix)]
@@ -417,5 +444,85 @@ mod tests {
             secure_private_file_for_read(&link),
             Err(CredentialStoreError::UnsafeCredentialFile(_))
         ));
+    }
+
+    #[test]
+    fn write_private_file_rejects_symlink_parent_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let attacker_controlled = directory.path().join("attacker");
+        let symlink_to_attacker = directory.path().join("s2");
+
+        fs::create_dir(&attacker_controlled).unwrap();
+        fs::set_permissions(&attacker_controlled, fs::Permissions::from_mode(0o777)).unwrap();
+        symlink(&attacker_controlled, &symlink_to_attacker).unwrap();
+
+        let credential_path = symlink_to_attacker.join("credential.json");
+
+        let result = write_private_file(&credential_path, b"secret credentials");
+
+        assert!(
+            matches!(result, Err(CredentialStoreError::UnsafeCredentialFile(_))),
+            "write_private_file must reject a symlinked parent directory, got {result:?}"
+        );
+
+        // The credential must never reach the attacker-controlled directory.
+        let attacker_file = attacker_controlled.join("credential.json");
+        assert!(
+            !attacker_file.exists(),
+            "credential was written through the symlink to the attacker-controlled directory"
+        );
+
+        // The symlink must not be replaced by a real directory.
+        let symlink_meta = fs::symlink_metadata(&symlink_to_attacker).unwrap();
+        assert!(
+            symlink_meta.file_type().is_symlink(),
+            "the symlink was replaced instead of being rejected"
+        );
+    }
+
+    #[test]
+    fn write_private_file_rejects_symlink_to_file_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let target_file = directory.path().join("not-a-directory");
+        fs::write(&target_file, b"oops").unwrap();
+        let symlink_parent = directory.path().join("s2");
+        symlink(&target_file, &symlink_parent).unwrap();
+
+        let credential_path = symlink_parent.join("credential.json");
+
+        let result = write_private_file(&credential_path, b"secret credentials");
+
+        assert!(
+            matches!(result, Err(CredentialStoreError::UnsafeCredentialFile(_))),
+            "write_private_file must reject a symlink-to-file parent, got {result:?}"
+        );
+        assert!(
+            !fs::symlink_metadata(&target_file)
+                .unwrap()
+                .file_type()
+                .is_dir(),
+            "the target file must remain a file"
+        );
+    }
+
+    #[test]
+    fn write_private_file_creates_and_secures_a_new_real_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let credential_directory = directory.path().join("nested").join("s2");
+        let path = credential_directory.join("credential.json");
+
+        write_private_file(&path, b"secret credentials").unwrap();
+
+        // The newly created parent must be a real directory (not a symlink)
+        // with user-only permissions, and the credential must be written there.
+        assert_eq!(fs::read(&path).unwrap(), b"secret credentials");
+        let parent_meta = fs::symlink_metadata(&credential_directory).unwrap();
+        assert!(parent_meta.file_type().is_dir());
+        assert!(!parent_meta.file_type().is_symlink());
+        assert_eq!(parent_meta.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
