@@ -23,7 +23,10 @@ use http::{
     HeaderMap, Method, StatusCode, Uri,
     header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderName, HeaderValue},
 };
-use http_body_util::{BodyExt, Empty, Full, StreamBody, combinators::UnsyncBoxBody};
+use http_body_util::{
+    BodyExt, Empty, Full, StreamBody,
+    combinators::{BoxBody as SendBoxBody, UnsyncBoxBody},
+};
 use hyper::body::{Frame, Incoming};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 pub use hyper_util::client::legacy::connect::Connect;
@@ -48,6 +51,8 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxBody = UnsyncBoxBody<Bytes, BoxError>;
+/// Erased response body, so tests can drive a session without a real transport.
+type ResponseBody = SendBoxBody<Bytes, hyper::Error>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Compression {
@@ -156,6 +161,22 @@ pub struct Request {
 impl Request {
     pub fn headers_mut(&mut self) -> &mut HeaderMap {
         &mut self.headers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uri(&self) -> &Uri {
+        &self.uri
+    }
+
+    /// Consume the request as the stream of body chunks a server would read.
+    #[cfg(test)]
+    pub(crate) fn into_body_stream(self) -> impl Stream<Item = Result<Bytes, BoxError>> + Send {
+        http_body_util::BodyStream::new(self.body.into_http_body()).filter_map(|frame| {
+            std::future::ready(match frame {
+                Ok(frame) => frame.into_data().ok().map(Ok),
+                Err(err) => Some(Err(err)),
+            })
+        })
     }
 
     pub fn with_monitored_body(self, signal: FrameSignal) -> Self {
@@ -372,7 +393,7 @@ impl UnaryResponse {
 pub struct StreamingResponse {
     status: StatusCode,
     headers: HeaderMap,
-    body: Incoming,
+    body: ResponseBody,
     permit: RequestPermit,
 }
 
@@ -381,8 +402,22 @@ impl StreamingResponse {
         Self {
             status,
             headers,
-            body,
+            body: ResponseBody::new(body),
             permit,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        status: StatusCode,
+        headers: HeaderMap,
+        body: impl Stream<Item = Bytes> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            body: ResponseBody::new(StreamBody::new(body.map(|b| Ok(Frame::data(b))))),
+            permit: RequestPermit::for_test(),
         }
     }
 
@@ -717,6 +752,16 @@ async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, Htt
 struct RequestPermit {
     active_requests: Arc<AtomicUsize>,
     idle_since: Arc<Mutex<Option<Instant>>>,
+}
+
+impl RequestPermit {
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self {
+            active_requests: Arc::new(AtomicUsize::new(1)),
+            idle_since: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl Drop for RequestPermit {

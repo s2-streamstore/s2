@@ -42,6 +42,7 @@ use crate::{
     client::{self, StreamingResponse, UnaryResponse},
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
+    reconnect::ReconnectAdvice,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
@@ -446,6 +447,7 @@ impl BasinClient {
         inputs: I,
         encryption: Option<&EncryptionKey>,
         frame_signal: Option<FrameSignal>,
+        reconnect: ReconnectAdvice,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
         I: Stream<Item = AppendInput> + Send + 'static,
@@ -497,6 +499,9 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
+                            if msg.reconnect_advised() {
+                                reconnect.advise();
+                            }
                             yield msg.try_into_proto()?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
@@ -526,6 +531,7 @@ impl BasinClient {
         start: ReadStart,
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
+        reconnect: ReconnectAdvice,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
@@ -563,6 +569,9 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
+                            if msg.reconnect_advised() {
+                                reconnect.advise();
+                            }
                             yield msg.try_into_proto()?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
@@ -746,6 +755,27 @@ impl std::fmt::Debug for BaseClient {
 }
 
 impl BaseClient {
+    /// Build a client backed by a caller-supplied transport.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        executor: Arc<dyn client::RequestExecutor>,
+        request_timeout: Duration,
+    ) -> Self {
+        Self {
+            client: executor,
+            default_headers: HeaderMap::new(),
+            access_token_mode: AccessTokenMode::Static,
+            #[cfg(feature = "_hidden")]
+            access_token_provider: None,
+            request_timeout,
+            retry_builder: RetryBackoffBuilder::default()
+                .with_min_base_delay(Duration::ZERO)
+                .with_max_base_delay(Duration::ZERO)
+                .with_max_retries(0),
+            compression: Compression::None,
+        }
+    }
+
     pub fn init(config: &S2Config) -> Result<Self, ApiError> {
         let connector = client::default_connector(
             Some(config.connection_timeout),
