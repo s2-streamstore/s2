@@ -621,6 +621,65 @@ mod test {
     }
 
     #[test]
+    fn advised_regular_frame_round_trips_with_payload() {
+        let proto = TestProto::new(vec![1, 2, 3]);
+        let msg = SessionMessage::regular(CompressionAlgorithm::None, &proto).unwrap();
+        let encoded = advise_reconnect(msg.encode());
+
+        match decode_once(&encoded).unwrap() {
+            SessionMessage::Regular(data) => {
+                assert!(data.reconnect_advised());
+                assert_eq!(data.try_into_proto::<TestProto>().unwrap(), proto);
+            }
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+    }
+
+    #[test]
+    fn advise_reconnect_preserves_compression() {
+        let proto = TestProto::new(vec![7; COMPRESSION_THRESHOLD_BYTES * 2]);
+        let msg = SessionMessage::regular(CompressionAlgorithm::Zstd, &proto).unwrap();
+        let encoded = advise_reconnect(msg.encode());
+
+        match decode_once(&encoded).unwrap() {
+            SessionMessage::Regular(data) => {
+                assert!(data.reconnect_advised());
+                assert_eq!(data.compression, CompressionAlgorithm::Zstd);
+                assert_eq!(data.try_into_proto::<TestProto>().unwrap(), proto);
+            }
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+    }
+
+    #[test]
+    fn advise_reconnect_leaves_terminal_frames_alone() {
+        let terminal = TerminalMessage {
+            status: 503,
+            body: "server_draining".to_string(),
+        };
+        let encoded = SessionMessage::from(terminal.clone()).encode();
+
+        assert_eq!(advise_reconnect(encoded.clone()), encoded);
+        match decode_once(&encoded).unwrap() {
+            SessionMessage::Regular(_) => panic!("expected terminal message"),
+            SessionMessage::Terminal(decoded) => assert_eq!(decoded, terminal),
+        }
+    }
+
+    #[test]
+    fn unadvised_regular_frame_decodes_without_advice() {
+        let proto = TestProto::new(vec![4, 5, 6]);
+        let encoded = SessionMessage::regular(CompressionAlgorithm::None, &proto)
+            .unwrap()
+            .encode();
+
+        match decode_once(&encoded).unwrap() {
+            SessionMessage::Regular(data) => assert!(!data.reconnect_advised()),
+            SessionMessage::Terminal(_) => panic!("expected regular message"),
+        }
+    }
+
+    #[test]
     fn frame_decoder_waits_for_complete_frame() {
         let proto = TestProto::new(vec![9, 9, 9]);
         let msg = SessionMessage::regular(CompressionAlgorithm::None, &proto).unwrap();
