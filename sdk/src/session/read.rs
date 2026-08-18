@@ -88,6 +88,10 @@ impl From<ReadSessionFailure> for ReadSessionError {
     }
 }
 
+/// The server heartbeats a tailing read session at a randomized gap of at most
+/// 15 seconds (<https://s2.dev/docs/api/protocol#data-flow>), plus some buffer.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
+
 type InternalStreaming<R> =
     Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionFailure>>>>;
 
@@ -456,7 +460,9 @@ pub async fn read_session(
             {
                 Some(Ok(ReadItem::ReconnectAdvised)) => {
                     batches = None;
-                    if end.count == Some(0) || end.bytes == Some(0) {
+                    // Avoid a useless reconnect for a read that was already
+                    // satisfied when the advice arrived.
+                    if read_limits_exhausted(&end) {
                         break;
                     }
                     if last_advised_resume.replace(start.seq_num) == Some(start.seq_num) {
@@ -556,7 +562,7 @@ async fn session_inner(
         .await?;
     Ok(Box::pin(try_stream! {
         loop {
-            match timeout(Duration::from_secs(20), batches.next()).await {
+            match timeout(HEARTBEAT_TIMEOUT, batches.next()).await {
                 Ok(Some(batch)) => {
                     yield ReadItem::Batch(ReadBatch::from_api(batch?));
                     if reconnect.is_advised() {
@@ -569,6 +575,11 @@ async fn session_inner(
             }
         }
     }))
+}
+
+/// Whether the read's `count` or `bytes` limit has been used up.
+fn read_limits_exhausted(end: &ReadEnd) -> bool {
+    end.count == Some(0) || end.bytes == Some(0)
 }
 
 /// Compute the remaining wait budget for a retry.
