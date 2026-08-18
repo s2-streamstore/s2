@@ -537,4 +537,20 @@ mod tests {
         let server = request.server_error().expect("server error");
         assert_eq!(server.known_code(), Some(ErrorCode::TransactionConflict));
     }
+
+    #[test]
+    fn unavailable_server_error_is_retryable_without_side_effects() {
+        // The streamer is gone before any mutation is submitted, so the operation is
+        // safe to retry even after the request body has been sent.
+        let unavailable = response(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+        assert_eq!(unavailable.known_code(), Some(ErrorCode::Unavailable));
+        assert!(unavailable.is_retryable());
+        assert!(unavailable.has_no_side_effects());
+
+        // An append that surfaces this error must be classified as side-effect free so
+        // the NoSideEffects retry policy retries it once the frame has been sent.
+        let append = AppendError::Request(RequestError::Server(unavailable));
+        assert!(append.is_retryable());
+        assert!(append.has_no_side_effects());
+    }
 }
