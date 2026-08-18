@@ -317,12 +317,32 @@ fn secure_private_file_for_read(_path: &Path) -> Result<(), CredentialStoreError
 fn secure_directory(path: &Path) -> Result<(), CredentialStoreError> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
-        CredentialStoreError::CredentialFile {
-            action: "secure the parent directory for",
+    // `symlink_metadata` does not follow symlinks, so a symlinked credential
+    // directory is rejected before anything is written through it. This
+    // mirrors the check in `secure_private_file_for_read`; the alternative of
+    // `fs::metadata` + `set_permissions` would silently operate on the
+    // symlink's target.
+    let directory =
+        fs::symlink_metadata(path).map_err(|source| CredentialStoreError::CredentialFile {
+            action: "inspect the parent directory for",
             source,
-        }
-    })
+        })?;
+    if !directory.file_type().is_dir() {
+        return Err(CredentialStoreError::UnsafeCredentialFile(
+            "the parent path is not a directory",
+        ));
+    }
+    // The write path needs owner rwx in addition to no group/other access, so
+    // repair to exactly 0700 rather than only when group/other bits are set.
+    if directory.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            CredentialStoreError::CredentialFile {
+                action: "secure the parent directory for",
+                source,
+            }
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
