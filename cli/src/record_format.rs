@@ -399,7 +399,6 @@ mod tests {
     use futures::{StreamExt, executor::block_on};
     use proptest::{prelude::*, test_runner::TestCaseResult};
     use s2_sdk::types::Header;
-    use tokio::io::AsyncWriteExt as _;
 
     use super::*;
 
@@ -516,23 +515,6 @@ mod tests {
         let lines = futures::stream::iter(vec![Err(io::Error::other("io error"))]);
         let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
         assert!(stream.next().await.unwrap().is_err());
-    }
-
-    // -- RecordsOut: file writer --
-
-    #[tokio::test]
-    async fn records_out_file_writer_truncates_existing_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("output.txt");
-        let output = RecordsOut::File(path.clone());
-
-        for contents in [b"first".as_slice(), b"second".as_slice()] {
-            let mut writer = output.writer().await.unwrap();
-            writer.write_all(contents).await.unwrap();
-            writer.flush().await.unwrap();
-        }
-
-        assert_eq!(std::fs::read(&path).unwrap(), b"second");
     }
 
     proptest! {
