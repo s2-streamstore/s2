@@ -42,6 +42,7 @@ use crate::{
     client::{self, StreamingResponse, UnaryResponse},
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
+    reconnect::ReconnectAdvice,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
@@ -446,6 +447,7 @@ impl BasinClient {
         inputs: I,
         encryption: Option<&EncryptionKey>,
         frame_signal: Option<FrameSignal>,
+        reconnect: ReconnectAdvice,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
         I: Stream<Item = AppendInput> + Send + 'static,
@@ -497,6 +499,9 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
+                            if msg.reconnect_advised() {
+                                reconnect.advise();
+                            }
                             yield msg.try_into_proto()?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
@@ -526,6 +531,7 @@ impl BasinClient {
         start: ReadStart,
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
+        reconnect: ReconnectAdvice,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
@@ -563,6 +569,9 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
+                            if msg.reconnect_advised() {
+                                reconnect.advise();
+                            }
                             yield msg.try_into_proto()?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {

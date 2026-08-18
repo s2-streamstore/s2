@@ -20,6 +20,7 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     error::{ReadError, RequestError},
+    reconnect::{ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS, ReconnectAdvice},
     retry::RetryBackoff,
     types::{
         AccessTokenMode, EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
@@ -89,6 +90,16 @@ impl From<ReadSessionFailure> for ReadSessionError {
 
 type InternalStreaming<R> =
     Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionFailure>>>>;
+
+/// An item from a single read connection.
+enum ReadItem {
+    Batch(ReadBatch),
+    /// The server advised reconnecting and the response ended cleanly.
+    ///
+    /// Always the last item of a connection, emitted after the batch it rode
+    /// in on, so the resume position already accounts for that batch.
+    ReconnectAdvised,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -382,6 +393,7 @@ pub async fn read_session(
             encryption.clone(),
             start.clone(),
             end.clone(),
+            ReconnectAdvice::new(),
         )
         .await
         {
@@ -402,7 +414,9 @@ pub async fn read_session(
     };
 
     let updates = Box::pin(stream! {
-        let mut batches: Option<InternalStreaming<ReadBatch>> = Some(batches);
+        let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
+        let mut advised_reconnects_without_progress = 0;
+        let mut last_advised_resume: Option<Option<u64>> = None;
 
         loop {
             if batches.is_none() {
@@ -413,6 +427,7 @@ pub async fn read_session(
                     encryption.clone(),
                     start.clone(),
                     end.clone(),
+                    ReconnectAdvice::new(),
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
@@ -439,7 +454,28 @@ pub async fn read_session(
                 .next()
                 .await
             {
-                Some(Ok(batch)) => {
+                Some(Ok(ReadItem::ReconnectAdvised)) => {
+                    batches = None;
+                    if end.count == Some(0) || end.bytes == Some(0) {
+                        break;
+                    }
+                    if last_advised_resume.replace(start.seq_num) == Some(start.seq_num) {
+                        advised_reconnects_without_progress += 1;
+                    } else {
+                        advised_reconnects_without_progress = 0;
+                    }
+                    debug!(
+                        resume_seq_num = ?start.seq_num,
+                        advised_reconnects_without_progress,
+                        "reconnecting read session on server advice"
+                    );
+                    yield Ok(ReadUpdate::behind());
+                    if advised_reconnects_without_progress > MAX_IMMEDIATE_ADVISED_RECONNECTS {
+                        tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
+                    }
+                    continue;
+                }
+                Some(Ok(ReadItem::Batch(batch))) => {
                     if retry_backoff.used() > 0 {
                         retry_backoff.reset();
                     }
@@ -513,15 +549,20 @@ async fn session_inner(
     encryption: Option<EncryptionKey>,
     start: ReadStart,
     end: ReadEnd,
-) -> Result<InternalStreaming<ReadBatch>, ReadSessionFailure> {
+    reconnect: ReconnectAdvice,
+) -> Result<InternalStreaming<ReadItem>, ReadSessionFailure> {
     let mut batches = client
-        .read_session(&name, start, end, encryption.as_ref())
+        .read_session(&name, start, end, encryption.as_ref(), reconnect.clone())
         .await?;
     Ok(Box::pin(try_stream! {
         loop {
             match timeout(Duration::from_secs(20), batches.next()).await {
                 Ok(Some(batch)) => {
-                    yield ReadBatch::from_api(batch?);
+                    yield ReadItem::Batch(ReadBatch::from_api(batch?));
+                    if reconnect.is_advised() {
+                        yield ReadItem::ReconnectAdvised;
+                        break;
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => Err(ReadSessionFailure::HeartbeatTimeout)?,
