@@ -332,7 +332,9 @@ fn secure_directory(path: &Path) -> Result<(), CredentialStoreError> {
             "the parent path is not a directory",
         ));
     }
-    if directory.permissions().mode() & 0o077 != 0 {
+    // The write path needs owner rwx in addition to no group/other access, so
+    // repair to exactly 0700 rather than only when group/other bits are set.
+    if directory.permissions().mode() & 0o777 != 0o700 {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
             CredentialStoreError::CredentialFile {
                 action: "secure the parent directory for",
