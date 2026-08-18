@@ -67,7 +67,7 @@ impl RecordsOut {
                 let file = OpenOptions::new()
                     .write(true)
                     .create(true)
-                    .append(true)
+                    .truncate(true)
                     .open(path)
                     .await?;
 
