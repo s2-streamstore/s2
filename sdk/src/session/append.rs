@@ -626,14 +626,13 @@ async fn run_session(
 
     let timer = MuxTimer::<N_TIMER_VARIANTS>::default();
     tokio::pin!(timer);
-    let mut advised = false;
 
     loop {
         // Stop feeding a draining server. A close already in progress is
         // cheaper to finish here than to move onto a fresh connection.
         if reconnect.is_advised() && state.close_tx.is_none() {
-            advised = true;
-            break;
+            drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout).await?;
+            return Ok(SessionOutcome::ReconnectAdvised);
         }
 
         tokio::select! {
@@ -728,57 +727,6 @@ async fn run_session(
         }
     }
 
-    if advised {
-        // Half-close so the server acknowledges everything it accepted and then
-        // ends the response cleanly. Every input reaches the server ahead of the
-        // request's end, so a clean end with appends still unacknowledged is a
-        // truncated response, and nothing is resent.
-        drop(input_tx);
-        loop {
-            // Bound the wait for the server's end of stream, which is otherwise
-            // unbounded once nothing is in flight.
-            if !timer.is_armed() {
-                timer.as_mut().fire_at(
-                    TimerEvent::AckDeadline,
-                    Instant::now() + ack_timeout,
-                    CoalesceMode::Earliest,
-                );
-            }
-
-            tokio::select! {
-                (event_ord, _deadline) = &mut timer, if timer.is_armed() => {
-                    match TimerEvent::from(event_ord) {
-                        TimerEvent::AckDeadline => {
-                            return Err(AppendSessionError::AckTimeout);
-                        }
-                    }
-                }
-
-                ack = acks.next() => {
-                    match ack {
-                        Some(Ok(ack)) => {
-                            process_ack(
-                                ack,
-                                state,
-                                timer.as_mut(),
-                            )?;
-                        }
-                        Some(Err(err)) => {
-                            return Err(err.into());
-                        }
-                        None => {
-                            if !state.inflight_appends.is_empty() {
-                                return Err(AppendSessionError::StreamClosedEarly);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        return Ok(SessionOutcome::ReconnectAdvised);
-    }
-
     assert!(state.inflight_appends.is_empty());
     assert_eq!(state.inflight_bytes, 0);
     assert!(state.stashed_submission.is_none());
@@ -863,6 +811,58 @@ async fn resend(
     );
     debug!("finished resending inflight appends");
     Ok(())
+}
+
+/// Half-close so the server acknowledges everything it accepted and then ends
+/// the response cleanly. Every input reaches the server ahead of the request's
+/// end, so a clean end with appends still unacknowledged is a truncated
+/// response, and nothing is resent.
+async fn drain_for_reconnect(
+    input_tx: mpsc::Sender<AppendInput>,
+    mut acks: Streaming<AppendAck>,
+    state: &mut SessionState,
+    mut timer: Pin<&mut MuxTimer<N_TIMER_VARIANTS>>,
+    ack_timeout: Duration,
+) -> Result<(), AppendSessionError> {
+    drop(input_tx);
+    loop {
+        // Bound the wait for the server's end of stream, which is otherwise
+        // unbounded once nothing is in flight.
+        if !timer.is_armed() {
+            timer.as_mut().fire_at(
+                TimerEvent::AckDeadline,
+                Instant::now() + ack_timeout,
+                CoalesceMode::Earliest,
+            );
+        }
+
+        tokio::select! {
+            (event_ord, _deadline) = &mut timer, if timer.is_armed() => {
+                match TimerEvent::from(event_ord) {
+                    TimerEvent::AckDeadline => {
+                        return Err(AppendSessionError::AckTimeout);
+                    }
+                }
+            }
+
+            ack = acks.next() => {
+                match ack {
+                    Some(Ok(ack)) => {
+                        process_ack(ack, state, timer.as_mut())?;
+                    }
+                    Some(Err(err)) => {
+                        return Err(err.into());
+                    }
+                    None => {
+                        if !state.inflight_appends.is_empty() {
+                            return Err(AppendSessionError::StreamClosedEarly);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn connect(
