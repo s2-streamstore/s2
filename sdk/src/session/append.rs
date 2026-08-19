@@ -503,6 +503,9 @@ async fn run_session_with_retry(
                 break;
             }
             Ok(SessionOutcome::ReconnectAdvised) => {
+                // A new session over a pooled connection would land back on the
+                // draining server, so force a fresh connection first.
+                client.rotate_transport().await;
                 // Advice is not a failure, so nothing here would slow down a client
                 // that keeps landing back on the same draining server. Count the
                 // cycles that acknowledged nothing new, and pace those.

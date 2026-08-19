@@ -610,6 +610,17 @@ fn read_response_error_handler(
     }
 }
 
+impl BasinClient {
+    /// Drop pooled connections to the basin endpoint, so the next request
+    /// opens a fresh connection instead of reusing one pinned to a draining
+    /// server. In flight requests keep their connection.
+    pub(crate) async fn rotate_transport(&self) {
+        if let Some(authority) = self.base_url.authority() {
+            self.client.client.rotate(authority.as_str()).await;
+        }
+    }
+}
+
 impl Deref for BasinClient {
     type Target = BaseClient;
 

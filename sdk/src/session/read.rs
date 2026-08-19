@@ -465,6 +465,9 @@ pub async fn read_session(
                     if read_limits_exhausted(&end) {
                         break;
                     }
+                    // A new session over a pooled connection would land back on
+                    // the draining server, so force a fresh connection first.
+                    client.rotate_transport().await;
                     if last_advised_resume.replace(start.seq_num) == Some(start.seq_num) {
                         advised_reconnects_without_progress += 1;
                     } else {

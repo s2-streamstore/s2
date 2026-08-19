@@ -411,6 +411,12 @@ impl StreamingResponse {
 pub trait RequestExecutor: Send + Sync {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
+
+    /// Discard pooled connections to `host` so the next request opens a fresh
+    /// one. Requests already in flight keep their connection.
+    async fn rotate(&self, host: &str) {
+        let _ = host;
+    }
 }
 
 pub fn default_connector(
@@ -819,6 +825,10 @@ where
             .retain(|pooled| !pooled.should_reap(IDLE_TIMEOUT));
     }
 
+    async fn clear(&self) {
+        self.clients.write().await.clear();
+    }
+
     fn is_empty(&self) -> bool {
         self.clients
             .try_read()
@@ -875,6 +885,16 @@ where
     async fn checkout(&self, host: &str) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit) {
         self.get_or_create_host_pool(host).await.checkout().await
     }
+
+    async fn rotate_host(&self, host: &str) {
+        let pool = {
+            let hosts = self.hosts.read().await;
+            hosts.get(host).cloned()
+        };
+        if let Some(pool) = pool {
+            pool.clear().await;
+        }
+    }
 }
 
 async fn reap_idle_clients<C: Connect + Clone + Send + Sync + 'static>(
@@ -905,6 +925,10 @@ where
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
         let (client, permit) = self.checkout(request.authority()).await;
         init_streaming_with(&client, request, permit).await
+    }
+
+    async fn rotate(&self, host: &str) {
+        self.rotate_host(host).await;
     }
 }
 
