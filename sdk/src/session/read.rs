@@ -20,7 +20,10 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     error::{ReadError, RequestError},
-    reconnect::{ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS, ReconnectAdvice},
+    reconnect::{
+        ADVICE_STREAK_WINDOW, ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS,
+        ReconnectAdvice,
+    },
     retry::RetryBackoff,
     types::{
         AccessTokenMode, EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
@@ -397,7 +400,7 @@ pub async fn read_session(
             encryption.clone(),
             start.clone(),
             end.clone(),
-            ReconnectAdvice::new(),
+            ReconnectAdvice::default(),
         )
         .await
         {
@@ -419,7 +422,8 @@ pub async fn read_session(
 
     let updates = Box::pin(stream! {
         let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
-        let mut consecutive_advised_reconnects = 0;
+        let mut advised_reconnect_streak = 0;
+        let mut last_advised_reconnect: Option<Instant> = None;
 
         loop {
             if batches.is_none() {
@@ -430,7 +434,7 @@ pub async fn read_session(
                     encryption.clone(),
                     start.clone(),
                     end.clone(),
-                    ReconnectAdvice::new(),
+                    ReconnectAdvice::default(),
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
@@ -467,16 +471,23 @@ pub async fn read_session(
                     // A new session over a pooled connection would land back on
                     // the draining server, so force a fresh connection first.
                     client.rotate_transport().await;
-                    // A drain keeps serving batches, so pace on the reconnects
-                    // themselves rather than on whether they made progress.
-                    consecutive_advised_reconnects += 1;
+                    // A drain keeps serving batches, so progress cannot tell a
+                    // storm from an ordinary handover. Time can: only advice
+                    // that keeps arriving right after reconnecting is paced.
+                    if last_advised_reconnect
+                        .is_some_and(|at: Instant| at.elapsed() > ADVICE_STREAK_WINDOW)
+                    {
+                        advised_reconnect_streak = 0;
+                    }
+                    last_advised_reconnect = Some(Instant::now());
+                    advised_reconnect_streak += 1;
                     debug!(
                         resume_seq_num = ?start.seq_num,
-                        consecutive_advised_reconnects,
+                        advised_reconnect_streak,
                         "reconnecting read session on server advice"
                     );
                     yield Ok(ReadUpdate::behind());
-                    if consecutive_advised_reconnects > MAX_IMMEDIATE_ADVISED_RECONNECTS {
+                    if advised_reconnect_streak > MAX_IMMEDIATE_ADVISED_RECONNECTS {
                         tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
                     }
                     continue;
@@ -504,7 +515,6 @@ pub async fn read_session(
                 }
                 Some(Err(err)) => {
                     batches = None;
-                    consecutive_advised_reconnects = 0;
                     if let Some(backoff) =
                         retry_delay(
                             &err,

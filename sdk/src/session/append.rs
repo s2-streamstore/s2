@@ -22,7 +22,10 @@ use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     error::{AppendError, RequestError},
     frame_signal::FrameSignal,
-    reconnect::{ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS, ReconnectAdvice},
+    reconnect::{
+        ADVICE_STREAK_WINDOW, ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS,
+        ReconnectAdvice,
+    },
     retry::RetryBackoffBuilder,
     types::{
         AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
@@ -482,7 +485,8 @@ async fn run_session_with_retry(
     };
     let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
-    let mut consecutive_advised_reconnects = 0;
+    let mut advised_reconnect_streak = 0;
+    let mut last_advised_reconnect: Option<Instant> = None;
 
     loop {
         let result = run_session(
@@ -503,18 +507,23 @@ async fn run_session_with_retry(
                 // A new session over a pooled connection could land back on the
                 // draining server, so force a fresh connection first.
                 client.rotate_transport().await;
-                // A drain still acknowledges appends, so pace on the reconnects
-                consecutive_advised_reconnects += 1;
+                // A drain still acknowledges appends, so progress cannot tell a
+                // storm from an ordinary handover. Time can: only advice that
+                // keeps arriving right after reconnecting is worth pacing.
+                if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVICE_STREAK_WINDOW) {
+                    advised_reconnect_streak = 0;
+                }
+                last_advised_reconnect = Some(Instant::now());
+                advised_reconnect_streak += 1;
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),
-                    consecutive_advised_reconnects, "reconnecting append session on server advice"
+                    advised_reconnect_streak, "reconnecting append session on server advice"
                 );
-                if consecutive_advised_reconnects > MAX_IMMEDIATE_ADVISED_RECONNECTS {
+                if advised_reconnect_streak > MAX_IMMEDIATE_ADVISED_RECONNECTS {
                     tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
                 }
             }
             Err(err) => {
-                consecutive_advised_reconnects = 0;
                 if prev_total_acked_records < state.total_acked_records {
                     prev_total_acked_records = state.total_acked_records;
                     retry_backoff.reset();
@@ -574,7 +583,6 @@ async fn run_session_with_retry(
 }
 
 /// How a connection attempt ended without failing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionOutcome {
     /// Everything submitted was acknowledged and the caller closed the session.
     Closed,
@@ -594,7 +602,7 @@ async fn run_session(
         s.reset();
     }
 
-    let reconnect = ReconnectAdvice::new();
+    let reconnect = ReconnectAdvice::default();
     let (input_tx, mut acks) = connect(
         client,
         stream,
