@@ -500,13 +500,10 @@ async fn run_session_with_retry(
                 break;
             }
             Ok(SessionOutcome::ReconnectAdvised) => {
-                // A new session over a pooled connection would land back on the
+                // A new session over a pooled connection could land back on the
                 // draining server, so force a fresh connection first.
                 client.rotate_transport().await;
-                // Advice is not a failure, so nothing else here would slow down a
-                // client that keeps landing back on a draining server. A drain
-                // still acknowledges appends, so pace on the reconnects
-                // themselves rather than on whether they made progress.
+                // A drain still acknowledges appends, so pace on the reconnects
                 consecutive_advised_reconnects += 1;
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),
