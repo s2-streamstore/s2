@@ -504,12 +504,10 @@ async fn run_session_with_retry(
                 break;
             }
             Ok(SessionOutcome::ReconnectAdvised) => {
-                // A new session over a pooled connection could land back on the
-                // draining server, so force a fresh connection first.
+                // A pooled connection would land back on the draining server.
                 client.rotate_transport().await;
-                // A drain still acknowledges appends, so progress cannot tell a
-                // storm from an ordinary handover. Time can: only advice that
-                // keeps arriving right after reconnecting is worth pacing.
+                // A drain keeps acknowledging, so pace on how quickly advice
+                // returns rather than on progress.
                 if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVICE_STREAK_WINDOW) {
                     advised_reconnect_streak = 0;
                 }

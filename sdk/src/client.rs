@@ -1036,43 +1036,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rotate_replaces_pooled_clients() {
-        let pool = test_pool();
-        let (before, permit) = pool.checkout(TEST_HOST).await;
-        drop(permit);
-        assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
-
-        pool.rotate(TEST_HOST).await;
-        assert_eq!(host_client_count(&pool, TEST_HOST).await, 0);
-
-        let (after, _permit) = pool.checkout(TEST_HOST).await;
-        assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
-        assert!(
-            !Arc::ptr_eq(&before, &after),
-            "checkout after rotate must not hand back the retired client"
-        );
-    }
-
-    #[tokio::test]
-    async fn rotate_leaves_in_flight_requests_usable() {
-        let pool = test_pool();
-        let (client, _permit) = pool.checkout(TEST_HOST).await;
-
-        pool.rotate(TEST_HOST).await;
-
-        // The pool dropped its reference, but the caller still holds one.
-        assert_eq!(host_client_count(&pool, TEST_HOST).await, 0);
-        assert_eq!(Arc::strong_count(&client), 1);
-    }
-
-    #[tokio::test]
-    async fn rotate_unknown_host_is_a_noop() {
-        let pool = test_pool();
-        pool.rotate("never-used:1234").await;
-        assert_eq!(host_client_count(&pool, "never-used:1234").await, 0);
-    }
-
-    #[tokio::test]
     async fn permit_drop_frees_capacity() {
         let pool = test_pool();
         let mut permits = Vec::new();

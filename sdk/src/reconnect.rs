@@ -12,9 +12,7 @@ pub(crate) const MAX_IMMEDIATE_ADVISED_RECONNECTS: usize = 3;
 /// Delay applied past [`MAX_IMMEDIATE_ADVISED_RECONNECTS`].
 pub(crate) const ADVISED_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 
-/// Gap after which advice is treated as a fresh streak rather than a storm.
-/// A reconnect that served this long before being advised again found a server
-/// that was not already shutting down.
+/// Gap after which advice starts a fresh streak rather than continuing one.
 pub(crate) const ADVICE_STREAK_WINDOW: Duration = Duration::from_secs(10);
 
 /// An atomic flag tracking whether the server has advised reconnecting on this

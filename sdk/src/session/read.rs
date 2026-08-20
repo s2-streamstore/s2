@@ -468,12 +468,10 @@ pub async fn read_session(
                     if read_limits_exhausted(&end) {
                         break;
                     }
-                    // A new session over a pooled connection would land back on
-                    // the draining server, so force a fresh connection first.
+                    // A pooled connection would land back on the draining server.
                     client.rotate_transport().await;
-                    // A drain keeps serving batches, so progress cannot tell a
-                    // storm from an ordinary handover. Time can: only advice
-                    // that keeps arriving right after reconnecting is paced.
+                    // A drain keeps serving batches, so pace on how quickly
+                    // advice returns rather than on progress.
                     if last_advised_reconnect
                         .is_some_and(|at: Instant| at.elapsed() > ADVICE_STREAK_WINDOW)
                     {
