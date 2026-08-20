@@ -419,8 +419,7 @@ pub async fn read_session(
 
     let updates = Box::pin(stream! {
         let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
-        let mut advised_reconnects_without_progress = 0;
-        let mut last_advised_resume: Option<Option<u64>> = None;
+        let mut consecutive_advised_reconnects = 0;
 
         loop {
             if batches.is_none() {
@@ -468,18 +467,16 @@ pub async fn read_session(
                     // A new session over a pooled connection would land back on
                     // the draining server, so force a fresh connection first.
                     client.rotate_transport().await;
-                    if last_advised_resume.replace(start.seq_num) == Some(start.seq_num) {
-                        advised_reconnects_without_progress += 1;
-                    } else {
-                        advised_reconnects_without_progress = 0;
-                    }
+                    // A drain keeps serving batches, so pace on the reconnects
+                    // themselves rather than on whether they made progress.
+                    consecutive_advised_reconnects += 1;
                     debug!(
                         resume_seq_num = ?start.seq_num,
-                        advised_reconnects_without_progress,
+                        consecutive_advised_reconnects,
                         "reconnecting read session on server advice"
                     );
                     yield Ok(ReadUpdate::behind());
-                    if advised_reconnects_without_progress > MAX_IMMEDIATE_ADVISED_RECONNECTS {
+                    if consecutive_advised_reconnects > MAX_IMMEDIATE_ADVISED_RECONNECTS {
                         tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
                     }
                     continue;
@@ -507,6 +504,7 @@ pub async fn read_session(
                 }
                 Some(Err(err)) => {
                     batches = None;
+                    consecutive_advised_reconnects = 0;
                     if let Some(backoff) =
                         retry_delay(
                             &err,

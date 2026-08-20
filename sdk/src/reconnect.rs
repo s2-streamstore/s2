@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-/// Max consecutive advised reconnects without progress before delaying the next one.
+/// Max consecutive advised reconnects before delaying the next one.
 pub(crate) const MAX_IMMEDIATE_ADVISED_RECONNECTS: usize = 3;
 
 /// Delay applied past [`MAX_IMMEDIATE_ADVISED_RECONNECTS`].

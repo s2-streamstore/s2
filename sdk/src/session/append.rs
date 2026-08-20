@@ -482,10 +482,7 @@ async fn run_session_with_retry(
     };
     let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
-    // Tracked separately from `prev_total_acked_records` so that pacing advised
-    // reconnects never consumes the progress that resets the retry backoff.
-    let mut advised_acked_records = 0;
-    let mut advised_reconnects_without_progress = 0;
+    let mut consecutive_advised_reconnects = 0;
 
     loop {
         let result = run_session(
@@ -506,25 +503,21 @@ async fn run_session_with_retry(
                 // A new session over a pooled connection would land back on the
                 // draining server, so force a fresh connection first.
                 client.rotate_transport().await;
-                // Advice is not a failure, so nothing here would slow down a client
-                // that keeps landing back on the same draining server. Count the
-                // cycles that acknowledged nothing new, and pace those.
-                if advised_acked_records < state.total_acked_records {
-                    advised_acked_records = state.total_acked_records;
-                    advised_reconnects_without_progress = 0;
-                } else {
-                    advised_reconnects_without_progress += 1;
-                }
+                // Advice is not a failure, so nothing else here would slow down a
+                // client that keeps landing back on a draining server. A drain
+                // still acknowledges appends, so pace on the reconnects
+                // themselves rather than on whether they made progress.
+                consecutive_advised_reconnects += 1;
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),
-                    advised_reconnects_without_progress,
-                    "reconnecting append session on server advice"
+                    consecutive_advised_reconnects, "reconnecting append session on server advice"
                 );
-                if advised_reconnects_without_progress > MAX_IMMEDIATE_ADVISED_RECONNECTS {
+                if consecutive_advised_reconnects > MAX_IMMEDIATE_ADVISED_RECONNECTS {
                     tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
                 }
             }
             Err(err) => {
+                consecutive_advised_reconnects = 0;
                 if prev_total_acked_records < state.total_acked_records {
                     prev_total_acked_records = state.total_acked_records;
                     retry_backoff.reset();
