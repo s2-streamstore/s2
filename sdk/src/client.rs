@@ -843,10 +843,15 @@ where
             .retain(|pooled| !pooled.should_reap(IDLE_TIMEOUT));
     }
 
+    /// Mark every client so it is never handed out again, and drop the ones
+    /// that are already idle. Clients with requests in flight are left for the
+    /// reaper, which collects them as soon as they go idle.
     async fn retire_all(&self) {
-        for pooled in self.clients.read().await.iter() {
+        let mut clients = self.clients.write().await;
+        for pooled in clients.iter() {
             pooled.retire();
         }
+        clients.retain(|pooled| pooled.active_requests.load(Ordering::Relaxed) != 0);
     }
 
     fn is_empty(&self) -> bool {

@@ -6,11 +6,12 @@ use std::{
     time::Duration,
 };
 
-/// Max consecutive advised reconnects without progress before delaying the next one.
-pub(crate) const MAX_IMMEDIATE_ADVISED_RECONNECTS: usize = 3;
-
-/// Delay applied past [`MAX_IMMEDIATE_ADVISED_RECONNECTS`].
-pub(crate) const ADVISED_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+/// Shortest gap between acting on reconnect advice within one session.
+///
+/// A reconnect can land back on the same draining server, which advises again
+/// immediately. Without a floor on the gap, that becomes a reconnect loop for
+/// as long as the server takes to go away.
+pub(crate) const MIN_ADVISED_RECONNECT_GAP: Duration = Duration::from_secs(2);
 
 /// An atomic flag tracking whether the server has advised reconnecting on this
 /// connection. Set by the response decoder when a frame carries the

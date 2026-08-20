@@ -22,7 +22,7 @@ use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     error::{AppendError, RequestError},
     frame_signal::FrameSignal,
-    reconnect::{ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS, ReconnectAdvice},
+    reconnect::{MIN_ADVISED_RECONNECT_GAP, ReconnectAdvice},
     retry::RetryBackoffBuilder,
     types::{
         AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
@@ -483,9 +483,7 @@ async fn run_session_with_retry(
     let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
     // Tracked separately from `prev_total_acked_records` so that pacing advised
-    // reconnects never consumes the progress that resets the retry backoff.
-    let mut advised_acked_records = 0;
-    let mut advised_reconnects_without_progress = 0;
+    let mut last_advised_reconnect: Option<Instant> = None;
 
     loop {
         let result = run_session(
@@ -510,23 +508,17 @@ async fn run_session_with_retry(
                 // opens can land while the server is still being replaced, so
                 // it gets the full retry budget rather than the remainder.
                 retry_backoff.reset();
-                // Advice is not a failure, so nothing here would slow down a client
-                // that keeps landing back on the same draining server. Count the
-                // cycles that acknowledged nothing new, and pace those.
-                if advised_acked_records < state.total_acked_records {
-                    advised_acked_records = state.total_acked_records;
-                    advised_reconnects_without_progress = 0;
-                } else {
-                    advised_reconnects_without_progress += 1;
+                if let Some(previous) = last_advised_reconnect {
+                    let since = previous.elapsed();
+                    if since < MIN_ADVISED_RECONNECT_GAP {
+                        tokio::time::sleep(MIN_ADVISED_RECONNECT_GAP - since).await;
+                    }
                 }
+                last_advised_reconnect = Some(Instant::now());
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),
-                    advised_reconnects_without_progress,
                     "reconnecting append session on server advice"
                 );
-                if advised_reconnects_without_progress > MAX_IMMEDIATE_ADVISED_RECONNECTS {
-                    tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
-                }
             }
             Err(err) => {
                 if prev_total_acked_records < state.total_acked_records {
