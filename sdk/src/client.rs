@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -738,7 +738,6 @@ struct PooledClient<C> {
     client: Arc<HyperClient<C, BoxBody>>,
     active_requests: Arc<AtomicUsize>,
     idle_since: Arc<Mutex<Option<Instant>>>,
-    retired: AtomicBool,
 }
 
 impl<C> PooledClient<C> {
@@ -747,24 +746,10 @@ impl<C> PooledClient<C> {
             client: Arc::new(client),
             active_requests: Arc::new(AtomicUsize::new(0)),
             idle_since: Arc::new(Mutex::new(Some(Instant::now()))),
-            retired: AtomicBool::new(false),
         }
-    }
-
-    /// Stop handing this client out. Requests already on it keep their
-    /// connection, so in flight work is unaffected.
-    fn retire(&self) {
-        self.retired.store(true, Ordering::Release);
-    }
-
-    fn is_retired(&self) -> bool {
-        self.retired.load(Ordering::Acquire)
     }
 
     fn request_permit(&self) -> Option<RequestPermit> {
-        if self.is_retired() {
-            return None;
-        }
         self.active_requests
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ar| {
                 (ar < MAX_CONCURRENT_REQUESTS_PER_CLIENT).then_some(ar + 1)
@@ -780,9 +765,6 @@ impl<C> PooledClient<C> {
     fn should_reap(&self, idle_timeout: Duration) -> bool {
         if self.active_requests.load(Ordering::Relaxed) != 0 {
             return false;
-        }
-        if self.is_retired() {
-            return true;
         }
         if let Some(idle_since) = *self.idle_since.lock().unwrap() {
             return idle_since.elapsed() > idle_timeout;
@@ -843,15 +825,8 @@ where
             .retain(|pooled| !pooled.should_reap(IDLE_TIMEOUT));
     }
 
-    /// Mark every client so it is never handed out again, and drop the ones
-    /// that are already idle. Clients with requests in flight are left for the
-    /// reaper, which collects them as soon as they go idle.
-    async fn retire_all(&self) {
-        let mut clients = self.clients.write().await;
-        for pooled in clients.iter() {
-            pooled.retire();
-        }
-        clients.retain(|pooled| pooled.active_requests.load(Ordering::Relaxed) != 0);
+    async fn clear(&self) {
+        self.clients.write().await.clear();
     }
 
     fn is_empty(&self) -> bool {
@@ -917,7 +892,7 @@ where
             hosts.get(host).cloned()
         };
         if let Some(pool) = pool {
-            pool.retire_all().await;
+            pool.clear().await;
         }
     }
 }

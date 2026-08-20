@@ -20,7 +20,7 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     error::{ReadError, RequestError},
-    reconnect::{MIN_ADVISED_RECONNECT_GAP, ReconnectAdvice},
+    reconnect::{ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS, ReconnectAdvice},
     retry::RetryBackoff,
     types::{
         AccessTokenMode, EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
@@ -419,7 +419,8 @@ pub async fn read_session(
 
     let updates = Box::pin(stream! {
         let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
-        let mut last_advised_reconnect: Option<Instant> = None;
+        let mut advised_reconnects_without_progress = 0;
+        let mut last_advised_resume: Option<Option<u64>> = None;
 
         loop {
             if batches.is_none() {
@@ -464,22 +465,23 @@ pub async fn read_session(
                     if read_limits_exhausted(&end) {
                         break;
                     }
-                    // Retire the connection so the next one is not pinned to
-                    // the draining server. In flight requests keep using it.
+                    // A new session over a pooled connection would land back on
+                    // the draining server, so force a fresh connection first.
                     client.rotate_transport().await;
-                    retry_backoff.reset();
+                    if last_advised_resume.replace(start.seq_num) == Some(start.seq_num) {
+                        advised_reconnects_without_progress += 1;
+                    } else {
+                        advised_reconnects_without_progress = 0;
+                    }
                     debug!(
                         resume_seq_num = ?start.seq_num,
+                        advised_reconnects_without_progress,
                         "reconnecting read session on server advice"
                     );
                     yield Ok(ReadUpdate::behind());
-                    if let Some(previous) = last_advised_reconnect {
-                        let since = previous.elapsed();
-                        if since < MIN_ADVISED_RECONNECT_GAP {
-                            tokio::time::sleep(MIN_ADVISED_RECONNECT_GAP - since).await;
-                        }
+                    if advised_reconnects_without_progress > MAX_IMMEDIATE_ADVISED_RECONNECTS {
+                        tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
                     }
-                    last_advised_reconnect = Some(Instant::now());
                     continue;
                 }
                 Some(Ok(ReadItem::Batch(batch))) => {
