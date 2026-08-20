@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -738,6 +738,7 @@ struct PooledClient<C> {
     client: Arc<HyperClient<C, BoxBody>>,
     active_requests: Arc<AtomicUsize>,
     idle_since: Arc<Mutex<Option<Instant>>>,
+    retired: AtomicBool,
 }
 
 impl<C> PooledClient<C> {
@@ -746,10 +747,24 @@ impl<C> PooledClient<C> {
             client: Arc::new(client),
             active_requests: Arc::new(AtomicUsize::new(0)),
             idle_since: Arc::new(Mutex::new(Some(Instant::now()))),
+            retired: AtomicBool::new(false),
         }
     }
 
+    /// Stop handing this client out. Requests already on it keep their
+    /// connection, so in flight work is unaffected.
+    fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+    }
+
+    fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
     fn request_permit(&self) -> Option<RequestPermit> {
+        if self.is_retired() {
+            return None;
+        }
         self.active_requests
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ar| {
                 (ar < MAX_CONCURRENT_REQUESTS_PER_CLIENT).then_some(ar + 1)
@@ -765,6 +780,9 @@ impl<C> PooledClient<C> {
     fn should_reap(&self, idle_timeout: Duration) -> bool {
         if self.active_requests.load(Ordering::Relaxed) != 0 {
             return false;
+        }
+        if self.is_retired() {
+            return true;
         }
         if let Some(idle_since) = *self.idle_since.lock().unwrap() {
             return idle_since.elapsed() > idle_timeout;
@@ -825,8 +843,10 @@ where
             .retain(|pooled| !pooled.should_reap(IDLE_TIMEOUT));
     }
 
-    async fn clear(&self) {
-        self.clients.write().await.clear();
+    async fn retire_all(&self) {
+        for pooled in self.clients.read().await.iter() {
+            pooled.retire();
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -892,7 +912,7 @@ where
             hosts.get(host).cloned()
         };
         if let Some(pool) = pool {
-            pool.clear().await;
+            pool.retire_all().await;
         }
     }
 }

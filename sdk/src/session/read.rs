@@ -465,9 +465,10 @@ pub async fn read_session(
                     if read_limits_exhausted(&end) {
                         break;
                     }
-                    // A new session over a pooled connection would land back on
-                    // the draining server, so force a fresh connection first.
+                    // Retire the connection so the next one is not pinned to
+                    // the draining server. In flight requests keep using it.
                     client.rotate_transport().await;
+                    retry_backoff.reset();
                     if last_advised_resume.replace(start.seq_num) == Some(start.seq_num) {
                         advised_reconnects_without_progress += 1;
                     } else {
