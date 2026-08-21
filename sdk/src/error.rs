@@ -122,10 +122,16 @@ impl From<client::HttpError> for ClientError {
 fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<ClientError> {
     let hyper_err = source_err::<hyper::Error>(err)?;
     let err_msg = format!("{hyper_err} -> {err_msg}");
-    if hyper_err.is_incomplete_message() {
+    if hyper_err.is_timeout() {
+        // The h2 keep-alive timing out fails requests sent on the dead connection.
+        Some(ClientError::Timeout)
+    } else if hyper_err.is_incomplete_message() {
         Some(ClientError::ConnectionClosedEarly(err_msg))
     } else if hyper_err.is_canceled() {
         Some(ClientError::RequestCanceled(err_msg))
+    } else if source_err::<h2::Error>(err).is_some_and(h2::Error::is_io) {
+        // An I/O death ends streaming bodies without tripping any hyper marker above.
+        Some(ClientError::ConnectionClosedEarly(err_msg))
     } else {
         None
     }
