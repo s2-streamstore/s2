@@ -411,6 +411,12 @@ impl StreamingResponse {
 pub trait RequestExecutor: Send + Sync {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
+
+    /// Discard pooled connections to `host` so the next request opens a fresh
+    /// one. Requests already in flight keep their connection.
+    async fn rotate(&self, host: &str) {
+        let _ = host;
+    }
 }
 
 pub fn default_connector(
@@ -905,6 +911,16 @@ where
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
         let (client, permit) = self.checkout(request.authority()).await;
         init_streaming_with(&client, request, permit).await
+    }
+
+    async fn rotate(&self, host: &str) {
+        let pool = {
+            let hosts = self.hosts.read().await;
+            hosts.get(host).cloned()
+        };
+        if let Some(pool) = pool {
+            pool.clients.write().await.clear();
+        }
     }
 }
 

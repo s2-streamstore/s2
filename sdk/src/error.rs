@@ -122,7 +122,9 @@ impl From<client::HttpError> for ClientError {
 fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<ClientError> {
     let hyper_err = source_err::<hyper::Error>(err)?;
     let err_msg = format!("{hyper_err} -> {err_msg}");
-    if hyper_err.is_incomplete_message() {
+    if hyper_err.is_incomplete_message() || hyper_err.is_closed() {
+        // `is_closed` covers a request dispatched onto a pooled connection
+        // that the server had already shut down.
         Some(ClientError::ConnectionClosedEarly(err_msg))
     } else if hyper_err.is_canceled() {
         Some(ClientError::RequestCanceled(err_msg))
