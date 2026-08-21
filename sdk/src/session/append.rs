@@ -504,10 +504,9 @@ async fn run_session_with_retry(
                 break;
             }
             Ok(SessionOutcome::ReconnectAdvised) => {
-                // A pooled connection would land back on the draining server.
+                // A pooled connection could land back on the draining server.
                 client.rotate_transport().await;
-                // A drain keeps acknowledging, so pace on how quickly advice
-                // returns rather than on progress.
+                // Throttle by how rapidly reconnect advice repeats.
                 if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVICE_STREAK_WINDOW) {
                     advised_reconnect_streak = 0;
                 }
@@ -627,8 +626,6 @@ async fn run_session(
     tokio::pin!(timer);
 
     loop {
-        // Stop feeding a draining server. A close already in progress is
-        // cheaper to finish here than to move onto a fresh connection.
         if reconnect.is_advised() && state.close_tx.is_none() {
             drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout).await?;
             return Ok(SessionOutcome::ReconnectAdvised);
