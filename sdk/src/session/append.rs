@@ -23,7 +23,7 @@ use crate::{
     error::{AppendError, RequestError},
     frame_signal::FrameSignal,
     reconnect::{
-        ADVICE_STREAK_WINDOW, ADVISED_RECONNECT_DELAY, MAX_IMMEDIATE_ADVISED_RECONNECTS,
+        ADVISED_RECONNECT_DELAY, ADVISED_RECONNECT_IDLE, MAX_IMMEDIATE_ADVISED_RECONNECTS,
         ReconnectAdvice,
     },
     retry::RetryBackoffBuilder,
@@ -485,7 +485,7 @@ async fn run_session_with_retry(
     };
     let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
-    let mut advised_reconnect_streak = 0;
+    let mut advised_reconnects = 0;
     let mut last_advised_reconnect: Option<Instant> = None;
 
     loop {
@@ -507,16 +507,16 @@ async fn run_session_with_retry(
                 // A pooled connection could land back on the draining server.
                 client.rotate_transport().await;
                 // Throttle by how rapidly reconnect advice repeats.
-                if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVICE_STREAK_WINDOW) {
-                    advised_reconnect_streak = 0;
+                if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVISED_RECONNECT_IDLE) {
+                    advised_reconnects = 0;
                 }
                 last_advised_reconnect = Some(Instant::now());
-                advised_reconnect_streak += 1;
+                advised_reconnects += 1;
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),
-                    advised_reconnect_streak, "reconnecting append session on server advice"
+                    advised_reconnects, "reconnecting append session on server advice"
                 );
-                if advised_reconnect_streak > MAX_IMMEDIATE_ADVISED_RECONNECTS {
+                if advised_reconnects > MAX_IMMEDIATE_ADVISED_RECONNECTS {
                     tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
                 }
             }

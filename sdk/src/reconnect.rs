@@ -12,8 +12,8 @@ pub(crate) const MAX_IMMEDIATE_ADVISED_RECONNECTS: usize = 3;
 /// Delay applied past [`MAX_IMMEDIATE_ADVISED_RECONNECTS`].
 pub(crate) const ADVISED_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 
-/// Gap after which advice starts a fresh streak rather than continuing one.
-pub(crate) const ADVICE_STREAK_WINDOW: Duration = Duration::from_secs(10);
+/// If no reconnect advice arrives for this long, the consecutive count resets.
+pub(crate) const ADVISED_RECONNECT_IDLE: Duration = Duration::from_secs(10);
 
 /// An atomic flag tracking whether the server has advised reconnecting on this
 /// connection. Set by the response decoder when a frame carries the
