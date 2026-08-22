@@ -154,7 +154,9 @@ def main() -> int:
         if args.base_ref and run_git("rev-parse", "--verify", "--quiet", args.base_ref).returncode:
             raise ValueError(f"base ref {args.base_ref!r} is not available")
 
-        lockfile_result = run_git("ls-files", "*Cargo.lock")
+        lockfile_result = run_git(
+            "ls-files", "--cached", "--others", "--exclude-standard", "*Cargo.lock"
+        )
         if lockfile_result.returncode:
             raise RuntimeError(f"cannot list Cargo.lock files: {lockfile_result.stderr.strip()}")
         lockfiles = lockfile_result.stdout.splitlines()
