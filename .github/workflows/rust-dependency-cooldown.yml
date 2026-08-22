@@ -10,7 +10,7 @@ jobs:
   wall1:
     name: Check dependency publish age
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         if: github.event_name == 'pull_request'
