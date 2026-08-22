@@ -122,10 +122,18 @@ impl From<client::HttpError> for ClientError {
 fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<ClientError> {
     let hyper_err = source_err::<hyper::Error>(err)?;
     let err_msg = format!("{hyper_err} -> {err_msg}");
-    if hyper_err.is_incomplete_message() {
+    if hyper_err.is_timeout() {
+        // The h2 keep-alive timing out fails requests sent on the dead connection.
+        Some(ClientError::Timeout)
+    } else if hyper_err.is_incomplete_message() {
         Some(ClientError::ConnectionClosedEarly(err_msg))
     } else if hyper_err.is_canceled() {
         Some(ClientError::RequestCanceled(err_msg))
+    } else if source_err::<h2::Error>(err).is_some_and(|e| e.is_io() || e.is_go_away()) {
+        // An I/O failure ends streaming bodies without tripping any hyper marker above.
+        // A remote GOAWAY ends streams dispatched onto a connection the server is
+        // gracefully shutting down.
+        Some(ClientError::ConnectionClosedEarly(err_msg))
     } else {
         None
     }
@@ -136,6 +144,8 @@ fn classify_io_source(err: &client::HttpError, err_msg: &str) -> Option<ClientEr
     let err_msg = format!("{io_err} -> {err_msg}");
     Some(match io_err.kind() {
         std::io::ErrorKind::UnexpectedEof => ClientError::UnexpectedEof(err_msg),
+        // h2 surfaces a stream cut short by connection shutdown as a broken pipe.
+        std::io::ErrorKind::BrokenPipe => ClientError::ConnectionClosedEarly(err_msg),
         std::io::ErrorKind::ConnectionReset => ClientError::ConnectionReset(err_msg),
         std::io::ErrorKind::ConnectionAborted => ClientError::ConnectionAborted(err_msg),
         std::io::ErrorKind::ConnectionRefused => ClientError::ConnectionRefused(err_msg),

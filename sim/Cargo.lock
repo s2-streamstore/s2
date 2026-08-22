@@ -3699,7 +3699,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.42.6"
+version = "0.42.7"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3761,6 +3761,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http 1.4.2",
  "http-body 1.0.1",
  "http-body-util",
