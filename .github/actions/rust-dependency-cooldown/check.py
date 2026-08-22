@@ -16,9 +16,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+ACTION_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path.cwd()
 CONFIG = REPO_ROOT / ".cargo" / "config.toml"
-ALLOWLIST = Path(__file__).with_name("rust-min-publish-age-allowlist.txt")
+ALLOWLIST = ACTION_ROOT / "first-party-crates.txt"
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 INDEX_BASE = "https://index.crates.io"
 USER_AGENT = "s2 minimum-publish-age check (github.com/s2-streamstore/s2)"
@@ -38,6 +39,12 @@ UNIT_SECONDS = {
     "month": 2592000,
     "months": 2592000,
 }
+RELEVANT_PATHS = (
+    ":(glob)**/Cargo.lock",
+    ".cargo/config.toml",
+    ".github/actions/rust-dependency-cooldown",
+    ".github/workflows/rust-dependency-cooldown.yml",
+)
 
 
 def minimum_age() -> tuple[timedelta, str]:
@@ -84,6 +91,15 @@ def run_git(*args: str) -> subprocess.CompletedProcess[str]:
 def lock_at(revision: str, path: str) -> str | None:
     result = run_git("show", f"{revision}:{path}")
     return result.stdout if result.returncode == 0 else None
+
+
+def has_relevant_changes(base_ref: str) -> bool:
+    result = run_git("diff", "--quiet", base_ref, "HEAD", "--", *RELEVANT_PATHS)
+    if result.returncode == 0:
+        return False
+    if result.returncode == 1:
+        return True
+    raise RuntimeError(f"cannot compare Wall 1 paths: {result.stderr.strip()}")
 
 
 def index_url(name: str) -> str:
@@ -139,6 +155,14 @@ def publication_times(name: str) -> dict[str, datetime]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="repository whose lock files are checked",
+    )
+    parser.add_argument("--config", type=Path, help="Cargo configuration to read")
+    parser.add_argument("--allowlist", type=Path, help="exact first-party crate names")
+    parser.add_argument(
         "base_ref",
         nargs="?",
         help="check only crates.io versions not present at this Git ref",
@@ -147,12 +171,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    global ALLOWLIST, CONFIG, REPO_ROOT
+
     args = parse_args()
+    REPO_ROOT = args.repo_root.resolve()
+    CONFIG = (args.config or REPO_ROOT / ".cargo" / "config.toml").resolve()
+    ALLOWLIST = (args.allowlist or ACTION_ROOT / "first-party-crates.txt").resolve()
     try:
-        age_limit, age_text = minimum_age()
-        allowlist = allowed_crates()
         if args.base_ref and run_git("rev-parse", "--verify", "--quiet", args.base_ref).returncode:
             raise ValueError(f"base ref {args.base_ref!r} is not available")
+        if args.base_ref and not has_relevant_changes(args.base_ref):
+            print("No Wall 1 files changed; dependency cooldown check skipped.")
+            return 0
+
+        age_limit, age_text = minimum_age()
+        allowlist = allowed_crates()
 
         lockfile_result = run_git(
             "ls-files", "--cached", "--others", "--exclude-standard", "*Cargo.lock"

@@ -12,38 +12,9 @@ env:
 jobs:
   wall1:
     name: Rust Dependency Cooldown
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 1
-      - name: Fetch pull request base
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
-      - name: Detect Wall 1 changes
-        if: github.event_name == 'pull_request'
-        id: wall1_changes
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if git diff --quiet "$BASE_SHA" HEAD -- \
-            ':(glob)**/Cargo.lock' \
-            .cargo/config.toml \
-            .github/actions/check-rust-min-publish-age.py \
-            .github/actions/rust-min-publish-age-allowlist.txt; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Check dependency publish age
-        if: github.event_name == 'pull_request' && steps.wall1_changes.outputs.changed == 'true'
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: ./.github/actions/check-rust-min-publish-age.py "$BASE_REF"
+    permissions:
+      contents: read
+    uses: $/.github/workflows/rust-dependency-cooldown.yml
 
   changes:
     name: Detect Changes
