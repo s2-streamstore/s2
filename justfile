@@ -20,7 +20,7 @@ sim-clippy *args:
 
 # Ensure cargo-deny is installed
 _ensure-deny:
-    @cargo deny --version > /dev/null 2>&1 || (echo "cargo-deny is required; install it through approved developer tooling" && exit 1)
+    @cargo deny --version > /dev/null 2>&1 || (echo "cargo-deny is required; run: brew install cargo-deny" && exit 1)
 
 # Run cargo-deny checks
 deny *args: _ensure-deny
@@ -37,7 +37,7 @@ fmt: _ensure-nightly
 
 # Ensure cargo-nextest is installed
 _ensure-nextest:
-    @cargo nextest --version > /dev/null 2>&1 || (echo "cargo-nextest is required; install it through approved developer tooling" && exit 1)
+    @cargo nextest --version > /dev/null 2>&1 || (echo "cargo-nextest is required; run: brew install cargo-nextest" && exit 1)
 
 # Run tests with nextest (excludes Docker-backed and live integration tests)
 test *args: sync _ensure-nextest
