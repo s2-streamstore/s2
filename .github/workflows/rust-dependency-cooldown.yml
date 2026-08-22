@@ -22,4 +22,4 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: $/.github/actions/rust-dependency-cooldown
         with:
-          base-sha: ${{ github.event.pull_request.base.sha }}
+          base-sha: HEAD^1

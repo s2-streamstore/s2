@@ -95,11 +95,21 @@ def lock_at(revision: str, path: str) -> str | None:
 
 def has_relevant_changes(base_ref: str) -> bool:
     result = run_git("diff", "--quiet", base_ref, "HEAD", "--", *RELEVANT_PATHS)
-    if result.returncode == 0:
-        return False
     if result.returncode == 1:
         return True
-    raise RuntimeError(f"cannot compare Wall 1 paths: {result.stderr.strip()}")
+    if result.returncode != 0:
+        raise RuntimeError(f"cannot compare committed Wall 1 paths: {result.stderr.strip()}")
+
+    result = run_git("diff", "--quiet", "HEAD", "--", *RELEVANT_PATHS)
+    if result.returncode == 1:
+        return True
+    if result.returncode != 0:
+        raise RuntimeError(f"cannot compare working Wall 1 paths: {result.stderr.strip()}")
+
+    result = run_git("ls-files", "--others", "--exclude-standard", "--", *RELEVANT_PATHS)
+    if result.returncode:
+        raise RuntimeError(f"cannot list untracked Wall 1 paths: {result.stderr.strip()}")
+    return bool(result.stdout.strip())
 
 
 def index_url(name: str) -> str:
