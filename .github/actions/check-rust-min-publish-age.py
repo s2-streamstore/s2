@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = REPO_ROOT / ".cargo" / "config.toml"
 ALLOWLIST = Path(__file__).with_name("rust-min-publish-age-allowlist.txt")
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
