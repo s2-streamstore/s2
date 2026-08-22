@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -21,6 +22,8 @@ ALLOWLIST = Path(__file__).with_name("rust-min-publish-age-allowlist.txt")
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 INDEX_BASE = "https://index.crates.io"
 USER_AGENT = "s2 minimum-publish-age check (github.com/s2-streamstore/s2)"
+RETRY_ATTEMPTS = 4
+RETRY_BASE_DELAY_SECONDS = 2
 UNIT_SECONDS = {
     "second": 1,
     "seconds": 1,
@@ -96,16 +99,35 @@ def index_url(name: str) -> str:
     return f"{INDEX_BASE}/{path}"
 
 
-def publication_times(name: str) -> dict[str, datetime]:
+def fetch_index(name: str) -> str:
     request = urllib.request.Request(index_url(name), headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = response.read().decode()
-    except (urllib.error.URLError, UnicodeDecodeError) as error:
-        raise RuntimeError(f"cannot read the crates.io index for {name}: {error}") from error
+    last_error: Exception | None = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(RETRY_BASE_DELAY_SECONDS * (attempt - 1))
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as error:
+            if error.code < 500 and error.code != 429:
+                raise RuntimeError(f"cannot read the crates.io index for {name}: {error}") from error
+            last_error = error
+            continue
+        except (urllib.error.URLError, TimeoutError) as error:
+            last_error = error
+            continue
+        try:
+            return raw.decode()
+        except UnicodeDecodeError as error:
+            raise RuntimeError(f"cannot read the crates.io index for {name}: {error}") from error
+    raise RuntimeError(
+        f"cannot read the crates.io index for {name} after {RETRY_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
 
+
+def publication_times(name: str) -> dict[str, datetime]:
     times: dict[str, datetime] = {}
-    for line in body.splitlines():
+    for line in fetch_index(name).splitlines():
         if not line.strip():
             continue
         entry = json.loads(line)
