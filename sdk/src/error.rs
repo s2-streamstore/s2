@@ -142,6 +142,8 @@ fn classify_io_source(err: &client::HttpError, err_msg: &str) -> Option<ClientEr
     let err_msg = format!("{io_err} -> {err_msg}");
     Some(match io_err.kind() {
         std::io::ErrorKind::UnexpectedEof => ClientError::UnexpectedEof(err_msg),
+        // h2 surfaces a stream cut short by connection shutdown as a broken pipe.
+        std::io::ErrorKind::BrokenPipe => ClientError::ConnectionClosedEarly(err_msg),
         std::io::ErrorKind::ConnectionReset => ClientError::ConnectionReset(err_msg),
         std::io::ErrorKind::ConnectionAborted => ClientError::ConnectionAborted(err_msg),
         std::io::ErrorKind::ConnectionRefused => ClientError::ConnectionRefused(err_msg),
