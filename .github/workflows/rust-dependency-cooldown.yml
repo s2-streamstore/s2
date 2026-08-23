@@ -1,4 +1,4 @@
-name: Rust dependency cooldown
+name: Rust dependency cooldown gate
 
 on:
   workflow_call:
@@ -7,8 +7,8 @@ permissions:
   contents: read
 
 jobs:
-  wall1:
-    name: Check dependency publish age
+  rust-dependency-cooldown:
+    name: Rust dependency cooldown gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

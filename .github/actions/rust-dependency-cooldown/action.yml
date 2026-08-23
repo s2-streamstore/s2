@@ -1,4 +1,4 @@
-name: Rust dependency cooldown
+name: Rust dependency cooldown gate
 description: Reject new crates.io versions that are inside the publication cooldown
 
 inputs:

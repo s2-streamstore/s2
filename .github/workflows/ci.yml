@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  wall1:
-    name: Rust Dependency Cooldown
+  rust-dependency-cooldown:
+    name: Rust dependency cooldown gate
     permissions:
       contents: read
     uses: $/.github/workflows/rust-dependency-cooldown.yml
@@ -38,7 +38,7 @@ jobs:
 
   cli-schema-drift:
     name: CLI Schema Drift
-    needs: [changes, wall1]
+    needs: [changes, rust-dependency-cooldown]
     if: needs.changes.outputs.apply_schema == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -92,7 +92,7 @@ jobs:
 
   clippy:
     name: Clippy
-    needs: wall1
+    needs: rust-dependency-cooldown
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -114,7 +114,7 @@ jobs:
 
   test:
     name: Tests
-    needs: wall1
+    needs: rust-dependency-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -131,7 +131,7 @@ jobs:
 
   testcontainers:
     name: Testcontainers
-    needs: wall1
+    needs: rust-dependency-cooldown
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -169,7 +169,7 @@ jobs:
 
   simulation:
     name: Simulation Tests
-    needs: wall1
+    needs: rust-dependency-cooldown
     # arm64, deliberately: on x86_64 Linux, fastant (via slatedb -> foyer) runs
     # a pre-main TSC calibration loop that spins forever under mad-turmoil's
     # interposed clock_gettime, hanging the simulator at startup. On aarch64
@@ -312,7 +312,7 @@ jobs:
 
   build-server:
     name: Build s2-lite
-    needs: wall1
+    needs: rust-dependency-cooldown
     uses: ./.github/workflows/build-s2-lite.yml
     with:
       ref: ${{ github.sha }}

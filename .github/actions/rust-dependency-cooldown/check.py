@@ -98,17 +98,23 @@ def has_relevant_changes(base_ref: str) -> bool:
     if result.returncode == 1:
         return True
     if result.returncode != 0:
-        raise RuntimeError(f"cannot compare committed Wall 1 paths: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"cannot compare committed Rust dependency cooldown paths: {result.stderr.strip()}"
+        )
 
     result = run_git("diff", "--quiet", "HEAD", "--", *RELEVANT_PATHS)
     if result.returncode == 1:
         return True
     if result.returncode != 0:
-        raise RuntimeError(f"cannot compare working Wall 1 paths: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"cannot compare working Rust dependency cooldown paths: {result.stderr.strip()}"
+        )
 
     result = run_git("ls-files", "--others", "--exclude-standard", "--", *RELEVANT_PATHS)
     if result.returncode:
-        raise RuntimeError(f"cannot list untracked Wall 1 paths: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"cannot list untracked Rust dependency cooldown paths: {result.stderr.strip()}"
+        )
     return bool(result.stdout.strip())
 
 
@@ -191,7 +197,7 @@ def main() -> int:
         if args.base_ref and run_git("rev-parse", "--verify", "--quiet", args.base_ref).returncode:
             raise ValueError(f"base ref {args.base_ref!r} is not available")
         if args.base_ref and not has_relevant_changes(args.base_ref):
-            print("No Wall 1 files changed; dependency cooldown check skipped.")
+            print("No Rust dependency cooldown files changed; check skipped.")
             return 0
 
         age_limit, age_text = minimum_age()
