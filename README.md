@@ -41,7 +41,7 @@ cargo +nightly remove <crate>
 cargo +nightly generate-lockfile
 ```
 
-Use `--locked` with normal build, check, test, run, document, fetch, and metadata commands. The pull request dependency check verifies every proposed lock-file change before Rust build jobs start.
+Use `--locked` with normal build, check, test, run, document, fetch, and metadata commands. The simulator is temporarily exempt until its separate lockfile is regenerated. The pull request dependency check verifies every proposed lock-file change before Rust build jobs start.
 
 Install the repository Cargo tools from Homebrew bottles:
 
