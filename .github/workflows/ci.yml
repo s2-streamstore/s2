@@ -110,7 +110,7 @@ jobs:
       - name: Clippy (simulator)
         env:
           RUSTFLAGS: --cfg tokio_unstable
-        run: cargo clippy --manifest-path sim/Cargo.toml --locked --all-targets -- -D warnings --allow deprecated
+        run: cargo clippy --manifest-path sim/Cargo.toml --all-targets -- -D warnings --allow deprecated
 
   test:
     name: Tests
@@ -194,7 +194,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build simulator
-        run: cargo build --manifest-path sim/Cargo.toml --locked --profile sim
+        run: cargo build --manifest-path sim/Cargo.toml --profile sim
 
       # Determinism first: a broken meta test means seeds are not reproducible
       # and any linearizability failure would not be debuggable. Children
