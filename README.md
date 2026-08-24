@@ -29,6 +29,26 @@ This repository contains:
 - **[s2-lite](lite/)** - An open source, self-hostable server implementation of the [S2 API](https://s2.dev/docs/api)
 - **[s2-sdk](sdk/)** - The official Rust SDK for S2
 
+## Development
+
+Use the nightly Cargo dependency commands so that the repository publication cooldown applies:
+
+```bash
+cargo +nightly add <crate>
+cargo +nightly update
+cargo +nightly update -p <crate>
+cargo +nightly remove <crate>
+cargo +nightly generate-lockfile
+```
+
+Use `--locked` with normal build, check, test, run, document, fetch, and metadata commands. The simulator is temporarily exempt until its separate lockfile is regenerated. The pull request dependency check verifies every proposed lock-file change before Rust build jobs start.
+
+Install the repository Cargo tools from Homebrew bottles:
+
+```bash
+brew install cargo-deny cargo-nextest
+```
+
 ## Installation
 
 ### Homebrew (macOS/Linux)

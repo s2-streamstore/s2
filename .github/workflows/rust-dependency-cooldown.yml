@@ -1,0 +1,25 @@
+name: Rust dependency cooldown gate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-dependency-cooldown:
+    name: Rust dependency cooldown gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check Rust dependency cooldown
+        if: github.event_name == 'pull_request'
+        uses: $/.github/actions/rust-dependency-cooldown
+        with:
+          base-sha: HEAD^1

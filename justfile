@@ -12,7 +12,7 @@ build *args: sync
 
 # Run clippy linter
 clippy *args: sync
-    cargo clippy --workspace --all-features --all-targets {{args}} -- -D warnings --allow deprecated
+    cargo clippy --locked --workspace --all-features --all-targets {{args}} -- -D warnings --allow deprecated
 
 # Run clippy on the simulator (separate workspace)
 sim-clippy *args:
@@ -20,7 +20,7 @@ sim-clippy *args:
 
 # Ensure cargo-deny is installed
 _ensure-deny:
-    @cargo deny --version > /dev/null 2>&1 || cargo install cargo-deny
+    @cargo deny --version > /dev/null 2>&1 || (echo "cargo-deny is required; run: brew install cargo-deny" && exit 1)
 
 # Run cargo-deny checks
 deny *args: _ensure-deny
@@ -37,20 +37,20 @@ fmt: _ensure-nightly
 
 # Ensure cargo-nextest is installed
 _ensure-nextest:
-    @cargo nextest --version > /dev/null 2>&1 || cargo install cargo-nextest
+    @cargo nextest --version > /dev/null 2>&1 || (echo "cargo-nextest is required; run: brew install cargo-nextest" && exit 1)
 
 # Run tests with nextest (excludes Docker-backed and live integration tests)
 test *args: sync _ensure-nextest
-    cargo nextest run --workspace --all-features --exclude s2-testcontainers -E 'not ((package(s2-cli) & binary(integration)) or (package(s2-sdk) & (binary(account_ops) or binary(basin_ops) or binary(metrics_ops) or binary(stream_ops))))' {{args}}
+    cargo nextest run --locked --workspace --all-features --exclude s2-testcontainers -E 'not ((package(s2-cli) & binary(integration)) or (package(s2-sdk) & (binary(account_ops) or binary(basin_ops) or binary(metrics_ops) or binary(stream_ops))))' {{args}}
 
 # Run CLI integration tests (requires s2 lite server running)
 test-cli-integration: sync _ensure-nextest
     S2_ACCESS_TOKEN=test S2_ACCOUNT_ENDPOINT=http://localhost S2_BASIN_ENDPOINT=http://localhost \
-    cargo nextest run -p s2-cli --test integration
+    cargo nextest run --locked -p s2-cli --test integration
 
 # Run SDK integration tests (requires S2_ACCESS_TOKEN and optional custom endpoints)
 test-sdk-integration: sync _ensure-nextest
-    cargo nextest run -p s2-sdk --test account_ops --test basin_ops --test metrics_ops --test stream_ops
+    cargo nextest run --locked -p s2-sdk --test account_ops --test basin_ops --test metrics_ops --test stream_ops
 
 # Verify Cargo.lock is up-to-date
 check-locked:
@@ -67,7 +67,7 @@ clean:
 
 # Run s2-lite
 lite *args:
-    cargo run --release -p s2-cli -- lite {{args}}
+    cargo run --locked --release -p s2-cli -- lite {{args}}
 
 # Run the s2-lite deterministic simulation (e.g. `just sim smoke --seed 42`,
 # `just sim linearizable --seed 42 --clients 3 --ops-per-client 100`)
