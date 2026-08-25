@@ -27,6 +27,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
+h2 = "0.4"
 http = { workspace = true }
 http-body = "1"
 http-body-util = "0.1"

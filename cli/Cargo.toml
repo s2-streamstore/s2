@@ -71,6 +71,9 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["http2", "server", "tokio"] }
 predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }

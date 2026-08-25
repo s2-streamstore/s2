@@ -29,7 +29,7 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 pub use hyper_util::client::legacy::connect::Connect;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
-    rt::TokioExecutor,
+    rt::{TokioExecutor, TokioTimer},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
@@ -784,7 +784,12 @@ where
     }
 
     fn create_client(&self) -> PooledClient<C> {
-        let client = HyperClient::builder(TokioExecutor::new()).build(self.connector.clone());
+        let client = HyperClient::builder(TokioExecutor::new())
+            .timer(TokioTimer::new())
+            .http2_only(true)
+            .http2_keep_alive_interval(Duration::from_secs(20))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .build(self.connector.clone());
         PooledClient::new(client)
     }
 
