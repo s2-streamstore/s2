@@ -438,11 +438,15 @@ pub trait RequestExecutor: Send + Sync {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
 
-    /// Discard the pooled connection to `host` identified by `connection`, so
+    /// Poison the pooled connection to `host` identified by `connection`, so
     /// the next request that would have reused it opens a fresh one instead.
-    /// Without an attribution, discard every pooled connection to `host`.
+    /// Without an attribution, poison every pooled connection to `host`.
     /// Requests already in flight keep their connection either way.
-    async fn rotate(&self, host: &str, connection: Option<ConnectionId>);
+    ///
+    /// Same contract as connection poisoning in `hyper-util`'s pool and the
+    /// AWS SDK (`ConnectionPoisoningInterceptor`), except this pool drops the
+    /// poisoned client eagerly instead of skipping it at checkout.
+    async fn poison(&self, host: &str, connection: Option<ConnectionId>);
 }
 
 pub fn default_connector(
@@ -952,7 +956,7 @@ where
         init_streaming_with(&client, request, permit, Some(connection)).await
     }
 
-    async fn rotate(&self, host: &str, connection: Option<ConnectionId>) {
+    async fn poison(&self, host: &str, connection: Option<ConnectionId>) {
         let pool = {
             let hosts = self.hosts.read().await;
             hosts.get(host).cloned()
@@ -962,13 +966,13 @@ where
             let pooled = clients.len();
             match connection {
                 // Drop only the client the advice arrived on; connections
-                // pinned to servers that are not going away stay pooled, and a
-                // repeat rotation for the same connection is a no-op.
+                // pinned to servers that are not going away stay pooled, and
+                // poisoning the same connection again is a no-op.
                 Some(id) => clients.retain(|pooled| pooled.id != id),
                 None => clients.clear(),
             }
             let removed = pooled - clients.len();
-            tracing::debug!(host, ?connection, removed, "rotated pooled connections");
+            tracing::debug!(host, ?connection, removed, "poisoned pooled connections");
         }
     }
 }

@@ -470,8 +470,8 @@ pub async fn read_session(
                     if read_limits_exhausted(&end) {
                         break;
                     }
-                    // The pooled connection is pinned to the draining server.
-                    client.rotate_transport(connection).await;
+                    // Poison the pooled connection: it is pinned to the draining server.
+                    client.poison_connection(connection).await;
                     // A drain keeps serving batches, so pace on how quickly
                     // advice returns rather than on progress.
                     if last_advised_reconnect

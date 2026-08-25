@@ -42,8 +42,9 @@ impl ReconnectAdvice {
         self.0.advised.store(true, Ordering::Release);
     }
 
-    /// Record which pooled connection serves this session, once known.
-    pub(crate) fn bind_connection(&self, connection: Option<ConnectionId>) {
+    /// Capture which pooled connection serves this session, once known —
+    /// the same role as `hyper_util`'s `capture_connection`.
+    pub(crate) fn capture_connection(&self, connection: Option<ConnectionId>) {
         if let Some(connection) = connection {
             let _ = self.0.connection.set(connection);
         }

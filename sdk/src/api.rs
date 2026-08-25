@@ -485,7 +485,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.bind_connection(response.connection());
+        reconnect.capture_connection(response.connection());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
@@ -526,15 +526,15 @@ impl BasinClient {
         }))
     }
 
-    /// Drop the pooled connection to the basin endpoint that carried reconnect
-    /// advice (all pooled connections when unattributed), so the next request
-    /// opens a fresh connection instead of reusing one pinned to a draining
-    /// server. In flight requests keep their connection.
-    pub(crate) async fn rotate_transport(&self, connection: Option<ConnectionId>) {
+    /// Poison the pooled connection to the basin endpoint that carried
+    /// reconnect advice (all pooled connections when unattributed), so the
+    /// next request opens a fresh connection instead of reusing one pinned to
+    /// a draining server. In flight requests keep their connection.
+    pub(crate) async fn poison_connection(&self, connection: Option<ConnectionId>) {
         if let Some(authority) = self.base_url.authority() {
             self.client
                 .client
-                .rotate(authority.as_str(), connection)
+                .poison(authority.as_str(), connection)
                 .await;
         }
     }
@@ -569,7 +569,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.bind_connection(response.connection());
+        reconnect.capture_connection(response.connection());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
@@ -1345,7 +1345,7 @@ mod tests {
             unreachable!("unary retry test does not initialize a stream")
         }
 
-        async fn rotate(&self, _host: &str, _connection: Option<ConnectionId>) {}
+        async fn poison(&self, _host: &str, _connection: Option<ConnectionId>) {}
     }
 
     fn server_error(status: StatusCode, code: &str) -> ApiError {

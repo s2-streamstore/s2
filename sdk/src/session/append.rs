@@ -505,8 +505,8 @@ async fn run_session_with_retry(
                 break;
             }
             Ok(SessionOutcome::ReconnectAdvised(connection)) => {
-                // The pooled connection is pinned to the draining server.
-                client.rotate_transport(connection).await;
+                // Poison the pooled connection: it is pinned to the draining server.
+                client.poison_connection(connection).await;
                 // Throttle by how rapidly reconnect advice repeats.
                 if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVISED_RECONNECT_IDLE) {
                     advised_reconnects = 0;
