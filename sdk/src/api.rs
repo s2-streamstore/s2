@@ -39,7 +39,7 @@ use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 
 use crate::{
-    client::{self, ConnectionId, StreamingResponse, UnaryResponse},
+    client::{self, StreamingResponse, UnaryResponse},
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
     reconnect::ReconnectAdvice,
@@ -477,7 +477,7 @@ impl BasinClient {
         let mut request = request_builder.build()?;
         set_encryption_header(&mut request, encryption);
         let (response, access_token) = self.client.init_streaming_authorized(request).await?;
-        let response = match response.into_result().await {
+        let mut response = match response.into_result().await {
             Ok(response) => response,
             Err(error) => {
                 self.client
@@ -485,7 +485,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.capture_connection(response.connection());
+        reconnect.capture_connection(response.take_poison_handle());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
@@ -526,19 +526,6 @@ impl BasinClient {
         }))
     }
 
-    /// Poison the pooled connection to the basin endpoint that carried
-    /// reconnect advice (all pooled connections when unattributed), so the
-    /// next request opens a fresh connection instead of reusing one pinned to
-    /// a draining server. In flight requests keep their connection.
-    pub(crate) async fn poison_connection(&self, connection: Option<ConnectionId>) {
-        if let Some(authority) = self.base_url.authority() {
-            self.client
-                .client
-                .poison(authority.as_str(), connection)
-                .await;
-        }
-    }
-
     pub async fn read_session(
         &self,
         name: &StreamName,
@@ -561,7 +548,7 @@ impl BasinClient {
         let mut request = request_builder.build()?;
         set_encryption_header(&mut request, encryption);
         let (response, access_token) = self.client.init_streaming_authorized(request).await?;
-        let response = match response.into_result().await {
+        let mut response = match response.into_result().await {
             Ok(response) => response,
             Err(error) => {
                 self.client
@@ -569,7 +556,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.capture_connection(response.connection());
+        reconnect.capture_connection(response.take_poison_handle());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
@@ -1344,8 +1331,6 @@ mod tests {
         ) -> Result<StreamingResponse, client::HttpError> {
             unreachable!("unary retry test does not initialize a stream")
         }
-
-        async fn poison(&self, _host: &str, _connection: Option<ConnectionId>) {}
     }
 
     fn server_error(status: StatusCode, code: &str) -> ApiError {

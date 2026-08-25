@@ -19,7 +19,6 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
-    client::ConnectionId,
     error::{ReadError, RequestError},
     reconnect::{
         ADVISED_RECONNECT_DELAY, ADVISED_RECONNECT_IDLE, MAX_IMMEDIATE_ADVISED_RECONNECTS,
@@ -103,11 +102,10 @@ type InternalStreaming<R> =
 enum ReadItem {
     Batch(ReadBatch),
     /// The server advised reconnecting and the response ended cleanly.
-    /// Carries the pooled connection the advice arrived on, when known.
     ///
     /// Always the last item of a connection, emitted after the batch it rode
     /// in on, so the resume position already accounts for that batch.
-    ReconnectAdvised(Option<ConnectionId>),
+    ReconnectAdvised,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -463,15 +461,15 @@ pub async fn read_session(
                 .next()
                 .await
             {
-                Some(Ok(ReadItem::ReconnectAdvised(connection))) => {
+                Some(Ok(ReadItem::ReconnectAdvised)) => {
                     batches = None;
-                    // Avoid a useless reconnect for a read that was already
-                    // satisfied when the advice arrived.
+                    // The advised connection was already poisoned when the
+                    // advice was first decoded; reconnecting dials a fresh
+                    // one. Avoid a useless reconnect for a read that was
+                    // already satisfied when the advice arrived.
                     if read_limits_exhausted(&end) {
                         break;
                     }
-                    // Poison the pooled connection: it is pinned to the draining server.
-                    client.poison_connection(connection).await;
                     // A drain keeps serving batches, so pace on how quickly
                     // advice returns rather than on progress.
                     if last_advised_reconnect
@@ -577,7 +575,7 @@ async fn session_inner(
                 Ok(Some(batch)) => {
                     yield ReadItem::Batch(ReadBatch::from_api(batch?));
                     if reconnect.is_advised() {
-                        yield ReadItem::ReconnectAdvised(reconnect.connection());
+                        yield ReadItem::ReconnectAdvised;
                         break;
                     }
                 }

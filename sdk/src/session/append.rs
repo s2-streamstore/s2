@@ -20,7 +20,6 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
-    client::ConnectionId,
     error::{AppendError, RequestError},
     frame_signal::FrameSignal,
     reconnect::{
@@ -504,9 +503,9 @@ async fn run_session_with_retry(
             Ok(SessionOutcome::Closed) => {
                 break;
             }
-            Ok(SessionOutcome::ReconnectAdvised(connection)) => {
-                // Poison the pooled connection: it is pinned to the draining server.
-                client.poison_connection(connection).await;
+            Ok(SessionOutcome::ReconnectAdvised) => {
+                // The advised connection was already poisoned when the advice
+                // was first decoded, so reconnecting dials a fresh one.
                 // Throttle by how rapidly reconnect advice repeats.
                 if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVISED_RECONNECT_IDLE) {
                     advised_reconnects = 0;
@@ -585,8 +584,7 @@ enum SessionOutcome {
     /// Everything submitted was acknowledged and the caller closed the session.
     Closed,
     /// The server advised reconnecting and this connection drained cleanly.
-    /// Carries the pooled connection the advice arrived on, when known.
-    ReconnectAdvised(Option<ConnectionId>),
+    ReconnectAdvised,
 }
 
 async fn run_session(
@@ -630,7 +628,7 @@ async fn run_session(
     loop {
         if reconnect.is_advised() && state.close_tx.is_none() {
             drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout).await?;
-            return Ok(SessionOutcome::ReconnectAdvised(reconnect.connection()));
+            return Ok(SessionOutcome::ReconnectAdvised);
         }
 
         tokio::select! {

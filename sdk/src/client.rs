@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock as StdRwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -381,12 +381,39 @@ impl ConnectionId {
     }
 }
 
+/// Grants its holder the ability to poison the pooled connection a streaming
+/// response was served on, dropping it from the pool so no new request reuses
+/// it. Requests already in flight keep the connection.
+///
+/// Poisoning is idempotent: the connection is identified by its
+/// [`ConnectionId`], so poisoning it again — including from another session
+/// sharing the connection — is a no-op.
+///
+/// Same contract as connection poisoning in `hyper-util`'s pool and the AWS
+/// SDK (`ConnectionPoisoningInterceptor`), except this pool drops the poisoned
+/// client eagerly instead of skipping it at checkout.
+pub struct PoisonHandle {
+    poison: Box<dyn Fn() + Send + Sync>,
+}
+
+impl PoisonHandle {
+    fn new(poison: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            poison: Box::new(poison),
+        }
+    }
+
+    pub(crate) fn poison(&self) {
+        (self.poison)();
+    }
+}
+
 pub struct StreamingResponse {
     status: StatusCode,
     headers: HeaderMap,
     body: Incoming,
     permit: RequestPermit,
-    connection: Option<ConnectionId>,
+    poison_handle: Option<PoisonHandle>,
 }
 
 impl StreamingResponse {
@@ -395,14 +422,14 @@ impl StreamingResponse {
         headers: HeaderMap,
         body: Incoming,
         permit: RequestPermit,
-        connection: Option<ConnectionId>,
+        poison_handle: Option<PoisonHandle>,
     ) -> Self {
         Self {
             status,
             headers,
             body,
             permit,
-            connection,
+            poison_handle,
         }
     }
 
@@ -410,10 +437,10 @@ impl StreamingResponse {
         self.status
     }
 
-    /// The pooled connection this response is being served on, when the
-    /// executor pools connections.
-    pub fn connection(&self) -> Option<ConnectionId> {
-        self.connection
+    /// Take the handle for poisoning the pooled connection this response is
+    /// being served on, when the executor pools connections.
+    pub fn take_poison_handle(&mut self) -> Option<PoisonHandle> {
+        self.poison_handle.take()
     }
 
     pub async fn into_bytes(self) -> Result<Bytes, HttpError> {
@@ -437,16 +464,6 @@ impl StreamingResponse {
 pub trait RequestExecutor: Send + Sync {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
-
-    /// Poison the pooled connection to `host` identified by `connection`, so
-    /// the next request that would have reused it opens a fresh one instead.
-    /// Without an attribution, poison every pooled connection to `host`.
-    /// Requests already in flight keep their connection either way.
-    ///
-    /// Same contract as connection poisoning in `hyper-util`'s pool and the
-    /// AWS SDK (`ConnectionPoisoningInterceptor`), except this pool drops the
-    /// poisoned client eagerly instead of skipping it at checkout.
-    async fn poison(&self, host: &str, connection: Option<ConnectionId>);
 }
 
 pub fn default_connector(
@@ -613,7 +630,7 @@ async fn init_streaming_with<C>(
     client: &HyperClient<C, BoxBody>,
     request: Request,
     permit: RequestPermit,
-    connection: Option<ConnectionId>,
+    poison_handle: Option<PoisonHandle>,
 ) -> Result<StreamingResponse, HttpError>
 where
     C: Connect + Clone + Send + Sync + 'static,
@@ -637,7 +654,7 @@ where
             parts.headers,
             body,
             permit,
-            connection,
+            poison_handle,
         ))
     };
 
@@ -808,7 +825,9 @@ impl<C> PooledClient<C> {
 }
 
 struct HostPool<C> {
-    clients: RwLock<Vec<PooledClient<C>>>,
+    // A std lock: never held across an await, and must be lockable from the
+    // synchronous decode path that fires a [`PoisonHandle`].
+    clients: StdRwLock<Vec<PooledClient<C>>>,
     connector: C,
 }
 
@@ -818,7 +837,7 @@ where
 {
     fn new(connector: C) -> Self {
         Self {
-            clients: RwLock::new(Vec::new()),
+            clients: StdRwLock::new(Vec::new()),
             connector,
         }
     }
@@ -833,16 +852,16 @@ where
         PooledClient::new(client)
     }
 
-    async fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
+    fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
         {
-            let clients = self.clients.read().await;
+            let clients = self.clients.read().unwrap();
             for pooled in clients.iter() {
                 if let Some(permit) = pooled.request_permit() {
                     return (pooled.client.clone(), permit, pooled.id);
                 }
             }
         }
-        let mut clients = self.clients.write().await;
+        let mut clients = self.clients.write().unwrap();
         for pooled in clients.iter() {
             if let Some(permit) = pooled.request_permit() {
                 return (pooled.client.clone(), permit, pooled.id);
@@ -858,10 +877,22 @@ where
         (client, permit, id)
     }
 
-    async fn reap_idle_clients(&self) {
+    /// Drop the pooled client identified by `id` so no new request reuses it.
+    /// Clients pinned to servers that are not going away stay pooled, requests
+    /// already in flight keep their connection, and poisoning the same
+    /// connection again is a no-op.
+    fn poison(&self, host: &str, id: ConnectionId) {
+        let mut clients = self.clients.write().unwrap();
+        let pooled = clients.len();
+        clients.retain(|pooled| pooled.id != id);
+        let removed = pooled - clients.len();
+        tracing::debug!(host, connection = ?id, removed, "poisoned pooled connections");
+    }
+
+    fn reap_idle_clients(&self) {
         self.clients
             .write()
-            .await
+            .unwrap()
             .retain(|pooled| !pooled.should_reap(IDLE_TIMEOUT));
     }
 
@@ -922,7 +953,7 @@ where
         &self,
         host: &str,
     ) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
-        self.get_or_create_host_pool(host).await.checkout().await
+        self.get_or_create_host_pool(host).await.checkout()
     }
 }
 
@@ -935,7 +966,7 @@ async fn reap_idle_clients<C: Connect + Clone + Send + Sync + 'static>(
     };
 
     for pool in &pools {
-        pool.reap_idle_clients().await;
+        pool.reap_idle_clients();
     }
 
     hosts.write().await.retain(|_, pool| !pool.is_empty());
@@ -952,28 +983,18 @@ where
     }
 
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
-        let (client, permit, connection) = self.checkout(request.authority()).await;
-        init_streaming_with(&client, request, permit, Some(connection)).await
-    }
-
-    async fn poison(&self, host: &str, connection: Option<ConnectionId>) {
-        let pool = {
-            let hosts = self.hosts.read().await;
-            hosts.get(host).cloned()
-        };
-        if let Some(pool) = pool {
-            let mut clients = pool.clients.write().await;
-            let pooled = clients.len();
-            match connection {
-                // Drop only the client the advice arrived on; connections
-                // pinned to servers that are not going away stay pooled, and
-                // poisoning the same connection again is a no-op.
-                Some(id) => clients.retain(|pooled| pooled.id != id),
-                None => clients.clear(),
+        let host = request.authority().to_owned();
+        let pool = self.get_or_create_host_pool(&host).await;
+        let (client, permit, id) = pool.checkout();
+        // Weak: the handle can outlive the pool (a session holds it for the
+        // connection's lifetime) and must not keep a reaped pool alive.
+        let weak = Arc::downgrade(&pool);
+        let poison_handle = PoisonHandle::new(move || {
+            if let Some(pool) = weak.upgrade() {
+                pool.poison(&host, id);
             }
-            let removed = pooled - clients.len();
-            tracing::debug!(host, ?connection, removed, "poisoned pooled connections");
-        }
+        });
+        init_streaming_with(&client, request, permit, Some(poison_handle)).await
     }
 }
 
@@ -1024,7 +1045,7 @@ mod tests {
     async fn host_client_count(pool: &Pool<HttpConnector>, host: &str) -> usize {
         let hosts = pool.hosts.read().await;
         match hosts.get(host) {
-            Some(pool) => pool.clients.read().await.len(),
+            Some(pool) => pool.clients.read().unwrap().len(),
             None => 0,
         }
     }
@@ -1119,7 +1140,7 @@ mod tests {
         {
             let hosts = pool.hosts.read().await;
             let pool = hosts.get(TEST_HOST).unwrap();
-            let clients = pool.clients.read().await;
+            let clients = pool.clients.read().unwrap();
             for pooled in clients.iter() {
                 *pooled.idle_since.lock().unwrap() =
                     Some(Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1));
@@ -1164,7 +1185,7 @@ mod tests {
         {
             let hosts = pool.hosts.read().await;
             let pool_a = hosts.get("host-a:443").unwrap();
-            let clients = pool_a.clients.read().await;
+            let clients = pool_a.clients.read().unwrap();
             for pooled in clients.iter() {
                 *pooled.idle_since.lock().unwrap() =
                     Some(Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1));
