@@ -39,7 +39,7 @@ use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 
 use crate::{
-    client::{self, StreamingResponse, UnaryResponse},
+    client::{self, ConnectionId, StreamingResponse, UnaryResponse},
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
     reconnect::ReconnectAdvice,
@@ -485,6 +485,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
+        reconnect.bind_connection(response.connection());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
@@ -525,12 +526,16 @@ impl BasinClient {
         }))
     }
 
-    /// Drop pooled connections to the basin endpoint, so the next request
+    /// Drop the pooled connection to the basin endpoint that carried reconnect
+    /// advice (all pooled connections when unattributed), so the next request
     /// opens a fresh connection instead of reusing one pinned to a draining
     /// server. In flight requests keep their connection.
-    pub(crate) async fn rotate_transport(&self) {
+    pub(crate) async fn rotate_transport(&self, connection: Option<ConnectionId>) {
         if let Some(authority) = self.base_url.authority() {
-            self.client.client.rotate(authority.as_str()).await;
+            self.client
+                .client
+                .rotate(authority.as_str(), connection)
+                .await;
         }
     }
 
@@ -564,6 +569,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
+        reconnect.bind_connection(response.connection());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
@@ -1339,7 +1345,7 @@ mod tests {
             unreachable!("unary retry test does not initialize a stream")
         }
 
-        async fn rotate(&self, _host: &str) {}
+        async fn rotate(&self, _host: &str, _connection: Option<ConnectionId>) {}
     }
 
     fn server_error(status: StatusCode, code: &str) -> ApiError {

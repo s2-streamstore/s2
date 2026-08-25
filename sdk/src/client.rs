@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -369,25 +369,51 @@ impl UnaryResponse {
     }
 }
 
+/// Identifies a pooled connection within its host pool, so reconnect advice
+/// can rotate just the connection it arrived on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionId(u64);
+
+impl ConnectionId {
+    fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 pub struct StreamingResponse {
     status: StatusCode,
     headers: HeaderMap,
     body: Incoming,
     permit: RequestPermit,
+    connection: Option<ConnectionId>,
 }
 
 impl StreamingResponse {
-    fn new(status: StatusCode, headers: HeaderMap, body: Incoming, permit: RequestPermit) -> Self {
+    fn new(
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Incoming,
+        permit: RequestPermit,
+        connection: Option<ConnectionId>,
+    ) -> Self {
         Self {
             status,
             headers,
             body,
             permit,
+            connection,
         }
     }
 
     pub fn status(&self) -> StatusCode {
         self.status
+    }
+
+    /// The pooled connection this response is being served on, when the
+    /// executor pools connections.
+    pub fn connection(&self) -> Option<ConnectionId> {
+        self.connection
     }
 
     pub async fn into_bytes(self) -> Result<Bytes, HttpError> {
@@ -412,9 +438,11 @@ pub trait RequestExecutor: Send + Sync {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
 
-    /// Discard pooled connections to `host` so the next request opens a fresh
-    /// one. Requests already in flight keep their connection.
-    async fn rotate(&self, host: &str);
+    /// Discard the pooled connection to `host` identified by `connection`, so
+    /// the next request that would have reused it opens a fresh one instead.
+    /// Without an attribution, discard every pooled connection to `host`.
+    /// Requests already in flight keep their connection either way.
+    async fn rotate(&self, host: &str, connection: Option<ConnectionId>);
 }
 
 pub fn default_connector(
@@ -581,6 +609,7 @@ async fn init_streaming_with<C>(
     client: &HyperClient<C, BoxBody>,
     request: Request,
     permit: RequestPermit,
+    connection: Option<ConnectionId>,
 ) -> Result<StreamingResponse, HttpError>
 where
     C: Connect + Clone + Send + Sync + 'static,
@@ -604,6 +633,7 @@ where
             parts.headers,
             body,
             permit,
+            connection,
         ))
     };
 
@@ -733,6 +763,7 @@ impl Drop for RequestPermit {
 }
 
 struct PooledClient<C> {
+    id: ConnectionId,
     client: Arc<HyperClient<C, BoxBody>>,
     active_requests: Arc<AtomicUsize>,
     idle_since: Arc<Mutex<Option<Instant>>>,
@@ -741,6 +772,7 @@ struct PooledClient<C> {
 impl<C> PooledClient<C> {
     fn new(client: HyperClient<C, BoxBody>) -> Self {
         Self {
+            id: ConnectionId::next(),
             client: Arc::new(client),
             active_requests: Arc::new(AtomicUsize::new(0)),
             idle_since: Arc::new(Mutex::new(Some(Instant::now()))),
@@ -797,19 +829,19 @@ where
         PooledClient::new(client)
     }
 
-    async fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit) {
+    async fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
         {
             let clients = self.clients.read().await;
             for pooled in clients.iter() {
                 if let Some(permit) = pooled.request_permit() {
-                    return (pooled.client.clone(), permit);
+                    return (pooled.client.clone(), permit, pooled.id);
                 }
             }
         }
         let mut clients = self.clients.write().await;
         for pooled in clients.iter() {
             if let Some(permit) = pooled.request_permit() {
-                return (pooled.client.clone(), permit);
+                return (pooled.client.clone(), permit, pooled.id);
             }
         }
         let new_client = self.create_client();
@@ -817,8 +849,9 @@ where
             .request_permit()
             .expect("new client must have a permit");
         let client = new_client.client.clone();
+        let id = new_client.id;
         clients.push(new_client);
-        (client, permit)
+        (client, permit, id)
     }
 
     async fn reap_idle_clients(&self) {
@@ -881,7 +914,10 @@ where
             .clone()
     }
 
-    async fn checkout(&self, host: &str) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit) {
+    async fn checkout(
+        &self,
+        host: &str,
+    ) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
         self.get_or_create_host_pool(host).await.checkout().await
     }
 }
@@ -907,22 +943,32 @@ where
     C: Connect + Clone + Send + Sync + 'static,
 {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
-        let (client, _permit) = self.checkout(request.authority()).await;
+        let (client, _permit, _) = self.checkout(request.authority()).await;
         execute_unary_with(&client, request).await
     }
 
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
-        let (client, permit) = self.checkout(request.authority()).await;
-        init_streaming_with(&client, request, permit).await
+        let (client, permit, connection) = self.checkout(request.authority()).await;
+        init_streaming_with(&client, request, permit, Some(connection)).await
     }
 
-    async fn rotate(&self, host: &str) {
+    async fn rotate(&self, host: &str, connection: Option<ConnectionId>) {
         let pool = {
             let hosts = self.hosts.read().await;
             hosts.get(host).cloned()
         };
         if let Some(pool) = pool {
-            pool.clients.write().await.clear();
+            let mut clients = pool.clients.write().await;
+            let pooled = clients.len();
+            match connection {
+                // Drop only the client the advice arrived on; connections
+                // pinned to servers that are not going away stay pooled, and a
+                // repeat rotation for the same connection is a no-op.
+                Some(id) => clients.retain(|pooled| pooled.id != id),
+                None => clients.clear(),
+            }
+            let removed = pooled - clients.len();
+            tracing::debug!(host, ?connection, removed, "rotated pooled connections");
         }
     }
 }
@@ -1017,7 +1063,7 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
@@ -1028,12 +1074,12 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
 
-        let (_client, permit) = pool.checkout(TEST_HOST).await;
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
         permits.push(permit);
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 2);
     }
@@ -1043,12 +1089,12 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
         permits.pop();
 
-        let (_client, permit) = pool.checkout(TEST_HOST).await;
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
         permits.push(permit);
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
     }
@@ -1058,10 +1104,10 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
-        let (_client, permit) = pool.checkout(TEST_HOST).await;
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
         permits.push(permit);
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 2);
 
@@ -1089,12 +1135,12 @@ mod tests {
 
         let mut permits_a = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(host_a).await;
+            let (_client, permit, _) = pool.checkout(host_a).await;
             permits_a.push(permit);
         }
         assert_eq!(host_client_count(&pool, host_a).await, 1);
 
-        let (_client, permit_b) = pool.checkout(host_b).await;
+        let (_client, permit_b, _) = pool.checkout(host_b).await;
         assert_eq!(host_client_count(&pool, host_b).await, 1);
         assert_eq!(host_client_count(&pool, host_a).await, 1);
 
@@ -1106,8 +1152,8 @@ mod tests {
     async fn reaper_removes_empty_host_entries() {
         let pool = test_pool();
 
-        let (_client, permit_a) = pool.checkout("host-a:443").await;
-        let (_client, permit_b) = pool.checkout("host-b:443").await;
+        let (_client, permit_a, _) = pool.checkout("host-a:443").await;
+        let (_client, permit_b, _) = pool.checkout("host-b:443").await;
         assert_eq!(pool.hosts.read().await.len(), 2);
 
         drop(permit_a);
