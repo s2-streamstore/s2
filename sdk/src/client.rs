@@ -414,9 +414,7 @@ pub trait RequestExecutor: Send + Sync {
 
     /// Discard pooled connections to `host` so the next request opens a fresh
     /// one. Requests already in flight keep their connection.
-    async fn rotate(&self, host: &str) {
-        let _ = host;
-    }
+    async fn rotate(&self, host: &str);
 }
 
 pub fn default_connector(

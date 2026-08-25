@@ -1338,6 +1338,8 @@ mod tests {
         ) -> Result<StreamingResponse, client::HttpError> {
             unreachable!("unary retry test does not initialize a stream")
         }
+
+        async fn rotate(&self, _host: &str) {}
     }
 
     fn server_error(status: StatusCode, code: &str) -> ApiError {
