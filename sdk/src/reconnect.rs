@@ -51,7 +51,7 @@ impl ReconnectAdvice {
 
     /// Capture the poison handle for the pooled connection serving this
     /// session, once known.
-    pub(crate) fn capture_connection(&self, poison: Option<PoisonHandle>) {
+    pub(crate) fn capture_poison_handle(&self, poison: Option<PoisonHandle>) {
         if let Some(poison) = poison {
             let _ = self.0.poison.set(poison);
         }

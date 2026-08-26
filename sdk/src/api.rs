@@ -485,7 +485,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.capture_connection(response.take_poison_handle());
+        reconnect.capture_poison_handle(response.take_poison_handle());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
@@ -556,7 +556,7 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.capture_connection(response.take_poison_handle());
+        reconnect.capture_poison_handle(response.take_poison_handle());
         let mut bytes_stream = response.stream();
         let auth_client = self.client.clone();
 
