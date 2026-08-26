@@ -369,10 +369,10 @@ impl UnaryResponse {
     }
 }
 
-/// Identifies a pooled connection within its host pool, so reconnect advice
-/// can rotate just the connection it arrived on.
+/// Identifies a pooled connection within its host pool, so poisoning drops
+/// just the connection reconnect advice arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConnectionId(u64);
+struct ConnectionId(u64);
 
 impl ConnectionId {
     fn next() -> Self {
