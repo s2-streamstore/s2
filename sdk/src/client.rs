@@ -821,8 +821,6 @@ impl<C> PooledClient<C> {
 }
 
 struct HostPool<C> {
-    // A std lock: never held across an await, and must be lockable from the
-    // synchronous decode path that fires a [`PoisonHandle`].
     clients: StdRwLock<Vec<PooledClient<C>>>,
     connector: C,
 }
