@@ -22,11 +22,9 @@ pub(crate) const ADVISED_RECONNECT_IDLE: Duration = Duration::from_secs(10);
 /// reconnect-advised bit, checked by the session loops.
 ///
 /// Also carries the [`PoisonHandle`] for the pooled connection the session is
-/// served on, captured once the response is established — the same role as
-/// `hyper_util`'s `capture_connection`. The first advice poisons the
+/// served on, captured once the response is established. The first advice poisons the
 /// connection immediately, so pool hygiene does not depend on how (or whether)
-/// the session acts on the advice: no new request reuses a connection to a
-/// draining server even if the session is closing or already satisfied.
+/// the session acts on the advice.
 #[derive(Clone, Default)]
 pub(crate) struct ReconnectAdvice(Arc<Inner>);
 
