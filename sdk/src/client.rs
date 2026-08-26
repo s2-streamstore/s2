@@ -388,10 +388,6 @@ impl ConnectionId {
 /// Poisoning is idempotent: the connection is identified by its
 /// [`ConnectionId`], so poisoning it again — including from another session
 /// sharing the connection — is a no-op.
-///
-/// Same contract as connection poisoning in `hyper-util`'s pool and the AWS
-/// SDK (`ConnectionPoisoningInterceptor`), except this pool drops the poisoned
-/// client eagerly instead of skipping it at checkout.
 pub struct PoisonHandle {
     poison: Box<dyn Fn() + Send + Sync>,
 }
