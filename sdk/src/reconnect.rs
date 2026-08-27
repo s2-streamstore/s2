@@ -1,12 +1,10 @@
 use std::{
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-
-use crate::client::PoisonHandle;
 
 /// Max consecutive advised reconnects before delaying the next one.
 pub(crate) const MAX_IMMEDIATE_ADVISED_RECONNECTS: usize = 3;
@@ -20,40 +18,15 @@ pub(crate) const ADVISED_RECONNECT_IDLE: Duration = Duration::from_secs(10);
 /// An atomic flag tracking whether the server has advised reconnecting on this
 /// connection. Set by the response decoder when a frame carries the
 /// reconnect-advised bit, checked by the session loops.
-///
-/// Also carries the [`PoisonHandle`] for the pooled connection the session is
-/// served on, captured once the response is established. The first advice poisons the
-/// connection immediately, so pool hygiene does not depend on how (or whether)
-/// the session acts on the advice.
 #[derive(Clone, Default)]
-pub(crate) struct ReconnectAdvice(Arc<Inner>);
-
-#[derive(Default)]
-struct Inner {
-    advised: AtomicBool,
-    poison: OnceLock<PoisonHandle>,
-}
+pub(crate) struct ReconnectAdvice(Arc<AtomicBool>);
 
 impl ReconnectAdvice {
     pub(crate) fn is_advised(&self) -> bool {
-        self.0.advised.load(Ordering::Acquire)
+        self.0.load(Ordering::Acquire)
     }
 
     pub(crate) fn advise(&self) {
-        // The advice bit repeats on every frame while the server drains; only
-        // the first one poisons the pooled connection.
-        if !self.0.advised.swap(true, Ordering::AcqRel)
-            && let Some(poison) = self.0.poison.get()
-        {
-            poison.poison();
-        }
-    }
-
-    /// Capture the poison handle for the pooled connection serving this
-    /// session, once known.
-    pub(crate) fn capture_poison_handle(&self, poison: Option<PoisonHandle>) {
-        if let Some(poison) = poison {
-            let _ = self.0.poison.set(poison);
-        }
+        self.0.store(true, Ordering::Release);
     }
 }

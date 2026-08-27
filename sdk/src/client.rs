@@ -409,7 +409,7 @@ pub struct StreamingResponse {
     headers: HeaderMap,
     body: Incoming,
     permit: RequestPermit,
-    poison_handle: Option<PoisonHandle>,
+    poison_handle: PoisonHandle,
 }
 
 impl StreamingResponse {
@@ -418,7 +418,7 @@ impl StreamingResponse {
         headers: HeaderMap,
         body: Incoming,
         permit: RequestPermit,
-        poison_handle: Option<PoisonHandle>,
+        poison_handle: PoisonHandle,
     ) -> Self {
         Self {
             status,
@@ -433,26 +433,26 @@ impl StreamingResponse {
         self.status
     }
 
-    /// Take the handle for poisoning the pooled connection this response is
-    /// being served on, when the executor pools connections.
-    pub fn take_poison_handle(&mut self) -> Option<PoisonHandle> {
-        self.poison_handle.take()
-    }
-
     pub async fn into_bytes(self) -> Result<Bytes, HttpError> {
         let bytes = self.body.collect().await?.to_bytes();
         decompress_body(&self.headers, bytes).await
     }
 
-    pub fn stream(self) -> impl Stream<Item = Result<Bytes, HttpError>> {
-        let permit = self.permit;
-        http_body_util::BodyStream::new(self.body).filter_map(move |result| {
+    pub fn into_stream(self) -> (impl Stream<Item = Result<Bytes, HttpError>>, PoisonHandle) {
+        let Self {
+            body,
+            permit,
+            poison_handle,
+            ..
+        } = self;
+        let stream = http_body_util::BodyStream::new(body).filter_map(move |result| {
             let _ = &permit;
             std::future::ready(match result {
                 Ok(frame) => frame.into_data().ok().map(Ok),
                 Err(e) => Some(Err(HttpError::Receive(e))),
             })
-        })
+        });
+        (stream, poison_handle)
     }
 }
 
@@ -626,7 +626,7 @@ async fn init_streaming_with<C>(
     client: &HyperClient<C, BoxBody>,
     request: Request,
     permit: RequestPermit,
-    poison_handle: Option<PoisonHandle>,
+    poison_handle: PoisonHandle,
 ) -> Result<StreamingResponse, HttpError>
 where
     C: Connect + Clone + Send + Sync + 'static,
@@ -988,7 +988,7 @@ where
                 pool.poison(&host, id);
             }
         });
-        init_streaming_with(&client, request, permit, Some(poison_handle)).await
+        init_streaming_with(&client, request, permit, poison_handle).await
     }
 }
 

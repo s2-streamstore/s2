@@ -477,7 +477,7 @@ impl BasinClient {
         let mut request = request_builder.build()?;
         set_encryption_header(&mut request, encryption);
         let (response, access_token) = self.client.init_streaming_authorized(request).await?;
-        let mut response = match response.into_result().await {
+        let response = match response.into_result().await {
             Ok(response) => response,
             Err(error) => {
                 self.client
@@ -485,14 +485,15 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.capture_poison_handle(response.take_poison_handle());
-        let mut bytes_stream = response.stream();
+        let (mut bytes_stream, poison_handle) = response.into_stream();
         let auth_client = self.client.clone();
 
         let mut buffer = BytesMut::new();
         let mut decoder = FrameDecoder;
 
         Ok(Box::pin(try_stream! {
+            let mut advice_seen = false;
+
             while let Some(chunk) = bytes_stream.next().await {
                 let chunk = chunk?;
                 buffer.extend_from_slice(&chunk);
@@ -500,7 +501,9 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
-                            if msg.reconnect_advised() {
+                            if !advice_seen && msg.reconnect_advised() {
+                                advice_seen = true;
+                                poison_handle.poison();
                                 reconnect.advise();
                             }
                             yield msg.try_into_proto()?;
@@ -548,7 +551,7 @@ impl BasinClient {
         let mut request = request_builder.build()?;
         set_encryption_header(&mut request, encryption);
         let (response, access_token) = self.client.init_streaming_authorized(request).await?;
-        let mut response = match response.into_result().await {
+        let response = match response.into_result().await {
             Ok(response) => response,
             Err(error) => {
                 self.client
@@ -556,14 +559,15 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        reconnect.capture_poison_handle(response.take_poison_handle());
-        let mut bytes_stream = response.stream();
+        let (mut bytes_stream, poison_handle) = response.into_stream();
         let auth_client = self.client.clone();
 
         let mut buffer = BytesMut::new();
         let mut decoder = FrameDecoder;
 
         Ok(Box::pin(try_stream! {
+            let mut advice_seen = false;
+
             while let Some(chunk) = bytes_stream.next().await {
                 let chunk = chunk?;
                 buffer.extend_from_slice(&chunk);
@@ -571,7 +575,9 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
-                            if msg.reconnect_advised() {
+                            if !advice_seen && msg.reconnect_advised() {
+                                advice_seen = true;
+                                poison_handle.poison();
                                 reconnect.advise();
                             }
                             yield msg.try_into_proto()?;
