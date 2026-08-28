@@ -842,6 +842,9 @@ async fn drain_for_reconnect(
                     Some(Ok(ack)) => {
                         process_ack(ack, state, timer.as_mut())?;
                     }
+                    Some(Err(err)) if err.is_server_draining() => {
+                        return Ok(());
+                    }
                     Some(Err(err)) => {
                         return Err(err.into());
                     }

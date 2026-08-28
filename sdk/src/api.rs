@@ -667,6 +667,14 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn is_server_draining(&self) -> bool {
+        matches!(
+            self,
+            Self::Server(StatusCode::SERVICE_UNAVAILABLE, response)
+                if response.code == "server_draining"
+        )
+    }
+
     pub(crate) fn is_authentication_error(&self) -> bool {
         matches!(
             self,
