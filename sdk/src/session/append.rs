@@ -22,10 +22,7 @@ use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     error::{AppendError, RequestError},
     frame_signal::FrameSignal,
-    reconnect::{
-        ADVISED_RECONNECT_DELAY, ADVISED_RECONNECT_IDLE, MAX_IMMEDIATE_ADVISED_RECONNECTS,
-        ReconnectAdvice,
-    },
+    reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoffBuilder,
     types::{
         AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
@@ -485,8 +482,7 @@ async fn run_session_with_retry(
     };
     let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
-    let mut advised_reconnects = 0;
-    let mut last_advised_reconnect: Option<Instant> = None;
+    let mut advised_reconnects = AdvisedReconnects::default();
 
     loop {
         let result = run_session(
@@ -496,6 +492,7 @@ async fn run_session_with_retry(
             &mut state,
             buffer_size,
             &frame_signal,
+            advised_reconnects,
         )
         .await;
 
@@ -506,19 +503,12 @@ async fn run_session_with_retry(
             Ok(SessionOutcome::ReconnectAdvised) => {
                 // The advised connection was already poisoned when the advice
                 // was first decoded, so reconnecting dials a fresh one.
-                // Throttle by how rapidly reconnect advice repeats.
-                if last_advised_reconnect.is_some_and(|at| at.elapsed() > ADVISED_RECONNECT_IDLE) {
-                    advised_reconnects = 0;
-                }
-                last_advised_reconnect = Some(Instant::now());
-                advised_reconnects += 1;
+                advised_reconnects.record();
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),
-                    advised_reconnects, "reconnecting append session on server advice"
+                    advised_reconnects = advised_reconnects.count(),
+                    "reconnecting append session on server advice"
                 );
-                if advised_reconnects > MAX_IMMEDIATE_ADVISED_RECONNECTS {
-                    tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
-                }
             }
             Err(err) => {
                 if prev_total_acked_records < state.total_acked_records {
@@ -594,6 +584,7 @@ async fn run_session(
     state: &mut SessionState,
     buffer_size: usize,
     frame_signal: &Option<FrameSignal>,
+    advised_reconnects: AdvisedReconnects,
 ) -> Result<SessionOutcome, AppendSessionError> {
     if let Some(s) = frame_signal {
         s.reset();
@@ -625,10 +616,17 @@ async fn run_session(
     let timer = MuxTimer::<N_TIMER_VARIANTS>::default();
     tokio::pin!(timer);
 
+    // A reconnect that is itself advised would thrash, so stay put instead.
+    let mut declined_advice = false;
+
     loop {
-        if reconnect.is_advised() && state.close_tx.is_none() {
-            drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout).await?;
-            return Ok(SessionOutcome::ReconnectAdvised);
+        if reconnect.is_advised() && state.close_tx.is_none() && !declined_advice {
+            if advised_reconnects.should_reconnect() {
+                drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout).await?;
+                return Ok(SessionOutcome::ReconnectAdvised);
+            }
+            declined_advice = true;
+            debug!("staying on the advised connection until the server drains it");
         }
 
         tokio::select! {

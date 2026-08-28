@@ -6,14 +6,44 @@ use std::{
     time::Duration,
 };
 
-/// Max consecutive advised reconnects before delaying the next one.
-pub(crate) const MAX_IMMEDIATE_ADVISED_RECONNECTS: usize = 3;
+use tokio::time::Instant;
 
-/// Delay applied past [`MAX_IMMEDIATE_ADVISED_RECONNECTS`].
-pub(crate) const ADVISED_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+/// Advised reconnects to attempt before staying put.
+pub(crate) const MAX_ADVISED_RECONNECTS: usize = 1;
 
-/// If no reconnect advice arrives for this long, the consecutive count resets.
-pub(crate) const ADVISED_RECONNECT_IDLE: Duration = Duration::from_secs(10);
+/// Gap after which the attempt count resets.
+pub(crate) const ADVISED_RECONNECT_IDLE: Duration = Duration::from_secs(5);
+
+/// Advised reconnects attempted lately.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AdvisedReconnects {
+    count: usize,
+    last: Option<Instant>,
+}
+
+impl AdvisedReconnects {
+    pub(crate) fn record(&mut self) {
+        if !self.is_recent() {
+            self.count = 0;
+        }
+        self.last = Some(Instant::now());
+        self.count += 1;
+    }
+
+    /// Whether to act on advice, or stay until the server ends the connection.
+    pub(crate) fn should_reconnect(&self) -> bool {
+        !self.is_recent() || self.count < MAX_ADVISED_RECONNECTS
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+
+    fn is_recent(&self) -> bool {
+        self.last
+            .is_some_and(|at| at.elapsed() <= ADVISED_RECONNECT_IDLE)
+    }
+}
 
 /// An atomic flag tracking whether the server has advised reconnecting on this
 /// connection. Set by the response decoder when a frame carries the

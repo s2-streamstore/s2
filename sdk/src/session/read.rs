@@ -20,10 +20,7 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     error::{ReadError, RequestError},
-    reconnect::{
-        ADVISED_RECONNECT_DELAY, ADVISED_RECONNECT_IDLE, MAX_IMMEDIATE_ADVISED_RECONNECTS,
-        ReconnectAdvice,
-    },
+    reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoff,
     types::{
         AccessTokenMode, EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
@@ -401,6 +398,7 @@ pub async fn read_session(
             start.clone(),
             end.clone(),
             ReconnectAdvice::default(),
+            AdvisedReconnects::default(),
         )
         .await
         {
@@ -422,8 +420,7 @@ pub async fn read_session(
 
     let updates = Box::pin(stream! {
         let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
-        let mut advised_reconnects = 0;
-        let mut last_advised_reconnect: Option<Instant> = None;
+        let mut advised_reconnects = AdvisedReconnects::default();
 
         loop {
             if batches.is_none() {
@@ -435,6 +432,7 @@ pub async fn read_session(
                     start.clone(),
                     end.clone(),
                     ReconnectAdvice::default(),
+                    advised_reconnects,
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
@@ -470,24 +468,13 @@ pub async fn read_session(
                     if read_limits_exhausted(&end) {
                         break;
                     }
-                    // A drain keeps serving batches, so pace on how quickly
-                    // advice returns rather than on progress.
-                    if last_advised_reconnect
-                        .is_some_and(|at: Instant| at.elapsed() > ADVISED_RECONNECT_IDLE)
-                    {
-                        advised_reconnects = 0;
-                    }
-                    last_advised_reconnect = Some(Instant::now());
-                    advised_reconnects += 1;
+                    advised_reconnects.record();
                     debug!(
                         resume_seq_num = ?start.seq_num,
-                        advised_reconnects,
+                        advised_reconnects = advised_reconnects.count(),
                         "reconnecting read session on server advice"
                     );
                     yield Ok(ReadUpdate::behind());
-                    if advised_reconnects > MAX_IMMEDIATE_ADVISED_RECONNECTS {
-                        tokio::time::sleep(ADVISED_RECONNECT_DELAY).await;
-                    }
                     continue;
                 }
                 Some(Ok(ReadItem::Batch(batch))) => {
@@ -565,18 +552,24 @@ async fn session_inner(
     start: ReadStart,
     end: ReadEnd,
     reconnect: ReconnectAdvice,
+    advised_reconnects: AdvisedReconnects,
 ) -> Result<InternalStreaming<ReadItem>, ReadSessionFailure> {
     let mut batches = client
         .read_session(&name, start, end, encryption.as_ref(), reconnect.clone())
         .await?;
+    // A reconnect that is itself advised would thrash, so stay put instead.
+    let mut declined_advice = false;
     Ok(Box::pin(try_stream! {
         loop {
             match timeout(HEARTBEAT_TIMEOUT, batches.next()).await {
                 Ok(Some(batch)) => {
                     yield ReadItem::Batch(ReadBatch::from_api(batch?));
-                    if reconnect.is_advised() {
-                        yield ReadItem::ReconnectAdvised;
-                        break;
+                    if reconnect.is_advised() && !declined_advice {
+                        if advised_reconnects.should_reconnect() {
+                            yield ReadItem::ReconnectAdvised;
+                            break;
+                        }
+                        declined_advice = true;
                     }
                 }
                 Ok(None) => break,
