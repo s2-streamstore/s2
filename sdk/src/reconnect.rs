@@ -8,7 +8,7 @@ use std::{
 
 use tokio::time::Instant;
 
-/// Advised reconnects to attempt before staying put.
+/// Advised reconnects to attempt before staying on.
 pub(crate) const MAX_ADVISED_RECONNECTS: usize = 1;
 
 /// Gap after which the attempt count resets.

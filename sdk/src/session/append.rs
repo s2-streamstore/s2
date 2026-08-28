@@ -616,7 +616,6 @@ async fn run_session(
     let timer = MuxTimer::<N_TIMER_VARIANTS>::default();
     tokio::pin!(timer);
 
-    // A reconnect that is itself advised would thrash, so stay put instead.
     let mut declined_advice = false;
 
     loop {
