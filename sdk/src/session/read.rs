@@ -557,7 +557,7 @@ async fn session_inner(
     let mut batches = client
         .read_session(&name, start, end, encryption.as_ref(), reconnect.clone())
         .await?;
-    // A reconnect that is itself advised would thrash, so stay put instead.
+
     let mut declined_advice = false;
     Ok(Box::pin(try_stream! {
         loop {
