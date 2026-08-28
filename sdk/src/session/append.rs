@@ -625,7 +625,6 @@ async fn run_session(
                 return Ok(SessionOutcome::ReconnectAdvised);
             }
             declined_advice = true;
-            debug!("staying on the advised connection until the server drains it");
         }
 
         tokio::select! {
