@@ -129,12 +129,38 @@ fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<Clien
         Some(ClientError::ConnectionClosedEarly(err_msg))
     } else if hyper_err.is_canceled() {
         Some(ClientError::RequestCanceled(err_msg))
-    } else if source_err::<h2::Error>(err).is_some_and(|e| e.is_io() || e.is_go_away()) {
+    } else if let Some(h2_err) = source_err::<h2::Error>(err) {
+        classify_h2_error(h2_err, &err_msg)
+    } else {
+        None
+    }
+}
+
+/// Classify an `h2::Error` nested inside a hyper error into a client error.
+///
+/// `h2` surfaces a received `RST_STREAM` in two shapes:
+///   - a `Reset`-kind error while reading the response body (hyper's body decoder surfaces the
+///     receiving stream's error), and
+///   - a `Reason`-kind error while sending the request body (hyper wraps the reason returned by
+///     `SendStream::poll_reset` via `h2::Error::from`).
+///
+/// Both carry the stream's [`h2::Reason`], so the check is reason-based rather
+/// than relying on `is_reset()`, which would miss the request-body path.
+fn classify_h2_error(h2_err: &h2::Error, err_msg: &str) -> Option<ClientError> {
+    if h2_err.is_io() || h2_err.is_go_away() {
         // An I/O failure ends streaming bodies without tripping any hyper marker above.
         // A remote GOAWAY ends streams dispatched onto a connection the server is
         // gracefully shutting down.
-        Some(ClientError::ConnectionClosedEarly(err_msg))
+        Some(ClientError::ConnectionClosedEarly(err_msg.to_owned()))
+    } else if h2_err.reason() == Some(h2::Reason::REFUSED_STREAM) {
+        // RFC 9113 §8.7: a RST_STREAM with REFUSED_STREAM is guaranteed to have
+        // been sent before any processing occurred, so the request — including
+        // non-idempotent methods — can be safely retried.
+        Some(ClientError::ConnectionClosedEarly(err_msg.to_owned()))
     } else {
+        // Other RST_STREAM reasons (INTERNAL_ERROR, CANCEL, FLOW_CONTROL_ERROR,
+        // STREAM_CLOSED, ...) may indicate partial server-side processing, so
+        // leave them for the caller to surface as a non-retryable `Other`.
         None
     }
 }
@@ -546,5 +572,90 @@ mod tests {
         assert!(matches!(request, RequestError::Server(_)));
         let server = request.server_error().expect("server error");
         assert_eq!(server.known_code(), Some(ErrorCode::TransactionConflict));
+    }
+
+    #[test]
+    fn h2_refused_stream_classifies_as_retryable_connection_closed_early() {
+        // A server RST_STREAM(REFUSED_STREAM) reaches the SDK via h2 in two
+        // shapes: a `Reset`-kind error while reading the response body, and a
+        // `Reason`-kind error while sending the request body (hyper wraps the
+        // reason from `SendStream::poll_reset` via `h2::Error::from`). Both
+        // report `reason() == Some(REFUSED_STREAM)`, so the classifier keys on
+        // the reason and covers both paths. The `Reason` shape is constructable
+        // from public `h2` and stands in for the request-body path here; the
+        // `Reset` path carries the same reason.
+        let h2_err = h2::Error::from(h2::Reason::REFUSED_STREAM);
+        assert_eq!(h2_err.reason(), Some(h2::Reason::REFUSED_STREAM));
+
+        let classified = classify_h2_error(&h2_err, "refused stream");
+        assert!(
+            matches!(classified, Some(ClientError::ConnectionClosedEarly(_))),
+            "REFUSED_STREAM must classify as ConnectionClosedEarly, got {classified:?}",
+        );
+        assert!(classified.expect("classified as retryable").is_retryable());
+    }
+
+    #[test]
+    fn h2_refused_stream_is_retryable_even_without_io_or_goaway() {
+        // The pre-fix classifier only retried h2 errors that were I/O or GOAWAY;
+        // a REFUSED_STREAM is neither, yet RFC 9113 guarantees it is retryable. The
+        // `Reason` shape constructed here is exactly what hyper wraps when a
+        // server RST_STREAM(REFUSED_STREAM) arrives while the client is sending
+        // its request body, so `is_reset()` is false — proving a reason-based
+        // check is required (an `is_reset()`-only check would miss this path).
+        let h2_err = h2::Error::from(h2::Reason::REFUSED_STREAM);
+        assert!(!h2_err.is_io());
+        assert!(!h2_err.is_go_away());
+        assert!(!h2_err.is_reset());
+
+        let classified = classify_h2_error(&h2_err, "refused").expect("retryable");
+        assert!(classified.is_retryable());
+        assert!(!classified.has_no_side_effects());
+    }
+
+    #[test]
+    fn h2_reasons_other_than_refused_stream_are_not_classified_as_retryable() {
+        // RFC 9113 reserves the "no processing" guarantee to REFUSED_STREAM.
+        // Every other reason — including unknown/future codes — may indicate
+        // partial processing and must not be automatically retried; they fall
+        // through to the caller's `Other`.
+        for reason in [
+            h2::Reason::NO_ERROR,
+            h2::Reason::PROTOCOL_ERROR,
+            h2::Reason::INTERNAL_ERROR,
+            h2::Reason::FLOW_CONTROL_ERROR,
+            h2::Reason::SETTINGS_TIMEOUT,
+            h2::Reason::STREAM_CLOSED,
+            h2::Reason::FRAME_SIZE_ERROR,
+            h2::Reason::CANCEL,
+            h2::Reason::COMPRESSION_ERROR,
+            h2::Reason::CONNECT_ERROR,
+            h2::Reason::ENHANCE_YOUR_CALM,
+            h2::Reason::INADEQUATE_SECURITY,
+            h2::Reason::HTTP_1_1_REQUIRED,
+            // Unknown / future reason codes are still `Some(reason)` but must not
+            // match the REFUSED_STREAM-specific check.
+            h2::Reason::from(999u32),
+            h2::Reason::from(u32::MAX),
+        ] {
+            let h2_err = h2::Error::from(reason);
+            assert_eq!(h2_err.reason(), Some(reason));
+            assert!(
+                classify_h2_error(&h2_err, "reset").is_none(),
+                "{reason:?} must not classify as a retryable client error",
+            );
+            // And the resulting `Other` bucket is non-retryable.
+            assert!(!ClientError::Other(reason.to_string()).is_retryable());
+        }
+    }
+
+    #[test]
+    fn connection_closed_early_is_retryable_but_other_is_not() {
+        // The retry policy keys on `ClientError::is_retryable()`. The fix routes
+        // REFUSED_STREAM into the retryable `ConnectionClosedEarly` bucket; had
+        // it fallen through, the caller would have mapped it to the
+        // non-retryable `Other` bucket.
+        assert!(ClientError::ConnectionClosedEarly("refused".into()).is_retryable());
+        assert!(!ClientError::Other("refused".into()).is_retryable());
     }
 }
