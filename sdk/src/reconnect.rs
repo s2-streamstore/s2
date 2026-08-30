@@ -12,7 +12,7 @@ use tokio::time::Instant;
 pub(crate) const MAX_ADVISED_RECONNECTS: usize = 1;
 
 /// Gap after which the attempt count resets.
-pub(crate) const ADVISED_RECONNECT_IDLE: Duration = Duration::from_secs(5);
+pub(crate) const ADVISED_RECONNECT_IDLE: Duration = Duration::from_secs(10);
 
 /// Advised reconnects attempted lately.
 #[derive(Clone, Copy, Default)]
