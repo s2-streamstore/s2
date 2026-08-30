@@ -107,6 +107,13 @@ impl AppendSessionError {
             Self::Append(AppendError::Request(error)) if error.is_authentication_error()
         )
     }
+
+    fn is_server_draining(&self) -> bool {
+        matches!(
+            self,
+            Self::Append(AppendError::Request(error)) if error.is_server_draining()
+        )
+    }
 }
 
 impl From<ApiError> for AppendSessionError {
@@ -199,6 +206,14 @@ struct SessionState {
     total_acked_records: usize,
     prev_ack_end: Option<StreamPosition>,
     stashed_submission: Option<StashedSubmission>,
+}
+
+impl SessionState {
+    fn is_close_complete(&self) -> bool {
+        self.close_tx.is_some()
+            && self.inflight_appends.is_empty()
+            && self.stashed_submission.is_none()
+    }
 }
 
 /// A session for high-throughput appending with backpressure control. It can be created from
@@ -510,6 +525,15 @@ async fn run_session_with_retry(
                     "reconnecting append session on server advice"
                 );
             }
+            Err(err) if err.is_server_draining() && state.is_close_complete() => break,
+            Err(err) if err.is_server_draining() && advised_reconnects.should_reconnect() => {
+                advised_reconnects.record();
+                debug!(
+                    inflight_appends_len = state.inflight_appends.len(),
+                    advised_reconnects = advised_reconnects.count(),
+                    "reconnecting append session while server drains"
+                );
+            }
             Err(err) => {
                 if prev_total_acked_records < state.total_acked_records {
                     prev_total_acked_records = state.total_acked_records;
@@ -613,6 +637,10 @@ async fn run_session(
         assert_eq!(state.inflight_bytes, 0);
     }
 
+    if state.is_close_complete() {
+        return Ok(SessionOutcome::Closed);
+    }
+
     let timer = MuxTimer::<N_TIMER_VARIANTS>::default();
     tokio::pin!(timer);
 
@@ -711,10 +739,7 @@ async fn run_session(
             }
         }
 
-        if state.close_tx.is_some()
-            && state.inflight_appends.is_empty()
-            && state.stashed_submission.is_none()
-        {
+        if state.is_close_complete() {
             break;
         }
     }

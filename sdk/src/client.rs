@@ -433,9 +433,20 @@ impl StreamingResponse {
         self.status
     }
 
-    pub async fn into_bytes(self) -> Result<Bytes, HttpError> {
-        let bytes = self.body.collect().await?.to_bytes();
-        decompress_body(&self.headers, bytes).await
+    pub(crate) async fn into_bytes_with_poison_handle(
+        self,
+    ) -> Result<(Bytes, PoisonHandle), HttpError> {
+        let Self {
+            headers,
+            body,
+            permit,
+            poison_handle,
+            ..
+        } = self;
+        let bytes = body.collect().await?.to_bytes();
+        let bytes = decompress_body(&headers, bytes).await?;
+        drop(permit);
+        Ok((bytes, poison_handle))
     }
 
     pub fn into_stream(self) -> (impl Stream<Item = Result<Bytes, HttpError>>, PoisonHandle) {

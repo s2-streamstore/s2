@@ -510,6 +510,9 @@ impl BasinClient {
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
                             let error: ApiError = msg.into();
+                            if error.is_server_draining() {
+                                poison_handle.poison();
+                            }
                             auth_client.invalidate_access_token_if_rejected(
                                 &error,
                                 access_token.as_deref(),
@@ -584,6 +587,9 @@ impl BasinClient {
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
                             let error: ApiError = msg.into();
+                            if error.is_server_draining() {
+                                poison_handle.poison();
+                            }
                             auth_client.invalidate_access_token_if_rejected(
                                 &error,
                                 access_token.as_deref(),
@@ -1195,14 +1201,20 @@ impl StreamingResult for StreamingResponse {
         }
 
         let status = self.status();
-        let bytes = self.into_bytes().await?;
+        let (bytes, poison_handle) = self.into_bytes_with_poison_handle().await?;
         if status == StatusCode::RANGE_NOT_SATISFIABLE
             && let Ok(tail) = serde_json::from_slice::<TailResponse>(&bytes)
         {
             return Err(ApiError::ReadUnwritten(tail));
         }
         match serde_json::from_slice::<ServerErrorBody>(&bytes) {
-            Ok(response) => Err(ApiError::Server(status, response)),
+            Ok(response) => {
+                let error = ApiError::Server(status, response);
+                if error.is_server_draining() {
+                    poison_handle.poison();
+                }
+                Err(error)
+            }
             Err(error) => Err(ApiError::Client(ClientError::ResponseDecode(format!(
                 "could not decode server error {status}: {error}; body: {}",
                 String::from_utf8_lossy(&bytes),

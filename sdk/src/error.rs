@@ -249,6 +249,15 @@ impl RequestError {
                 if error.status == StatusCode::UNAUTHORIZED && error.code == "authn"
         )
     }
+
+    pub(crate) fn is_server_draining(&self) -> bool {
+        matches!(
+            self,
+            Self::Server(error)
+                if error.status == StatusCode::SERVICE_UNAVAILABLE
+                    && error.code == "server_draining"
+        )
+    }
 }
 
 impl From<ApiError> for RequestError {
