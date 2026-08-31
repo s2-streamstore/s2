@@ -129,7 +129,9 @@ fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<Clien
         Some(ClientError::ConnectionClosedEarly(err_msg))
     } else if hyper_err.is_canceled() {
         Some(ClientError::RequestCanceled(err_msg))
-    } else if source_err::<h2::Error>(err).is_some_and(|e| e.is_io() || e.is_go_away()) {
+    } else if source_err::<h2::Error>(err).is_some_and(|e| {
+        e.is_io() || e.is_go_away() || e.reason() == Some(h2::Reason::REFUSED_STREAM)
+    }) {
         // An I/O failure ends streaming bodies without tripping any hyper marker above.
         // A remote GOAWAY ends streams dispatched onto a connection the server is
         // gracefully shutting down.
