@@ -526,7 +526,7 @@ async fn run_session_with_retry(
                 );
             }
             Err(err) if err.is_server_draining() && state.is_close_complete() => break,
-            Err(err) if err.is_server_draining() && advised_reconnects.should_reconnect() => {
+            Err(err) if err.is_server_draining() => {
                 advised_reconnects.record();
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),

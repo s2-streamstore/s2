@@ -674,7 +674,7 @@ fn take_server_draining_reconnect(
     err: &ReadSessionFailure,
     advised_reconnects: &mut AdvisedReconnects,
 ) -> bool {
-    if err.is_server_draining() && advised_reconnects.should_reconnect() {
+    if err.is_server_draining() {
         advised_reconnects.record();
         true
     } else {
