@@ -47,6 +47,10 @@ impl ReadSessionFailure {
     fn is_authentication_error(&self) -> bool {
         matches!(self, Self::Api(error) if error.is_authentication_error())
     }
+
+    fn is_server_draining(&self) -> bool {
+        matches!(self, Self::Api(error) if error.is_server_draining())
+    }
 }
 
 /// Errors returned by a read session.
@@ -383,6 +387,7 @@ pub async fn read_session(
     let access_token_mode = client.config.access_token.mode();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
+    let mut advised_reconnects = AdvisedReconnects::default();
     let initial_resume_seq_num = if start.clamp == Some(true) {
         None
     } else {
@@ -398,7 +403,7 @@ pub async fn read_session(
             start.clone(),
             end.clone(),
             ReconnectAdvice::default(),
-            AdvisedReconnects::default(),
+            advised_reconnects,
         )
         .await
         {
@@ -407,6 +412,13 @@ pub async fn read_session(
                 break batches;
             }
             Err(err) => {
+                if take_server_draining_reconnect(&err, &mut advised_reconnects) {
+                    debug!(
+                        advised_reconnects = advised_reconnects.count(),
+                        "reconnecting initial read session while server drains"
+                    );
+                    continue;
+                }
                 if let Some(backoff) =
                     retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
                 {
@@ -420,7 +432,6 @@ pub async fn read_session(
 
     let updates = Box::pin(stream! {
         let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
-        let mut advised_reconnects = AdvisedReconnects::default();
 
         loop {
             if batches.is_none() {
@@ -436,6 +447,14 @@ pub async fn read_session(
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
+                        if take_server_draining_reconnect(&err, &mut advised_reconnects) {
+                            debug!(
+                                resume_seq_num = ?start.seq_num,
+                                advised_reconnects = advised_reconnects.count(),
+                                "reconnecting read session while server drains"
+                            );
+                            continue;
+                        }
                         if let Some(backoff) =
                             retry_delay(
                                 &err,
@@ -500,6 +519,18 @@ pub async fn read_session(
                 }
                 Some(Err(err)) => {
                     batches = None;
+                    if err.is_server_draining() && read_limits_exhausted(&end) {
+                        break;
+                    }
+                    if take_server_draining_reconnect(&err, &mut advised_reconnects) {
+                        debug!(
+                            resume_seq_num = ?start.seq_num,
+                            advised_reconnects = advised_reconnects.count(),
+                            "reconnecting read session while server drains"
+                        );
+                        yield Ok(ReadUpdate::behind());
+                        continue;
+                    }
                     if let Some(backoff) =
                         retry_delay(
                             &err,
@@ -636,6 +667,18 @@ fn retry_delay(
             "not retrying read session"
         );
         None
+    }
+}
+
+fn take_server_draining_reconnect(
+    err: &ReadSessionFailure,
+    advised_reconnects: &mut AdvisedReconnects,
+) -> bool {
+    if err.is_server_draining() && advised_reconnects.should_reconnect() {
+        advised_reconnects.record();
+        true
+    } else {
+        false
     }
 }
 
