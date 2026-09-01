@@ -42,6 +42,7 @@ use crate::{
     client::{self, StreamingResponse, UnaryResponse},
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
+    reconnect::ReconnectAdvice,
     retry::{RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
@@ -446,6 +447,7 @@ impl BasinClient {
         inputs: I,
         encryption: Option<&EncryptionKey>,
         frame_signal: Option<FrameSignal>,
+        reconnect: ReconnectAdvice,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
         I: Stream<Item = AppendInput> + Send + 'static,
@@ -483,13 +485,15 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        let mut bytes_stream = response.stream();
+        let (mut bytes_stream, poison_handle) = response.into_stream();
         let auth_client = self.client.clone();
 
         let mut buffer = BytesMut::new();
         let mut decoder = FrameDecoder;
 
         Ok(Box::pin(try_stream! {
+            let mut advice_seen = false;
+
             while let Some(chunk) = bytes_stream.next().await {
                 let chunk = chunk?;
                 buffer.extend_from_slice(&chunk);
@@ -497,10 +501,18 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
+                            if !advice_seen && msg.reconnect_advised() {
+                                advice_seen = true;
+                                poison_handle.poison();
+                                reconnect.advise();
+                            }
                             yield msg.try_into_proto()?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
                             let error: ApiError = msg.into();
+                            if error.is_server_draining() {
+                                poison_handle.poison();
+                            }
                             auth_client.invalidate_access_token_if_rejected(
                                 &error,
                                 access_token.as_deref(),
@@ -526,6 +538,7 @@ impl BasinClient {
         start: ReadStart,
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
+        reconnect: ReconnectAdvice,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
@@ -549,13 +562,15 @@ impl BasinClient {
                 return Err(error);
             }
         };
-        let mut bytes_stream = response.stream();
+        let (mut bytes_stream, poison_handle) = response.into_stream();
         let auth_client = self.client.clone();
 
         let mut buffer = BytesMut::new();
         let mut decoder = FrameDecoder;
 
         Ok(Box::pin(try_stream! {
+            let mut advice_seen = false;
+
             while let Some(chunk) = bytes_stream.next().await {
                 let chunk = chunk?;
                 buffer.extend_from_slice(&chunk);
@@ -563,10 +578,18 @@ impl BasinClient {
                 loop {
                     match decoder.decode(&mut buffer) {
                         Ok(Some(SessionMessage::Regular(msg))) => {
+                            if !advice_seen && msg.reconnect_advised() {
+                                advice_seen = true;
+                                poison_handle.poison();
+                                reconnect.advise();
+                            }
                             yield msg.try_into_proto()?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
                             let error: ApiError = msg.into();
+                            if error.is_server_draining() {
+                                poison_handle.poison();
+                            }
                             auth_client.invalidate_access_token_if_rejected(
                                 &error,
                                 access_token.as_deref(),
@@ -648,6 +671,14 @@ impl ApiError {
             Self::AccessTokenProvider(error) => error.is_retryable(),
             _ => false,
         }
+    }
+
+    pub(crate) fn is_server_draining(&self) -> bool {
+        matches!(
+            self,
+            Self::Server(StatusCode::SERVICE_UNAVAILABLE, response)
+                if response.code == "server_draining"
+        )
     }
 
     pub(crate) fn is_authentication_error(&self) -> bool {
@@ -1170,14 +1201,20 @@ impl StreamingResult for StreamingResponse {
         }
 
         let status = self.status();
-        let bytes = self.into_bytes().await?;
+        let (bytes, poison_handle) = self.into_bytes_with_poison_handle().await?;
         if status == StatusCode::RANGE_NOT_SATISFIABLE
             && let Ok(tail) = serde_json::from_slice::<TailResponse>(&bytes)
         {
             return Err(ApiError::ReadUnwritten(tail));
         }
         match serde_json::from_slice::<ServerErrorBody>(&bytes) {
-            Ok(response) => Err(ApiError::Server(status, response)),
+            Ok(response) => {
+                let error = ApiError::Server(status, response);
+                if error.is_server_draining() {
+                    poison_handle.poison();
+                }
+                Err(error)
+            }
             Err(error) => Err(ApiError::Client(ClientError::ResponseDecode(format!(
                 "could not decode server error {status}: {error}; body: {}",
                 String::from_utf8_lossy(&bytes),

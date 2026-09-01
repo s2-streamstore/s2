@@ -22,6 +22,7 @@ use crate::{
     api::{ApiError, BasinClient, Streaming, retry_builder},
     error::{AppendError, RequestError},
     frame_signal::FrameSignal,
+    reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoffBuilder,
     types::{
         AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
@@ -104,6 +105,13 @@ impl AppendSessionError {
         matches!(
             self,
             Self::Append(AppendError::Request(error)) if error.is_authentication_error()
+        )
+    }
+
+    fn is_server_draining(&self) -> bool {
+        matches!(
+            self,
+            Self::Append(AppendError::Request(error)) if error.is_server_draining()
         )
     }
 }
@@ -198,6 +206,14 @@ struct SessionState {
     total_acked_records: usize,
     prev_ack_end: Option<StreamPosition>,
     stashed_submission: Option<StashedSubmission>,
+}
+
+impl SessionState {
+    fn is_close_complete(&self) -> bool {
+        self.close_tx.is_some()
+            && self.inflight_appends.is_empty()
+            && self.stashed_submission.is_none()
+    }
 }
 
 /// A session for high-throughput appending with backpressure control. It can be created from
@@ -481,6 +497,7 @@ async fn run_session_with_retry(
     };
     let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
+    let mut advised_reconnects = AdvisedReconnects::default();
 
     loop {
         let result = run_session(
@@ -490,12 +507,32 @@ async fn run_session_with_retry(
             &mut state,
             buffer_size,
             &frame_signal,
+            advised_reconnects,
         )
         .await;
 
         match result {
-            Ok(()) => {
+            Ok(SessionOutcome::Closed) => {
                 break;
+            }
+            Ok(SessionOutcome::ReconnectAdvised) => {
+                // The advised connection was already poisoned when the advice
+                // was first decoded, so reconnecting dials a fresh one.
+                advised_reconnects.record();
+                debug!(
+                    inflight_appends_len = state.inflight_appends.len(),
+                    advised_reconnects = advised_reconnects.count(),
+                    "reconnecting append session on server advice"
+                );
+            }
+            Err(err) if err.is_server_draining() && state.is_close_complete() => break,
+            Err(err) if err.is_server_draining() => {
+                advised_reconnects.record();
+                debug!(
+                    inflight_appends_len = state.inflight_appends.len(),
+                    advised_reconnects = advised_reconnects.count(),
+                    "reconnecting append session while server drains"
+                );
             }
             Err(err) => {
                 if prev_total_acked_records < state.total_acked_records {
@@ -556,6 +593,14 @@ async fn run_session_with_retry(
     }
 }
 
+/// How a connection attempt ended without failing.
+enum SessionOutcome {
+    /// Everything submitted was acknowledged and the caller closed the session.
+    Closed,
+    /// The server advised reconnecting and this connection drained cleanly.
+    ReconnectAdvised,
+}
+
 async fn run_session(
     client: &BasinClient,
     stream: &StreamName,
@@ -563,17 +608,20 @@ async fn run_session(
     state: &mut SessionState,
     buffer_size: usize,
     frame_signal: &Option<FrameSignal>,
-) -> Result<(), AppendSessionError> {
+    advised_reconnects: AdvisedReconnects,
+) -> Result<SessionOutcome, AppendSessionError> {
     if let Some(s) = frame_signal {
         s.reset();
     }
 
+    let reconnect = ReconnectAdvice::default();
     let (input_tx, mut acks) = connect(
         client,
         stream,
         encryption,
         buffer_size,
         frame_signal.clone(),
+        reconnect.clone(),
     )
     .await?;
     let ack_timeout = client.config.request_timeout;
@@ -589,10 +637,24 @@ async fn run_session(
         assert_eq!(state.inflight_bytes, 0);
     }
 
+    if state.is_close_complete() {
+        return Ok(SessionOutcome::Closed);
+    }
+
     let timer = MuxTimer::<N_TIMER_VARIANTS>::default();
     tokio::pin!(timer);
 
+    let mut declined_advice = false;
+
     loop {
+        if reconnect.is_advised() && state.close_tx.is_none() && !declined_advice {
+            if advised_reconnects.should_reconnect() {
+                drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout).await?;
+                return Ok(SessionOutcome::ReconnectAdvised);
+            }
+            declined_advice = true;
+        }
+
         tokio::select! {
             (event_ord, _deadline) = &mut timer, if timer.is_armed() => {
                 match TimerEvent::from(event_ord) {
@@ -677,10 +739,7 @@ async fn run_session(
             }
         }
 
-        if state.close_tx.is_some()
-            && state.inflight_appends.is_empty()
-            && state.stashed_submission.is_none()
-        {
+        if state.is_close_complete() {
             break;
         }
     }
@@ -689,7 +748,7 @@ async fn run_session(
     assert_eq!(state.inflight_bytes, 0);
     assert!(state.stashed_submission.is_none());
 
-    Ok(())
+    Ok(SessionOutcome::Closed)
 }
 
 async fn resend(
@@ -771,12 +830,68 @@ async fn resend(
     Ok(())
 }
 
+/// Half-close so the server acknowledges everything it accepted and then ends
+/// the response cleanly. Every input reaches the server ahead of the request's
+/// end, so a clean end with appends still unacknowledged is a truncated
+/// response, and nothing is resent.
+async fn drain_for_reconnect(
+    input_tx: mpsc::Sender<AppendInput>,
+    mut acks: Streaming<AppendAck>,
+    state: &mut SessionState,
+    mut timer: Pin<&mut MuxTimer<N_TIMER_VARIANTS>>,
+    ack_timeout: Duration,
+) -> Result<(), AppendSessionError> {
+    drop(input_tx);
+    loop {
+        // Bound the wait for the server's end of stream, which is otherwise
+        // unbounded once nothing is in flight.
+        if !timer.is_armed() {
+            timer.as_mut().fire_at(
+                TimerEvent::AckDeadline,
+                Instant::now() + ack_timeout,
+                CoalesceMode::Earliest,
+            );
+        }
+
+        tokio::select! {
+            (event_ord, _deadline) = &mut timer, if timer.is_armed() => {
+                match TimerEvent::from(event_ord) {
+                    TimerEvent::AckDeadline => {
+                        return Err(AppendSessionError::AckTimeout);
+                    }
+                }
+            }
+
+            ack = acks.next() => {
+                match ack {
+                    Some(Ok(ack)) => {
+                        process_ack(ack, state, timer.as_mut())?;
+                    }
+                    Some(Err(err)) if err.is_server_draining() => {
+                        return Ok(());
+                    }
+                    Some(Err(err)) => {
+                        return Err(err.into());
+                    }
+                    None => {
+                        if !state.inflight_appends.is_empty() {
+                            return Err(AppendSessionError::StreamClosedEarly);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn connect(
     client: &BasinClient,
     stream: &StreamName,
     encryption: Option<&EncryptionKey>,
     buffer_size: usize,
     frame_signal: Option<FrameSignal>,
+    reconnect: ReconnectAdvice,
 ) -> Result<(mpsc::Sender<AppendInput>, Streaming<AppendAck>), AppendSessionError> {
     let (input_tx, input_rx) = mpsc::channel::<AppendInput>(buffer_size);
     let ack_stream = Box::pin(
@@ -786,6 +901,7 @@ async fn connect(
                 ReceiverStream::new(input_rx).map(|i| i.into()),
                 encryption,
                 frame_signal,
+                reconnect,
             )
             .await?
             .map(|ack| match ack {

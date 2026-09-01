@@ -92,6 +92,7 @@ issue.
 mod api;
 mod client;
 mod frame_signal;
+mod reconnect;
 mod session;
 
 pub mod batching;

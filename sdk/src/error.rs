@@ -125,7 +125,9 @@ fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<Clien
     if hyper_err.is_timeout() {
         // The h2 keep-alive timing out fails requests sent on the dead connection.
         Some(ClientError::Timeout)
-    } else if hyper_err.is_incomplete_message() {
+    } else if hyper_err.is_incomplete_message() || hyper_err.is_closed() {
+        // `is_closed` covers a request dispatched onto a pooled connection
+        // that the server had already shut down.
         Some(ClientError::ConnectionClosedEarly(err_msg))
     } else if hyper_err.is_canceled() {
         Some(ClientError::RequestCanceled(err_msg))
@@ -247,6 +249,15 @@ impl RequestError {
             self,
             Self::Server(error)
                 if error.status == StatusCode::UNAUTHORIZED && error.code == "authn"
+        )
+    }
+
+    pub(crate) fn is_server_draining(&self) -> bool {
+        matches!(
+            self,
+            Self::Server(error)
+                if error.status == StatusCode::SERVICE_UNAVAILABLE
+                    && error.code == "server_draining"
         )
     }
 }

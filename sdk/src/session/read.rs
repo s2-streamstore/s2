@@ -20,6 +20,7 @@ use tracing::debug;
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
     error::{ReadError, RequestError},
+    reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoff,
     types::{
         AccessTokenMode, EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
@@ -45,6 +46,10 @@ impl ReadSessionFailure {
 
     fn is_authentication_error(&self) -> bool {
         matches!(self, Self::Api(error) if error.is_authentication_error())
+    }
+
+    fn is_server_draining(&self) -> bool {
+        matches!(self, Self::Api(error) if error.is_server_draining())
     }
 }
 
@@ -87,8 +92,22 @@ impl From<ReadSessionFailure> for ReadSessionError {
     }
 }
 
+/// The server heartbeats a tailing read session at a randomized gap of at most
+/// 15 seconds (<https://s2.dev/docs/api/protocol#data-flow>), plus some buffer.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
+
 type InternalStreaming<R> =
     Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionFailure>>>>;
+
+/// An item from a single read connection.
+enum ReadItem {
+    Batch(ReadBatch),
+    /// The server advised reconnecting and the response ended cleanly.
+    ///
+    /// Always the last item of a connection, emitted after the batch it rode
+    /// in on, so the resume position already accounts for that batch.
+    ReconnectAdvised,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -368,6 +387,7 @@ pub async fn read_session(
     let access_token_mode = client.config.access_token.mode();
     let baseline_wait = end.wait;
     let mut last_tail_at: Option<Instant> = None;
+    let mut advised_reconnects = AdvisedReconnects::default();
     let initial_resume_seq_num = if start.clamp == Some(true) {
         None
     } else {
@@ -382,6 +402,8 @@ pub async fn read_session(
             encryption.clone(),
             start.clone(),
             end.clone(),
+            ReconnectAdvice::default(),
+            advised_reconnects,
         )
         .await
         {
@@ -390,6 +412,13 @@ pub async fn read_session(
                 break batches;
             }
             Err(err) => {
+                if take_server_draining_reconnect(&err, &mut advised_reconnects) {
+                    debug!(
+                        advised_reconnects = advised_reconnects.count(),
+                        "reconnecting initial read session while server drains"
+                    );
+                    continue;
+                }
                 if let Some(backoff) =
                     retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
                 {
@@ -402,7 +431,7 @@ pub async fn read_session(
     };
 
     let updates = Box::pin(stream! {
-        let mut batches: Option<InternalStreaming<ReadBatch>> = Some(batches);
+        let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
 
         loop {
             if batches.is_none() {
@@ -413,9 +442,19 @@ pub async fn read_session(
                     encryption.clone(),
                     start.clone(),
                     end.clone(),
+                    ReconnectAdvice::default(),
+                    advised_reconnects,
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
+                        if take_server_draining_reconnect(&err, &mut advised_reconnects) {
+                            debug!(
+                                resume_seq_num = ?start.seq_num,
+                                advised_reconnects = advised_reconnects.count(),
+                                "reconnecting read session while server drains"
+                            );
+                            continue;
+                        }
                         if let Some(backoff) =
                             retry_delay(
                                 &err,
@@ -439,7 +478,25 @@ pub async fn read_session(
                 .next()
                 .await
             {
-                Some(Ok(batch)) => {
+                Some(Ok(ReadItem::ReconnectAdvised)) => {
+                    batches = None;
+                    // The advised connection was already poisoned when the
+                    // advice was first decoded; reconnecting dials a fresh
+                    // one. Avoid a useless reconnect for a read that was
+                    // already satisfied when the advice arrived.
+                    if read_limits_exhausted(&end) {
+                        break;
+                    }
+                    advised_reconnects.record();
+                    debug!(
+                        resume_seq_num = ?start.seq_num,
+                        advised_reconnects = advised_reconnects.count(),
+                        "reconnecting read session on server advice"
+                    );
+                    yield Ok(ReadUpdate::behind());
+                    continue;
+                }
+                Some(Ok(ReadItem::Batch(batch))) => {
                     if retry_backoff.used() > 0 {
                         retry_backoff.reset();
                     }
@@ -462,6 +519,18 @@ pub async fn read_session(
                 }
                 Some(Err(err)) => {
                     batches = None;
+                    if err.is_server_draining() && read_limits_exhausted(&end) {
+                        break;
+                    }
+                    if take_server_draining_reconnect(&err, &mut advised_reconnects) {
+                        debug!(
+                            resume_seq_num = ?start.seq_num,
+                            advised_reconnects = advised_reconnects.count(),
+                            "reconnecting read session while server drains"
+                        );
+                        yield Ok(ReadUpdate::behind());
+                        continue;
+                    }
                     if let Some(backoff) =
                         retry_delay(
                             &err,
@@ -513,21 +582,37 @@ async fn session_inner(
     encryption: Option<EncryptionKey>,
     start: ReadStart,
     end: ReadEnd,
-) -> Result<InternalStreaming<ReadBatch>, ReadSessionFailure> {
+    reconnect: ReconnectAdvice,
+    advised_reconnects: AdvisedReconnects,
+) -> Result<InternalStreaming<ReadItem>, ReadSessionFailure> {
     let mut batches = client
-        .read_session(&name, start, end, encryption.as_ref())
+        .read_session(&name, start, end, encryption.as_ref(), reconnect.clone())
         .await?;
+
+    let mut declined_advice = false;
     Ok(Box::pin(try_stream! {
         loop {
-            match timeout(Duration::from_secs(20), batches.next()).await {
+            match timeout(HEARTBEAT_TIMEOUT, batches.next()).await {
                 Ok(Some(batch)) => {
-                    yield ReadBatch::from_api(batch?);
+                    yield ReadItem::Batch(ReadBatch::from_api(batch?));
+                    if reconnect.is_advised() && !declined_advice {
+                        if advised_reconnects.should_reconnect() {
+                            yield ReadItem::ReconnectAdvised;
+                            break;
+                        }
+                        declined_advice = true;
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => Err(ReadSessionFailure::HeartbeatTimeout)?,
             }
         }
     }))
+}
+
+/// Whether the read's `count` or `bytes` limit has been used up.
+fn read_limits_exhausted(end: &ReadEnd) -> bool {
+    end.count == Some(0) || end.bytes == Some(0)
 }
 
 /// Compute the remaining wait budget for a retry.
@@ -582,6 +667,18 @@ fn retry_delay(
             "not retrying read session"
         );
         None
+    }
+}
+
+fn take_server_draining_reconnect(
+    err: &ReadSessionFailure,
+    advised_reconnects: &mut AdvisedReconnects,
+) -> bool {
+    if err.is_server_draining() {
+        advised_reconnects.record();
+        true
+    } else {
+        false
     }
 }
 
