@@ -1423,6 +1423,10 @@ mod tests {
             mode,
         ));
 
+        // Signal set + Unavailable (streamer gone before submission) — safe to retry.
+        let unavailable = server_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+        assert!(is_safe_to_retry(&unavailable, policy, Some(&signal), mode,));
+
         // Signal set + non-retryable — never safe.
         assert!(!is_safe_to_retry(
             &non_retryable,
