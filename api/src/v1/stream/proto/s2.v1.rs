@@ -35,11 +35,66 @@ pub struct AppendRecord {
     #[prost(bytes = "bytes", tag = "3")]
     pub body: ::prost::bytes::Bytes,
 }
+/// Timestamping behavior.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TimestampingConfig {
+    /// Timestamping mode for appends that influences how timestamps are handled.
+    #[prost(enumeration = "TimestampingMode", optional, tag = "1")]
+    pub mode: ::core::option::Option<i32>,
+    /// Allow client-specified timestamps to exceed the arrival time.
+    /// If this is `false` or not set, client timestamps will be capped at the arrival time.
+    #[prost(bool, optional, tag = "2")]
+    pub uncapped: ::core::option::Option<bool>,
+}
+/// Delete-on-empty configuration.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteOnEmptyConfig {
+    /// Minimum age in seconds before an empty stream can be deleted.
+    /// Set to 0 (default) to disable delete-on-empty (don't delete automatically).
+    #[prost(uint64, tag = "1")]
+    pub min_age_secs: u64,
+}
+/// Stream configuration.
+/// Unset fields inherit from the basin's default stream configuration.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StreamConfig {
+    /// Storage class for recent writes.
+    #[prost(enumeration = "StorageClass", optional, tag = "1")]
+    pub storage_class: ::core::option::Option<i32>,
+    /// Timestamping behavior.
+    #[prost(message, optional, tag = "4")]
+    pub timestamping: ::core::option::Option<TimestampingConfig>,
+    /// Delete-on-empty configuration.
+    #[prost(message, optional, tag = "5")]
+    pub delete_on_empty: ::core::option::Option<DeleteOnEmptyConfig>,
+    /// Retention policy for the stream.
+    /// If unspecified, the default is to retain records for 7 days.
+    #[prost(oneof = "stream_config::RetentionPolicy", tags = "2, 3")]
+    pub retention_policy: ::core::option::Option<stream_config::RetentionPolicy>,
+}
+/// Nested message and enum types in `StreamConfig`.
+pub mod stream_config {
+    /// Retain records unless explicitly trimmed.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct InfiniteRetention {}
+    /// Retention policy for the stream.
+    /// If unspecified, the default is to retain records for 7 days.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum RetentionPolicy {
+        /// Age in seconds for automatic trimming of records older than this threshold.
+        /// This must be set to a value greater than 0 seconds.
+        #[prost(uint64, tag = "2")]
+        Age(u64),
+        /// Retain records unless explicitly trimmed.
+        #[prost(message, tag = "3")]
+        Infinite(InfiniteRetention),
+    }
+}
 /// Payload of an Append request message.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AppendInput {
-    /// Batch of records to append atomically, which must contain at least one record, and no more than 1000.
-    /// The total size of a batch of records may not exceed 1MiB of metered bytes.
+    /// Batch of records to append atomically, which must contain at least one record, and no more
+    /// than 1000. The total size of a batch of records may not exceed 1MiB of metered bytes.
     #[prost(message, repeated, tag = "1")]
     pub records: ::prost::alloc::vec::Vec<AppendRecord>,
     /// Enforce that the sequence number issued to the first record matches.
@@ -48,6 +103,11 @@ pub struct AppendInput {
     /// Enforce a fencing token which must have been previously set by a `fence` command record.
     #[prost(string, optional, tag = "3")]
     pub fencing_token: ::core::option::Option<::prost::alloc::string::String>,
+    /// Stream configuration to apply if this append creates the stream via the basin's
+    /// `create_stream_on_append` setting. Unset fields inherit the basin's default stream
+    /// configuration. Ignored if the stream already exists.
+    #[prost(message, optional, tag = "4")]
+    pub create_stream_config: ::core::option::Option<StreamConfig>,
 }
 /// Success response message to an Append request.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -55,12 +115,14 @@ pub struct AppendAck {
     /// Sequence number and timestamp of the first record that was appended.
     #[prost(message, optional, tag = "1")]
     pub start: ::core::option::Option<StreamPosition>,
-    /// Sequence number of the last record that was appended + 1, and timestamp of the last record that was appended.
-    /// The difference between `end.seq_num` and `start.seq_num` will be the number of records appended.
+    /// Sequence number of the last record that was appended + 1, and timestamp of the last record
+    /// that was appended. The difference between `end.seq_num` and `start.seq_num` will be the
+    /// number of records appended.
     #[prost(message, optional, tag = "2")]
     pub end: ::core::option::Option<StreamPosition>,
-    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record on the stream.
-    /// This can be greater than the `end` position in case of concurrent appends.
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of
+    /// the last record on the stream. This can be greater than the `end` position in case of
+    /// concurrent appends.
     #[prost(message, optional, tag = "3")]
     pub tail: ::core::option::Option<StreamPosition>,
 }
@@ -83,13 +145,86 @@ pub struct SequencedRecord {
 /// Success response message to a Read request.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReadBatch {
-    /// Records that are durably sequenced on the stream, retrieved based on the requested criteria.
-    /// This can only be empty in response to a unary read if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
-    /// In the context of a session, it can be empty as a heartbeat message. A heartbeat will be sent whenever a switch to following in real-time happens, and then at a randomized gap between 5 and 15 seconds if no records have become available.
+    /// Records that are durably sequenced on the stream, retrieved based on the requested
+    /// criteria. This can only be empty in response to a unary read if the request cannot be
+    /// satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
+    /// In the context of a session, it can be empty as a heartbeat message. A heartbeat will be
+    /// sent whenever a switch to following in real-time happens, and then at a randomized gap
+    /// between 5 and 15 seconds if no records have become available.
     #[prost(message, repeated, tag = "1")]
     pub records: ::prost::alloc::vec::Vec<SequencedRecord>,
-    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
-    /// It will only be present when reading recent records.
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of
+    /// the last record. It will only be present when reading recent records.
     #[prost(message, optional, tag = "2")]
     pub tail: ::core::option::Option<StreamPosition>,
+}
+/// Storage class for recent writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum StorageClass {
+    /// Unspecified, treated as unset.
+    Unspecified = 0,
+    /// Append tail latency under 400 milliseconds with s2.dev.
+    Standard = 1,
+    /// Append tail latency under 40 milliseconds with s2.dev.
+    Express = 2,
+}
+impl StorageClass {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "STORAGE_CLASS_UNSPECIFIED",
+            Self::Standard => "STORAGE_CLASS_STANDARD",
+            Self::Express => "STORAGE_CLASS_EXPRESS",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "STORAGE_CLASS_UNSPECIFIED" => Some(Self::Unspecified),
+            "STORAGE_CLASS_STANDARD" => Some(Self::Standard),
+            "STORAGE_CLASS_EXPRESS" => Some(Self::Express),
+            _ => None,
+        }
+    }
+}
+/// Timestamping mode for appends that influences how timestamps are handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum TimestampingMode {
+    /// Unspecified, treated as unset.
+    Unspecified = 0,
+    /// Prefer client-specified timestamp if present otherwise use arrival time.
+    ClientPrefer = 1,
+    /// Require a client-specified timestamp and reject the append if it is missing.
+    ClientRequire = 2,
+    /// Use the arrival time and ignore any client-specified timestamp.
+    Arrival = 3,
+}
+impl TimestampingMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "TIMESTAMPING_MODE_UNSPECIFIED",
+            Self::ClientPrefer => "TIMESTAMPING_MODE_CLIENT_PREFER",
+            Self::ClientRequire => "TIMESTAMPING_MODE_CLIENT_REQUIRE",
+            Self::Arrival => "TIMESTAMPING_MODE_ARRIVAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TIMESTAMPING_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "TIMESTAMPING_MODE_CLIENT_PREFER" => Some(Self::ClientPrefer),
+            "TIMESTAMPING_MODE_CLIENT_REQUIRE" => Some(Self::ClientRequire),
+            "TIMESTAMPING_MODE_ARRIVAL" => Some(Self::Arrival),
+            _ => None,
+        }
+    }
 }

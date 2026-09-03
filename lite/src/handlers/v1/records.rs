@@ -19,7 +19,9 @@ use s2_common::{
     http::extract::Header,
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
-    stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
+    stream::{
+        AppendMessage, ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
+    },
 };
 
 use crate::{
@@ -384,11 +386,15 @@ pub async fn append(
     match request {
         v1t::stream::AppendRequest::Unary {
             encryption_key,
-            input,
+            message:
+                AppendMessage {
+                    input,
+                    create_stream_config,
+                },
             response_mime,
         } => {
             let handle = backend
-                .open_for_append(&basin, &stream, encryption_key)
+                .open_for_append(&basin, &stream, encryption_key, create_stream_config)
                 .await?;
             let ack = handle.append(input).await?;
             match response_mime {
@@ -404,20 +410,20 @@ pub async fn append(
         }
         v1t::stream::AppendRequest::S2s {
             encryption_key,
-            inputs,
+            messages,
             response_compression,
         } => {
+            let mut messages = messages.peekable();
             let handle = backend
-                .open_for_append(&basin, &stream, encryption_key)
+                .open_for_append_session(&basin, &stream, encryption_key, &mut messages)
                 .await?;
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
             let inputs = async_stream::stream! {
-                tokio::pin!(inputs);
                 let mut err_tx = Some(err_tx);
-                while let Some(input) = inputs.next().await {
-                    match input {
-                        Ok(input) => yield input,
+                while let Some(message) = messages.next().await {
+                    match message {
+                        Ok(AppendMessage { input, .. }) => yield input,
                         Err(e) => {
                             if let Some(tx) = err_tx.take() {
                                 let _ = tx.send(e);
@@ -471,11 +477,14 @@ mod tests {
     use prost::Message as _;
     use s2_api::v1::stream::{
         proto,
-        s2s::{FrameDecoder, SessionMessage},
+        s2s::{self, FrameDecoder, SessionMessage},
     };
     use s2_common::{
         basin::{BASIN_HEADER, BasinName},
-        config::{BasinConfig, OptionalStreamConfig},
+        config::{
+            BasinConfig, DeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy, StorageClass,
+            StreamConfig,
+        },
         encryption::{EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
@@ -597,7 +606,7 @@ mod tests {
         encryption_key: EncryptionKey,
     ) {
         backend
-            .open_for_append(basin, stream, Some(encryption_key))
+            .open_for_append(basin, stream, Some(encryption_key), None)
             .await
             .expect("open append handle")
             .append(append_input(body))
@@ -675,6 +684,7 @@ mod tests {
             }],
             match_seq_num: None,
             fencing_token: None,
+            create_stream_config: None,
         };
 
         let response = send(
@@ -729,6 +739,217 @@ mod tests {
             panic!("expected envelope record");
         };
         assert_eq!(record.body().as_ref(), b"secret");
+    }
+
+    fn basin_config_with_create_stream_on_append() -> BasinConfig {
+        BasinConfig {
+            create_stream_on_append: true,
+            default_stream_config: OptionalStreamConfig {
+                storage_class: Some(StorageClass::Standard),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Config a stream should end up with when `{"retention_policy": {"age": 3600},
+    /// "delete_on_empty": {"min_age_secs": 300}}` is layered over
+    /// `basin_config_with_create_stream_on_append`'s defaults.
+    fn expected_auto_created_config() -> StreamConfig {
+        StreamConfig {
+            storage_class: StorageClass::Standard,
+            retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
+            timestamping: Default::default(),
+            delete_on_empty: DeleteOnEmptyConfig {
+                min_age: Duration::from_secs(300),
+            },
+        }
+    }
+
+    fn proto_create_stream_config() -> proto::StreamConfig {
+        proto::StreamConfig {
+            storage_class: None,
+            retention_policy: Some(proto::stream_config::RetentionPolicy::Age(3600)),
+            timestamping: None,
+            delete_on_empty: Some(proto::DeleteOnEmptyConfig { min_age_secs: 300 }),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_append_auto_creates_stream_with_create_stream_config() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-json-create-config",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        let body = serde_json::json!({
+            "records": [{"body": "hello"}],
+            "create_stream_config": {
+                "retention_policy": {"age": 3600},
+                "delete_on_empty": {"min_age_secs": 300}
+            }
+        });
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let ack = response_json(response, "append ack body").await;
+        assert_eq!(ack["end"]["seq_num"], 1);
+        let config = backend
+            .get_stream_config(basin, stream)
+            .await
+            .expect("get stream config");
+        assert_eq!(config, expected_auto_created_config());
+    }
+
+    #[tokio::test]
+    async fn json_append_with_invalid_create_stream_config_is_rejected_without_creating() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-json-create-config-invalid",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        let body = serde_json::json!({
+            "records": [{"body": "hello"}],
+            "create_stream_config": {"retention_policy": {"age": 0}}
+        });
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let info = response_json(response, "append error body").await;
+        assert_eq!(info["code"], "invalid");
+        assert!(
+            info["message"]
+                .as_str()
+                .expect("error message string")
+                .contains("age must be greater than 0 seconds")
+        );
+        assert_no_streams(&backend, &basin).await;
+    }
+
+    #[tokio::test]
+    async fn proto_append_ignores_create_stream_config_for_existing_stream() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "append-proto-create-config-existing",
+            basin_config_with_create_stream_on_append(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        let before = backend
+            .get_stream_config(basin.clone(), stream.clone())
+            .await
+            .expect("get stream config");
+
+        let input = proto::AppendInput {
+            records: vec![proto::AppendRecord {
+                timestamp: None,
+                headers: vec![],
+                body: Bytes::from_static(b"hello"),
+            }],
+            match_seq_num: None,
+            fencing_token: None,
+            create_stream_config: Some(proto_create_stream_config()),
+        };
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "application/protobuf")
+                .header(header::ACCEPT, "application/protobuf")
+                .body(Body::from(input.encode_to_vec()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = backend
+            .get_stream_config(basin, stream)
+            .await
+            .expect("get stream config");
+        assert_eq!(after, before);
+        assert_ne!(after, expected_auto_created_config());
+    }
+
+    #[tokio::test]
+    async fn s2s_append_session_auto_creates_stream_with_first_frame_config() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-s2s-create-config",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        let frame = |body: &'static [u8], create_stream_config| {
+            let input = proto::AppendInput {
+                records: vec![proto::AppendRecord {
+                    timestamp: None,
+                    headers: vec![],
+                    body: Bytes::from_static(body),
+                }],
+                match_seq_num: None,
+                fencing_token: None,
+                create_stream_config,
+            };
+            SessionMessage::regular(s2s::CompressionAlgorithm::None, &input)
+                .expect("encode frame")
+                .encode()
+        };
+        // Only the first frame's config is applied; the second frame's conflicting
+        // config is ignored since the stream exists by then.
+        let conflicting = proto::StreamConfig {
+            retention_policy: Some(proto::stream_config::RetentionPolicy::Infinite(
+                proto::stream_config::InfiniteRetention {},
+            )),
+            ..Default::default()
+        };
+        let mut body = BytesMut::new();
+        body.extend_from_slice(&frame(b"first", Some(proto_create_stream_config())));
+        body.extend_from_slice(&frame(b"second", Some(conflicting)));
+
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "s2s/proto")
+                .body(Body::from(body.freeze()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_bytes(response, "s2s body").await;
+        let mut decoder = FrameDecoder;
+        let mut buf = BytesMut::from(body.as_ref());
+        let mut acks = Vec::new();
+        while let Some(frame) = decoder.decode(&mut buf).expect("frame decode") {
+            let SessionMessage::Regular(ack) = frame else {
+                panic!("expected regular frame");
+            };
+            acks.push(
+                ack.try_into_proto::<proto::AppendAck>()
+                    .expect("decode append ack"),
+            );
+        }
+        assert_eq!(acks.len(), 2);
+        assert_eq!(acks[1].end.as_ref().map(|pos| pos.seq_num), Some(2));
+
+        let config = backend
+            .get_stream_config(basin, stream)
+            .await
+            .expect("get stream config");
+        assert_eq!(config, expected_auto_created_config());
     }
 
     #[tokio::test]

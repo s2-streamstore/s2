@@ -1,15 +1,21 @@
 use std::{
     collections::VecDeque,
     ops::{DerefMut as _, Range, RangeTo},
+    pin::Pin,
     sync::Arc,
 };
 
-use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
+use futures::{
+    Stream, StreamExt as _,
+    future::OptionFuture,
+    stream::{FuturesOrdered, Peekable},
+};
 use s2_common::{
     basin::BasinName,
+    config::OptionalStreamConfig,
     encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
-    stream::{AppendAck, AppendInput, StreamName},
+    stream::{AppendAck, AppendInput, AppendMessage, StreamName},
 };
 use s2_storage::record::encrypt_append_input;
 use tokio::sync::oneshot;
@@ -18,16 +24,52 @@ use super::{Backend, StreamHandle};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
+    /// Open a stream for a unary append.
+    ///
+    /// `create_stream_config` is applied over the basin defaults only if this call creates the
+    /// stream via `create_stream_on_append`, and is otherwise ignored.
     pub async fn open_for_append(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         encryption_key: Option<EncryptionKey>,
+        create_stream_config: Option<OptionalStreamConfig>,
     ) -> Result<StreamHandle, AppendError> {
         self.stream_handle_with_auto_create::<AppendError>(
             basin,
             stream,
             |config| config.create_stream_on_append,
+            async || create_stream_config.unwrap_or_default(),
+            |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
+        )
+        .await
+    }
+
+    /// Open a stream for an append session.
+    ///
+    /// The stream is looked up eagerly. Only if it is missing and the basin has
+    /// `create_stream_on_append` enabled is the first message peeked, so that its
+    /// `create_stream_config` can be applied over the basin defaults. If the first message is
+    /// unavailable or failed to decode, the stream is created with basin defaults and the
+    /// error surfaces through the session as usual.
+    pub async fn open_for_append_session<S, E>(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        encryption_key: Option<EncryptionKey>,
+        messages: &mut Peekable<S>,
+    ) -> Result<StreamHandle, AppendError>
+    where
+        S: Stream<Item = Result<AppendMessage, E>> + Unpin,
+    {
+        self.stream_handle_with_auto_create::<AppendError>(
+            basin,
+            stream,
+            |config| config.create_stream_on_append,
+            async || match Pin::new(messages).peek().await {
+                Some(Ok(message)) => message.create_stream_config.clone().unwrap_or_default(),
+                Some(Err(_)) | None => OptionalStreamConfig::default(),
+            },
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await

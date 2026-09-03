@@ -228,13 +228,14 @@ pub enum AppendRequest {
     /// Unary
     Unary {
         encryption_key: Option<EncryptionKey>,
-        input: s2_common::stream::AppendInput,
+        message: s2_common::stream::AppendMessage,
         response_mime: JsonOrProto,
     },
     /// S2S bi-directional streaming
     S2s {
         encryption_key: Option<EncryptionKey>,
-        inputs: BoxStream<'static, Result<s2_common::stream::AppendInput, AppendInputStreamError>>,
+        messages:
+            BoxStream<'static, Result<s2_common::stream::AppendMessage, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,
     },
 }
@@ -244,12 +245,12 @@ impl std::fmt::Debug for AppendRequest {
         match self {
             AppendRequest::Unary {
                 encryption_key,
-                input,
+                message,
                 response_mime: response,
             } => f
                 .debug_struct("AppendRequest::Unary")
                 .field("encryption_key", encryption_key)
-                .field("input", input)
+                .field("message", message)
                 .field("response", response)
                 .finish(),
             AppendRequest::S2s {
@@ -375,23 +376,34 @@ pub struct AppendInput {
     pub match_seq_num: Option<record::SeqNum>,
     /// Enforce a fencing token, which starts out as an empty string that can be overridden by a `fence` command record.
     pub fencing_token: Option<record::FencingToken>,
+    /// Stream configuration to apply if this append creates the stream via the basin's `create_stream_on_append` setting.
+    /// Unset fields inherit the basin's `default_stream_config`.
+    /// Ignored if the stream already exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_stream_config: Option<StreamConfig>,
 }
 
 impl AppendInput {
     pub fn decode(
         self,
         format: Format,
-    ) -> Result<s2_common::stream::AppendInput, s2_common::ValidationError> {
+    ) -> Result<s2_common::stream::AppendMessage, s2_common::ValidationError> {
         let records: Vec<s2_common::stream::AppendRecord> = self
             .records
             .into_iter()
             .map(|record| record.decode(format))
             .try_collect()?;
 
-        Ok(s2_common::stream::AppendInput {
-            records: s2_common::stream::AppendRecordBatch::try_from(records)?,
-            match_seq_num: self.match_seq_num,
-            fencing_token: self.fencing_token,
+        Ok(s2_common::stream::AppendMessage {
+            input: s2_common::stream::AppendInput {
+                records: s2_common::stream::AppendRecordBatch::try_from(records)?,
+                match_seq_num: self.match_seq_num,
+                fencing_token: self.fencing_token,
+            },
+            create_stream_config: self
+                .create_stream_config
+                .map(TryInto::try_into)
+                .transpose()?,
         })
     }
 }

@@ -3249,6 +3249,12 @@ pub struct AppendInput {
     /// If unspecified, no matching is performed. If specified and mismatched,
     /// the append fails. A stream defaults to `""` as its fencing token.
     pub fencing_token: Option<FencingToken>,
+    /// Stream configuration to apply if this append creates the stream on demand.
+    ///
+    /// Only takes effect when the basin has `create_stream_on_append` enabled and the stream
+    /// does not exist yet. Unset fields inherit the basin's default stream configuration.
+    /// Ignored if the stream already exists, so it is safe to send on every append.
+    pub create_stream_config: Option<StreamConfig>,
 }
 
 impl AppendInput {
@@ -3258,6 +3264,7 @@ impl AppendInput {
             records,
             match_seq_num: None,
             fencing_token: None,
+            create_stream_config: None,
         }
     }
 
@@ -3276,6 +3283,16 @@ impl AppendInput {
             ..self
         }
     }
+
+    /// Set the stream configuration to apply if this append creates the stream on demand.
+    ///
+    /// See [`AppendInput::create_stream_config`].
+    pub fn with_create_stream_config(self, create_stream_config: StreamConfig) -> Self {
+        Self {
+            create_stream_config: Some(create_stream_config),
+            ..self
+        }
+    }
 }
 
 impl From<AppendInput> for api::stream::proto::AppendInput {
@@ -3284,6 +3301,9 @@ impl From<AppendInput> for api::stream::proto::AppendInput {
             records: value.records.iter().cloned().map(Into::into).collect(),
             match_seq_num: value.match_seq_num,
             fencing_token: value.fencing_token.map(|t| t.to_string()),
+            create_stream_config: value
+                .create_stream_config
+                .map(|config| api::config::StreamConfig::from(config).into()),
         }
     }
 }

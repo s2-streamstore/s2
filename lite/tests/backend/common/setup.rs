@@ -237,7 +237,7 @@ pub async fn append_payloads_with_encryption(
         fencing_token: None,
     };
     backend
-        .open_for_append(basin, stream, encryption_key_for_spec(encryption))
+        .open_for_append(basin, stream, encryption_key_for_spec(encryption), None)
         .await
         .expect("Failed to open append handle")
         .append(input)
@@ -257,7 +257,7 @@ pub async fn append_timestamped_payloads(
         fencing_token: None,
     };
     backend
-        .open_for_append(basin, stream, None)
+        .open_for_append(basin, stream, None, None)
         .await
         .expect("Failed to open append handle")
         .append(input)

@@ -323,11 +323,16 @@ impl Backend {
         }
     }
 
+    /// Resolve a handle for `stream`, creating it on demand if the basin config allows.
+    ///
+    /// `create_stream_config` is only invoked when the stream is actually being created, and its
+    /// result is layered over the basin's default stream config. It must already be validated.
     pub(super) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         should_auto_create: impl FnOnce(&BasinConfig) -> bool,
+        create_stream_config: impl AsyncFnOnce() -> OptionalStreamConfig,
         resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
     ) -> Result<StreamHandle, E>
     where
@@ -352,11 +357,12 @@ impl Backend {
                     Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
                 };
                 if should_auto_create(&config) {
+                    let create_stream_config = create_stream_config().await;
                     if let Err(e) = self
                         .provision_stream(
                             basin.clone(),
                             stream.clone(),
-                            OptionalStreamConfig::default(),
+                            create_stream_config,
                             ProvisionMode::CreateOnly {
                                 request_token: None,
                             },
@@ -370,8 +376,10 @@ impl Backend {
                             ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
                             ProvisionStreamError::BasinNotFound(e) => Err(e)?,
                             ProvisionStreamError::StreamAlreadyExists(_) => {}
-                            ProvisionStreamError::Validation(_) => {
-                                unreachable!("auto-create uses default config")
+                            ProvisionStreamError::Validation(e) => {
+                                unreachable!(
+                                    "auto-create config is validated at the API boundary: {e}"
+                                )
                             }
                         }
                     }
@@ -623,7 +631,7 @@ mod tests {
                     let basin = basin.clone();
                     let stream = stream.clone();
                     tokio::spawn(async move {
-                        let handle = backend.open_for_append(&basin, &stream, None).await?;
+                        let handle = backend.open_for_append(&basin, &stream, None, None).await?;
                         handle.append(append_input(&format!("r{i}"))).await
                     })
                 })

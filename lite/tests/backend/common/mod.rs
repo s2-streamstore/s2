@@ -30,6 +30,7 @@ pub async fn append(
             &basin,
             &stream,
             encryption.and_then(encryption_key_for_spec),
+            None,
         )
         .await?
         .append(input)
@@ -51,6 +52,7 @@ where
             &basin,
             &stream,
             encryption.and_then(encryption_key_for_spec),
+            None,
         )
         .await?
         .append_session(inputs);

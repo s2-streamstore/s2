@@ -1,13 +1,19 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::{StreamExt as _, TryStreamExt as _};
 use s2_common::{
     basin::BasinName,
-    config::BasinConfig,
+    config::{
+        BasinConfig, DeleteOnEmptyConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
+        RetentionPolicy, StorageClass, StreamConfig,
+    },
     encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
     record::StreamPosition,
-    stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamName},
+    stream::{
+        AppendInput, AppendMessage, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamName,
+    },
 };
 use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
 
@@ -121,6 +127,180 @@ async fn test_backend_append_auto_creates_stream_with_basin_cipher() {
         read_records_with_encryption(&backend, &basin_name, &stream_name, start, end, &encryption)
             .await;
     assert_eq!(envelope_bodies(&records), vec![b"secret".to_vec()]);
+}
+
+fn basin_config_with_defaults() -> BasinConfig {
+    BasinConfig {
+        create_stream_on_append: true,
+        default_stream_config: OptionalStreamConfig {
+            storage_class: Some(StorageClass::Standard),
+            retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(7 * 24 * 60 * 60))),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn requested_create_stream_config() -> OptionalStreamConfig {
+    OptionalStreamConfig {
+        retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(3600))),
+        delete_on_empty: OptionalDeleteOnEmptyConfig {
+            min_age: Some(Duration::from_secs(300)),
+        },
+        ..Default::default()
+    }
+}
+
+/// The config a stream should end up with when `requested_create_stream_config` is layered
+/// over `basin_config_with_defaults`.
+fn expected_merged_stream_config() -> StreamConfig {
+    StreamConfig {
+        storage_class: StorageClass::Standard,
+        retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
+        timestamping: Default::default(),
+        delete_on_empty: DeleteOnEmptyConfig {
+            min_age: Duration::from_secs(300),
+        },
+    }
+}
+
+#[tokio::test]
+async fn test_backend_append_auto_create_applies_create_stream_config() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-config",
+        basin_config_with_defaults(),
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+
+    let input = AppendInput {
+        records: create_test_record_batch(vec![Bytes::from_static(b"hello")]),
+        match_seq_num: None,
+        fencing_token: None,
+    };
+    let ack = backend
+        .open_for_append(
+            &basin_name,
+            &stream_name,
+            None,
+            Some(requested_create_stream_config()),
+        )
+        .await
+        .expect("Failed to open append handle")
+        .append(input)
+        .await
+        .expect("Failed to append to auto-created stream");
+    assert_eq!(ack.end.seq_num, 1);
+
+    let config = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to get stream config");
+    assert_eq!(config, expected_merged_stream_config());
+}
+
+#[tokio::test]
+async fn test_backend_append_ignores_create_stream_config_for_existing_stream() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-config-existing",
+        basin_config_with_defaults(),
+    )
+    .await;
+    let stream_name = create_test_stream(
+        &backend,
+        &basin_name,
+        "existing",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+    let before = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to get stream config");
+
+    let input = AppendInput {
+        records: create_test_record_batch(vec![Bytes::from_static(b"hello")]),
+        match_seq_num: None,
+        fencing_token: None,
+    };
+    backend
+        .open_for_append(
+            &basin_name,
+            &stream_name,
+            None,
+            Some(requested_create_stream_config()),
+        )
+        .await
+        .expect("Failed to open append handle")
+        .append(input)
+        .await
+        .expect("Failed to append to existing stream");
+
+    let after = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to get stream config");
+    assert_eq!(after, before);
+    assert_ne!(after, expected_merged_stream_config());
+}
+
+#[tokio::test]
+async fn test_backend_append_session_auto_create_uses_first_message_config() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-session-config",
+        basin_config_with_defaults(),
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+
+    let message = |body: &'static [u8], create_stream_config| AppendMessage {
+        input: AppendInput {
+            records: create_test_record_batch(vec![Bytes::from_static(body)]),
+            match_seq_num: None,
+            fencing_token: None,
+        },
+        create_stream_config,
+    };
+    // Only the first message carries the config; a conflicting config on a later
+    // message must be ignored since the stream exists by then.
+    let conflicting = OptionalStreamConfig {
+        retention_policy: Some(RetentionPolicy::Infinite()),
+        ..Default::default()
+    };
+    let mut messages = futures::stream::iter(vec![
+        Ok::<_, std::convert::Infallible>(message(
+            b"first",
+            Some(requested_create_stream_config()),
+        )),
+        Ok(message(b"second", Some(conflicting))),
+    ])
+    .peekable();
+
+    let handle = backend
+        .open_for_append_session(&basin_name, &stream_name, None, &mut messages)
+        .await
+        .expect("Failed to open append session");
+    // Peeking must not consume the first message.
+    let inputs = messages.map(|message| message.expect("infallible").input);
+    let acks: Vec<_> = handle
+        .append_session(inputs)
+        .try_collect()
+        .await
+        .expect("Failed to append in session");
+    assert_eq!(acks.len(), 2);
+    assert_eq!(acks[1].end.seq_num, 2);
+
+    let config = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to get stream config");
+    assert_eq!(config, expected_merged_stream_config());
 }
 
 #[tokio::test]

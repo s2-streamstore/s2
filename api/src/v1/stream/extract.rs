@@ -74,8 +74,8 @@ where
                 match msg? {
                     s2s::SessionMessage::Regular(data) => {
                         let input = data.try_into_proto::<proto::AppendInput>()?;
-                        let input = s2_common::stream::AppendInput::try_from(input)?;
-                        Ok(Some((input, framed)))
+                        let message = s2_common::stream::AppendMessage::try_from(input)?;
+                        Ok(Some((message, framed)))
                     }
                     s2s::SessionMessage::Terminal(_) => {
                         Err(AppendInputStreamError::FrameDecode(std::io::Error::new(
@@ -88,7 +88,7 @@ where
 
             return Ok(Self::S2s {
                 encryption_key,
-                inputs: Box::pin(inputs),
+                messages: Box::pin(inputs),
                 response_compression,
             });
         }
@@ -103,7 +103,7 @@ where
             .and_then(JsonOrProto::from_mime)
             .unwrap_or(JsonOrProto::Json);
 
-        let input = match request_mime {
+        let message = match request_mime {
             JsonOrProto::Proto => {
                 let Proto(input) = Proto::<proto::AppendInput>::from_request(req, state).await?;
                 input.try_into()?
@@ -117,7 +117,7 @@ where
 
         Ok(Self::Unary {
             encryption_key,
-            input,
+            message,
             response_mime,
         })
     }

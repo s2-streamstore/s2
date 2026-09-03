@@ -401,6 +401,7 @@ pub mod extract {
                 records: vec![],
                 match_seq_num: None,
                 fencing_token: None,
+                create_stream_config: None,
             });
             assert_roundtrip(&AppendInput {
                 records: vec![AppendRecord {
@@ -410,6 +411,14 @@ pub mod extract {
                 }],
                 match_seq_num: Some(42),
                 fencing_token: Some("token".parse().unwrap()),
+                create_stream_config: Some(crate::v1::config::StreamConfig {
+                    storage_class: None,
+                    retention_policy: Some(crate::v1::config::RetentionPolicy::Age(3600)),
+                    timestamping: None,
+                    delete_on_empty: Some(crate::v1::config::DeleteOnEmptyConfig {
+                        min_age_secs: 300,
+                    }),
+                }),
             });
 
             // StreamReconfiguration: exercises Maybe<T> in all three states

@@ -22,7 +22,7 @@ use crate::{
     session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
     types::{
         AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, S2Error,
-        StreamName, ValidationError,
+        StreamConfig, StreamName, ValidationError,
     },
 };
 
@@ -65,6 +65,7 @@ pub struct ProducerConfig {
     batching: BatchingConfig,
     fencing_token: Option<FencingToken>,
     match_seq_num: Option<u64>,
+    create_stream_config: Option<StreamConfig>,
 }
 
 impl Default for ProducerConfig {
@@ -74,6 +75,7 @@ impl Default for ProducerConfig {
             batching: BatchingConfig::default(),
             fencing_token: None,
             match_seq_num: None,
+            create_stream_config: None,
         }
     }
 }
@@ -124,6 +126,19 @@ impl ProducerConfig {
     pub fn with_match_seq_num(self, match_seq_num: u64) -> Self {
         Self {
             match_seq_num: Some(match_seq_num),
+            ..self
+        }
+    }
+
+    /// Set the stream configuration to apply if the producer creates the stream on demand.
+    ///
+    /// Only takes effect when the basin has `create_stream_on_append` enabled and the stream does
+    /// not exist yet. Ignored once the stream exists.
+    ///
+    /// Defaults to `None`.
+    pub fn with_create_stream_config(self, create_stream_config: StreamConfig) -> Self {
+        Self {
+            create_stream_config: Some(create_stream_config),
             ..self
         }
     }
@@ -244,6 +259,9 @@ impl Producer {
         }
         if let Some(seq_num) = config.match_seq_num {
             inputs = inputs.with_match_seq_num(seq_num);
+        }
+        if let Some(create_stream_config) = config.create_stream_config {
+            inputs = inputs.with_create_stream_config(create_stream_config);
         }
 
         let mut pending_batch_acks = FuturesUnordered::new();

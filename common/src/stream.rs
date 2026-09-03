@@ -9,6 +9,7 @@ use super::{
 };
 use crate::{
     caps,
+    config::OptionalStreamConfig,
     encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
     record::{
@@ -291,6 +292,27 @@ pub struct AppendInput<T = Record> {
     pub records: AppendRecordBatch<T>,
     pub match_seq_num: Option<SeqNum>,
     pub fencing_token: Option<FencingToken>,
+}
+
+/// An [`AppendInput`] together with message-scoped options that are not part of the record batch.
+///
+/// This is what a single append message decodes to, whether it is the body of a unary append or
+/// one frame of an append session.
+#[derive(Debug, Clone)]
+pub struct AppendMessage {
+    pub input: AppendInput,
+    /// Stream configuration to apply if this message triggers on-demand stream creation.
+    /// Ignored if the stream already exists.
+    pub create_stream_config: Option<OptionalStreamConfig>,
+}
+
+impl From<AppendInput> for AppendMessage {
+    fn from(input: AppendInput) -> Self {
+        Self {
+            input,
+            create_stream_config: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
