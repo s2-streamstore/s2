@@ -64,6 +64,10 @@ pub enum ServiceError {
     Read(#[from] ReadError),
     #[error("Not implemented")]
     NotImplemented,
+    #[error(
+        "No route matches this path under a stream name. If the stream name contains '/', it must be percent-encoded (e.g. 'cdc/products' -> 'cdc%2Fproducts')."
+    )]
+    AmbiguousStreamPath,
 }
 
 impl From<AppendRequestRejection> for ServiceError {
@@ -300,6 +304,7 @@ impl ServiceError {
             ServiceError::NotImplemented => {
                 standard(ErrorCode::NotImplemented, "Not implemented".to_string())
             }
+            ServiceError::AmbiguousStreamPath => standard(ErrorCode::BadPath, self.to_string()),
         }
     }
 }
