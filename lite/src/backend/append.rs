@@ -15,7 +15,10 @@ use s2_common::{
 use s2_storage::record::encrypt_append_input;
 use tokio::sync::oneshot;
 
-use super::{Backend, StreamHandle, core::StreamLookup};
+use super::{
+    Backend, StreamHandle,
+    core::{AutoCreateOn, StreamLookup},
+};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
@@ -28,13 +31,13 @@ impl Backend {
         basin: &BasinName,
         stream: &StreamName,
         encryption_key: Option<EncryptionKey>,
-        create_stream_config: Option<OptionalStreamConfig>,
+        create_stream_config: OptionalStreamConfig,
     ) -> Result<StreamHandle, AppendError> {
         self.stream_handle_with_auto_create::<AppendError>(
             basin,
             stream,
-            |config| config.create_stream_on_append,
-            create_stream_config.unwrap_or_default(),
+            AutoCreateOn::Append,
+            create_stream_config,
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await
@@ -54,9 +57,7 @@ impl Backend {
         encryption_key: Option<EncryptionKey>,
     ) -> Result<AppendSessionOpen, AppendError> {
         match self
-            .lookup_stream_for_auto_create::<AppendError>(basin, stream, |config| {
-                config.create_stream_on_append
-            })
+            .lookup_stream_for_auto_create::<AppendError>(basin, stream, AutoCreateOn::Append)
             .await?
         {
             StreamLookup::Found(client) => Ok(AppendSessionOpen::Ready(

@@ -16,7 +16,7 @@ use s2_storage::record::{
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
 
-use super::{Backend, StreamHandle};
+use super::{Backend, StreamHandle, core::AutoCreateOn};
 use crate::{
     backend::{
         error::{
@@ -37,7 +37,7 @@ impl Backend {
         self.stream_handle_with_auto_create::<CheckTailError>(
             basin,
             stream,
-            |config| config.create_stream_on_read,
+            AutoCreateOn::Read,
             OptionalStreamConfig::default(),
             |_| Ok(EncryptionSpec::Plain),
         )
@@ -53,7 +53,7 @@ impl Backend {
         self.stream_handle_with_auto_create::<ReadError>(
             basin,
             stream,
-            |config| config.create_stream_on_read,
+            AutoCreateOn::Read,
             OptionalStreamConfig::default(),
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
@@ -565,7 +565,7 @@ mod tests {
 
         let input = append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
         let ack = backend
-            .open_for_append(&basin, &stream, None, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(input)
@@ -719,7 +719,7 @@ mod tests {
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(initial_input)
@@ -779,7 +779,7 @@ mod tests {
         let follow_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(follow_input)
@@ -909,7 +909,7 @@ mod tests {
                 Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap(),
             );
             let ack = backend
-                .open_for_append(&basin, &stream, None, None)
+                .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
                 .await
                 .unwrap()
                 .append(input)
@@ -963,7 +963,7 @@ mod tests {
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(initial_input)
@@ -1010,7 +1010,7 @@ mod tests {
         let follow_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(follow_input)

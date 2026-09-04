@@ -301,16 +301,16 @@ pub struct AppendInput<T = Record> {
 #[derive(Debug, Clone)]
 pub struct AppendMessage {
     pub input: AppendInput,
-    /// Stream configuration to apply if this message triggers on-demand stream creation.
-    /// Ignored if the stream already exists.
-    pub create_stream_config: Option<OptionalStreamConfig>,
+    /// Stream configuration to layer over the basin defaults if this message triggers on-demand
+    /// stream creation. Ignored if the stream already exists.
+    pub create_stream_config: OptionalStreamConfig,
 }
 
 impl From<AppendInput> for AppendMessage {
     fn from(input: AppendInput) -> Self {
         Self {
             input,
-            create_stream_config: None,
+            create_stream_config: OptionalStreamConfig::default(),
         }
     }
 }

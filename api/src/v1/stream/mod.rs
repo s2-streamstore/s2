@@ -403,7 +403,8 @@ impl AppendInput {
             create_stream_config: self
                 .create_stream_config
                 .map(TryInto::try_into)
-                .transpose()?,
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 }

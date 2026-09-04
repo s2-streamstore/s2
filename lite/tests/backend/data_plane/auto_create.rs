@@ -188,7 +188,7 @@ async fn test_backend_append_auto_create_applies_create_stream_config() {
             &basin_name,
             &stream_name,
             None,
-            Some(requested_create_stream_config()),
+            requested_create_stream_config(),
         )
         .await
         .expect("Failed to open append handle")
@@ -235,7 +235,7 @@ async fn test_backend_append_ignores_create_stream_config_for_existing_stream() 
             &basin_name,
             &stream_name,
             None,
-            Some(requested_create_stream_config()),
+            requested_create_stream_config(),
         )
         .await
         .expect("Failed to open append handle")
@@ -286,15 +286,16 @@ async fn test_backend_append_session_defers_auto_create_to_first_message_config(
         ..Default::default()
     };
     let mut messages = futures::stream::iter(vec![
-        message(b"first", Some(requested_create_stream_config())),
-        message(b"second", Some(conflicting)),
+        message(b"first", requested_create_stream_config()),
+        message(b"second", conflicting),
     ])
     .peekable();
 
     let create_stream_config = std::pin::Pin::new(&mut messages)
         .peek()
         .await
-        .and_then(|message| message.create_stream_config.clone());
+        .map(|message| message.create_stream_config.clone())
+        .expect("first message");
     let handle = backend
         .open_for_append(&basin_name, &stream_name, None, create_stream_config)
         .await

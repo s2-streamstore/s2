@@ -202,7 +202,8 @@ impl TryFrom<AppendInput> for s2_common::stream::AppendMessage {
             },
             create_stream_config: create_stream_config
                 .map(|proto_config| config::StreamConfig::from(proto_config).try_into())
-                .transpose()?,
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 }

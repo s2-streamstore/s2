@@ -329,7 +329,7 @@ impl Backend {
         &self,
         basin: &BasinName,
         stream: &StreamName,
-        should_auto_create: impl FnOnce(&BasinConfig) -> bool,
+        auto_create_on: AutoCreateOn,
     ) -> Result<StreamLookup, E>
     where
         E: From<StreamerError>
@@ -345,7 +345,7 @@ impl Backend {
                     Err(GetBasinConfigError::Storage(e)) => Err(e)?,
                     Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
                 };
-                if should_auto_create(&config) {
+                if auto_create_on.is_enabled(&config) {
                     Ok(StreamLookup::AutoCreate)
                 } else {
                     Err(e.into())
@@ -417,7 +417,7 @@ impl Backend {
         &self,
         basin: &BasinName,
         stream: &StreamName,
-        should_auto_create: impl FnOnce(&BasinConfig) -> bool,
+        auto_create_on: AutoCreateOn,
         create_stream_config: OptionalStreamConfig,
         resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
     ) -> Result<StreamHandle, E>
@@ -431,7 +431,7 @@ impl Backend {
             + From<StreamNotFoundError>,
     {
         let client = match self
-            .lookup_stream_for_auto_create::<E>(basin, stream, should_auto_create)
+            .lookup_stream_for_auto_create::<E>(basin, stream, auto_create_on)
             .await?
         {
             StreamLookup::Found(client) => client,
@@ -441,6 +441,24 @@ impl Backend {
             }
         };
         self.stream_handle(client, resolve_encryption)
+    }
+}
+
+/// Which basin setting governs creating a missing stream on demand.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum AutoCreateOn {
+    /// `create_stream_on_append`
+    Append,
+    /// `create_stream_on_read`
+    Read,
+}
+
+impl AutoCreateOn {
+    fn is_enabled(self, config: &BasinConfig) -> bool {
+        match self {
+            Self::Append => config.create_stream_on_append,
+            Self::Read => config.create_stream_on_read,
+        }
     }
 }
 
@@ -684,7 +702,9 @@ mod tests {
                     let basin = basin.clone();
                     let stream = stream.clone();
                     tokio::spawn(async move {
-                        let handle = backend.open_for_append(&basin, &stream, None, None).await?;
+                        let handle = backend
+                            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                            .await?;
                         handle.append(append_input(&format!("r{i}"))).await
                     })
                 })

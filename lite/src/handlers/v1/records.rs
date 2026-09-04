@@ -643,7 +643,12 @@ mod tests {
         encryption_key: EncryptionKey,
     ) {
         backend
-            .open_for_append(basin, stream, Some(encryption_key), None)
+            .open_for_append(
+                basin,
+                stream,
+                Some(encryption_key),
+                OptionalStreamConfig::default(),
+            )
             .await
             .expect("open append handle")
             .append(append_input(body))
