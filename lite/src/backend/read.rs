@@ -38,7 +38,7 @@ impl Backend {
             basin,
             stream,
             |config| config.create_stream_on_read,
-            async || OptionalStreamConfig::default(),
+            OptionalStreamConfig::default(),
             |_| Ok(EncryptionSpec::Plain),
         )
         .await
@@ -54,7 +54,7 @@ impl Backend {
             basin,
             stream,
             |config| config.create_stream_on_read,
-            async || OptionalStreamConfig::default(),
+            OptionalStreamConfig::default(),
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await

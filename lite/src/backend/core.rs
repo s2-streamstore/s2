@@ -323,16 +323,102 @@ impl Backend {
         }
     }
 
+    /// Look up `stream`, distinguishing a missing stream that the basin config allows creating
+    /// on demand from one that does not.
+    pub(super) async fn lookup_stream_for_auto_create<E>(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        should_auto_create: impl FnOnce(&BasinConfig) -> bool,
+    ) -> Result<StreamLookup, E>
+    where
+        E: From<StreamerError>
+            + From<StorageError>
+            + From<BasinNotFoundError>
+            + From<StreamNotFoundError>,
+    {
+        match self.streamer_client_guarded(basin, stream).await {
+            Ok(client) => Ok(StreamLookup::Found(client)),
+            Err(StreamerError::StreamNotFound(e)) => {
+                let config = match self.get_basin_config(basin.clone()).await {
+                    Ok(config) => config,
+                    Err(GetBasinConfigError::Storage(e)) => Err(e)?,
+                    Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
+                };
+                if should_auto_create(&config) {
+                    Ok(StreamLookup::AutoCreate)
+                } else {
+                    Err(e.into())
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Create `stream` on demand with `create_stream_config` layered over the basin's default
+    /// stream config, tolerating a concurrent creation. The config must already be validated.
+    pub(super) async fn auto_create_stream<E>(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        create_stream_config: OptionalStreamConfig,
+    ) -> Result<GuardedStreamerClient, E>
+    where
+        E: From<StreamerError>
+            + From<StorageError>
+            + From<BasinNotFoundError>
+            + From<TransactionConflictError>
+            + From<BasinDeletionPendingError>
+            + From<StreamDeletionPendingError>,
+    {
+        if let Err(e) = self
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                create_stream_config,
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+        {
+            match e {
+                ProvisionStreamError::Storage(e) => Err(e)?,
+                ProvisionStreamError::TransactionConflict(e) => Err(e)?,
+                ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
+                ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
+                ProvisionStreamError::BasinNotFound(e) => Err(e)?,
+                ProvisionStreamError::StreamAlreadyExists(_) => {}
+                ProvisionStreamError::Validation(e) => {
+                    unreachable!("auto-create config is validated at the API boundary: {e}")
+                }
+            }
+        }
+        Ok(self.streamer_client_guarded(basin, stream).await?)
+    }
+
+    pub(super) fn stream_handle<E>(
+        &self,
+        client: GuardedStreamerClient,
+        resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
+    ) -> Result<StreamHandle, E> {
+        Ok(StreamHandle {
+            db: self.db.clone(),
+            encryption: resolve_encryption(client.cipher())?,
+            client,
+        })
+    }
+
     /// Resolve a handle for `stream`, creating it on demand if the basin config allows.
     ///
-    /// `create_stream_config` is only invoked when the stream is actually being created, and its
-    /// result is layered over the basin's default stream config. It must already be validated.
+    /// `create_stream_config` is layered over the basin's default stream config only if the
+    /// stream is actually being created. It must already be validated.
     pub(super) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         should_auto_create: impl FnOnce(&BasinConfig) -> bool,
-        create_stream_config: impl AsyncFnOnce() -> OptionalStreamConfig,
+        create_stream_config: OptionalStreamConfig,
         resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
     ) -> Result<StreamHandle, E>
     where
@@ -344,59 +430,26 @@ impl Backend {
             + From<StreamDeletionPendingError>
             + From<StreamNotFoundError>,
     {
-        match self.streamer_client_guarded(basin, stream).await {
-            Ok(client) => Ok(StreamHandle {
-                db: self.db.clone(),
-                encryption: resolve_encryption(client.cipher())?,
-                client,
-            }),
-            Err(StreamerError::StreamNotFound(e)) => {
-                let config = match self.get_basin_config(basin.clone()).await {
-                    Ok(config) => config,
-                    Err(GetBasinConfigError::Storage(e)) => Err(e)?,
-                    Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
-                };
-                if should_auto_create(&config) {
-                    let create_stream_config = create_stream_config().await;
-                    if let Err(e) = self
-                        .provision_stream(
-                            basin.clone(),
-                            stream.clone(),
-                            create_stream_config,
-                            ProvisionMode::CreateOnly {
-                                request_token: None,
-                            },
-                        )
-                        .await
-                    {
-                        match e {
-                            ProvisionStreamError::Storage(e) => Err(e)?,
-                            ProvisionStreamError::TransactionConflict(e) => Err(e)?,
-                            ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
-                            ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
-                            ProvisionStreamError::BasinNotFound(e) => Err(e)?,
-                            ProvisionStreamError::StreamAlreadyExists(_) => {}
-                            ProvisionStreamError::Validation(e) => {
-                                unreachable!(
-                                    "auto-create config is validated at the API boundary: {e}"
-                                )
-                            }
-                        }
-                    }
-                    let client = self.streamer_client_guarded(basin, stream).await?;
-                    let encryption = resolve_encryption(client.cipher())?;
-                    Ok(StreamHandle {
-                        db: self.db.clone(),
-                        encryption,
-                        client,
-                    })
-                } else {
-                    Err(e.into())
-                }
+        let client = match self
+            .lookup_stream_for_auto_create::<E>(basin, stream, should_auto_create)
+            .await?
+        {
+            StreamLookup::Found(client) => client,
+            StreamLookup::AutoCreate => {
+                self.auto_create_stream::<E>(basin, stream, create_stream_config)
+                    .await?
             }
-            Err(e) => Err(e.into()),
-        }
+        };
+        self.stream_handle(client, resolve_encryption)
     }
+}
+
+/// Outcome of [`Backend::lookup_stream_for_auto_create`].
+pub(super) enum StreamLookup {
+    /// The stream exists.
+    Found(GuardedStreamerClient),
+    /// The stream does not exist, and the basin config allows creating it on demand.
+    AutoCreate,
 }
 
 #[cfg(test)]

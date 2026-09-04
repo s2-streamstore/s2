@@ -15,7 +15,10 @@ use s2_common::{
         AppendInput, AppendMessage, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamName,
     },
 };
-use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
+use s2_lite::backend::{
+    AppendSessionOpen,
+    error::{AppendError, CheckTailError, ReadError},
+};
 
 use super::common::*;
 
@@ -249,7 +252,7 @@ async fn test_backend_append_ignores_create_stream_config_for_existing_stream() 
 }
 
 #[tokio::test]
-async fn test_backend_append_session_auto_create_uses_first_message_config() {
+async fn test_backend_append_session_defers_auto_create_to_first_message_config() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
@@ -258,6 +261,15 @@ async fn test_backend_append_session_auto_create_uses_first_message_config() {
     )
     .await;
     let stream_name = test_stream_name("missing");
+
+    // Opening the session must not create the stream: the config to apply is only known once
+    // the first message arrives, and clients wait for the response before sending it.
+    let open = backend
+        .open_for_append_session(&basin_name, &stream_name, None)
+        .await
+        .expect("Failed to open append session");
+    assert!(matches!(open, AppendSessionOpen::Deferred));
+    assert_stream_count(&backend, &basin_name, 0).await;
 
     let message = |body: &'static [u8], create_stream_config| AppendMessage {
         input: AppendInput {
@@ -274,22 +286,21 @@ async fn test_backend_append_session_auto_create_uses_first_message_config() {
         ..Default::default()
     };
     let mut messages = futures::stream::iter(vec![
-        Ok::<_, std::convert::Infallible>(message(
-            b"first",
-            Some(requested_create_stream_config()),
-        )),
-        Ok(message(b"second", Some(conflicting))),
+        message(b"first", Some(requested_create_stream_config())),
+        message(b"second", Some(conflicting)),
     ])
     .peekable();
 
-    let handle = backend
-        .open_for_append_session(&basin_name, &stream_name, None, &mut messages)
+    let create_stream_config = std::pin::Pin::new(&mut messages)
+        .peek()
         .await
-        .expect("Failed to open append session");
-    // Peeking must not consume the first message.
-    let inputs = messages.map(|message| message.expect("infallible").input);
+        .and_then(|message| message.create_stream_config.clone());
+    let handle = backend
+        .open_for_append(&basin_name, &stream_name, None, create_stream_config)
+        .await
+        .expect("Failed to auto-create stream for append session");
     let acks: Vec<_> = handle
-        .append_session(inputs)
+        .append_session(messages.map(|message| message.input))
         .try_collect()
         .await
         .expect("Failed to append in session");
@@ -301,6 +312,33 @@ async fn test_backend_append_session_auto_create_uses_first_message_config() {
         .await
         .expect("Failed to get stream config");
     assert_eq!(config, expected_merged_stream_config());
+
+    // Now that the stream exists, opening a session resolves it directly.
+    let open = backend
+        .open_for_append_session(&basin_name, &stream_name, None)
+        .await
+        .expect("Failed to open append session");
+    assert!(matches!(open, AppendSessionOpen::Ready(_)));
+}
+
+#[tokio::test]
+async fn test_backend_append_session_without_auto_create_returns_not_found() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-no-auto-create-session",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+
+    let err = backend
+        .open_for_append_session(&basin_name, &stream_name, None)
+        .await
+        .err()
+        .expect("Expected StreamNotFound error");
+    assert!(matches!(err, AppendError::StreamNotFound(_)));
+    assert_stream_count(&backend, &basin_name, 0).await;
 }
 
 #[tokio::test]

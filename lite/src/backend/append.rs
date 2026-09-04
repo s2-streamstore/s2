@@ -1,26 +1,21 @@
 use std::{
     collections::VecDeque,
     ops::{DerefMut as _, Range, RangeTo},
-    pin::Pin,
     sync::Arc,
 };
 
-use futures::{
-    Stream, StreamExt as _,
-    future::OptionFuture,
-    stream::{FuturesOrdered, Peekable},
-};
+use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
     basin::BasinName,
     config::OptionalStreamConfig,
     encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
-    stream::{AppendAck, AppendInput, AppendMessage, StreamName},
+    stream::{AppendAck, AppendInput, StreamName},
 };
 use s2_storage::record::encrypt_append_input;
 use tokio::sync::oneshot;
 
-use super::{Backend, StreamHandle};
+use super::{Backend, StreamHandle, core::StreamLookup};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
@@ -39,7 +34,7 @@ impl Backend {
             basin,
             stream,
             |config| config.create_stream_on_append,
-            async || create_stream_config.unwrap_or_default(),
+            create_stream_config.unwrap_or_default(),
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await
@@ -47,33 +42,40 @@ impl Backend {
 
     /// Open a stream for an append session.
     ///
-    /// The stream is looked up eagerly. Only if it is missing and the basin has
-    /// `create_stream_on_append` enabled is the first message peeked, so that its
-    /// `create_stream_config` can be applied over the basin defaults. If the first message is
-    /// unavailable or failed to decode, the stream is created with basin defaults and the
-    /// error surfaces through the session as usual.
-    pub async fn open_for_append_session<S, E>(
+    /// Unlike [`Backend::open_for_append`], a missing stream is not created here even if the basin
+    /// has `create_stream_on_append` enabled, since the `create_stream_config` to apply is carried
+    /// by the first message, which clients only send once they have the response headers. In that
+    /// case [`AppendSessionOpen::Deferred`] is returned and the caller is expected to complete
+    /// stream creation with [`Backend::open_for_append`] once the first message is available.
+    pub async fn open_for_append_session(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         encryption_key: Option<EncryptionKey>,
-        messages: &mut Peekable<S>,
-    ) -> Result<StreamHandle, AppendError>
-    where
-        S: Stream<Item = Result<AppendMessage, E>> + Unpin,
-    {
-        self.stream_handle_with_auto_create::<AppendError>(
-            basin,
-            stream,
-            |config| config.create_stream_on_append,
-            async || match Pin::new(messages).peek().await {
-                Some(Ok(message)) => message.create_stream_config.clone().unwrap_or_default(),
-                Some(Err(_)) | None => OptionalStreamConfig::default(),
-            },
-            |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
-        )
-        .await
+    ) -> Result<AppendSessionOpen, AppendError> {
+        match self
+            .lookup_stream_for_auto_create::<AppendError>(basin, stream, |config| {
+                config.create_stream_on_append
+            })
+            .await?
+        {
+            StreamLookup::Found(client) => Ok(AppendSessionOpen::Ready(
+                self.stream_handle::<AppendError>(client, |cipher| {
+                    Ok(EncryptionSpec::resolve(cipher, encryption_key)?)
+                })?,
+            )),
+            StreamLookup::AutoCreate => Ok(AppendSessionOpen::Deferred),
+        }
     }
+}
+
+/// Outcome of [`Backend::open_for_append_session`].
+pub enum AppendSessionOpen {
+    /// The stream exists.
+    Ready(StreamHandle),
+    /// The stream does not exist and the basin has `create_stream_on_append` enabled.
+    /// Creation is deferred until the first message so its `create_stream_config` can be applied.
+    Deferred,
 }
 
 impl StreamHandle {
