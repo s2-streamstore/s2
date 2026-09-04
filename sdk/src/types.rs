@@ -3253,7 +3253,7 @@ pub struct AppendInput {
     ///
     /// Only takes effect when the basin has `create_stream_on_append` enabled and the stream
     /// does not exist yet. Unset fields inherit the basin's default stream configuration.
-    /// Ignored if the stream already exists, so it is safe to send on every append.
+    /// Ignored if the stream already exists.
     pub create_stream_config: Option<StreamConfig>,
 }
 
