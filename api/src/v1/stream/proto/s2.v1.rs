@@ -55,7 +55,6 @@ pub struct DeleteOnEmptyConfig {
     pub min_age_secs: u64,
 }
 /// Stream configuration.
-/// Unset fields inherit from the basin's default stream configuration.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StreamConfig {
     /// Storage class for recent writes.
@@ -104,8 +103,8 @@ pub struct AppendInput {
     #[prost(string, optional, tag = "3")]
     pub fencing_token: ::core::option::Option<::prost::alloc::string::String>,
     /// Stream configuration to apply if this append creates the stream via the basin's
-    /// `create_stream_on_append` setting. Unset fields inherit the basin's default stream
-    /// configuration. Ignored if the stream already exists.
+    /// `create_stream_on_append` setting. Unset fields inherit the basin's
+    /// `default_stream_config`. Ignored if the stream already exists.
     #[prost(message, optional, tag = "4")]
     pub create_stream_config: ::core::option::Option<StreamConfig>,
 }
