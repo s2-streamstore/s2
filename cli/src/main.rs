@@ -458,9 +458,14 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 record_stream,
                 args.uri,
                 encryption_key.as_ref(),
-                args.fencing_token,
-                args.match_seq_num,
-                *args.linger,
+                ops::AppendOptions {
+                    fencing_token: args.fencing_token,
+                    match_seq_num: args.match_seq_num,
+                    linger: *args.linger,
+                    create_stream_config: args
+                        .create_stream_config
+                        .map(apply::stream_config_to_sdk),
+                },
             );
             let mut acks = std::pin::pin!(acks);
             let mut last_printed_batch_end: Option<u64> = None;

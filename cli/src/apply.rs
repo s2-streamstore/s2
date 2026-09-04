@@ -103,7 +103,7 @@ fn basin_config_to_sdk(config: s2_resource_spec::BasinConfig) -> s2_sdk::types::
     sdk_config
 }
 
-fn stream_config_to_sdk(config: s2_resource_spec::StreamConfig) -> s2_sdk::types::StreamConfig {
+pub fn stream_config_to_sdk(config: s2_resource_spec::StreamConfig) -> s2_sdk::types::StreamConfig {
     let mut sdk_config = s2_sdk::types::StreamConfig::new();
     if let Some(storage_class) = config.storage_class {
         sdk_config = sdk_config.with_storage_class(storage_class_to_sdk(storage_class));
