@@ -3249,7 +3249,7 @@ pub struct AppendInput {
     /// If unspecified, no matching is performed. If specified and mismatched,
     /// the append fails. A stream defaults to `""` as its fencing token.
     pub fencing_token: Option<FencingToken>,
-    /// Stream configuration to apply if this append creates the stream on demand.
+    /// Stream configuration to apply if the stream is created on append.
     ///
     /// Only takes effect when the basin has `create_stream_on_append` enabled and the stream
     /// does not exist yet. Unset fields inherit the basin's default stream configuration.
@@ -3284,7 +3284,7 @@ impl AppendInput {
         }
     }
 
-    /// Set the stream configuration to apply if this append creates the stream on demand.
+    /// Set the stream configuration to apply if the stream is created on append.
     ///
     /// See [`AppendInput::create_stream_config`].
     pub fn with_create_stream_config(self, create_stream_config: StreamConfig) -> Self {

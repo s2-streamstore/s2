@@ -163,7 +163,10 @@ impl AppendInputs {
         }
     }
 
-    /// Set the stream configuration to apply if an [`AppendInput`] creates the stream on demand.
+    /// Set the stream configuration to apply if the stream is created on append.
+    ///
+    /// Only takes effect when the basin has `create_stream_on_append` enabled and the stream does
+    /// not exist yet.
     pub fn with_create_stream_config(self, create_stream_config: StreamConfig) -> Self {
         Self {
             create_stream_config: Some(create_stream_config),
