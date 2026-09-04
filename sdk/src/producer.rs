@@ -133,7 +133,7 @@ impl ProducerConfig {
     /// Set the stream configuration to apply if the stream is created on append.
     ///
     /// Only takes effect when the basin has `create_stream_on_append` enabled and the stream does
-    /// not exist yet. Ignored once the stream exists.
+    /// not exist yet. Ignored if the stream exists.
     ///
     /// Defaults to `None`.
     pub fn with_create_stream_config(self, create_stream_config: StreamConfig) -> Self {
