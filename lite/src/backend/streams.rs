@@ -17,6 +17,7 @@ use super::{
     Backend,
     store::db_txn_get,
     streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
+    validate_storage_class,
 };
 use crate::{
     backend::{
@@ -101,6 +102,12 @@ impl Backend {
         if basin_meta.deleted_at.is_some() {
             return Err(BasinDeletionPendingError { basin }.into());
         }
+
+        validate_storage_class(
+            config
+                .storage_class
+                .or(basin_meta.config.default_stream_config.storage_class),
+        )?;
 
         let stream_meta_key = kv::stream_meta::ser_key(&basin, &stream);
 
@@ -314,6 +321,7 @@ impl Backend {
         meta.config = OptionalStreamConfig::from(meta.config)
             .reconfigure(reconfig)
             .merge(basin_meta.config.default_stream_config);
+        validate_storage_class(Some(meta.config.storage_class))?;
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 

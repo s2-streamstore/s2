@@ -420,6 +420,8 @@ pub enum ProvisionBasinError {
     BasinAlreadyExists(#[from] BasinAlreadyExistsError),
     #[error(transparent)]
     BasinDeletionPending(#[from] BasinDeletionPendingError),
+    #[error(transparent)]
+    Validation(#[from] s2_common::ValidationError),
 }
 
 impl From<slatedb::Error> for ProvisionBasinError {
@@ -450,6 +452,8 @@ pub enum ReconfigureBasinError {
     BasinNotFound(#[from] BasinNotFoundError),
     #[error(transparent)]
     BasinDeletionPending(#[from] BasinDeletionPendingError),
+    #[error(transparent)]
+    Validation(#[from] s2_common::ValidationError),
 }
 
 impl From<slatedb::Error> for ReconfigureBasinError {

@@ -139,7 +139,8 @@
       "type": "string",
       "enum": [
         "standard",
-        "express"
+        "express",
+        "native"
       ]
     },
     "RetentionPolicy": {

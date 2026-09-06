@@ -11,7 +11,7 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, bgtasks::BgtaskTrigger, store::db_txn_get};
+use super::{Backend, bgtasks::BgtaskTrigger, store::db_txn_get, validate_storage_class};
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, DeleteBasinError,
@@ -69,6 +69,7 @@ impl Backend {
         config: BasinConfig,
         mode: ProvisionMode,
     ) -> Result<ProvisionResult<BasinInfo>, ProvisionBasinError> {
+        validate_storage_class(config.default_stream_config.storage_class)?;
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -176,6 +177,7 @@ impl Backend {
         }
 
         meta.config = meta.config.reconfigure(reconfig);
+        validate_storage_class(meta.config.default_stream_config.storage_class)?;
 
         txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
 

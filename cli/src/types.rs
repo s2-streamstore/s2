@@ -208,6 +208,7 @@ pub use sdk::types::LocationName;
 pub enum StorageClass {
     Standard,
     Express,
+    Native,
 }
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
@@ -322,6 +323,7 @@ impl From<StorageClass> for sdk::types::StorageClass {
         match class {
             StorageClass::Standard => sdk::types::StorageClass::Standard,
             StorageClass::Express => sdk::types::StorageClass::Express,
+            StorageClass::Native => sdk::types::StorageClass::Native,
         }
     }
 }
@@ -331,6 +333,7 @@ impl From<sdk::types::StorageClass> for StorageClass {
         match class {
             sdk::types::StorageClass::Standard => StorageClass::Standard,
             sdk::types::StorageClass::Express => StorageClass::Express,
+            sdk::types::StorageClass::Native => StorageClass::Native,
         }
     }
 }

@@ -49,6 +49,7 @@ fn storage_class_from_sdk(storage_class: s2_sdk::types::StorageClass) -> Storage
     match storage_class {
         s2_sdk::types::StorageClass::Standard => StorageClass::Standard,
         s2_sdk::types::StorageClass::Express => StorageClass::Express,
+        s2_sdk::types::StorageClass::Native => StorageClass::Native,
     }
 }
 
@@ -127,6 +128,7 @@ fn storage_class_to_sdk(
     match storage_class {
         s2_resource_spec::StorageClass::Standard => s2_sdk::types::StorageClass::Standard,
         s2_resource_spec::StorageClass::Express => s2_sdk::types::StorageClass::Express,
+        s2_resource_spec::StorageClass::Native => s2_sdk::types::StorageClass::Native,
     }
 }
 
@@ -311,6 +313,7 @@ fn format_storage_class(sc: StorageClass) -> &'static str {
     match sc {
         StorageClass::Standard => "standard",
         StorageClass::Express => "express",
+        StorageClass::Native => "native",
     }
 }
 

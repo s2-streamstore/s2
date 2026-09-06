@@ -104,6 +104,8 @@ headless host that has no credential store.
 
 It uses [SlateDB](https://slatedb.io) as its storage engine, which relies entirely on object storage for durability.
 
+Lite accepts `standard` and `express` storage-class settings for API compatibility; both use the configured SlateDB backend. The `native` storage class is not supported and is rejected in stream configurations and basin defaults.
+
 It is easy to run `s2 lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. 
 
 You can also simply not specify a `--bucket`, which makes it operate entirely in-memory (or use `--local-root` to persist to local disk instead).
