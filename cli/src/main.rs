@@ -661,9 +661,8 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     fencing_token: args.fencing_token,
                     match_seq_num: args.match_seq_num,
                     linger: *args.linger,
-                    stream_config: args
-                        .stream_config
-                        .map(apply::stream_config_to_sdk),
+                    stream_config: (!args.stream_config.is_empty())
+                        .then(|| args.stream_config.into()),
                 },
             );
             let mut acks = std::pin::pin!(acks);

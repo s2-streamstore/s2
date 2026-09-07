@@ -588,8 +588,10 @@ fn append_with_stream_config() {
         "text",
         "--input",
         "-",
-        "--stream-config",
-        r#"{"retention_policy": "1h", "delete_on_empty": {"min_age": "5m"}}"#,
+        "--retention-policy",
+        "1h",
+        "--delete-on-empty-min-age",
+        "5m",
     ])
     .write_stdin("first record\n")
     .assert()
@@ -612,8 +614,8 @@ fn append_with_stream_config() {
         "text",
         "--input",
         "-",
-        "--stream-config",
-        r#"{"retention_policy": "2h"}"#,
+        "--retention-policy",
+        "2h",
     ])
     .write_stdin("second record\n")
     .assert()
@@ -626,21 +628,6 @@ fn append_with_stream_config() {
 
     cleanup_stream(&basin, &stream);
     cleanup_basin(&basin);
-}
-
-#[test]
-#[serial]
-fn append_with_invalid_stream_config_fails() {
-    s2().args([
-        "append",
-        "s2://some-basin/some-stream",
-        "--stream-config",
-        r#"{"retention_policy": "not-a-duration"}"#,
-    ])
-    .write_stdin("record\n")
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("invalid stream config JSON"));
 }
 
 #[test]

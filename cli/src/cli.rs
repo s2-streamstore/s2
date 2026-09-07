@@ -691,22 +691,17 @@ pub struct AppendArgs {
     #[arg(long, default_value = "5ms")]
     pub linger: humantime::Duration,
 
-    /// Stream configuration to apply if the stream is created on append.
-    ///
-    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
-    /// already exists.
-    ///
-    /// JSON in the same shape as a stream `config` in an `s2 apply` spec, e.g.
-    /// '{"retention_policy": "1h", "delete_on_empty": {"min_age": "5m"}}'.
-    #[arg(long, value_name = "JSON", value_parser = parse_stream_config_json)]
-    pub stream_config: Option<s2_resource_spec::StreamConfig>,
-
     #[command(flatten)]
     pub encryption_key: EncryptionKeyArgs,
-}
 
-fn parse_stream_config_json(s: &str) -> Result<s2_resource_spec::StreamConfig, String> {
-    serde_json::from_str(s).map_err(|e| format!("invalid stream config JSON: {e}"))
+    /// Stream configuration to apply if the stream is created on append.
+    /// Unset fields inherit the basin's default stream configuration.
+    /// Ignored if the stream already exists.
+    #[command(
+        flatten,
+        next_help_heading = "Stream configuration (applied only if the stream is created on append)"
+    )]
+    pub stream_config: StreamConfig,
 }
 
 #[derive(Args, Debug, Clone, Default)]
