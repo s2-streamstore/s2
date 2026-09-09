@@ -25,7 +25,8 @@ use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::ValidationError;
 /// Access token ID.
 ///
-/// **Note:** It must be unique to the account and between 1 and 96 bytes in length.
+/// **Note:** It must be unique to the account and between 1 and 96 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::access::AccessTokenId;
 /// See [`ListAccessTokensInput::prefix`].
 pub use s2_common::access::AccessTokenIdPrefix;
@@ -47,7 +48,8 @@ pub use s2_common::basin::BasinNameStartAfter;
 pub use s2_common::location::LocationName;
 /// Stream name.
 ///
-/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
+/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::stream::StreamName;
 /// See [`ListStreamsInput::prefix`].
 pub use s2_common::stream::StreamNamePrefix;

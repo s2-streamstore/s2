@@ -193,7 +193,8 @@ impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct IssueAccessTokenRequest {
     /// Access token ID.
-    /// It must be unique to the account and between 1 and 96 bytes in length.
+    /// It must be unique to the account and between 1 and 96 bytes in length, and must not
+    /// contain NUL bytes.
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
