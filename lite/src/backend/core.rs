@@ -399,7 +399,6 @@ impl Backend {
     }
 
     /// Fail if any field set in `expected` differs from the existing configuration of `stream`.
-    /// A no-op if `expected` is empty, so unconditional callers pay no lookup.
     async fn check_stream_config<E>(
         &self,
         basin: &BasinName,
