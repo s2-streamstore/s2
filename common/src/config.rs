@@ -83,7 +83,8 @@ impl Default for RetentionPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "kebab-case")]
 pub enum TimestampingMode {
     #[default]
     ClientPrefer,
@@ -215,6 +216,66 @@ impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
     }
 }
 
+/// A field set in an [`OptionalStreamConfig`] that disagrees with the [`StreamConfig`] it was
+/// checked against. See [`OptionalStreamConfig::mismatch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum StreamConfigMismatch {
+    StorageClass {
+        expected: StorageClass,
+        actual: StorageClass,
+    },
+    RetentionPolicy {
+        expected: RetentionPolicy,
+        actual: RetentionPolicy,
+    },
+    TimestampingMode {
+        expected: TimestampingMode,
+        actual: TimestampingMode,
+    },
+    TimestampingUncapped {
+        expected: bool,
+        actual: bool,
+    },
+    DeleteOnEmptyMinAge {
+        expected: Duration,
+        actual: Duration,
+    },
+}
+
+impl StreamConfigMismatch {
+    /// Snake-cased name of the mismatched field.
+    pub fn field(&self) -> &'static str {
+        self.into()
+    }
+}
+
+impl std::fmt::Display for StreamConfigMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn secs(d: &Duration) -> String {
+            format!("{}s", d.as_secs())
+        }
+        fn retention(p: &RetentionPolicy) -> String {
+            match p {
+                RetentionPolicy::Age(age) => format!("age {}", secs(age)),
+                RetentionPolicy::Infinite() => "infinite".to_owned(),
+            }
+        }
+        let (expected, actual) = match self {
+            Self::StorageClass { expected, actual } => (expected.to_string(), actual.to_string()),
+            Self::RetentionPolicy { expected, actual } => (retention(expected), retention(actual)),
+            Self::TimestampingMode { expected, actual } => {
+                (expected.to_string(), actual.to_string())
+            }
+            Self::TimestampingUncapped { expected, actual } => {
+                (expected.to_string(), actual.to_string())
+            }
+            Self::DeleteOnEmptyMinAge { expected, actual } => (secs(expected), secs(actual)),
+        };
+        write!(f, "{}: expected {expected}, found {actual}", self.field())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalStreamConfig {
     pub storage_class: Option<StorageClass>,
@@ -233,29 +294,34 @@ impl OptionalStreamConfig {
 
     /// Whether no field is set.
     pub fn is_empty(&self) -> bool {
-        self.storage_class.is_none()
-            && self.retention_policy.is_none()
-            && self.timestamping.mode.is_none()
-            && self.timestamping.uncapped.is_none()
-            && self.delete_on_empty.min_age.is_none()
+        *self == Self::default()
     }
 
-    /// Check every set field against `actual`, returning the name of the first field that
-    /// does not match. Unset fields are not compared.
-    pub fn mismatch(&self, actual: &StreamConfig) -> Option<&'static str> {
-        fn differs<T: PartialEq>(expected: Option<T>, actual: T) -> bool {
-            expected.is_some_and(|expected| expected != actual)
+    /// Check every set field against `actual`, returning the first one that does not match.
+    /// Unset fields are not compared.
+    pub fn mismatch(&self, actual: &StreamConfig) -> Option<StreamConfigMismatch> {
+        fn differs<T: PartialEq + Copy>(expected: Option<T>, actual: T) -> Option<(T, T)> {
+            expected
+                .filter(|expected| *expected != actual)
+                .map(|expected| (expected, actual))
         }
-        if differs(self.storage_class, actual.storage_class) {
-            Some("storage_class")
-        } else if differs(self.retention_policy, actual.retention_policy) {
-            Some("retention_policy")
-        } else if differs(self.timestamping.mode, actual.timestamping.mode) {
-            Some("timestamping.mode")
-        } else if differs(self.timestamping.uncapped, actual.timestamping.uncapped) {
-            Some("timestamping.uncapped")
-        } else if differs(self.delete_on_empty.min_age, actual.delete_on_empty.min_age) {
-            Some("delete_on_empty.min_age")
+        let Self {
+            storage_class,
+            retention_policy,
+            timestamping: OptionalTimestampingConfig { mode, uncapped },
+            delete_on_empty: OptionalDeleteOnEmptyConfig { min_age },
+        } = self;
+        if let Some((expected, actual)) = differs(*storage_class, actual.storage_class) {
+            Some(StreamConfigMismatch::StorageClass { expected, actual })
+        } else if let Some((expected, actual)) = differs(*retention_policy, actual.retention_policy)
+        {
+            Some(StreamConfigMismatch::RetentionPolicy { expected, actual })
+        } else if let Some((expected, actual)) = differs(*mode, actual.timestamping.mode) {
+            Some(StreamConfigMismatch::TimestampingMode { expected, actual })
+        } else if let Some((expected, actual)) = differs(*uncapped, actual.timestamping.uncapped) {
+            Some(StreamConfigMismatch::TimestampingUncapped { expected, actual })
+        } else if let Some((expected, actual)) = differs(*min_age, actual.delete_on_empty.min_age) {
+            Some(StreamConfigMismatch::DeleteOnEmptyMinAge { expected, actual })
         } else {
             None
         }
@@ -396,4 +462,39 @@ pub struct BasinReconfiguration {
     pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     pub create_stream_on_append: Maybe<bool>,
     pub create_stream_on_read: Maybe<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatch_compares_only_set_fields() {
+        let actual = StreamConfig {
+            storage_class: StorageClass::Standard,
+            retention_policy: RetentionPolicy::Age(Duration::from_secs(7 * 24 * 60 * 60)),
+            ..Default::default()
+        };
+
+        assert!(OptionalStreamConfig::default().is_empty());
+        assert_eq!(OptionalStreamConfig::default().mismatch(&actual), None);
+
+        let matching = OptionalStreamConfig {
+            storage_class: Some(StorageClass::Standard),
+            ..Default::default()
+        };
+        assert!(!matching.is_empty());
+        assert_eq!(matching.mismatch(&actual), None);
+
+        let differing = OptionalStreamConfig {
+            retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(3600))),
+            ..Default::default()
+        };
+        let mismatch = differing.mismatch(&actual).expect("should mismatch");
+        assert_eq!(mismatch.field(), "retention_policy");
+        assert_eq!(
+            mismatch.to_string(),
+            "retention_policy: expected age 3600s, found age 604800s"
+        );
+    }
 }

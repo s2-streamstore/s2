@@ -2,6 +2,7 @@ use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
     basin::BasinName,
+    config::StreamConfigMismatch,
     encryption::EncryptionSpecResolutionError,
     record::{FencingToken, SeqNum, StreamPosition},
     stream::StreamName,
@@ -61,11 +62,11 @@ pub struct BasinDeletionPendingError {
 pub struct StreamDeletionPendingError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("stream `{stream}` in basin `{basin}` exists with a different `{field}`")]
+#[error("stream `{stream}` in basin `{basin}` exists with a different config: {mismatch}")]
 pub struct StreamConfigMismatchError {
     pub basin: BasinName,
     pub stream: StreamName,
-    pub field: &'static str,
+    pub mismatch: StreamConfigMismatch,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]

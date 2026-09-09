@@ -354,11 +354,11 @@ impl Backend {
                         Err(GetStreamConfigError::StreamNotFound(e)) => Err(e)?,
                         Err(GetStreamConfigError::StreamDeletionPending(e)) => Err(e)?,
                     };
-                    if let Some(field) = stream_config.mismatch(&actual) {
+                    if let Some(mismatch) = stream_config.mismatch(&actual) {
                         Err(StreamConfigMismatchError {
                             basin: basin.clone(),
                             stream: stream.clone(),
-                            field,
+                            mismatch,
                         })?;
                     }
                 }

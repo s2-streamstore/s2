@@ -5,14 +5,14 @@ use s2_common::{
     basin::BasinName,
     config::{
         BasinConfig, DeleteOnEmptyConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-        RetentionPolicy, StorageClass, StreamConfig,
+        RetentionPolicy, StorageClass, StreamConfig, StreamConfigMismatch,
     },
     encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
     record::StreamPosition,
     stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamName},
 };
-use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
+use s2_lite::backend::error::{AppendError, CheckTailError, ReadError, StreamConfigMismatchError};
 
 use super::common::*;
 
@@ -243,7 +243,16 @@ async fn test_backend_append_existing_stream_config_must_match() {
         .await
         .map(drop);
     assert!(
-        matches!(&result, Err(AppendError::StreamConfigMismatch(e)) if e.field == "retention_policy"),
+        matches!(
+            &result,
+            Err(AppendError::StreamConfigMismatch(StreamConfigMismatchError {
+                mismatch: StreamConfigMismatch::RetentionPolicy {
+                    expected: RetentionPolicy::Age(expected),
+                    actual: RetentionPolicy::Age(actual),
+                },
+                ..
+            })) if *expected == Duration::from_secs(7200) && *actual == Duration::from_secs(3600)
+        ),
         "{result:?}"
     );
     let after = backend
@@ -258,7 +267,7 @@ async fn test_backend_read_existing_stream_config_must_match() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
-        "backend-auto-create-read-config-existing",
+        "backend-read-config-existing",
         BasinConfig::default(),
     )
     .await;
@@ -276,14 +285,23 @@ async fn test_backend_read_existing_stream_config_must_match() {
             &stream_name,
             None,
             OptionalStreamConfig {
-                storage_class: Some(StorageClass::Express),
+                storage_class: Some(StorageClass::Standard),
                 ..Default::default()
             },
         )
         .await
         .map(drop);
     assert!(
-        matches!(&result, Err(ReadError::StreamConfigMismatch(e)) if e.field == "storage_class"),
+        matches!(
+            &result,
+            Err(ReadError::StreamConfigMismatch(StreamConfigMismatchError {
+                mismatch: StreamConfigMismatch::StorageClass {
+                    expected: StorageClass::Standard,
+                    actual: StorageClass::Express,
+                },
+                ..
+            }))
+        ),
         "{result:?}"
     );
 }
