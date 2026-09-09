@@ -355,7 +355,7 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
 pub static STREAM_CONFIG_HEADER: HeaderName = HeaderName::from_static("s2-stream-config");
 
 /// Value of the `s2-stream-config` header: a JSON-encoded [`StreamConfig`] to apply if the stream
-/// is created on append. Ignored if the stream already exists.
+/// is created on append or read. Ignored if the stream already exists.
 ///
 /// Validated the same way as `CreateStream`.
 #[derive(Debug, Clone, PartialEq, Eq)]

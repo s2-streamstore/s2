@@ -632,6 +632,32 @@ fn append_with_stream_config() {
 
 #[test]
 #[serial]
+fn read_with_stream_config() {
+    let basin = unique_name("test-cli-csor-cfg");
+    s2().args(["create-basin", &basin, "--create-stream-on-read"])
+        .assert()
+        .success();
+    wait_for_basin(&basin);
+
+    let stream = unique_name("test-csor-new");
+    let uri = format!("s2://{basin}/{stream}");
+    // Reading at the tail of a freshly created (empty) stream is past-tail, so don't
+    // assert on the exit status; the request still creates the stream.
+    let _ = s2()
+        .args(["read", &uri, "--retention-policy", "1h"])
+        .assert();
+
+    s2().args(["get-stream-config", &uri])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1h"));
+
+    cleanup_stream(&basin, &stream);
+    cleanup_basin(&basin);
+}
+
+#[test]
+#[serial]
 fn tail_stream() {
     let basin = ensure_test_basin("test-cli-data");
     let stream = unique_name("test-data-tail");

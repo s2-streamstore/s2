@@ -425,6 +425,7 @@ impl BasinClient {
         start: ReadStart,
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
+        stream_config: Option<&StreamConfig>,
     ) -> Result<ReadBatch, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
         let mut builder = self
@@ -438,6 +439,7 @@ impl BasinClient {
         }
         let mut request = builder.build()?;
         set_encryption_header(&mut request, encryption);
+        set_stream_config_header(&mut request, stream_config);
         let response = self
             .request(request)
             .error_handler(read_response_error_handler)
@@ -545,6 +547,7 @@ impl BasinClient {
         start: ReadStart,
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
+        stream_config: Option<&StreamConfig>,
         reconnect: ReconnectAdvice,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
@@ -560,6 +563,7 @@ impl BasinClient {
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
         let mut request = request_builder.build()?;
         set_encryption_header(&mut request, encryption);
+        set_stream_config_header(&mut request, stream_config);
         let (response, access_token) = self.client.init_streaming_authorized(request).await?;
         let response = match response.into_result().await {
             Ok(response) => response,

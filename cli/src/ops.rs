@@ -535,7 +535,10 @@ pub async fn read(
 ) -> Result<ReadSession, CliError> {
     use std::time::SystemTime;
 
-    let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
+    let mut stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
+    if !args.stream_config.is_empty() {
+        stream = stream.with_stream_config(args.stream_config.clone().into());
+    }
 
     let from = match (args.seq_num, args.timestamp, args.tail_offset, args.ago) {
         (Some(seq), None, None, None) => ReadFrom::SeqNum(seq),

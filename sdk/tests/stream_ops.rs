@@ -2297,3 +2297,30 @@ async fn stream_config_applies_only_when_append_creates_stream()
     s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn stream_config_applies_when_read_creates_stream() -> Result<(), Box<dyn std::error::Error>>
+{
+    let s2 = s2();
+    let basin_name = unique_basin_name();
+    s2.create_basin(
+        CreateBasinInput::new(basin_name.clone())
+            .with_config(BasinConfig::new().with_create_stream_on_read(true)),
+    )
+    .await?;
+    let basin = s2.basin(basin_name.clone());
+
+    let stream_config = StreamConfig::new().with_retention_policy(RetentionPolicy::Age(3600));
+
+    let session_stream = unique_stream_name();
+    let _session = basin
+        .stream(session_stream.clone())
+        .with_stream_config(stream_config)
+        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .await?;
+    let config = basin.get_stream_config(session_stream).await?;
+    assert_eq!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
+
+    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    Ok(())
+}

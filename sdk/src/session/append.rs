@@ -9,7 +9,6 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use s2_api::v1::config::StreamConfig as ApiStreamConfig;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::Instant,
@@ -25,19 +24,12 @@ use crate::{
     frame_signal::FrameSignal,
     reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoffBuilder,
+    session::StreamHeaders,
     types::{
-        AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
-        ONE_MIB, StreamName, StreamPosition, ValidationError,
+        AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB,
+        StreamName, StreamPosition, ValidationError,
     },
 };
-
-/// Per-stream options sent as request headers on every (re)connect of an append session.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct AppendHeaders {
-    pub encryption: Option<EncryptionKey>,
-    /// `s2-stream-config`
-    pub stream_config: Option<ApiStreamConfig>,
-}
 
 /// Errors returned by an append session.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -240,7 +232,7 @@ impl AppendSession {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        headers: AppendHeaders,
+        headers: StreamHeaders,
         config: AppendSessionConfig,
     ) -> Self {
         let buffer_size = config
@@ -365,7 +357,7 @@ pub(crate) struct AppendSessionInternal {
 }
 
 impl AppendSessionInternal {
-    pub(crate) fn new(client: BasinClient, stream: StreamName, headers: AppendHeaders) -> Self {
+    pub(crate) fn new(client: BasinClient, stream: StreamName, headers: StreamHeaders) -> Self {
         let buffer_size = DEFAULT_CHANNEL_BUFFER_SIZE;
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
         let retry_builder = retry_builder(&client.config.retry);
@@ -478,7 +470,7 @@ impl AppendPermits {
 async fn run_session_with_retry(
     client: BasinClient,
     stream: StreamName,
-    headers: AppendHeaders,
+    headers: StreamHeaders,
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
@@ -609,7 +601,7 @@ enum SessionOutcome {
 async fn run_session(
     client: &BasinClient,
     stream: &StreamName,
-    headers: &AppendHeaders,
+    headers: &StreamHeaders,
     state: &mut SessionState,
     buffer_size: usize,
     frame_signal: &Option<FrameSignal>,
@@ -893,7 +885,7 @@ async fn drain_for_reconnect(
 async fn connect(
     client: &BasinClient,
     stream: &StreamName,
-    headers: &AppendHeaders,
+    headers: &StreamHeaders,
     buffer_size: usize,
     frame_signal: Option<FrameSignal>,
     reconnect: ReconnectAdvice,

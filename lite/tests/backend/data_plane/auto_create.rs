@@ -236,6 +236,33 @@ async fn test_backend_append_ignores_stream_config_for_existing_stream() {
 }
 
 #[tokio::test]
+async fn test_backend_read_auto_create_applies_stream_config() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-read-config",
+        BasinConfig {
+            create_stream_on_append: false,
+            create_stream_on_read: true,
+            ..basin_config_with_defaults()
+        },
+    )
+    .await;
+    let stream_name = test_stream_name("missing");
+
+    backend
+        .open_for_read(&basin_name, &stream_name, None, requested_stream_config())
+        .await
+        .expect("Failed to open read handle on auto-created stream");
+
+    let config = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await
+        .expect("Failed to get stream config");
+    assert_eq!(config, expected_merged_stream_config());
+}
+
+#[tokio::test]
 async fn test_backend_append_without_auto_create_returns_not_found() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(

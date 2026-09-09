@@ -5,7 +5,7 @@ use crate::{
     error::{AppendError, ReadError, RequestError},
     producer::{Producer, ProducerConfig},
     session::{
-        self, AppendHeaders, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError,
+        self, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError, StreamHeaders,
     },
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
@@ -441,10 +441,10 @@ impl S2Stream {
         }
     }
 
-    /// Set the stream configuration to apply if the stream is created on append.
+    /// Set the stream configuration to apply if the stream is created on append or read.
     ///
     /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
-    /// already exists. Sent as the `s2-stream-config` header on appends and append sessions.
+    /// already exists. Sent as the `s2-stream-config` header on appends and reads.
     pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
         Self {
             stream_config: Some(stream_config),
@@ -456,8 +456,8 @@ impl S2Stream {
         self.stream_config.clone().map(Into::into)
     }
 
-    fn append_headers(&self) -> AppendHeaders {
-        AppendHeaders {
+    fn headers(&self) -> StreamHeaders {
+        StreamHeaders {
             encryption: self.encryption.clone(),
             stream_config: self.api_stream_config(),
         }
@@ -493,6 +493,7 @@ impl S2Stream {
                 input.start.into(),
                 input.stop.into(),
                 self.encryption.as_ref(),
+                self.api_stream_config().as_ref(),
             )
             .await?;
         let mut batch = ReadBatch::from_api(batch);
@@ -507,7 +508,7 @@ impl S2Stream {
         AppendSession::new(
             self.client.clone(),
             self.name.clone(),
-            self.append_headers(),
+            self.headers(),
             config,
         )
     }
@@ -517,7 +518,7 @@ impl S2Stream {
         Producer::new(
             self.client.clone(),
             self.name.clone(),
-            self.append_headers(),
+            self.headers(),
             config,
         )
     }
@@ -531,7 +532,7 @@ impl S2Stream {
         session::read_session(
             self.client.clone(),
             self.name.clone(),
-            self.encryption.clone(),
+            self.headers(),
             input,
             config,
         )

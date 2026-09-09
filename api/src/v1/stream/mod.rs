@@ -209,18 +209,27 @@ pub enum ReadRequest {
     /// Unary
     Unary {
         encryption_key: Option<EncryptionKey>,
+        /// Stream configuration to apply if the stream is created on read, from the
+        /// `s2-stream-config` header.
+        stream_config: OptionalStreamConfig,
         format: Format,
         response_mime: JsonOrProto,
     },
     /// Server-Sent Events streaming response
     EventStream {
         encryption_key: Option<EncryptionKey>,
+        /// Stream configuration to apply if the stream is created on read, from the
+        /// `s2-stream-config` header.
+        stream_config: OptionalStreamConfig,
         format: Format,
         last_event_id: Option<sse::LastEventId>,
     },
     /// S2S streaming response
     S2s {
         encryption_key: Option<EncryptionKey>,
+        /// Stream configuration to apply if the stream is created on read, from the
+        /// `s2-stream-config` header.
+        stream_config: OptionalStreamConfig,
         response_compression: s2s::CompressionAlgorithm,
     },
 }

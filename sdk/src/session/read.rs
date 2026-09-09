@@ -22,8 +22,9 @@ use crate::{
     error::{ReadError, RequestError},
     reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoff,
+    session::StreamHeaders,
     types::{
-        AccessTokenMode, EncryptionKey, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
+        AccessTokenMode, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
         ReadSessionRetryPolicy, StreamName, StreamPosition,
     },
 };
@@ -371,7 +372,7 @@ impl Drop for ReadSession {
 pub async fn read_session(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<EncryptionKey>,
+    headers: StreamHeaders,
     input: ReadInput,
     config: ReadSessionConfig,
 ) -> Result<ReadSession, ReadSessionError> {
@@ -399,7 +400,7 @@ pub async fn read_session(
         match session_inner(
             client.clone(),
             name.clone(),
-            encryption.clone(),
+            headers.clone(),
             start.clone(),
             end.clone(),
             ReconnectAdvice::default(),
@@ -439,7 +440,7 @@ pub async fn read_session(
                 match session_inner(
                     client.clone(),
                     name.clone(),
-                    encryption.clone(),
+                    headers.clone(),
                     start.clone(),
                     end.clone(),
                     ReconnectAdvice::default(),
@@ -579,14 +580,21 @@ fn update_resume_start(start: &mut ReadStart, batch: &ReadBatch) {
 async fn session_inner(
     client: BasinClient,
     name: StreamName,
-    encryption: Option<EncryptionKey>,
+    headers: StreamHeaders,
     start: ReadStart,
     end: ReadEnd,
     reconnect: ReconnectAdvice,
     advised_reconnects: AdvisedReconnects,
 ) -> Result<InternalStreaming<ReadItem>, ReadSessionFailure> {
     let mut batches = client
-        .read_session(&name, start, end, encryption.as_ref(), reconnect.clone())
+        .read_session(
+            &name,
+            start,
+            end,
+            headers.encryption.as_ref(),
+            headers.stream_config.as_ref(),
+            reconnect.clone(),
+        )
         .await?;
 
     let mut declined_advice = false;

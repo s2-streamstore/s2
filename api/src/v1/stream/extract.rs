@@ -137,12 +137,16 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(&parts.headers);
         let encryption_key = parse_header_opt::<EncryptionKey>(&parts.headers)?;
+        let stream_config = parse_header_opt::<StreamConfigHeader>(&parts.headers)?
+            .map(|header| header.0)
+            .unwrap_or_default();
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
                 s2s::CompressionAlgorithm::from_accept_encoding(&parts.headers);
             return Ok(Self::S2s {
                 encryption_key,
+                stream_config,
                 response_compression,
             });
         }
@@ -155,6 +159,7 @@ where
             let last_event_id = parse_header_opt::<LastEventId>(&parts.headers)?;
             return Ok(Self::EventStream {
                 encryption_key,
+                stream_config,
                 format,
                 last_event_id,
             });
@@ -167,6 +172,7 @@ where
 
         Ok(Self::Unary {
             encryption_key,
+            stream_config,
             format,
             response_mime,
         })

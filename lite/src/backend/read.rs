@@ -29,6 +29,7 @@ use crate::{
 };
 
 impl Backend {
+    /// Open a stream for a check tail.
     pub async fn open_for_check_tail(
         &self,
         basin: &BasinName,
@@ -44,17 +45,22 @@ impl Backend {
         .await
     }
 
+    /// Open a stream for a read or read session.
+    ///
+    /// `stream_config` is applied if the stream is created on read. Unset fields inherit the
+    /// basin's default stream configuration. Ignored if the stream already exists.
     pub async fn open_for_read(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         encryption_key: Option<EncryptionKey>,
+        stream_config: OptionalStreamConfig,
     ) -> Result<StreamHandle, ReadError> {
         self.stream_handle_with_auto_create::<ReadError>(
             basin,
             stream,
             AutoCreateOn::Read,
-            OptionalStreamConfig::default(),
+            stream_config,
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await
@@ -588,7 +594,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -645,7 +651,7 @@ mod tests {
         };
 
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -739,7 +745,7 @@ mod tests {
         };
 
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -884,7 +890,7 @@ mod tests {
             wait: Some(wait),
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -980,7 +986,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)

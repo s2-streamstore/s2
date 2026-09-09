@@ -780,6 +780,15 @@ pub struct ReadArgs {
 
     #[command(flatten)]
     pub encryption_key: EncryptionKeyArgs,
+
+    /// Stream configuration to apply if the stream is created on read.
+    /// Unset fields inherit the basin's default stream configuration.
+    /// Ignored if the stream already exists.
+    #[command(
+        flatten,
+        next_help_heading = "Stream configuration (applied only if the stream is created on read)"
+    )]
+    pub stream_config: StreamConfig,
 }
 
 #[derive(Args, Debug)]

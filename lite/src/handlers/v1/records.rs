@@ -161,6 +161,7 @@ pub struct ReadArgs {
         v1t::StreamNamePathSegment,
         s2_api::data::S2FormatHeader,
         s2_api::data::S2EncryptionKeyHeader,
+        s2_api::data::S2StreamConfigHeader,
         v1t::stream::ReadStart,
         v1t::stream::ReadEnd,
     ),
@@ -186,12 +187,13 @@ pub async fn read(
     match request {
         v1t::stream::ReadRequest::Unary {
             encryption_key,
+            stream_config,
             format,
             response_mime,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend
-                .open_for_read(&basin, &stream, encryption_key)
+                .open_for_read(&basin, &stream, encryption_key, stream_config)
                 .await?
                 .read(start, end)
                 .await?;
@@ -209,13 +211,14 @@ pub async fn read(
         }
         v1t::stream::ReadRequest::EventStream {
             encryption_key,
+            stream_config,
             format,
             last_event_id,
         } => {
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend
-                .open_for_read(&basin, &stream, encryption_key)
+                .open_for_read(&basin, &stream, encryption_key, stream_config)
                 .await?
                 .read(start, end)
                 .await?;
@@ -265,11 +268,12 @@ pub async fn read(
         }
         v1t::stream::ReadRequest::S2s {
             encryption_key,
+            stream_config,
             response_compression,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let s2s_stream = backend
-                .open_for_read(&basin, &stream, encryption_key)
+                .open_for_read(&basin, &stream, encryption_key, stream_config)
                 .await?
                 .read(start, end)
                 .await?
@@ -711,7 +715,12 @@ mod tests {
         assert_eq!(ack.end.as_ref().map(|pos| pos.seq_num), Some(1));
 
         let records = backend
-            .open_for_read(&basin, &stream, Some(encryption_key.clone()))
+            .open_for_read(
+                &basin,
+                &stream,
+                Some(encryption_key.clone()),
+                OptionalStreamConfig::default(),
+            )
             .await
             .expect("open read handle")
             .read(
@@ -896,6 +905,37 @@ mod tests {
         assert_eq!(acks.len(), 2);
         assert_eq!(acks[1].end.as_ref().map(|pos| pos.seq_num), Some(2));
 
+        let config = backend
+            .get_stream_config(basin, stream)
+            .await
+            .expect("get stream config");
+        assert_eq!(config, expected_auto_created_config());
+    }
+
+    #[tokio::test]
+    async fn read_auto_creates_stream_with_stream_config_header() {
+        let basin_config = BasinConfig {
+            create_stream_on_append: false,
+            create_stream_on_read: true,
+            ..basin_config_with_create_stream_on_append()
+        };
+        let (app, backend, basin, stream) =
+            setup_app_without_stream("read-create-config", basin_config).await;
+
+        let response = send(
+            &app,
+            request_builder(
+                "GET",
+                format!("/v1/streams/{stream}/records?seq_num=0"),
+                &basin,
+            )
+            .header(STREAM_CONFIG_HEADER.as_str(), STREAM_CONFIG_HEADER_VALUE)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        // Auto-created empty stream: reading at seq_num 0 is past the tail.
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         let config = backend
             .get_stream_config(basin, stream)
             .await
