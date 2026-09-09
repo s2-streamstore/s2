@@ -535,10 +535,7 @@ pub async fn read(
 ) -> Result<ReadSession, CliError> {
     use std::time::SystemTime;
 
-    let mut stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
-    if !args.stream_config.is_empty() {
-        stream = stream.with_stream_config(args.stream_config.clone().into());
-    }
+    let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
 
     let from = match (args.seq_num, args.timestamp, args.tail_offset, args.ago) {
         (Some(seq), None, None, None) => ReadFrom::SeqNum(seq),
@@ -573,11 +570,13 @@ pub async fn read(
         stop = stop.with_until(..until);
     }
 
+    let mut input = ReadInput::new().with_start(start).with_stop(stop);
+    if !args.stream_config.is_empty() {
+        input = input.with_stream_config(args.stream_config.clone().into());
+    }
+
     stream
-        .read_session(
-            ReadInput::new().with_start(start).with_stop(stop),
-            ReadSessionConfig::default(),
-        )
+        .read_session(input, ReadSessionConfig::default())
         .await
         .map_err(|e| CliError::op(OpKind::Read, e))
 }
@@ -602,13 +601,13 @@ where
     S: Stream<Item = Result<AppendRecord, E>> + Send + Unpin + 'a,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let mut stream = stream_with_encryption(s2, uri, encryption_key);
-    if let Some(config) = options.stream_config {
-        stream = stream.with_stream_config(config);
-    }
+    let stream = stream_with_encryption(s2, uri, encryption_key);
 
     let batching_config = BatchingConfig::new().with_linger(options.linger);
     let mut producer_config = ProducerConfig::new().with_batching(batching_config);
+    if let Some(config) = options.stream_config {
+        producer_config = producer_config.with_stream_config(config);
+    }
     if let Some(ft) = options.fencing_token {
         producer_config = producer_config.with_fencing_token(ft);
     }

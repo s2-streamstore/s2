@@ -380,6 +380,7 @@ pub async fn read_session(
         start,
         stop,
         ignore_command_records,
+        stream_config: _,
     } = input;
     let mut start: ReadStart = start.into();
     let mut end: ReadEnd = stop.into();

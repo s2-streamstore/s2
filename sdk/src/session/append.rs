@@ -27,7 +27,7 @@ use crate::{
     session::StreamHeaders,
     types::{
         AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB,
-        StreamName, StreamPosition, ValidationError,
+        StreamConfig, StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -155,6 +155,7 @@ impl Future for BatchSubmitTicket {
 pub struct AppendSessionConfig {
     max_unacked_bytes: u32,
     max_unacked_batches: Option<u32>,
+    stream_config: Option<StreamConfig>,
 }
 
 impl Default for AppendSessionConfig {
@@ -162,6 +163,7 @@ impl Default for AppendSessionConfig {
         Self {
             max_unacked_bytes: 5 * ONE_MIB,
             max_unacked_batches: None,
+            stream_config: None,
         }
     }
 }
@@ -195,6 +197,23 @@ impl AppendSessionConfig {
             max_unacked_batches: Some(max_unacked_batches.get()),
             ..self
         }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on append.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists. Sent as the `s2-stream-config` header when the session connects.
+    ///
+    /// Defaults to `None`.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
+            ..self
+        }
+    }
+
+    pub(crate) fn stream_config(&self) -> Option<&StreamConfig> {
+        self.stream_config.as_ref()
     }
 }
 

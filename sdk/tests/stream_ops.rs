@@ -2237,10 +2237,12 @@ async fn stream_config_applies_only_when_append_creates_stream()
     let unary_stream = unique_stream_name();
     basin
         .stream(unary_stream.clone())
-        .with_stream_config(stream_config.clone())
-        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
-            AppendRecord::new("hello")?,
-        ])?))
+        .append(
+            AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
+                "hello",
+            )?])?)
+            .with_stream_config(stream_config.clone()),
+        )
         .await?;
     let config = basin.get_stream_config(unary_stream).await?;
     assert_matches!(
@@ -2260,8 +2262,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
     let session_stream = unique_stream_name();
     let producer = basin
         .stream(session_stream.clone())
-        .with_stream_config(stream_config.clone())
-        .producer(ProducerConfig::default());
+        .producer(ProducerConfig::new().with_stream_config(stream_config.clone()));
     producer.submit(AppendRecord::new("hello")?).await?.await?;
     producer.close().await?;
     let config = basin.get_stream_config(session_stream).await?;
@@ -2285,10 +2286,12 @@ async fn stream_config_applies_only_when_append_creates_stream()
     let before = basin.get_stream_config(existing_stream.clone()).await?;
     basin
         .stream(existing_stream.clone())
-        .with_stream_config(stream_config)
-        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
-            AppendRecord::new("hello")?,
-        ])?))
+        .append(
+            AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
+                "hello",
+            )?])?)
+            .with_stream_config(stream_config),
+        )
         .await?;
     let after = basin.get_stream_config(existing_stream).await?;
     assert_eq!(after, before);
@@ -2315,8 +2318,10 @@ async fn stream_config_applies_when_read_creates_stream() -> Result<(), Box<dyn 
     let session_stream = unique_stream_name();
     let _session = basin
         .stream(session_stream.clone())
-        .with_stream_config(stream_config)
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new().with_stream_config(stream_config),
+            ReadSessionConfig::default(),
+        )
         .await?;
     let config = basin.get_stream_config(session_stream).await?;
     assert_eq!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
