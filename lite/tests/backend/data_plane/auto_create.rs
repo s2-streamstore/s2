@@ -194,7 +194,7 @@ async fn test_backend_append_auto_create_applies_stream_config() {
 }
 
 #[tokio::test]
-async fn test_backend_append_ignores_stream_config_for_existing_stream() {
+async fn test_backend_append_existing_stream_config_must_match() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
@@ -202,37 +202,90 @@ async fn test_backend_append_ignores_stream_config_for_existing_stream() {
         basin_config_with_defaults(),
     )
     .await;
-    let stream_name = create_test_stream(
-        &backend,
-        &basin_name,
-        "existing",
-        OptionalStreamConfig::default(),
-    )
-    .await;
+    let stream_name =
+        create_test_stream(&backend, &basin_name, "existing", requested_stream_config()).await;
+
+    // Matching config: the append proceeds.
+    backend
+        .open_for_append(&basin_name, &stream_name, None, requested_stream_config())
+        .await
+        .expect("matching stream config should be accepted");
+
+    // Only set fields are compared.
+    backend
+        .open_for_append(
+            &basin_name,
+            &stream_name,
+            None,
+            OptionalStreamConfig {
+                retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(3600))),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("partial matching stream config should be accepted");
+
+    // Mismatching config: rejected without touching the stream.
     let before = backend
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to get stream config");
-
-    let input = AppendInput {
-        records: create_test_record_batch(vec![Bytes::from_static(b"hello")]),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-    backend
-        .open_for_append(&basin_name, &stream_name, None, requested_stream_config())
+    let result = backend
+        .open_for_append(
+            &basin_name,
+            &stream_name,
+            None,
+            OptionalStreamConfig {
+                retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(7200))),
+                ..Default::default()
+            },
+        )
         .await
-        .expect("Failed to open append handle")
-        .append(input)
-        .await
-        .expect("Failed to append to existing stream");
-
+        .map(drop);
+    assert!(
+        matches!(&result, Err(AppendError::StreamConfigMismatch(e)) if e.field == "retention_policy"),
+        "{result:?}"
+    );
     let after = backend
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to get stream config");
     assert_eq!(after, before);
-    assert_ne!(after, expected_merged_stream_config());
+}
+
+#[tokio::test]
+async fn test_backend_read_existing_stream_config_must_match() {
+    let backend = create_backend().await;
+    let basin_name = create_test_basin(
+        &backend,
+        "backend-auto-create-read-config-existing",
+        BasinConfig::default(),
+    )
+    .await;
+    let stream_name =
+        create_test_stream(&backend, &basin_name, "existing", requested_stream_config()).await;
+
+    backend
+        .open_for_read(&basin_name, &stream_name, None, requested_stream_config())
+        .await
+        .expect("matching stream config should be accepted");
+
+    let result = backend
+        .open_for_read(
+            &basin_name,
+            &stream_name,
+            None,
+            OptionalStreamConfig {
+                storage_class: Some(StorageClass::Express),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(drop);
+    assert!(
+        matches!(&result, Err(ReadError::StreamConfigMismatch(e)) if e.field == "storage_class"),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]

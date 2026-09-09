@@ -21,9 +21,9 @@ use super::{
     StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
-        BasinDeletionPendingError, BasinNotFoundError, GetBasinConfigError, ProvisionStreamError,
-        StorageError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
-        StreamerMissingInActionError, TransactionConflictError,
+        BasinDeletionPendingError, BasinNotFoundError, GetBasinConfigError, GetStreamConfigError,
+        ProvisionStreamError, StorageError, StreamConfigMismatchError, StreamDeletionPendingError,
+        StreamNotFoundError, StreamerError, StreamerMissingInActionError, TransactionConflictError,
     },
     kv,
     streamer::{GuardedStreamerClient, StreamerClient, StreamerGenerationId},
@@ -342,10 +342,28 @@ impl Backend {
             + From<TransactionConflictError>
             + From<BasinDeletionPendingError>
             + From<StreamDeletionPendingError>
-            + From<StreamNotFoundError>,
+            + From<StreamNotFoundError>
+            + From<StreamConfigMismatchError>,
     {
         let client = match self.streamer_client_guarded(basin, stream).await {
-            Ok(client) => client,
+            Ok(client) => {
+                if !stream_config.is_empty() {
+                    let actual = match self.get_stream_config(basin.clone(), stream.clone()).await {
+                        Ok(actual) => actual,
+                        Err(GetStreamConfigError::Storage(e)) => Err(e)?,
+                        Err(GetStreamConfigError::StreamNotFound(e)) => Err(e)?,
+                        Err(GetStreamConfigError::StreamDeletionPending(e)) => Err(e)?,
+                    };
+                    if let Some(field) = stream_config.mismatch(&actual) {
+                        Err(StreamConfigMismatchError {
+                            basin: basin.clone(),
+                            stream: stream.clone(),
+                            field,
+                        })?;
+                    }
+                }
+                client
+            }
             Err(StreamerError::StreamNotFound(e)) => {
                 let config = match self.get_basin_config(basin.clone()).await {
                     Ok(config) => config,

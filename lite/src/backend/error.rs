@@ -61,6 +61,14 @@ pub struct BasinDeletionPendingError {
 pub struct StreamDeletionPendingError;
 
 #[derive(Debug, Clone, thiserror::Error)]
+#[error("stream `{stream}` in basin `{basin}` exists with a different `{field}`")]
+pub struct StreamConfigMismatchError {
+    pub basin: BasinName,
+    pub stream: StreamName,
+    pub field: &'static str,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("unwritten position: {0}")]
 pub struct UnwrittenError(pub StreamPosition);
 
@@ -142,6 +150,8 @@ pub enum CheckTailError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error(transparent)]
+    StreamConfigMismatch(#[from] StreamConfigMismatchError),
 }
 
 impl From<StreamerError> for CheckTailError {
@@ -174,6 +184,8 @@ pub enum AppendError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error(transparent)]
+    StreamConfigMismatch(#[from] StreamConfigMismatchError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -261,6 +273,8 @@ pub enum ReadError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error(transparent)]
+    StreamConfigMismatch(#[from] StreamConfigMismatchError),
     #[error(transparent)]
     Unwritten(#[from] UnwrittenError),
 }

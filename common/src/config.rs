@@ -231,6 +231,36 @@ impl OptionalStreamConfig {
         Ok(())
     }
 
+    /// Whether no field is set.
+    pub fn is_empty(&self) -> bool {
+        self.storage_class.is_none()
+            && self.retention_policy.is_none()
+            && self.timestamping.mode.is_none()
+            && self.timestamping.uncapped.is_none()
+            && self.delete_on_empty.min_age.is_none()
+    }
+
+    /// Check every set field against `actual`, returning the name of the first field that
+    /// does not match. Unset fields are not compared.
+    pub fn mismatch(&self, actual: &StreamConfig) -> Option<&'static str> {
+        fn differs<T: PartialEq>(expected: Option<T>, actual: T) -> bool {
+            expected.is_some_and(|expected| expected != actual)
+        }
+        if differs(self.storage_class, actual.storage_class) {
+            Some("storage_class")
+        } else if differs(self.retention_policy, actual.retention_policy) {
+            Some("retention_policy")
+        } else if differs(self.timestamping.mode, actual.timestamping.mode) {
+            Some("timestamping.mode")
+        } else if differs(self.timestamping.uncapped, actual.timestamping.uncapped) {
+            Some("timestamping.uncapped")
+        } else if differs(self.delete_on_empty.min_age, actual.delete_on_empty.min_age) {
+            Some("delete_on_empty.min_age")
+        } else {
+            None
+        }
+    }
+
     pub fn reconfigure(mut self, reconfiguration: StreamReconfiguration) -> Self {
         let StreamReconfiguration {
             storage_class,
