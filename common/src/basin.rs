@@ -231,6 +231,7 @@ mod test {
     #[case::invalid_first_char("Abcdefgh".to_owned())]
     #[case::invalid_last_char("abcdefg-".to_owned())]
     #[case::invalid_characters("abcd_efg".to_owned())]
+    #[case::nul("abcd\0efg".to_owned())]
     fn validate_name_err(#[case] name: String) {
         BasinNameStr::<NameProps>::validate_str(&name).expect_err("expected validation error");
     }
@@ -248,6 +249,7 @@ mod test {
     #[case::too_long("a".repeat(crate::caps::MAX_BASIN_NAME_LEN + 1))]
     #[case::invalid_first_char("-abc".to_owned())]
     #[case::invalid_characters("ab_cd".to_owned())]
+    #[case::nul("ab\0cd".to_owned())]
     fn validate_prefix_err(#[case] prefix: String) {
         BasinNameStr::<PrefixProps>::validate_str(&prefix).expect_err("expected validation error");
     }
@@ -267,6 +269,7 @@ mod test {
     #[case::too_long("a".repeat(crate::caps::MAX_BASIN_NAME_LEN + 1))]
     #[case::invalid_first_char("-abc".to_owned())]
     #[case::invalid_characters("ab_cd".to_owned())]
+    #[case::nul("ab\0cd".to_owned())]
     fn validate_start_after_err(#[case] start_after: String) {
         BasinNameStr::<StartAfterProps>::validate_str(&start_after)
             .expect_err("expected validation error");

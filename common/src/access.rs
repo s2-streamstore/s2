@@ -30,6 +30,12 @@ impl<T: StrProps> AccessTokenIdStr<T> {
             );
         }
 
+        if id.contains('\0') {
+            return Err(
+                format!("access token {} must not contain NUL bytes", T::FIELD_NAME).into(),
+            );
+        }
+
         if id.len() > caps::MAX_ACCESS_TOKEN_ID_LEN {
             return Err(format!(
                 "access token {} must not exceed {} bytes in length",
@@ -264,6 +270,7 @@ mod test {
     #[case::dot(".".to_owned())]
     #[case::dot_dot("..".to_owned())]
     #[case::too_long("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN + 1))]
+    #[case::nul("a\0b".to_owned())]
     fn validate_id_err(#[case] id: String) {
         AccessTokenIdStr::<IdProps>::validate_str(&id).expect_err("expected validation error");
     }
@@ -282,6 +289,7 @@ mod test {
 
     #[rstest]
     #[case::too_long("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN + 1))]
+    #[case::nul("a\0b".to_owned())]
     fn validate_prefix_err(#[case] prefix: String) {
         AccessTokenIdStr::<PrefixProps>::validate_str(&prefix)
             .expect_err("expected validation error");
@@ -301,6 +309,7 @@ mod test {
 
     #[rstest]
     #[case::too_long("a".repeat(crate::caps::MAX_ACCESS_TOKEN_ID_LEN + 1))]
+    #[case::nul("a\0b".to_owned())]
     fn validate_start_after_err(#[case] start_after: String) {
         AccessTokenIdStr::<StartAfterProps>::validate_str(&start_after)
             .expect_err("expected validation error");
