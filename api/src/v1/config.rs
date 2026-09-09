@@ -1116,7 +1116,6 @@ mod tests {
         let invalid_json = "not json".parse::<StreamConfigHeader>().unwrap_err();
         assert!(invalid_json.to_string().contains("invalid JSON"));
 
-        // Same validation as CreateStream.
         let invalid_age =
             r#"{"retention_policy":{"age":0}}"#.parse::<StreamConfigHeader>().unwrap_err();
         assert!(

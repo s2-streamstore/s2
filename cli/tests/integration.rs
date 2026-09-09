@@ -578,7 +578,6 @@ fn append_with_stream_config() {
     .success();
     wait_for_basin(&basin);
 
-    // Auto-created stream picks up the config from the append.
     let stream = unique_name("test-csoa-new");
     let uri = format!("s2://{basin}/{stream}");
     s2().args([
@@ -606,7 +605,20 @@ fn append_with_stream_config() {
                 .and(predicate::str::contains("7days").not()),
         );
 
-    // Config is ignored once the stream exists.
+    s2().args([
+        "append",
+        &uri,
+        "--format",
+        "text",
+        "--input",
+        "-",
+        "--retention-policy",
+        "1h",
+    ])
+    .write_stdin("second record\n")
+    .assert()
+    .success();
+
     s2().args([
         "append",
         &uri,
@@ -617,9 +629,10 @@ fn append_with_stream_config() {
         "--retention-policy",
         "2h",
     ])
-    .write_stdin("second record\n")
+    .write_stdin("third record\n")
     .assert()
-    .success();
+    .failure()
+    .stderr(predicate::str::contains("stream_config_mismatch"));
 
     s2().args(["get-stream-config", &uri])
         .assert()
@@ -641,11 +654,9 @@ fn read_with_stream_config() {
 
     let stream = unique_name("test-csor-new");
     let uri = format!("s2://{basin}/{stream}");
-    // Reading at the tail of a freshly created (empty) stream is past-tail, so don't
-    // assert on the exit status; the request still creates the stream.
-    let _ = s2()
-        .args(["read", &uri, "--retention-policy", "1h"])
-        .assert();
+    s2().args(["read", &uri, "--count", "1", "--retention-policy", "1h"])
+        .assert()
+        .failure();
 
     s2().args(["get-stream-config", &uri])
         .assert()

@@ -148,8 +148,6 @@ fn requested_stream_config() -> OptionalStreamConfig {
     }
 }
 
-/// The config a stream should end up with when `requested_stream_config` is layered
-/// over `basin_config_with_defaults`.
 fn expected_merged_stream_config() -> StreamConfig {
     StreamConfig {
         storage_class: StorageClass::Standard,
@@ -205,13 +203,11 @@ async fn test_backend_append_existing_stream_config_must_match() {
     let stream_name =
         create_test_stream(&backend, &basin_name, "existing", requested_stream_config()).await;
 
-    // Matching config: the append proceeds.
     backend
         .open_for_append(&basin_name, &stream_name, None, requested_stream_config())
         .await
         .expect("matching stream config should be accepted");
 
-    // Only set fields are compared.
     backend
         .open_for_append(
             &basin_name,
@@ -225,7 +221,6 @@ async fn test_backend_append_existing_stream_config_must_match() {
         .await
         .expect("partial matching stream config should be accepted");
 
-    // Mismatching config: rejected without touching the stream.
     let before = backend
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await

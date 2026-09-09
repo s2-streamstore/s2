@@ -2233,7 +2233,6 @@ async fn stream_config_applies_only_when_append_creates_stream()
         .with_retention_policy(RetentionPolicy::Age(3600))
         .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300)));
 
-    // Unary append creates the stream with the header config layered over basin defaults.
     let unary_stream = unique_stream_name();
     basin
         .stream(unary_stream.clone())
@@ -2258,7 +2257,6 @@ async fn stream_config_applies_only_when_append_creates_stream()
         }
     );
 
-    // Append sessions (via the producer) send the same header.
     let session_stream = unique_stream_name();
     let producer = basin
         .stream(session_stream.clone())
@@ -2278,7 +2276,6 @@ async fn stream_config_applies_only_when_append_creates_stream()
         }
     );
 
-    // Once the stream exists, set fields must match its config.
     let existing_stream = unique_stream_name();
     basin
         .create_stream(

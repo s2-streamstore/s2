@@ -765,9 +765,6 @@ mod tests {
         }
     }
 
-    /// Config a stream should end up with when `{"retention_policy": {"age": 3600},
-    /// "delete_on_empty": {"min_age_secs": 300}}` is layered over
-    /// `basin_config_with_create_stream_on_append`'s defaults.
     fn expected_auto_created_config() -> StreamConfig {
         StreamConfig {
             storage_class: StorageClass::Standard,
@@ -934,7 +931,6 @@ mod tests {
             .unwrap(),
         )
         .await;
-        // Auto-created empty stream: reading at seq_num 0 is past the tail.
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         let config = backend
             .get_stream_config(basin, stream)
