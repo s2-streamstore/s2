@@ -16,6 +16,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::{
+    HeaderMap,
     header::HeaderValue,
     uri::{Authority, Scheme},
 };
@@ -511,6 +512,7 @@ pub struct S2Config {
     pub(crate) retry: RetryConfig,
     pub(crate) compression: Compression,
     pub(crate) user_agent: HeaderValue,
+    pub(crate) default_headers: HeaderMap,
     pub(crate) insecure_skip_cert_verification: bool,
     pub(crate) rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
@@ -528,6 +530,7 @@ impl S2Config {
             user_agent: concat!("s2-sdk-rust/", env!("CARGO_PKG_VERSION"))
                 .parse()
                 .expect("valid user agent"),
+            default_headers: HeaderMap::new(),
             insecure_skip_cert_verification: false,
             rustls_crypto_provider: default_rustls_crypto_provider(),
         }
@@ -545,6 +548,24 @@ impl S2Config {
     /// Set the S2 endpoints to connect to.
     pub fn with_endpoints(self, endpoints: S2Endpoints) -> Self {
         Self { endpoints, ..self }
+    }
+
+    /// Set additional HTTP headers to send with every request.
+    ///
+    /// These headers apply to account, basin, and stream operations, including
+    /// retries and streaming requests. SDK-generated headers, such as
+    /// authorization and basin routing, take precedence over these defaults.
+    /// Calling this method again replaces the previous set of default headers.
+    ///
+    /// Headers are sent to all configured S2 endpoints. Use
+    /// [`HeaderValue::set_sensitive`] for values that should be redacted in debug
+    /// output. Do not use these defaults for per-request identifiers, since the
+    /// same values are reused across requests.
+    pub fn with_default_headers(self, default_headers: HeaderMap) -> Self {
+        Self {
+            default_headers,
+            ..self
+        }
     }
 
     /// Set the timeout for establishing a connection to the server.
