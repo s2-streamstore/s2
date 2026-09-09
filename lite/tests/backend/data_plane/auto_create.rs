@@ -4,8 +4,8 @@ use bytes::Bytes;
 use s2_common::{
     basin::BasinName,
     config::{
-        BasinConfig, DeleteOnEmptyConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-        RetentionPolicy, StorageClass, StreamConfig, StreamConfigMismatch,
+        BasinConfig, DeleteOnEmptyConfig, Mismatch, OptionalDeleteOnEmptyConfig,
+        OptionalStreamConfig, RetentionPolicy, StorageClass, StreamConfig, StreamConfigMismatch,
     },
     encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
@@ -246,10 +246,10 @@ async fn test_backend_append_existing_stream_config_must_match() {
         matches!(
             &result,
             Err(AppendError::StreamConfigMismatch(StreamConfigMismatchError {
-                mismatch: StreamConfigMismatch::RetentionPolicy {
+                mismatch: StreamConfigMismatch::RetentionPolicy(Mismatch {
                     expected: RetentionPolicy::Age(expected),
                     actual: RetentionPolicy::Age(actual),
-                },
+                }),
                 ..
             })) if *expected == Duration::from_secs(7200) && *actual == Duration::from_secs(3600)
         ),
@@ -295,10 +295,10 @@ async fn test_backend_read_existing_stream_config_must_match() {
         matches!(
             &result,
             Err(ReadError::StreamConfigMismatch(StreamConfigMismatchError {
-                mismatch: StreamConfigMismatch::StorageClass {
+                mismatch: StreamConfigMismatch::StorageClass(Mismatch {
                     expected: StorageClass::Standard,
                     actual: StorageClass::Express,
-                },
+                }),
                 ..
             }))
         ),
