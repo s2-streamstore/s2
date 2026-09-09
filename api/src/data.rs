@@ -374,6 +374,42 @@ pub mod extract {
             assert!(result.is_ok());
         }
 
+        /// A deeply nested value must never overflow the stack, wherever it
+        /// appears in the document: a wrong-typed value is rejected before it
+        /// is descended into, an unknown field is skipped iteratively, and
+        /// nesting that is actually deserialized hits the recursion limit.
+        #[test]
+        fn deeply_nested_json_does_not_overflow_stack() {
+            const DEPTH: usize = 50_000;
+            let nested = format!("{}{}", "[".repeat(DEPTH), "]".repeat(DEPTH));
+            let cases = [
+                (
+                    format!(r#"{{"records":[{{"body":{nested}}}]}}"#),
+                    Some(http::StatusCode::UNPROCESSABLE_ENTITY),
+                ),
+                (format!(r#"{{"records":[],"unknown":{nested}}}"#), None),
+                (nested.clone(), Some(http::StatusCode::UNPROCESSABLE_ENTITY)),
+            ];
+            // Tokio's default worker stack size; unbounded recursion over
+            // 50k levels overflows it.
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || {
+                    for (input, expected_status) in &cases {
+                        let status = parse_json::<AppendInput>(input.as_bytes())
+                            .err()
+                            .map(|e| e.status());
+                        assert_eq!(status, *expected_status);
+                    }
+                    let err = parse_json::<serde_json::Value>(nested.as_bytes()).unwrap_err();
+                    assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+                    assert!(err.body_text().contains("recursion limit exceeded"));
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+
         /// Serialize with serde_json and deserialize again, asserting semantic
         /// equality for shapes with custom (de)serialization.
         #[test]
