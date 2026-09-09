@@ -361,7 +361,7 @@ mod test {
 
     use crate::{backend::Backend, handlers};
 
-    async fn setup_app(test_suffix: &str) -> (axum::Router, BasinName) {
+    async fn setup_app(test_suffix: &str) -> (axum::Router, Backend, BasinName) {
         let object_store = Arc::new(InMemory::new());
         let db_path = format!("/tmp/streams-handler-test-{}", Uuid::new_v4());
         let db = Db::builder(db_path, object_store)
@@ -384,7 +384,8 @@ mod test {
             )
             .await
             .expect("create basin");
-        (handlers::router().with_state(backend), basin)
+        let app = handlers::router().with_state(backend.clone());
+        (app, backend, basin)
     }
 
     async fn send(app: &axum::Router, request: Request<Body>) -> Response {
@@ -431,7 +432,7 @@ mod test {
 
     #[tokio::test]
     async fn create_stream_with_nul_byte_is_bad_json() {
-        let (app, basin) = setup_app("create-nul").await;
+        let (app, backend, basin) = setup_app("create-nul").await;
 
         let response = create_stream(&app, &basin, "a\0b").await;
 
@@ -445,6 +446,8 @@ mod test {
                 .contains("stream name must not contain NUL bytes"),
             "unexpected message: {error}"
         );
+
+        backend.close().await.expect("close backend");
     }
 
     #[rstest]
@@ -452,13 +455,15 @@ mod test {
     #[case::unicode("stream/名前 😀?#%20")]
     #[tokio::test]
     async fn create_stream_with_other_chars_is_created(#[case] name: &str) {
-        let (app, basin) = setup_app("create-ok").await;
+        let (app, backend, basin) = setup_app("create-ok").await;
 
         let response = create_stream(&app, &basin, name).await;
 
         assert_eq!(response.status(), StatusCode::CREATED);
         let info = response_json(response).await;
         assert_eq!(info["name"], name);
+
+        backend.close().await.expect("close backend");
     }
 
     #[rstest]
@@ -469,7 +474,7 @@ mod test {
         #[case] query: &str,
         #[case] expected_message: &str,
     ) {
-        let (app, basin) = setup_app("list-nul").await;
+        let (app, backend, basin) = setup_app("list-nul").await;
 
         let response = list_streams(&app, &basin, query).await;
 
@@ -483,5 +488,7 @@ mod test {
                 .contains(expected_message),
             "unexpected message: {error}"
         );
+
+        backend.close().await.expect("close backend");
     }
 }
