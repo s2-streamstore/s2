@@ -332,6 +332,12 @@ impl StreamConfig {
             Some(config)
         }
     }
+
+    /// Encode as the value of the `s2-stream-config` header.
+    pub fn to_header_value(&self) -> HeaderValue {
+        let json = serde_json::to_string(self).expect("StreamConfig serializes to JSON");
+        HeaderValue::from_str(&json).expect("compact JSON of StreamConfig is a valid header value")
+    }
 }
 
 impl From<s2_common::config::StreamConfig> for StreamConfig {
@@ -357,23 +363,17 @@ pub static STREAM_CONFIG_HEADER: HeaderName = HeaderName::from_static("s2-stream
 /// Value of the `s2-stream-config` header: a JSON-encoded [`StreamConfig`] to apply if the stream
 /// is created on append or read. If the stream already exists, its configuration must match the
 /// set fields, or the request fails with `stream_config_mismatch`.
+///
+/// Encode with [`StreamConfig::to_header_value`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamConfigHeader(pub s2_common::config::OptionalStreamConfig);
-
-impl StreamConfigHeader {
-    /// Encode a [`StreamConfig`] as a compact JSON header value.
-    pub fn to_header_value(config: &StreamConfig) -> HeaderValue {
-        let json = serde_json::to_string(config).expect("StreamConfig serializes to JSON");
-        HeaderValue::from_str(&json).expect("compact JSON of StreamConfig is a valid header value")
-    }
-}
 
 impl FromStr for StreamConfigHeader {
     type Err = s2_common::ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let config: StreamConfig = serde_json::from_str(s)
-            .map_err(|e| s2_common::ValidationError(format!("invalid JSON: {e}")))?;
+        let config: StreamConfig =
+            serde_json::from_str(s).map_err(|e| format!("invalid JSON: {e}"))?;
         Ok(Self(config.try_into()?))
     }
 }
@@ -1138,7 +1138,7 @@ mod tests {
             }),
             delete_on_empty: Some(DeleteOnEmptyConfig { min_age_secs: 60 }),
         };
-        let value = StreamConfigHeader::to_header_value(&config);
+        let value = config.to_header_value();
         let parsed: StreamConfigHeader = value.to_str().unwrap().parse().unwrap();
         assert_eq!(
             parsed.0,

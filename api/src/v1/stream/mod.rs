@@ -209,8 +209,7 @@ pub enum ReadRequest {
     /// Unary
     Unary {
         encryption_key: Option<EncryptionKey>,
-        /// Stream configuration to apply if the stream is created on read, from the
-        /// `s2-stream-config` header.
+        /// Parsed `s2-stream-config` header; empty if absent.
         stream_config: OptionalStreamConfig,
         format: Format,
         response_mime: JsonOrProto,
@@ -218,8 +217,7 @@ pub enum ReadRequest {
     /// Server-Sent Events streaming response
     EventStream {
         encryption_key: Option<EncryptionKey>,
-        /// Stream configuration to apply if the stream is created on read, from the
-        /// `s2-stream-config` header.
+        /// Parsed `s2-stream-config` header; empty if absent.
         stream_config: OptionalStreamConfig,
         format: Format,
         last_event_id: Option<sse::LastEventId>,
@@ -227,8 +225,7 @@ pub enum ReadRequest {
     /// S2S streaming response
     S2s {
         encryption_key: Option<EncryptionKey>,
-        /// Stream configuration to apply if the stream is created on read, from the
-        /// `s2-stream-config` header.
+        /// Parsed `s2-stream-config` header; empty if absent.
         stream_config: OptionalStreamConfig,
         response_compression: s2s::CompressionAlgorithm,
     },
@@ -238,8 +235,7 @@ pub enum AppendRequest {
     /// Unary
     Unary {
         encryption_key: Option<EncryptionKey>,
-        /// Stream configuration to apply if the stream is created on append, from the
-        /// `s2-stream-config` header.
+        /// Parsed `s2-stream-config` header; empty if absent.
         stream_config: OptionalStreamConfig,
         input: s2_common::stream::AppendInput,
         response_mime: JsonOrProto,
@@ -247,8 +243,7 @@ pub enum AppendRequest {
     /// S2S bi-directional streaming
     S2s {
         encryption_key: Option<EncryptionKey>,
-        /// Stream configuration to apply if the stream is created on append, from the
-        /// `s2-stream-config` header.
+        /// Parsed `s2-stream-config` header; empty if absent.
         stream_config: OptionalStreamConfig,
         inputs: BoxStream<'static, Result<s2_common::stream::AppendInput, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,

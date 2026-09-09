@@ -325,8 +325,9 @@ impl Backend {
 
     /// Resolve a handle for `stream`, creating it on demand if the basin config allows.
     ///
-    /// `stream_config` is applied over the basin's default stream configuration only if the
-    /// stream is being created. It must already be validated.
+    /// `stream_config` must already be validated. It is applied over the basin's default stream
+    /// configuration if the stream is created here. If the stream already exists, every set field
+    /// must match its configuration.
     pub(super) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
@@ -347,21 +348,8 @@ impl Backend {
     {
         let client = match self.streamer_client_guarded(basin, stream).await {
             Ok(client) => {
-                if !stream_config.is_empty() {
-                    let actual = match self.get_stream_config(basin.clone(), stream.clone()).await {
-                        Ok(actual) => actual,
-                        Err(GetStreamConfigError::Storage(e)) => Err(e)?,
-                        Err(GetStreamConfigError::StreamNotFound(e)) => Err(e)?,
-                        Err(GetStreamConfigError::StreamDeletionPending(e)) => Err(e)?,
-                    };
-                    if let Some(mismatch) = stream_config.mismatch(&actual) {
-                        Err(StreamConfigMismatchError {
-                            basin: basin.clone(),
-                            stream: stream.clone(),
-                            mismatch,
-                        })?;
-                    }
-                }
+                self.check_stream_config::<E>(basin, stream, &stream_config)
+                    .await?;
                 client
             }
             Err(StreamerError::StreamNotFound(e)) => {
@@ -373,27 +361,30 @@ impl Backend {
                 if !auto_create_on.is_enabled(&config) {
                     return Err(e.into());
                 }
-                if let Err(e) = self
+                match self
                     .provision_stream(
                         basin.clone(),
                         stream.clone(),
-                        stream_config,
+                        stream_config.clone(),
                         ProvisionMode::CreateOnly {
                             request_token: None,
                         },
                     )
                     .await
                 {
-                    match e {
-                        ProvisionStreamError::Storage(e) => Err(e)?,
-                        ProvisionStreamError::TransactionConflict(e) => Err(e)?,
-                        ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
-                        ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
-                        ProvisionStreamError::BasinNotFound(e) => Err(e)?,
-                        ProvisionStreamError::StreamAlreadyExists(_) => {}
-                        ProvisionStreamError::Validation(e) => {
-                            unreachable!("auto-create config is validated at the API boundary: {e}")
-                        }
+                    Ok(_) => {}
+                    // Lost a creation race; the winner's config is the one to check against.
+                    Err(ProvisionStreamError::StreamAlreadyExists(_)) => {
+                        self.check_stream_config::<E>(basin, stream, &stream_config)
+                            .await?;
+                    }
+                    Err(ProvisionStreamError::Storage(e)) => Err(e)?,
+                    Err(ProvisionStreamError::TransactionConflict(e)) => Err(e)?,
+                    Err(ProvisionStreamError::BasinDeletionPending(e)) => Err(e)?,
+                    Err(ProvisionStreamError::StreamDeletionPending(e)) => Err(e)?,
+                    Err(ProvisionStreamError::BasinNotFound(e)) => Err(e)?,
+                    Err(ProvisionStreamError::Validation(e)) => {
+                        unreachable!("auto-create config is validated at the API boundary: {e}")
                     }
                 }
                 self.streamer_client_guarded(basin, stream).await?
@@ -405,6 +396,40 @@ impl Backend {
             encryption: resolve_encryption(client.cipher())?,
             client,
         })
+    }
+
+    /// Fail if any field set in `expected` differs from the existing configuration of `stream`.
+    /// A no-op if `expected` is empty, so unconditional callers pay no lookup.
+    async fn check_stream_config<E>(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        expected: &OptionalStreamConfig,
+    ) -> Result<(), E>
+    where
+        E: From<StorageError>
+            + From<StreamNotFoundError>
+            + From<StreamDeletionPendingError>
+            + From<StreamConfigMismatchError>,
+    {
+        if expected.is_empty() {
+            return Ok(());
+        }
+        let actual = match self.get_stream_config(basin.clone(), stream.clone()).await {
+            Ok(actual) => actual,
+            Err(GetStreamConfigError::Storage(e)) => Err(e)?,
+            Err(GetStreamConfigError::StreamNotFound(e)) => Err(e)?,
+            Err(GetStreamConfigError::StreamDeletionPending(e)) => Err(e)?,
+        };
+        match expected.mismatch(&actual) {
+            None => Ok(()),
+            Some(mismatch) => Err(StreamConfigMismatchError {
+                basin: basin.clone(),
+                stream: stream.clone(),
+                mismatch,
+            }
+            .into()),
+        }
     }
 }
 

@@ -699,7 +699,7 @@ pub struct AppendArgs {
     /// If the stream already exists, its configuration must match the set fields.
     #[command(
         flatten,
-        next_help_heading = "Stream configuration (applied only if the stream is created on append)"
+        next_help_heading = "Stream configuration (applied if the stream is created on append; must match if it exists)"
     )]
     pub stream_config: StreamConfig,
 }
@@ -786,7 +786,7 @@ pub struct ReadArgs {
     /// If the stream already exists, its configuration must match the set fields.
     #[command(
         flatten,
-        next_help_heading = "Stream configuration (applied only if the stream is created on read)"
+        next_help_heading = "Stream configuration (applied if the stream is created on read; must match if it exists)"
     )]
     pub stream_config: StreamConfig,
 }

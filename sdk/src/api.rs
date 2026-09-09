@@ -19,7 +19,7 @@ use s2_api::v1::{
         BasinInfo, CreateBasinRequest, EnsureBasinRequest, ListBasinsRequest, ListBasinsResponse,
     },
     config::{
-        BasinConfig, BasinReconfiguration, STREAM_CONFIG_HEADER, StreamConfig, StreamConfigHeader,
+        BasinConfig, BasinReconfiguration, STREAM_CONFIG_HEADER, StreamConfig,
         StreamReconfiguration,
     },
     location::LocationInfo,
@@ -978,10 +978,9 @@ fn set_encryption_header(request: &mut client::Request, encryption: Option<&Encr
 
 fn set_stream_config_header(request: &mut client::Request, stream_config: Option<&StreamConfig>) {
     if let Some(config) = stream_config {
-        request.headers_mut().insert(
-            STREAM_CONFIG_HEADER.clone(),
-            StreamConfigHeader::to_header_value(config),
-        );
+        request
+            .headers_mut()
+            .insert(STREAM_CONFIG_HEADER.clone(), config.to_header_value());
     }
 }
 

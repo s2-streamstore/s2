@@ -453,10 +453,10 @@ impl S2Stream {
     }
 
     /// Append records.
-    pub async fn append(&self, input: AppendInput) -> Result<AppendAck, AppendError> {
+    pub async fn append(&self, mut input: AppendInput) -> Result<AppendAck, AppendError> {
         let stream_config = input
             .stream_config
-            .clone()
+            .take()
             .map(s2_api::v1::config::StreamConfig::from);
         let ack = self
             .client
