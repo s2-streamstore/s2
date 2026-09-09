@@ -408,9 +408,11 @@ impl From<s2_common::access::ReadWritePermissions> for ReadWritePermissions {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListAccessTokensRequest {
     /// Filter to access tokens whose IDs begin with this prefix.
+    /// It must not contain NUL bytes.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub prefix: Option<AccessTokenIdPrefix>,
     /// Filter to access tokens whose IDs lexicographically start after this string.
+    /// It must not contain NUL bytes.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub start_after: Option<AccessTokenIdStartAfter>,
     /// Number of results, up to a maximum of 1000.
