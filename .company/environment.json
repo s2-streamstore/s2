@@ -1,0 +1,13 @@
+{
+  "$schema": "https://api.thecompany.company/schemas/v1/environment.json",
+  "scripts": {
+    "install": {
+      "command": "set -euo pipefail\n\nSUDO=\"\"\nif [ \"$(id -u)\" -ne 0 ]; then SUDO=\"sudo\"; fi\n\n# System build dependencies: a C toolchain for crates with native code, and\n# protoc for s2-api's optional `codegen` feature (enabled by --all-features).\n$SUDO apt-get update\n$SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\\n  build-essential pkg-config protobuf-compiler curl ca-certificates git\n\n# Rust toolchains. Stable builds and tests the workspace; nightly is required\n# for `just fmt` because .rustfmt.toml uses unstable rustfmt options.\nif [ ! -x \"$HOME/.cargo/bin/rustup\" ]; then\n  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \\\n    | sh -s -- -y --profile minimal --default-toolchain stable\nfi\n. \"$HOME/.cargo/env\"\nrustup component add clippy rustfmt\nrustup toolchain install nightly --profile minimal --component rustfmt\n\n# Cargo tools required by the justfile recipes and CI checks. nextest ships a\n# prebuilt binary; the rest are quick to compile from source.\ncargo install --locked just cargo-sort cargo-deny\ncurl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C \"$HOME/.cargo/bin\"\n\n# Expose the toolchain to shells that do not source the cargo env.\nfor b in \"$HOME/.cargo/bin\"/*; do\n  $SUDO ln -sf \"$b\" /usr/local/bin/\ndone\n\n# Fetch the api/specs submodule and warm the dependency cache for the\n# workspace and the standalone simulator.\ngit submodule update --init --recursive\ncargo fetch --locked\ncargo fetch --manifest-path sim/Cargo.toml\n",
+      "timeout": 3600
+    },
+    "prepare": {
+      "command": "set -euo pipefail\n\n# Reconcile submodules and the dependency cache with the checked-out commit.\ngit submodule update --init --recursive\ncargo fetch --locked\n",
+      "timeout": 600
+    }
+  }
+}
