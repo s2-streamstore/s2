@@ -25,11 +25,12 @@ use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::ValidationError;
 /// Access token ID.
 ///
-/// **Note:** It must be unique to the account and between 1 and 96 bytes in length.
+/// **Note:** It must be unique to the account and between 1 and 96 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::access::AccessTokenId;
-/// See [`ListAccessTokensInput::prefix`].
+/// See [`ListAccessTokensInput::prefix`]. It must not contain NUL bytes.
 pub use s2_common::access::AccessTokenIdPrefix;
-/// See [`ListAccessTokensInput::start_after`].
+/// See [`ListAccessTokensInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::access::AccessTokenIdStartAfter;
 /// Basin name.
 ///
@@ -47,11 +48,12 @@ pub use s2_common::basin::BasinNameStartAfter;
 pub use s2_common::location::LocationName;
 /// Stream name.
 ///
-/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
+/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::stream::StreamName;
-/// See [`ListStreamsInput::prefix`].
+/// See [`ListStreamsInput::prefix`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNamePrefix;
-/// See [`ListStreamsInput::start_after`].
+/// See [`ListStreamsInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNameStartAfter;
 pub use s2_common::{
     caps::RECORD_BATCH_MAX,
