@@ -3363,7 +3363,7 @@ pub struct AppendInput {
     /// Stream configuration to apply if the stream is created on append.
     ///
     /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
-    /// already exists. Sent as the `s2-stream-config` header.
+    /// already exists.
     ///
     /// Only used by [`append`](crate::S2Stream::append). Append sessions send the header once
     /// at connect; see
@@ -3647,7 +3647,7 @@ pub struct ReadInput {
     /// Stream configuration to apply if the stream is created on read.
     ///
     /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
-    /// already exists. Sent as the `s2-stream-config` header.
+    /// already exists.
     pub stream_config: Option<StreamConfig>,
 }
 

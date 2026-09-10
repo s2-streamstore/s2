@@ -202,7 +202,7 @@ impl AppendSessionConfig {
     /// Set the stream configuration to apply if the stream is created on append.
     ///
     /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
-    /// already exists. Sent as the `s2-stream-config` header when the session connects.
+    /// already exists.
     ///
     /// Defaults to `None`.
     pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
