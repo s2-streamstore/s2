@@ -557,6 +557,11 @@ impl S2Config {
     /// authorization and basin routing, take precedence over these defaults.
     /// Calling this method again replaces the previous set of default headers.
     ///
+    /// `Content-Encoding` defaults are ignored; the SDK sets it to match the
+    /// request body encoding. `Accept-Encoding` defaults are used only when
+    /// [`Compression::None`] is configured; otherwise the SDK sets the header
+    /// to the configured compression algorithm.
+    ///
     /// Headers are sent to all configured S2 endpoints. Use
     /// [`HeaderValue::set_sensitive`] for values that should be redacted in debug
     /// output. Do not use these defaults for per-request identifiers, since the

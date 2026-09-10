@@ -304,6 +304,7 @@ impl RequestBuilder {
     }
 
     pub fn headers(mut self, headers: &HeaderMap) -> Self {
+        // An owned HeaderMap replaces each key's existing values while preserving duplicates.
         self.headers.extend(headers.clone());
         self
     }
@@ -572,7 +573,7 @@ fn build_http_request(
     let mut builder = http::Request::builder().method(method).uri(uri.clone());
 
     if let Some(req_headers) = builder.headers_mut() {
-        req_headers.extend(headers);
+        *req_headers = headers;
         if let Some(encoding) = content_encoding {
             req_headers.insert(CONTENT_ENCODING, encoding);
         }

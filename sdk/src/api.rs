@@ -798,6 +798,9 @@ impl BaseClient {
         // Authorization belongs to the configured token, including when a
         // refreshable provider supplies it immediately before each attempt.
         default_headers.remove(AUTHORIZATION);
+        // Only the body encoder can set Content-Encoding, including leaving it
+        // absent for uncompressed bodies and streams with per-frame compression.
+        default_headers.remove(http::header::CONTENT_ENCODING);
         #[cfg(feature = "_hidden")]
         let mut access_token_provider = None;
         match &config.access_token {
@@ -1342,6 +1345,10 @@ mod tests {
                 HeaderValue::from_static("wrong-encoding"),
             ),
             (
+                http::header::CONTENT_ENCODING,
+                HeaderValue::from_static("gzip"),
+            ),
+            (
                 http::header::HeaderName::from_static(S2_BASIN),
                 HeaderValue::from_static("wrong-basin"),
             ),
@@ -1424,12 +1431,55 @@ mod tests {
             assert!(headers[AUTHORIZATION].is_sensitive());
             assert_eq!(headers[http::header::USER_AGENT], config.user_agent);
             assert_eq!(headers[http::header::ACCEPT_ENCODING], "gzip");
+            assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
         }
         assert_eq!(unary[2][S2_BASIN], "test-basin");
         for headers in streaming.iter() {
             assert_eq!(headers[S2_BASIN], "test-basin");
             assert_eq!(headers[CONTENT_TYPE], CONTENT_TYPE_S2S);
         }
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[rstest::rstest]
+    #[case::none(Compression::None, None, "gzip, zstd")]
+    #[case::gzip(Compression::Gzip, Some("gzip"), "gzip")]
+    #[case::zstd(Compression::Zstd, Some("zstd"), "zstd")]
+    #[tokio::test]
+    async fn default_headers_do_not_override_request_compression(
+        #[case] compression: Compression,
+        #[case] content_encoding: Option<&str>,
+        #[case] accept_encoding: &str,
+    ) {
+        let config = S2Config::new("token")
+            .with_compression(compression)
+            .with_default_headers(HeaderMap::from_iter([
+                (
+                    http::header::CONTENT_ENCODING,
+                    HeaderValue::from_static("wrong-encoding"),
+                ),
+                (
+                    http::header::ACCEPT_ENCODING,
+                    HeaderValue::from_static("gzip, zstd"),
+                ),
+            ]));
+        let client = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
+        let mut request = client
+            .post("http://example.test/v1/basins".parse().unwrap())
+            .json(&serde_json::json!({"name": "test-basin"}))
+            .build()
+            .unwrap()
+            .compress()
+            .await
+            .unwrap();
+        let headers = request.headers_mut();
+        assert_eq!(
+            headers
+                .get(http::header::CONTENT_ENCODING)
+                .map(|value| value.to_str().unwrap()),
+            content_encoding
+        );
+        assert_eq!(headers[http::header::ACCEPT_ENCODING], accept_encoding);
     }
 
     #[cfg(feature = "_hidden")]
