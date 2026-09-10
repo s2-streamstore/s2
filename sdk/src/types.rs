@@ -561,6 +561,8 @@ impl S2Config {
     /// [`HeaderValue::set_sensitive`] for values that should be redacted in debug
     /// output. Do not use these defaults for per-request identifiers, since the
     /// same values are reused across requests.
+    #[cfg(feature = "_hidden")]
+    #[doc(hidden)]
     pub fn with_default_headers(self, default_headers: HeaderMap) -> Self {
         Self {
             default_headers,

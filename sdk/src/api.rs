@@ -1264,22 +1264,26 @@ fn provision_result_from_parts<T>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "_hidden")]
     use std::sync::Mutex;
     #[cfg(feature = "_hidden")]
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[cfg(feature = "_hidden")]
     use async_trait::async_trait;
+    #[cfg(feature = "_hidden")]
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use super::*;
 
+    #[cfg(feature = "_hidden")]
     #[derive(Default)]
     struct HeaderCapture {
         unary: Mutex<Vec<HeaderMap>>,
         streaming: Mutex<Vec<HeaderMap>>,
     }
 
+    #[cfg(feature = "_hidden")]
     #[async_trait]
     impl client::RequestExecutor for HeaderCapture {
         async fn execute_unary(
@@ -1315,6 +1319,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "_hidden")]
     #[tokio::test]
     async fn default_headers_reach_account_basin_streaming_and_retry_requests() {
         let mut session = HeaderValue::from_static("session-1");
@@ -1427,6 +1432,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "_hidden")]
     #[tokio::test]
     async fn default_headers_are_replaced_and_isolated_between_clients() {
         let first_headers = HeaderMap::from_iter([
