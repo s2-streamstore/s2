@@ -2278,10 +2278,9 @@ async fn stream_config_applies_only_when_append_creates_stream()
 
     let existing_stream = unique_stream_name();
     basin
-        .create_stream(
-            CreateStreamInput::new(existing_stream.clone()).with_config(stream_config.clone()),
-        )
+        .create_stream(CreateStreamInput::new(existing_stream.clone()))
         .await?;
+    let before = basin.get_stream_config(existing_stream.clone()).await?;
     basin
         .stream(existing_stream.clone())
         .append(
@@ -2291,23 +2290,9 @@ async fn stream_config_applies_only_when_append_creates_stream()
             .with_stream_config(stream_config),
         )
         .await?;
-    let result = basin
-        .stream(existing_stream.clone())
-        .append(
-            AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
-                "hello",
-            )?])?)
-            .with_stream_config(
-                StreamConfig::new().with_retention_policy(RetentionPolicy::Age(7200)),
-            ),
-        )
-        .await;
-    assert_matches!(
-        result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "stream_config_mismatch");
-        }
-    );
+    let after = basin.get_stream_config(existing_stream).await?;
+    assert_eq!(after, before);
+    assert_ne!(after.retention_policy, Some(RetentionPolicy::Age(3600)));
 
     s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
     Ok(())

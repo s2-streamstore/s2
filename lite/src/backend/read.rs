@@ -47,9 +47,8 @@ impl Backend {
 
     /// Open a stream for a read or read session.
     ///
-    /// `stream_config` is applied over the basin's default stream configuration if the stream is
-    /// created on read. If the stream already exists, its configuration must match the set
-    /// fields.
+    /// `stream_config` is applied if the stream is created on read. Unset fields inherit the
+    /// basin's default stream configuration. Ignored if the stream already exists.
     pub async fn open_for_read(
         &self,
         basin: &BasinName,

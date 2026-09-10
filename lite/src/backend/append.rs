@@ -21,9 +21,8 @@ use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 impl Backend {
     /// Open a stream for an append or append session.
     ///
-    /// `stream_config` is applied over the basin's default stream configuration if the stream is
-    /// created on append. If the stream already exists, its configuration must match the set
-    /// fields.
+    /// `stream_config` is applied if the stream is created on append. Unset fields inherit the
+    /// basin's default stream configuration. Ignored if the stream already exists.
     pub async fn open_for_append(
         &self,
         basin: &BasinName,

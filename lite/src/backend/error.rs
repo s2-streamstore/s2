@@ -2,7 +2,6 @@ use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
     basin::BasinName,
-    config::StreamConfigMismatch,
     encryption::EncryptionSpecResolutionError,
     record::{FencingToken, SeqNum, StreamPosition},
     stream::StreamName,
@@ -60,14 +59,6 @@ pub struct BasinDeletionPendingError {
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("stream deletion pending")]
 pub struct StreamDeletionPendingError;
-
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("stream `{stream}` in basin `{basin}` exists with a different config: {mismatch}")]
-pub struct StreamConfigMismatchError {
-    pub basin: BasinName,
-    pub stream: StreamName,
-    pub mismatch: StreamConfigMismatch,
-}
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("unwritten position: {0}")]
@@ -151,8 +142,6 @@ pub enum CheckTailError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
-    #[error(transparent)]
-    StreamConfigMismatch(#[from] StreamConfigMismatchError),
 }
 
 impl From<StreamerError> for CheckTailError {
@@ -185,8 +174,6 @@ pub enum AppendError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
-    #[error(transparent)]
-    StreamConfigMismatch(#[from] StreamConfigMismatchError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -274,8 +261,6 @@ pub enum ReadError {
     BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamDeletionPending(#[from] StreamDeletionPendingError),
-    #[error(transparent)]
-    StreamConfigMismatch(#[from] StreamConfigMismatchError),
     #[error(transparent)]
     Unwritten(#[from] UnwrittenError),
 }

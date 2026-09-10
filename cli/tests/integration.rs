@@ -613,26 +613,11 @@ fn append_with_stream_config() {
         "--input",
         "-",
         "--retention-policy",
-        "1h",
+        "2h",
     ])
     .write_stdin("second record\n")
     .assert()
     .success();
-
-    s2().args([
-        "append",
-        &uri,
-        "--format",
-        "text",
-        "--input",
-        "-",
-        "--retention-policy",
-        "2h",
-    ])
-    .write_stdin("third record\n")
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("stream_config_mismatch"));
 
     s2().args(["get-stream-config", &uri])
         .assert()

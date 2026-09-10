@@ -3362,11 +3362,8 @@ pub struct AppendInput {
     pub fencing_token: Option<FencingToken>,
     /// Stream configuration to apply if the stream is created on append.
     ///
-    /// Unset fields inherit the basin's default stream configuration. If the stream already
-    /// exists, its configuration must match the set fields, or the request fails with
-    /// [`ErrorCode::StreamConfigMismatch`](crate::error::ErrorCode::StreamConfigMismatch). Sent as
-    /// the `s2-stream-config` header, and is metered as a `create_stream` operation even if the
-    /// stream already exists.
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists. Sent as the `s2-stream-config` header.
     ///
     /// Only used by [`append`](crate::S2Stream::append). Append sessions send the header once
     /// at connect; see
@@ -3649,11 +3646,8 @@ pub struct ReadInput {
     pub ignore_command_records: bool,
     /// Stream configuration to apply if the stream is created on read.
     ///
-    /// Unset fields inherit the basin's default stream configuration. If the stream already
-    /// exists, its configuration must match the set fields, or the request fails with
-    /// [`ErrorCode::StreamConfigMismatch`](crate::error::ErrorCode::StreamConfigMismatch). Sent as
-    /// the `s2-stream-config` header, and is metered as a `create_stream` operation even if the
-    /// stream already exists.
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists. Sent as the `s2-stream-config` header.
     pub stream_config: Option<StreamConfig>,
 }
 

@@ -41,7 +41,6 @@ pub enum ErrorCode {
     ResourceAlreadyExists,
     ServerDraining,
     Storage,
-    StreamConfigMismatch,
     StreamDeletionPending,
     StreamNotFound,
     TransactionConflict,
@@ -76,7 +75,6 @@ impl ErrorCode {
             Self::RequestTimeout => http::StatusCode::REQUEST_TIMEOUT,
             Self::BasinDeletionPending
             | Self::ResourceAlreadyExists
-            | Self::StreamConfigMismatch
             | Self::StreamDeletionPending
             | Self::TransactionConflict => http::StatusCode::CONFLICT,
             Self::Invalid => http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -119,7 +117,6 @@ impl ErrorCode {
             | Self::PermissionDenied
             | Self::QuotaExhausted
             | Self::ResourceAlreadyExists
-            | Self::StreamConfigMismatch
             | Self::StreamDeletionPending
             | Self::StreamNotFound => false,
         }
@@ -147,7 +144,6 @@ impl ErrorCode {
             | Self::RateLimited
             | Self::ResourceAlreadyExists
             | Self::ServerDraining
-            | Self::StreamConfigMismatch
             | Self::StreamDeletionPending
             | Self::StreamNotFound
             | Self::TransactionConflict => true,

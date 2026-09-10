@@ -225,9 +225,6 @@ impl ServiceError {
                 CheckTailError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
-                CheckTailError::StreamConfigMismatch(e) => {
-                    standard(ErrorCode::StreamConfigMismatch, e.to_string())
-                }
             },
             ServiceError::Append(e) => match e {
                 AppendError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -254,9 +251,6 @@ impl ServiceError {
                 }
                 AppendError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
-                }
-                AppendError::StreamConfigMismatch(e) => {
-                    standard(ErrorCode::StreamConfigMismatch, e.to_string())
                 }
                 AppendError::ConditionFailed(e) => ErrorResponse::AppendConditionFailed(match e {
                     AppendConditionFailedError::FencingTokenMismatch { actual, .. } => {
@@ -298,9 +292,6 @@ impl ServiceError {
                 }
                 ReadError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
-                }
-                ReadError::StreamConfigMismatch(e) => {
-                    standard(ErrorCode::StreamConfigMismatch, e.to_string())
                 }
                 ReadError::Unwritten(tail) => ErrorResponse::Unwritten(v1t::stream::TailResponse {
                     tail: tail.0.into(),
