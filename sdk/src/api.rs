@@ -798,9 +798,6 @@ impl BaseClient {
         // Authorization belongs to the configured token, including when a
         // refreshable provider supplies it immediately before each attempt.
         default_headers.remove(AUTHORIZATION);
-        // Only the body encoder can set Content-Encoding, including leaving it
-        // absent for uncompressed bodies and streams with per-frame compression.
-        default_headers.remove(http::header::CONTENT_ENCODING);
         #[cfg(feature = "_hidden")]
         let mut access_token_provider = None;
         match &config.access_token {
@@ -1345,10 +1342,6 @@ mod tests {
                 HeaderValue::from_static("wrong-encoding"),
             ),
             (
-                http::header::CONTENT_ENCODING,
-                HeaderValue::from_static("gzip"),
-            ),
-            (
                 http::header::HeaderName::from_static(S2_BASIN),
                 HeaderValue::from_static("wrong-basin"),
             ),
@@ -1357,7 +1350,8 @@ mod tests {
         let config = S2Config::new("actual-token")
             .with_endpoints(S2Endpoints::for_endpoint("http://example.test").unwrap())
             .with_compression(Compression::Gzip)
-            .with_default_headers(headers);
+            .with_default_headers(headers)
+            .unwrap();
         let executor = Arc::new(HeaderCapture::default());
         let mut base = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
         base.client = executor.clone();
@@ -1446,23 +1440,18 @@ mod tests {
     #[case::gzip(Compression::Gzip, Some("gzip"), "gzip")]
     #[case::zstd(Compression::Zstd, Some("zstd"), "zstd")]
     #[tokio::test]
-    async fn default_headers_do_not_override_request_compression(
+    async fn default_accept_encoding_respects_configured_compression(
         #[case] compression: Compression,
         #[case] content_encoding: Option<&str>,
         #[case] accept_encoding: &str,
     ) {
         let config = S2Config::new("token")
             .with_compression(compression)
-            .with_default_headers(HeaderMap::from_iter([
-                (
-                    http::header::CONTENT_ENCODING,
-                    HeaderValue::from_static("wrong-encoding"),
-                ),
-                (
-                    http::header::ACCEPT_ENCODING,
-                    HeaderValue::from_static("gzip, zstd"),
-                ),
-            ]));
+            .with_default_headers(HeaderMap::from_iter([(
+                http::header::ACCEPT_ENCODING,
+                HeaderValue::from_static("gzip, zstd"),
+            )]))
+            .unwrap();
         let client = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
         let mut request = client
             .post("http://example.test/v1/basins".parse().unwrap())
@@ -1495,11 +1484,16 @@ mod tests {
                 HeaderValue::from_static("present"),
             ),
         ]);
-        let first = S2Config::new("token").with_default_headers(first_headers);
-        let second = first.clone().with_default_headers(HeaderMap::from_iter([(
-            http::header::HeaderName::from_static("x-origin-session"),
-            HeaderValue::from_static("second"),
-        )]));
+        let first = S2Config::new("token")
+            .with_default_headers(first_headers)
+            .unwrap();
+        let second = first
+            .clone()
+            .with_default_headers(HeaderMap::from_iter([(
+                http::header::HeaderName::from_static("x-origin-session"),
+                HeaderValue::from_static("second"),
+            )]))
+            .unwrap();
         for (config, session) in [(&first, "first"), (&second, "second")] {
             let client = BaseClient::init_with_connector(config, HttpConnector::new()).unwrap();
             let mut request = client
@@ -1512,7 +1506,7 @@ mod tests {
                 session == "first"
             );
         }
-        let cleared = second.with_default_headers(HeaderMap::new());
+        let cleared = second.with_default_headers(HeaderMap::new()).unwrap();
         assert!(cleared.default_headers.is_empty());
         assert!(S2Config::new("token").default_headers.is_empty());
     }
@@ -1683,6 +1677,7 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Bearer wrong-token"),
             )]))
+            .unwrap()
             .with_access_token_provider(RotatingTokenProvider {
                 generation: AtomicUsize::new(1),
             });

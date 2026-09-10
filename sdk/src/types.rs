@@ -557,22 +557,32 @@ impl S2Config {
     /// authorization and basin routing, take precedence over these defaults.
     /// Calling this method again replaces the previous set of default headers.
     ///
-    /// `Content-Encoding` defaults are ignored; the SDK sets it to match the
-    /// request body encoding. `Accept-Encoding` defaults are used only when
-    /// [`Compression::None`] is configured; otherwise the SDK sets the header
-    /// to the configured compression algorithm.
+    /// `Accept-Encoding` defaults are used only when [`Compression::None`] is
+    /// configured; otherwise the SDK sets the header to the configured
+    /// compression algorithm.
     ///
     /// Headers are sent to all configured S2 endpoints. Use
     /// [`HeaderValue::set_sensitive`] for values that should be redacted in debug
     /// output. Do not use these defaults for per-request identifiers, since the
     /// same values are reused across requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `default_headers` contains `Content-Encoding`.
+    /// Use [`Self::with_compression`] to configure request body encoding.
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
-    pub fn with_default_headers(self, default_headers: HeaderMap) -> Self {
-        Self {
+    pub fn with_default_headers(self, default_headers: HeaderMap) -> Result<Self, ValidationError> {
+        if default_headers.contains_key(http::header::CONTENT_ENCODING) {
+            return Err(ValidationError(
+                "Content-Encoding cannot be set in default headers; use S2Config::with_compression instead"
+                    .into(),
+            ));
+        }
+        Ok(Self {
             default_headers,
             ..self
-        }
+        })
     }
 
     /// Set the timeout for establishing a connection to the server.
@@ -4015,6 +4025,28 @@ mod tests {
         assert_eq!(cfg.connection_timeout, Duration::from_secs(3));
         assert_eq!(cfg.request_timeout, Duration::from_secs(5));
         assert!(!cfg.insecure_skip_cert_verification);
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[rstest]
+    #[case::matching_compression("content-encoding", "gzip", Compression::Gzip)]
+    #[case::mixed_case("Content-Encoding", "identity", Compression::None)]
+    #[case::empty_value("content-encoding", "", Compression::None)]
+    fn default_headers_reject_content_encoding(
+        #[case] name: &str,
+        #[case] value: &str,
+        #[case] compression: Compression,
+    ) {
+        let headers = HeaderMap::from_iter([(
+            name.parse::<http::header::HeaderName>().unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        )]);
+        let error = S2Config::new("token")
+            .with_compression(compression)
+            .with_default_headers(headers)
+            .unwrap_err();
+        assert!(error.0.contains("Content-Encoding"));
+        assert!(error.0.contains("with_compression"));
     }
 
     // -- StorageClass --
