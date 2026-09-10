@@ -697,7 +697,8 @@ pub struct AppendArgs {
     /// Stream configuration to apply if the stream is created on append.
     /// Unset fields inherit the basin's default stream configuration.
     /// If the stream already exists, its configuration must match the set fields.
-    /// Each request that sets any of these incurs a CreateStream basin operation.
+    /// Setting any of these is metered as a create_stream operation, even if the stream already
+    /// exists.
     #[command(
         flatten,
         next_help_heading = "Stream configuration (applied if the stream is created on append; must match if it exists)"
@@ -785,7 +786,8 @@ pub struct ReadArgs {
     /// Stream configuration to apply if the stream is created on read.
     /// Unset fields inherit the basin's default stream configuration.
     /// If the stream already exists, its configuration must match the set fields.
-    /// Each request that sets any of these incurs a CreateStream basin operation.
+    /// Setting any of these is metered as a create_stream operation, even if the stream already
+    /// exists.
     #[command(
         flatten,
         next_help_heading = "Stream configuration (applied if the stream is created on read; must match if it exists)"

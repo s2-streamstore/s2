@@ -3365,8 +3365,8 @@ pub struct AppendInput {
     /// Unset fields inherit the basin's default stream configuration. If the stream already
     /// exists, its configuration must match the set fields, or the request fails with
     /// [`ErrorCode::StreamConfigMismatch`](crate::error::ErrorCode::StreamConfigMismatch). Sent as
-    /// the `s2-stream-config` header; each request that sets it incurs a `CreateStream` basin
-    /// operation.
+    /// the `s2-stream-config` header, and is metered as a `create_stream` operation even if the
+    /// stream already exists.
     ///
     /// Only used by [`append`](crate::S2Stream::append). Append sessions send the header once
     /// at connect; see
@@ -3652,8 +3652,8 @@ pub struct ReadInput {
     /// Unset fields inherit the basin's default stream configuration. If the stream already
     /// exists, its configuration must match the set fields, or the request fails with
     /// [`ErrorCode::StreamConfigMismatch`](crate::error::ErrorCode::StreamConfigMismatch). Sent as
-    /// the `s2-stream-config` header; each request that sets it incurs a `CreateStream` basin
-    /// operation.
+    /// the `s2-stream-config` header, and is metered as a `create_stream` operation even if the
+    /// stream already exists.
     pub stream_config: Option<StreamConfig>,
 }
 
