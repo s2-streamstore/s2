@@ -568,7 +568,8 @@ impl S2Config {
     ///
     /// # Errors
     ///
-    /// Returns an error if `default_headers` contains `Content-Encoding`.
+    /// Returns an error if `default_headers` contains `Content-Encoding`,
+    /// `Content-Length`, or `Transfer-Encoding`. The SDK controls body framing.
     /// Use [`Self::with_compression`] to configure request body encoding.
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
@@ -578,6 +579,16 @@ impl S2Config {
                 "Content-Encoding cannot be set in default headers; use S2Config::with_compression instead"
                     .into(),
             ));
+        }
+        for name in [
+            http::header::CONTENT_LENGTH,
+            http::header::TRANSFER_ENCODING,
+        ] {
+            if default_headers.contains_key(&name) {
+                return Err(ValidationError(format!(
+                    "{name} cannot be set in default headers; the SDK controls request body framing"
+                )));
+            }
         }
         Ok(Self {
             default_headers,
@@ -4047,6 +4058,26 @@ mod tests {
             .unwrap_err();
         assert!(error.0.contains("Content-Encoding"));
         assert!(error.0.contains("with_compression"));
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[rstest]
+    #[case::content_length("content-length", "123")]
+    #[case::content_length_mixed_case("Content-Length", "0")]
+    #[case::content_length_empty("content-length", "")]
+    #[case::transfer_encoding("transfer-encoding", "chunked")]
+    #[case::transfer_encoding_mixed_case("Transfer-Encoding", "chunked")]
+    #[case::transfer_encoding_empty("transfer-encoding", "")]
+    fn default_headers_reject_framing_headers(#[case] name: &str, #[case] value: &str) {
+        let headers = HeaderMap::from_iter([(
+            name.parse::<http::header::HeaderName>().unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        )]);
+        let error = S2Config::new("token")
+            .with_default_headers(headers)
+            .unwrap_err();
+        assert!(error.0.contains(&name.to_ascii_lowercase()));
+        assert!(error.0.contains("framing"));
     }
 
     // -- StorageClass --
