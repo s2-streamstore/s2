@@ -531,20 +531,6 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .expect("Failed to create basin");
 
     let stream_name = test_stream_name("stream-reconfigure");
-    assert!(matches!(
-        backend
-            .provision_stream(
-                basin_name.clone(),
-                stream_name.clone(),
-                OptionalStreamConfig {
-                    storage_class: Some(StorageClass::Native),
-                    ..Default::default()
-                },
-                ProvisionMode::Ensure,
-            )
-            .await,
-        Err(ProvisionStreamError::Validation(_))
-    ));
     let initial_config = OptionalStreamConfig {
         retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(60))),
         timestamping: OptionalTimestampingConfig {
@@ -586,23 +572,6 @@ async fn test_reconfigure_stream_updates_selected_fields() {
     assert_eq!(updated.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(updated.timestamping.mode, TimestampingMode::Arrival);
     assert!(updated.timestamping.uncapped);
-
-    assert!(matches!(
-        backend
-            .reconfigure_stream(
-                basin_name.clone(),
-                stream_name.clone(),
-                StreamReconfiguration {
-                    storage_class: Maybe::from(Some(StorageClass::Native)),
-                    retention_policy: Maybe::from(Some(RetentionPolicy::Age(Duration::from_secs(
-                        60
-                    ),))),
-                    ..Default::default()
-                },
-            )
-            .await,
-        Err(ReconfigureStreamError::Validation(_))
-    ));
 
     let fetched = backend
         .get_stream_config(basin_name, stream_name)

@@ -13,7 +13,7 @@ pub enum StorageClass {
     Standard,
     /// Append tail latency under 40 milliseconds with s2.dev.
     Express,
-    /// Native storage class. Not supported by S2 Lite.
+    /// Append tail latency under 4 ms with s2.dev.
     Native,
 }
 

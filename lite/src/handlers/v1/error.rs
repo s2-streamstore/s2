@@ -108,7 +108,6 @@ impl ServiceError {
                 ProvisionBasinError::BasinDeletionPending(e) => {
                     standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
-                ProvisionBasinError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::GetBasinConfig(e) => match e {
                 GetBasinConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -136,7 +135,6 @@ impl ServiceError {
                 ReconfigureBasinError::BasinDeletionPending(e) => {
                     standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
-                ReconfigureBasinError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::ListStreams(e) => match e {
                 ListStreamsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),

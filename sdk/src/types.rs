@@ -738,7 +738,7 @@ pub enum StorageClass {
     Standard,
     /// Express storage class that offers append latencies under `50ms`.
     Express,
-    /// Native storage class. Not supported by S2 Lite.
+    /// Native storage class that offers append latencies under 4 ms.
     Native,
 }
 

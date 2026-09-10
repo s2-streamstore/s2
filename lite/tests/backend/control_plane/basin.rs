@@ -298,15 +298,6 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     let mut initial_config = BasinConfig::default();
     initial_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
-    let mut native_config = initial_config.clone();
-    native_config.default_stream_config.storage_class = Some(StorageClass::Native);
-    assert!(matches!(
-        backend
-            .provision_basin(basin_name.clone(), native_config, ProvisionMode::Ensure)
-            .await,
-        Err(ProvisionBasinError::Validation(_))
-    ));
-
     backend
         .provision_basin(
             basin_name.clone(),
@@ -355,23 +346,6 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
         updated.default_stream_config.timestamping.mode,
         Some(TimestampingMode::Arrival)
     );
-
-    assert!(matches!(
-        backend
-            .reconfigure_basin(
-                basin_name.clone(),
-                BasinReconfiguration {
-                    default_stream_config: Maybe::from(Some(StreamReconfiguration {
-                        storage_class: Maybe::from(Some(StorageClass::Native)),
-                        ..Default::default()
-                    })),
-                    create_stream_on_append: Maybe::from(false),
-                    ..Default::default()
-                },
-            )
-            .await,
-        Err(ReconfigureBasinError::Validation(_))
-    ));
 
     let fetched = backend
         .get_basin_config(basin_name)
