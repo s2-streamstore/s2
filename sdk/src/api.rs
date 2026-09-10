@@ -794,7 +794,10 @@ impl BaseClient {
         C: client::Connect + Clone + Send + Sync + 'static,
     {
         let access_token_mode = config.access_token.mode();
-        let mut default_headers = HeaderMap::new();
+        let mut default_headers = config.default_headers.clone();
+        // Authorization belongs to the configured token, including when a
+        // refreshable provider supplies it immediately before each attempt.
+        default_headers.remove(AUTHORIZATION);
         #[cfg(feature = "_hidden")]
         let mut access_token_provider = None;
         match &config.access_token {
@@ -1262,10 +1265,9 @@ fn provision_result_from_parts<T>(
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "_hidden")]
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
+    use std::sync::Mutex;
+    #[cfg(feature = "_hidden")]
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[cfg(feature = "_hidden")]
     use async_trait::async_trait;
@@ -1273,6 +1275,241 @@ mod tests {
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use super::*;
+
+    #[cfg(feature = "_hidden")]
+    #[derive(Default)]
+    struct HeaderCapture {
+        unary: Mutex<Vec<HeaderMap>>,
+        streaming: Mutex<Vec<HeaderMap>>,
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[async_trait]
+    impl client::RequestExecutor for HeaderCapture {
+        async fn execute_unary(
+            &self,
+            mut request: client::Request,
+        ) -> Result<UnaryResponse, client::HttpError> {
+            let mut headers = self.unary.lock().unwrap();
+            headers.push(request.headers_mut().clone());
+            // Exercise a real retry through RequestBuilder::send.
+            Ok(if headers.len() == 1 {
+                UnaryResponse::new_for_test(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    br#"{"code":"unavailable","message":"retry"}"#.to_vec(),
+                )
+            } else {
+                UnaryResponse::new_for_test(
+                    StatusCode::OK,
+                    br#"{"basins":[],"streams":[],"has_more":false}"#.to_vec(),
+                )
+            })
+        }
+
+        async fn init_streaming(
+            &self,
+            mut request: client::Request,
+        ) -> Result<StreamingResponse, client::HttpError> {
+            self.streaming
+                .lock()
+                .unwrap()
+                .push(request.headers_mut().clone());
+            // Capturing initiation is sufficient: do not construct a response body.
+            Err(client::HttpError::Timeout)
+        }
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[tokio::test]
+    async fn default_headers_reach_account_basin_streaming_and_retry_requests() {
+        let mut session = HeaderValue::from_static("session-1");
+        session.set_sensitive(true);
+        let headers = HeaderMap::from_iter([
+            (
+                http::header::HeaderName::from_static("x-origin-session"),
+                session,
+            ),
+            (
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer wrong-token"),
+            ),
+            (
+                http::header::USER_AGENT,
+                HeaderValue::from_static("wrong-agent"),
+            ),
+            (
+                http::header::ACCEPT_ENCODING,
+                HeaderValue::from_static("wrong-encoding"),
+            ),
+            (
+                http::header::HeaderName::from_static(S2_BASIN),
+                HeaderValue::from_static("wrong-basin"),
+            ),
+            (CONTENT_TYPE, HeaderValue::from_static("wrong-content-type")),
+        ]);
+        let config = S2Config::new("actual-token")
+            .with_endpoints(S2Endpoints::for_endpoint("http://example.test").unwrap())
+            .with_compression(Compression::Gzip)
+            .with_default_headers(headers)
+            .unwrap();
+        let executor = Arc::new(HeaderCapture::default());
+        let mut base = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
+        base.client = executor.clone();
+        base.retry_builder = RetryBackoffBuilder::default()
+            .with_min_base_delay(Duration::ZERO)
+            .with_max_base_delay(Duration::ZERO)
+            .with_max_retries(1);
+        let account = AccountClient::init(config.clone(), base);
+        account
+            .list_basins(ListBasinsRequest {
+                prefix: None,
+                start_after: None,
+                limit: None,
+            })
+            .await
+            .unwrap();
+        let basin = account.basin_client("test-basin".parse().unwrap());
+        basin
+            .list_streams(ListStreamsRequest {
+                prefix: None,
+                start_after: None,
+                limit: None,
+            })
+            .await
+            .unwrap();
+
+        let stream = "test-stream".parse().unwrap();
+        assert!(
+            basin
+                .read_session(
+                    &stream,
+                    ReadStart {
+                        seq_num: None,
+                        timestamp: None,
+                        tail_offset: None,
+                        clamp: None
+                    },
+                    ReadEnd {
+                        count: None,
+                        bytes: None,
+                        until: None,
+                        wait: None
+                    },
+                    None,
+                    ReconnectAdvice::default(),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            basin
+                .append_session(
+                    &stream,
+                    futures_util::stream::empty(),
+                    None,
+                    None,
+                    ReconnectAdvice::default(),
+                )
+                .await
+                .is_err()
+        );
+
+        let unary = executor.unary.lock().unwrap();
+        let streaming = executor.streaming.lock().unwrap();
+        assert_eq!(unary.len(), 3); // account, account retry, basin
+        assert_eq!(streaming.len(), 2); // read and append
+        for headers in unary.iter().chain(streaming.iter()) {
+            assert_eq!(headers["x-origin-session"], "session-1");
+            assert!(headers["x-origin-session"].is_sensitive());
+            assert_eq!(headers[AUTHORIZATION], "Bearer actual-token");
+            assert!(headers[AUTHORIZATION].is_sensitive());
+            assert_eq!(headers[http::header::USER_AGENT], config.user_agent);
+            assert_eq!(headers[http::header::ACCEPT_ENCODING], "gzip");
+            assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
+        }
+        assert_eq!(unary[2][S2_BASIN], "test-basin");
+        for headers in streaming.iter() {
+            assert_eq!(headers[S2_BASIN], "test-basin");
+            assert_eq!(headers[CONTENT_TYPE], CONTENT_TYPE_S2S);
+        }
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[rstest::rstest]
+    #[case::none(Compression::None, None, "gzip, zstd")]
+    #[case::gzip(Compression::Gzip, Some("gzip"), "gzip")]
+    #[case::zstd(Compression::Zstd, Some("zstd"), "zstd")]
+    #[tokio::test]
+    async fn default_accept_encoding_respects_configured_compression(
+        #[case] compression: Compression,
+        #[case] content_encoding: Option<&str>,
+        #[case] accept_encoding: &str,
+    ) {
+        let config = S2Config::new("token")
+            .with_compression(compression)
+            .with_default_headers(HeaderMap::from_iter([(
+                http::header::ACCEPT_ENCODING,
+                HeaderValue::from_static("gzip, zstd"),
+            )]))
+            .unwrap();
+        let client = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
+        let mut request = client
+            .post("http://example.test/v1/basins".parse().unwrap())
+            .json(&serde_json::json!({"name": "test-basin"}))
+            .build()
+            .unwrap()
+            .compress()
+            .await
+            .unwrap();
+        let headers = request.headers_mut();
+        assert_eq!(
+            headers
+                .get(http::header::CONTENT_ENCODING)
+                .map(|value| value.to_str().unwrap()),
+            content_encoding
+        );
+        assert_eq!(headers[http::header::ACCEPT_ENCODING], accept_encoding);
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[tokio::test]
+    async fn default_headers_are_replaced_and_isolated_between_clients() {
+        let first_headers = HeaderMap::from_iter([
+            (
+                http::header::HeaderName::from_static("x-origin-session"),
+                HeaderValue::from_static("first"),
+            ),
+            (
+                http::header::HeaderName::from_static("x-first-only"),
+                HeaderValue::from_static("present"),
+            ),
+        ]);
+        let first = S2Config::new("token")
+            .with_default_headers(first_headers)
+            .unwrap();
+        let second = first
+            .clone()
+            .with_default_headers(HeaderMap::from_iter([(
+                http::header::HeaderName::from_static("x-origin-session"),
+                HeaderValue::from_static("second"),
+            )]))
+            .unwrap();
+        for (config, session) in [(&first, "first"), (&second, "second")] {
+            let client = BaseClient::init_with_connector(config, HttpConnector::new()).unwrap();
+            let mut request = client
+                .get("http://example.test".parse().unwrap())
+                .build()
+                .unwrap();
+            assert_eq!(request.headers_mut()["x-origin-session"], session);
+            assert_eq!(
+                request.headers_mut().contains_key("x-first-only"),
+                session == "first"
+            );
+        }
+        let cleared = second.with_default_headers(HeaderMap::new()).unwrap();
+        assert!(cleared.default_headers.is_empty());
+        assert!(S2Config::new("token").default_headers.is_empty());
+    }
 
     #[cfg(feature = "_hidden")]
     #[derive(Debug)]
@@ -1435,9 +1672,15 @@ mod tests {
     #[cfg(feature = "_hidden")]
     #[tokio::test]
     async fn dynamic_access_token_is_loaded_for_each_attempt_and_marked_sensitive() {
-        let config = S2Config::new("unused").with_access_token_provider(RotatingTokenProvider {
-            generation: AtomicUsize::new(1),
-        });
+        let config = S2Config::new("unused")
+            .with_default_headers(HeaderMap::from_iter([(
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer wrong-token"),
+            )]))
+            .unwrap()
+            .with_access_token_provider(RotatingTokenProvider {
+                generation: AtomicUsize::new(1),
+            });
         let client = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
         let uri = "http://example.test/v1/basins".parse().unwrap();
         let mut request = client.get(uri).build().unwrap();
