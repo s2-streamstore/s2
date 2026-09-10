@@ -147,7 +147,8 @@ impl ProducerConfig {
     /// Unset fields inherit the basin's default stream configuration. If the stream already
     /// exists, its configuration must match the set fields, or the request fails with
     /// [`ErrorCode::StreamConfigMismatch`](crate::error::ErrorCode::StreamConfigMismatch). Sent as
-    /// the `s2-stream-config` header when the session connects.
+    /// the `s2-stream-config` header when the session connects; each connect incurs a
+    /// `CreateStream` basin operation.
     ///
     /// Defaults to `None`.
     pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {

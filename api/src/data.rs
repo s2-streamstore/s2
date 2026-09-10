@@ -104,6 +104,7 @@ pub struct S2StreamConfigHeader {
     /// JSON-encoded `StreamConfig` to apply if the stream is created on append or read.
     /// Unset fields inherit the basin's default stream configuration.
     /// If the stream already exists, its configuration must match the set fields, or the request fails with `stream_config_mismatch`.
+    /// Every request that sets this header incurs a `CreateStream` basin operation.
     #[cfg_attr(feature = "utoipa", param(
         required = false,
         rename = "s2-stream-config",
