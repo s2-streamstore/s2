@@ -4927,6 +4927,7 @@ dependencies = [
  "strum",
  "thiserror 2.0.19",
  "time",
+ "tokio",
  "tokio-util",
  "utoipa",
  "zstd",

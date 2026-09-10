@@ -17,7 +17,7 @@ include = [
 ]
 
 [features]
-axum = ["dep:axum", "dep:sonic-rs", "s2-common/axum"]
+axum = ["dep:axum", "dep:sonic-rs", "dep:tokio", "s2-common/axum"]
 utoipa = ["dep:utoipa"]
 codegen = ["dep:prost-build"]
 
@@ -40,6 +40,7 @@ sonic-rs = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
+tokio = { workspace = true, optional = true, features = ["time"] }
 tokio-util = { workspace = true, features = ["codec", "io"] }
 utoipa = { workspace = true, optional = true, features = ["time"] }
 zstd = { workspace = true }
@@ -51,3 +52,4 @@ prost-build = { workspace = true, optional = true }
 futures = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "test-util", "time"] }
