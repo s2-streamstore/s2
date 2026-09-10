@@ -46,11 +46,15 @@ fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceErro
     Ok(())
 }
 
+/// Adjusts the read bounds to resume after `last_event_id`, and returns the
+/// count/bytes already delivered so emitted event ids stay cumulative across
+/// reconnects.
 fn apply_last_event_id(
     mut start: ReadStart,
     mut end: v1t::stream::ReadEnd,
     last_event_id: Option<v1t::stream::sse::LastEventId>,
-) -> (ReadStart, v1t::stream::ReadEnd) {
+) -> (ReadStart, v1t::stream::ReadEnd, CountOrBytes) {
+    let mut delivered = CountOrBytes::ZERO;
     if let Some(v1t::stream::sse::LastEventId {
         seq_num,
         count,
@@ -60,8 +64,9 @@ fn apply_last_event_id(
         start.from = ReadFrom::SeqNum(seq_num.saturating_add(1));
         end.count = end.count.map(|c| c.saturating_sub(count));
         end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
+        delivered = CountOrBytes { count, bytes };
     }
-    (start, end)
+    (start, end, delivered)
 }
 
 enum ReadMode {
@@ -212,7 +217,7 @@ pub async fn read(
             format,
             last_event_id,
         } => {
-            let (start, end) = apply_last_event_id(start, end, last_event_id);
+            let (start, end, delivered) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend
                 .open_for_read(&basin, &stream, encryption_key)
@@ -220,7 +225,7 @@ pub async fn read(
                 .read(start, end)
                 .await?;
             let events = async_stream::stream! {
-                let mut processed = CountOrBytes::ZERO;
+                let mut processed = delivered;
                 tokio::pin!(session);
                 let mut errored = false;
                 while let Some(output) = session.next().await {
@@ -472,6 +477,7 @@ mod tests {
     use s2_api::v1::stream::{
         proto,
         s2s::{FrameDecoder, SessionMessage},
+        sse::LastEventId,
     };
     use s2_common::{
         basin::{BASIN_HEADER, BasinName},
@@ -603,6 +609,88 @@ mod tests {
             .append(append_input(body))
             .await
             .expect("append encrypted payload");
+    }
+
+    async fn append_payload(
+        backend: &Backend,
+        basin: &BasinName,
+        stream: &StreamName,
+        body: &'static [u8],
+    ) {
+        backend
+            .open_for_append(basin, stream, None)
+            .await
+            .expect("open append handle")
+            .append(append_input(body))
+            .await
+            .expect("append payload");
+    }
+
+    struct SseBatches {
+        seq_nums: Vec<u64>,
+        last_id: Option<LastEventId>,
+    }
+
+    /// Performs a bounded SSE read and collects the delivered `batch` events.
+    async fn sse_read_bounded(
+        app: &axum::Router,
+        basin: &BasinName,
+        stream: &StreamName,
+        count: usize,
+        last_event_id: Option<LastEventId>,
+    ) -> SseBatches {
+        let mut request = request_builder(
+            "GET",
+            format!("/v1/streams/{stream}/records?seq_num=0&count={count}&wait=0"),
+            basin,
+        )
+        .header(header::ACCEPT, "text/event-stream");
+        if let Some(id) = last_event_id {
+            request = request.header("last-event-id", id.to_string());
+        }
+        let response = send(app, request.body(Body::empty()).unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_bytes(response, "sse body").await;
+        let body = std::str::from_utf8(&body).expect("utf8 sse body");
+
+        let mut batches = SseBatches {
+            seq_nums: Vec::new(),
+            last_id: None,
+        };
+        for event in body.split("\n\n").filter(|e| !e.trim().is_empty()) {
+            let field = |name: &str| {
+                event
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .map(str::trim)
+            };
+            match field("event:") {
+                Some("batch") => {
+                    let id: LastEventId = field("id:")
+                        .expect("batch event id")
+                        .parse()
+                        .expect("parse batch event id");
+                    let data: serde_json::Value =
+                        serde_json::from_str(field("data:").expect("batch event data"))
+                            .expect("batch event json");
+                    let records = data["records"].as_array().expect("records array");
+                    batches.seq_nums.extend(
+                        records
+                            .iter()
+                            .map(|r| r["seq_num"].as_u64().expect("seq_num")),
+                    );
+                    assert_eq!(
+                        id.seq_num,
+                        *batches.seq_nums.last().expect("non-empty batch")
+                    );
+                    batches.last_id = Some(id);
+                }
+                Some("error") => panic!("unexpected sse error event: {event}"),
+                Some(other) => panic!("unexpected sse event `{other}`: {event}"),
+                None => assert_eq!(field("data:"), Some("[DONE]"), "unexpected event: {event}"),
+            }
+        }
+        batches
     }
 
     fn read_uri(stream: &StreamName) -> String {
@@ -831,6 +919,50 @@ mod tests {
                 .as_str()
                 .expect("error message string")
                 .contains("missing encryption key")
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_resume_emits_cumulative_ids_and_honors_count_bound() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "read-sse-resume",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        for _ in 0..20 {
+            append_payload(&backend, &basin, &stream, b"payload").await;
+        }
+        let bound = 10;
+
+        // Reference: an uninterrupted bounded read.
+        let full = sse_read_bounded(&app, &basin, &stream, bound, None).await;
+        assert_eq!(full.seq_nums, (0..10).collect::<Vec<_>>());
+        let full_id = full.last_id.expect("last id");
+        assert_eq!((full_id.seq_num, full_id.count), (9, 10));
+
+        // Connection drops after the client has received 4 records.
+        let first = sse_read_bounded(&app, &basin, &stream, 4, None).await;
+        assert_eq!(first.seq_nums, (0..4).collect::<Vec<_>>());
+        let first_id = first.last_id.expect("last id");
+        assert_eq!((first_id.seq_num, first_id.count), (3, 4));
+
+        // Resume the original bounded read: only the remaining 6 records are
+        // delivered, and the emitted ids carry the cumulative count/bytes.
+        let resumed = sse_read_bounded(&app, &basin, &stream, bound, Some(first_id)).await;
+        assert_eq!(resumed.seq_nums, (4..10).collect::<Vec<_>>());
+        let resumed_id = resumed.last_id.expect("last id");
+        assert_eq!(
+            (resumed_id.seq_num, resumed_id.count, resumed_id.bytes),
+            (full_id.seq_num, full_id.count, full_id.bytes)
+        );
+
+        // Resuming again once the bound is met delivers nothing more.
+        let exhausted = sse_read_bounded(&app, &basin, &stream, bound, Some(resumed_id)).await;
+        assert!(exhausted.seq_nums.is_empty(), "{:?}", exhausted.seq_nums);
+        assert_eq!(
+            first.seq_nums.len() + resumed.seq_nums.len() + exhausted.seq_nums.len(),
+            bound
         );
     }
 
