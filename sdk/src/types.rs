@@ -734,11 +734,11 @@ impl<T> Page<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Storage class for recent appends.
 pub enum StorageClass {
-    /// Standard storage class that offers append latencies under `500ms`.
+    /// Append tail latency under 400 ms with s2.dev.
     Standard,
-    /// Express storage class that offers append latencies under `50ms`.
+    /// Append tail latency under 40 ms with s2.dev.
     Express,
-    /// Native storage class that offers append latencies under 4 ms.
+    /// Append tail latency under 4 ms with s2.dev.
     Native,
 }
 

@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {
-    /// Append tail latency under 400 milliseconds with s2.dev.
+    /// Append tail latency under 400 ms with s2.dev.
     Standard,
-    /// Append tail latency under 40 milliseconds with s2.dev.
+    /// Append tail latency under 40 ms with s2.dev.
     Express,
     /// Append tail latency under 4 ms with s2.dev.
     Native,
