@@ -71,6 +71,14 @@ impl Backend {
         }
     }
 
+    /// Flush memtables to L0 and close the database.
+    ///
+    /// Call after draining HTTP requests to reduce WAL replay on restart.
+    /// Dropping the backend does not close SlateDB.
+    pub async fn close(&self) -> Result<(), slatedb::Error> {
+        self.db.close().await
+    }
+
     pub(super) fn bgtask_trigger(&self, trigger: BgtaskTrigger) {
         let _ = self.bgtask_trigger_tx.send(trigger);
     }

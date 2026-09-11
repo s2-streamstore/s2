@@ -199,6 +199,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     info!(%args.append_inflight_bytes, "starting backend");
     let backend = Backend::new(db, args.append_inflight_bytes);
+    let shutdown_backend = backend.clone();
     crate::backend::bgtasks::spawn(&backend);
 
     if let Some(init_file) = &args.init_file {
@@ -277,6 +278,17 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
             return Err(eyre::eyre!("Invalid TLS configuration"));
         }
     }
+
+    info!("http server stopped; closing SlateDB");
+    let close_started = Instant::now();
+    shutdown_backend
+        .close()
+        .await
+        .map_err(|error| eyre::eyre!("SlateDB close: {error}"))?;
+    info!(
+        elapsed_ms = close_started.elapsed().as_millis(),
+        "SlateDB closed"
+    );
 
     Ok(())
 }

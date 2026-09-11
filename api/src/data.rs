@@ -201,10 +201,10 @@ pub mod extract {
         }
     }
 
-    fn classify_sonic_error(err: sonic_rs::Error) -> JsonExtractionRejection {
-        use sonic_rs::error::Category;
+    fn classify_json_error(err: serde_json::Error) -> JsonExtractionRejection {
+        use serde_json::error::Category;
         match err.classify() {
-            Category::TypeUnmatched | Category::NotFound => JsonExtractionRejection::DataError {
+            Category::Data => JsonExtractionRejection::DataError {
                 status: http::StatusCode::UNPROCESSABLE_ENTITY,
                 message: err.to_string().into(),
             },
@@ -212,7 +212,7 @@ pub mod extract {
                 status: http::StatusCode::INTERNAL_SERVER_ERROR,
                 message: err.to_string().into(),
             },
-            _ => JsonExtractionRejection::SyntaxError {
+            Category::Syntax | Category::Eof => JsonExtractionRejection::SyntaxError {
                 status: http::StatusCode::BAD_REQUEST,
                 message: err.to_string().into(),
             },
@@ -242,9 +242,9 @@ pub mod extract {
                     message: e.body_text().into(),
                 }
             })?;
-            sonic_rs::from_slice(&bytes)
+            serde_json::from_slice(&bytes)
                 .map(Self)
-                .map_err(classify_sonic_error)
+                .map_err(classify_json_error)
         }
     }
 
@@ -274,9 +274,9 @@ pub mod extract {
             if bytes.is_empty() {
                 return Ok(None);
             }
-            sonic_rs::from_slice(&bytes)
+            serde_json::from_slice(&bytes)
                 .map(|v| Some(Self(v)))
-                .map_err(classify_sonic_error)
+                .map_err(classify_json_error)
         }
     }
 
@@ -342,15 +342,12 @@ pub mod extract {
             stream::{AppendInput, AppendRecord, Header},
         };
 
-        fn classify_json_error<T: DeserializeOwned>(
-            json: &[u8],
-        ) -> Result<T, JsonExtractionRejection> {
-            sonic_rs::from_slice(json).map_err(classify_sonic_error)
+        fn parse_json<T: DeserializeOwned>(json: &[u8]) -> Result<T, JsonExtractionRejection> {
+            serde_json::from_slice(json).map_err(classify_json_error)
         }
 
         /// Verify that our rejection wrapper preserves axum's status code
-        /// classification for a variety of invalid JSON payloads, now using
-        /// sonic-rs as the deserializer.
+        /// classification for a variety of invalid JSON payloads.
         #[test]
         fn json_error_classification() {
             let cases: &[(&[u8], http::StatusCode)] = &[
@@ -374,7 +371,7 @@ pub mod extract {
             ];
 
             for (input, expected_status) in cases {
-                let err = classify_json_error::<AppendInput>(input).expect_err(&format!(
+                let err = parse_json::<AppendInput>(input).expect_err(&format!(
                     "expected error for {:?}",
                     String::from_utf8_lossy(input)
                 ));
@@ -392,24 +389,59 @@ pub mod extract {
         #[test]
         fn valid_json_parses_successfully() {
             let input = br#"{"records": [], "match_seq_num": null}"#;
-            let result = classify_json_error::<AppendInput>(input);
+            let result = parse_json::<AppendInput>(input);
             assert!(result.is_ok());
         }
 
-        /// Differential test: serialize with serde_json, deserialize with
-        /// both serde_json and sonic_rs, assert semantic equality.
+        /// A deeply nested value must never overflow the stack, wherever it
+        /// appears in the document: a wrong-typed value is rejected before it
+        /// is descended into, an unknown field is skipped iteratively, and
+        /// nesting that is actually deserialized hits the recursion limit.
         #[test]
-        fn serde_json_sonic_rs_roundtrip() {
+        fn deeply_nested_json_does_not_overflow_stack() {
+            const DEPTH: usize = 50_000;
+            let nested = format!("{}{}", "[".repeat(DEPTH), "]".repeat(DEPTH));
+            let cases = [
+                (
+                    format!(r#"{{"records":[{{"body":{nested}}}]}}"#),
+                    Some(http::StatusCode::UNPROCESSABLE_ENTITY),
+                ),
+                (format!(r#"{{"records":[],"unknown":{nested}}}"#), None),
+                (nested.clone(), Some(http::StatusCode::UNPROCESSABLE_ENTITY)),
+            ];
+            // Tokio's default worker stack size; unbounded recursion over
+            // 50k levels overflows it.
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || {
+                    for (input, expected_status) in &cases {
+                        let status = parse_json::<AppendInput>(input.as_bytes())
+                            .err()
+                            .map(|e| e.status());
+                        assert_eq!(status, *expected_status);
+                    }
+                    let err = parse_json::<serde_json::Value>(nested.as_bytes()).unwrap_err();
+                    assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+                    assert!(err.body_text().contains("recursion limit exceeded"));
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+
+        /// Serialize with serde_json and deserialize again, asserting semantic
+        /// equality for shapes with custom (de)serialization.
+        #[test]
+        fn serde_json_roundtrip() {
             fn assert_roundtrip<T>(input: &T)
             where
                 T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
             {
                 let json = serde_json::to_vec(input).unwrap();
-                let from_serde: T = serde_json::from_slice(&json).unwrap();
-                let from_sonic: T = sonic_rs::from_slice(&json).unwrap();
+                let parsed: T = parse_json(&json).unwrap();
                 assert_eq!(
-                    format!("{from_serde:?}"),
-                    format!("{from_sonic:?}"),
+                    format!("{input:?}"),
+                    format!("{parsed:?}"),
                     "roundtrip mismatch for {}",
                     String::from_utf8_lossy(&json),
                 );

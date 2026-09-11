@@ -55,9 +55,11 @@ impl From<s2_common::stream::StreamInfo> for StreamInfo {
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListStreamsRequest {
     /// Filter to streams whose names begin with this prefix.
+    /// It must not contain NUL bytes.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub prefix: Option<StreamNamePrefix>,
     /// Filter to streams whose names lexicographically start after this string.
+    /// It must not contain NUL bytes.
     #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
     pub start_after: Option<StreamNameStartAfter>,
     /// Number of results, up to a maximum of 1000.
@@ -83,7 +85,7 @@ pub struct ListStreamsResponse {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateStreamRequest {
     /// Stream name that is unique to the basin.
-    /// It can be between 1 and 512 bytes in length.
+    /// It can be between 1 and 512 bytes in length, and must not contain NUL bytes.
     pub stream: StreamName,
     /// Stream configuration.
     pub config: Option<StreamConfig>,
