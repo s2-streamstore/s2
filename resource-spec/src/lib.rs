@@ -70,6 +70,7 @@ pub struct StreamConfig {
 pub enum StorageClass {
     Standard,
     Express,
+    Native,
 }
 
 impl schemars::JsonSchema for StorageClass {
@@ -81,7 +82,7 @@ impl schemars::JsonSchema for StorageClass {
         schemars::json_schema!({
             "type": "string",
             "description": "Storage class for recent writes.",
-            "enum": ["standard", "express"]
+            "enum": ["standard", "express", "native"]
         })
     }
 }
@@ -91,6 +92,7 @@ impl From<StorageClass> for s2_common::config::StorageClass {
         match s {
             StorageClass::Standard => Self::Standard,
             StorageClass::Express => Self::Express,
+            StorageClass::Native => Self::Native,
         }
     }
 }

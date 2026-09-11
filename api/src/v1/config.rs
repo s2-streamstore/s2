@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {
-    /// Append tail latency under 400 milliseconds with s2.dev.
+    /// Append tail latency under 400 ms with s2.dev.
     Standard,
-    /// Append tail latency under 40 milliseconds with s2.dev.
+    /// Append tail latency under 40 ms with s2.dev.
     Express,
+    /// Append tail latency under 4 ms with s2.dev.
+    Native,
 }
 
 impl From<StorageClass> for s2_common::config::StorageClass {
@@ -20,6 +22,7 @@ impl From<StorageClass> for s2_common::config::StorageClass {
         match value {
             StorageClass::Express => Self::Express,
             StorageClass::Standard => Self::Standard,
+            StorageClass::Native => Self::Native,
         }
     }
 }
@@ -29,6 +32,7 @@ impl From<s2_common::config::StorageClass> for StorageClass {
         match value {
             s2_common::config::StorageClass::Express => Self::Express,
             s2_common::config::StorageClass::Standard => Self::Standard,
+            s2_common::config::StorageClass::Native => Self::Native,
         }
     }
 }
@@ -598,7 +602,11 @@ mod tests {
     use super::*;
 
     fn gen_storage_class() -> impl Strategy<Value = StorageClass> {
-        prop_oneof![Just(StorageClass::Standard), Just(StorageClass::Express)]
+        prop_oneof![
+            Just(StorageClass::Standard),
+            Just(StorageClass::Express),
+            Just(StorageClass::Native),
+        ]
     }
 
     fn gen_timestamping_mode() -> impl Strategy<Value = TimestampingMode> {
