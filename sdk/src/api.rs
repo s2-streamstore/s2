@@ -430,6 +430,7 @@ impl BasinClient {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
         let mut builder = self
             .get(url)
+            .header(CONTENT_TYPE, CONTENT_TYPE_PROTO)
             .header(ACCEPT, ACCEPT_PROTO)
             .query(&start)
             .query(&end);
@@ -1453,6 +1454,93 @@ mod tests {
             assert_eq!(headers[S2_BASIN], "test-basin");
             assert_eq!(headers[CONTENT_TYPE], CONTENT_TYPE_S2S);
         }
+    }
+
+    /// Captures the request headers of the next unary request and replies with
+    /// an empty body, which decodes to a default `ReadBatch`.
+    #[cfg(feature = "_hidden")]
+    #[derive(Default)]
+    struct ReadUnaryHeaderCapture {
+        headers: Mutex<Vec<HeaderMap>>,
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[async_trait]
+    impl client::RequestExecutor for ReadUnaryHeaderCapture {
+        async fn execute_unary(
+            &self,
+            mut request: client::Request,
+        ) -> Result<UnaryResponse, client::HttpError> {
+            self.headers
+                .lock()
+                .unwrap()
+                .push(request.headers_mut().clone());
+            Ok(UnaryResponse::new_for_test(StatusCode::OK, Vec::new()))
+        }
+
+        async fn init_streaming(
+            &self,
+            _request: client::Request,
+        ) -> Result<client::StreamingResponse, client::HttpError> {
+            unreachable!("`read` is a unary operation");
+        }
+    }
+
+    /// A default `Content-Type: s2s/proto` (the SDK's own streaming MIME for the
+    /// internal s2-cloud use case) must not flip the server into s2s framing for
+    /// the unary `read`, or the response is s2s-framed and `ReadBatch::decode`
+    /// fails. `read` pins `Content-Type: application/protobuf` — mirroring
+    /// `append` — so a leaked default cannot alter the response contract.
+    #[cfg(feature = "_hidden")]
+    #[tokio::test]
+    async fn read_pins_content_type_overriding_default_s2s_proto() {
+        let headers =
+            HeaderMap::from_iter([(CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE_S2S))]);
+        let config = S2Config::new("actual-token")
+            .with_endpoints(S2Endpoints::for_endpoint("http://example.test").unwrap())
+            .with_default_headers(headers)
+            .unwrap();
+        let executor = Arc::new(ReadUnaryHeaderCapture::default());
+        let mut base = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
+        base.client = executor.clone();
+        let account = AccountClient::init(config.clone(), base);
+        let basin = account.basin_client("test-basin".parse().unwrap());
+        let stream: StreamName = "test-stream".parse().unwrap();
+
+        // The unary read completes: the empty body decodes to a default
+        // `ReadBatch`, proving the unary response contract is honoured.
+        let batch = basin
+            .read(
+                &stream,
+                ReadStart {
+                    seq_num: None,
+                    timestamp: None,
+                    tail_offset: None,
+                    clamp: None,
+                },
+                ReadEnd {
+                    count: None,
+                    bytes: None,
+                    until: None,
+                    wait: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(batch, ReadBatch::default());
+
+        let captured = executor.headers.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let request_headers = &captured[0];
+        assert_eq!(request_headers[CONTENT_TYPE], CONTENT_TYPE_PROTO);
+        assert_eq!(request_headers[ACCEPT], ACCEPT_PROTO);
+        // The leaked `s2s/proto` default must be replaced, not appended.
+        assert_eq!(
+            request_headers.get_all(CONTENT_TYPE).iter().count(),
+            1,
+            "Content-Type must have a single pinned value"
+        );
     }
 
     #[cfg(feature = "_hidden")]
