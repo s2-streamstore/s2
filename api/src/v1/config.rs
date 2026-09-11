@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
-use s2_common::maybe::Maybe;
+use http::{HeaderName, HeaderValue};
+use s2_common::{http::ParseableHeader, maybe::Maybe};
 use serde::{Deserialize, Serialize};
 
 #[rustfmt::skip]
@@ -331,6 +332,12 @@ impl StreamConfig {
             Some(config)
         }
     }
+
+    /// Encode as compact JSON for the `s2-stream-config` header.
+    pub fn to_header_value(&self) -> HeaderValue {
+        let json = serde_json::to_string(self).expect("StreamConfig serializes to JSON");
+        HeaderValue::from_str(&json).expect("compact JSON of StreamConfig is a valid header value")
+    }
 }
 
 impl From<s2_common::config::StreamConfig> for StreamConfig {
@@ -348,6 +355,30 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
         }
+    }
+}
+
+pub static STREAM_CONFIG_HEADER: HeaderName = HeaderName::from_static("s2-stream-config");
+
+/// Value of the `s2-stream-config` header: a JSON-encoded [`StreamConfig`] to apply over the
+/// basin's default stream config if the stream is created on append or read. Ignored if the
+/// stream already exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamConfigHeader(pub s2_common::config::OptionalStreamConfig);
+
+impl FromStr for StreamConfigHeader {
+    type Err = s2_common::ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let config: StreamConfig =
+            serde_json::from_str(s).map_err(|e| format!("invalid JSON: {e}"))?;
+        Ok(Self(config.try_into()?))
+    }
+}
+
+impl ParseableHeader for StreamConfigHeader {
+    fn name() -> &'static HeaderName {
+        &STREAM_CONFIG_HEADER
     }
 }
 
@@ -1055,6 +1086,69 @@ mod tests {
         assert!(
             internal.delete_on_empty.min_age.is_none(),
             "delete_on_empty.min_age should be None"
+        );
+    }
+
+    #[test]
+    fn stream_config_header_parses_and_validates() {
+        let header: StreamConfigHeader =
+            r#"{"retention_policy":{"age":3600},"delete_on_empty":{"min_age_secs":300}}"#
+                .parse()
+                .unwrap();
+        assert_eq!(
+            header.0,
+            s2_common::config::OptionalStreamConfig {
+                retention_policy: Some(s2_common::config::RetentionPolicy::Age(
+                    Duration::from_secs(3600)
+                )),
+                delete_on_empty: s2_common::config::OptionalDeleteOnEmptyConfig {
+                    min_age: Some(Duration::from_secs(300)),
+                },
+                ..Default::default()
+            }
+        );
+
+        for spaced in [
+            r#"{ "retention_policy": { "age": 3600 }, "delete_on_empty": { "min_age_secs": 300 } }"#,
+            "{\t\"delete_on_empty\":\t{\"min_age_secs\":\t300},\t\"retention_policy\":\t{\"age\":\t3600}\t}",
+            "  {\"retention_policy\":{\"age\":3600},\"delete_on_empty\":{\"min_age_secs\":300}}  ",
+        ] {
+            let parsed: StreamConfigHeader = spaced.parse().unwrap();
+            assert_eq!(parsed, header, "{spaced:?}");
+        }
+
+        let empty: StreamConfigHeader = "{}".parse().unwrap();
+        assert_eq!(empty.0, Default::default());
+
+        let invalid_json = "not json".parse::<StreamConfigHeader>().unwrap_err();
+        assert!(invalid_json.to_string().contains("invalid JSON"));
+
+        let invalid_age =
+            r#"{"retention_policy":{"age":0}}"#.parse::<StreamConfigHeader>().unwrap_err();
+        assert!(
+            invalid_age
+                .to_string()
+                .contains("age must be greater than 0 seconds"),
+            "{invalid_age}"
+        );
+    }
+
+    #[test]
+    fn stream_config_header_value_roundtrips() {
+        let config = StreamConfig {
+            storage_class: Some(StorageClass::Express),
+            retention_policy: Some(RetentionPolicy::Infinite(InfiniteRetention {})),
+            timestamping: Some(TimestampingConfig {
+                mode: Some(TimestampingMode::ClientRequire),
+                uncapped: Some(true),
+            }),
+            delete_on_empty: Some(DeleteOnEmptyConfig { min_age_secs: 60 }),
+        };
+        let value = config.to_header_value();
+        let parsed: StreamConfigHeader = value.to_str().unwrap().parse().unwrap();
+        assert_eq!(
+            parsed.0,
+            s2_common::config::OptionalStreamConfig::try_from(config).unwrap()
         );
     }
 }

@@ -161,6 +161,7 @@ pub struct ReadArgs {
         v1t::StreamNamePathSegment,
         s2_api::data::S2FormatHeader,
         s2_api::data::S2EncryptionKeyHeader,
+        s2_api::data::S2StreamConfigHeader,
         v1t::stream::ReadStart,
         v1t::stream::ReadEnd,
     ),
@@ -186,12 +187,13 @@ pub async fn read(
     match request {
         v1t::stream::ReadRequest::Unary {
             encryption_key,
+            create_stream_config_patch,
             format,
             response_mime,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend
-                .open_for_read(&basin, &stream, encryption_key)
+                .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?;
@@ -209,13 +211,14 @@ pub async fn read(
         }
         v1t::stream::ReadRequest::EventStream {
             encryption_key,
+            create_stream_config_patch,
             format,
             last_event_id,
         } => {
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend
-                .open_for_read(&basin, &stream, encryption_key)
+                .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?;
@@ -265,11 +268,12 @@ pub async fn read(
         }
         v1t::stream::ReadRequest::S2s {
             encryption_key,
+            create_stream_config_patch,
             response_compression,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let s2s_stream = backend
-                .open_for_read(&basin, &stream, encryption_key)
+                .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?
@@ -364,6 +368,7 @@ pub struct AppendArgs {
         v1t::StreamNamePathSegment,
         s2_api::data::S2FormatHeader,
         s2_api::data::S2EncryptionKeyHeader,
+        s2_api::data::S2StreamConfigHeader,
     ),
     servers(
         (url = super::paths::cloud_endpoints::BASIN, variables(
@@ -384,11 +389,12 @@ pub async fn append(
     match request {
         v1t::stream::AppendRequest::Unary {
             encryption_key,
+            create_stream_config_patch,
             input,
             response_mime,
         } => {
             let handle = backend
-                .open_for_append(&basin, &stream, encryption_key)
+                .open_for_append(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?;
             let ack = handle.append(input).await?;
             match response_mime {
@@ -404,11 +410,12 @@ pub async fn append(
         }
         v1t::stream::AppendRequest::S2s {
             encryption_key,
+            create_stream_config_patch,
             inputs,
             response_compression,
         } => {
             let handle = backend
-                .open_for_append(&basin, &stream, encryption_key)
+                .open_for_append(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?;
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
@@ -469,13 +476,19 @@ mod tests {
     use bytesize::ByteSize;
     use futures::TryStreamExt as _;
     use prost::Message as _;
-    use s2_api::v1::stream::{
-        proto,
-        s2s::{FrameDecoder, SessionMessage},
+    use s2_api::v1::{
+        config::STREAM_CONFIG_HEADER,
+        stream::{
+            proto,
+            s2s::{self, FrameDecoder, SessionMessage},
+        },
     };
     use s2_common::{
         basin::{BASIN_HEADER, BasinName},
-        config::{BasinConfig, OptionalStreamConfig},
+        config::{
+            BasinConfig, DeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy, StorageClass,
+            StreamConfig,
+        },
         encryption::{EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
@@ -597,7 +610,12 @@ mod tests {
         encryption_key: EncryptionKey,
     ) {
         backend
-            .open_for_append(basin, stream, Some(encryption_key))
+            .open_for_append(
+                basin,
+                stream,
+                Some(encryption_key),
+                OptionalStreamConfig::default(),
+            )
             .await
             .expect("open append handle")
             .append(append_input(body))
@@ -697,7 +715,12 @@ mod tests {
         assert_eq!(ack.end.as_ref().map(|pos| pos.seq_num), Some(1));
 
         let records = backend
-            .open_for_read(&basin, &stream, Some(encryption_key.clone()))
+            .open_for_read(
+                &basin,
+                &stream,
+                Some(encryption_key.clone()),
+                OptionalStreamConfig::default(),
+            )
             .await
             .expect("open read handle")
             .read(
@@ -729,6 +752,191 @@ mod tests {
             panic!("expected envelope record");
         };
         assert_eq!(record.body().as_ref(), b"secret");
+    }
+
+    fn basin_config_with_create_stream_on_append() -> BasinConfig {
+        BasinConfig {
+            create_stream_on_append: true,
+            default_stream_config: OptionalStreamConfig {
+                storage_class: Some(StorageClass::Standard),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn expected_auto_created_config() -> StreamConfig {
+        StreamConfig {
+            storage_class: StorageClass::Standard,
+            retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
+            timestamping: Default::default(),
+            delete_on_empty: DeleteOnEmptyConfig {
+                min_age: Duration::from_secs(300),
+            },
+        }
+    }
+
+    const STREAM_CONFIG_HEADER_VALUE: &str =
+        r#"{"retention_policy":{"age":3600},"delete_on_empty":{"min_age_secs":300}}"#;
+
+    fn append_record_input(body: &'static [u8]) -> proto::AppendInput {
+        proto::AppendInput {
+            records: vec![proto::AppendRecord {
+                timestamp: None,
+                headers: vec![],
+                body: Bytes::from_static(body),
+            }],
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn json_append_auto_creates_stream_with_stream_config_header() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-json-create-config",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        let body = serde_json::json!({"records": [{"body": "hello"}]});
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(STREAM_CONFIG_HEADER.as_str(), STREAM_CONFIG_HEADER_VALUE)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let ack = response_json(response, "append ack body").await;
+        assert_eq!(ack["end"]["seq_num"], 1);
+        let config = backend
+            .get_stream_config(basin, stream)
+            .await
+            .expect("get stream config");
+        assert_eq!(config, expected_auto_created_config());
+    }
+
+    #[tokio::test]
+    async fn append_with_invalid_stream_config_header_is_rejected_without_creating() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-create-config-invalid",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        for (value, expected_message) in [
+            (
+                r#"{"retention_policy":{"age":0}}"#,
+                "age must be greater than 0 seconds",
+            ),
+            ("not json", "invalid JSON"),
+        ] {
+            let body = serde_json::json!({"records": [{"body": "hello"}]});
+            let response = send(
+                &app,
+                request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(STREAM_CONFIG_HEADER.as_str(), value)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let info = response_json(response, "append error body").await;
+            assert_eq!(info["code"], "bad_header");
+            let message = info["message"].as_str().expect("error message string");
+            assert!(
+                message.contains("s2-stream-config") && message.contains(expected_message),
+                "{message}"
+            );
+        }
+        assert_no_streams(&backend, &basin).await;
+    }
+
+    #[tokio::test]
+    async fn s2s_append_session_auto_creates_stream_with_stream_config_header() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-s2s-create-config",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        let frame = |body: &'static [u8]| {
+            SessionMessage::regular(s2s::CompressionAlgorithm::None, &append_record_input(body))
+                .expect("encode frame")
+                .encode()
+        };
+        let mut body = BytesMut::new();
+        body.extend_from_slice(&frame(b"first"));
+        body.extend_from_slice(&frame(b"second"));
+
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "s2s/proto")
+                .header(STREAM_CONFIG_HEADER.as_str(), STREAM_CONFIG_HEADER_VALUE)
+                .body(Body::from(body.freeze()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_bytes(response, "s2s body").await;
+        let mut decoder = FrameDecoder;
+        let mut buf = BytesMut::from(body.as_ref());
+        let mut acks = Vec::new();
+        while let Some(frame) = decoder.decode(&mut buf).expect("frame decode") {
+            let SessionMessage::Regular(ack) = frame else {
+                panic!("expected regular frame");
+            };
+            acks.push(
+                ack.try_into_proto::<proto::AppendAck>()
+                    .expect("decode append ack"),
+            );
+        }
+        assert_eq!(acks.len(), 2);
+        assert_eq!(acks[1].end.as_ref().map(|pos| pos.seq_num), Some(2));
+
+        let config = backend
+            .get_stream_config(basin, stream)
+            .await
+            .expect("get stream config");
+        assert_eq!(config, expected_auto_created_config());
+    }
+
+    #[tokio::test]
+    async fn read_auto_creates_stream_with_stream_config_header() {
+        let basin_config = BasinConfig {
+            create_stream_on_append: false,
+            create_stream_on_read: true,
+            ..basin_config_with_create_stream_on_append()
+        };
+        let (app, backend, basin, stream) =
+            setup_app_without_stream("read-create-config", basin_config).await;
+
+        let response = send(
+            &app,
+            request_builder(
+                "GET",
+                format!("/v1/streams/{stream}/records?seq_num=0"),
+                &basin,
+            )
+            .header(STREAM_CONFIG_HEADER.as_str(), STREAM_CONFIG_HEADER_VALUE)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        let config = backend
+            .get_stream_config(basin, stream)
+            .await
+            .expect("get stream config");
+        assert_eq!(config, expected_auto_created_config());
     }
 
     #[tokio::test]

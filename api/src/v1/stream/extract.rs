@@ -17,7 +17,7 @@ use crate::{
         extract::{JsonExtractionRejection, ProtoRejection},
     },
     mime::JsonOrProto,
-    v1::stream::sse::LastEventId,
+    v1::{config::StreamConfigHeader, stream::sse::LastEventId},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +54,9 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(req.headers());
         let encryption_key = parse_header_opt::<EncryptionKey>(req.headers())?;
+        let create_stream_config_patch = parse_header_opt::<StreamConfigHeader>(req.headers())?
+            .map(|header| header.0)
+            .unwrap_or_default();
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
@@ -88,6 +91,7 @@ where
 
             return Ok(Self::S2s {
                 encryption_key,
+                create_stream_config_patch,
                 inputs: Box::pin(inputs),
                 response_compression,
             });
@@ -117,6 +121,7 @@ where
 
         Ok(Self::Unary {
             encryption_key,
+            create_stream_config_patch,
             input,
             response_mime,
         })
@@ -132,12 +137,16 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let content_type = crate::mime::content_type(&parts.headers);
         let encryption_key = parse_header_opt::<EncryptionKey>(&parts.headers)?;
+        let create_stream_config_patch = parse_header_opt::<StreamConfigHeader>(&parts.headers)?
+            .map(|header| header.0)
+            .unwrap_or_default();
 
         if content_type.as_ref().is_some_and(crate::mime::is_s2s_proto) {
             let response_compression =
                 s2s::CompressionAlgorithm::from_accept_encoding(&parts.headers);
             return Ok(Self::S2s {
                 encryption_key,
+                create_stream_config_patch,
                 response_compression,
             });
         }
@@ -150,6 +159,7 @@ where
             let last_event_id = parse_header_opt::<LastEventId>(&parts.headers)?;
             return Ok(Self::EventStream {
                 encryption_key,
+                create_stream_config_patch,
                 format,
                 last_event_id,
             });
@@ -162,6 +172,7 @@ where
 
         Ok(Self::Unary {
             encryption_key,
+            create_stream_config_patch,
             format,
             response_mime,
         })

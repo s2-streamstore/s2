@@ -7,6 +7,7 @@ use std::{
 use futures::{Stream, StreamExt as _, future::OptionFuture, stream::FuturesOrdered};
 use s2_common::{
     basin::BasinName,
+    config::OptionalStreamConfig,
     encryption::{EncryptionKey, EncryptionSpec},
     record::{SeqNum, StreamPosition},
     stream::{AppendAck, AppendInput, StreamName},
@@ -14,20 +15,26 @@ use s2_common::{
 use s2_storage::record::encrypt_append_input;
 use tokio::sync::oneshot;
 
-use super::{Backend, StreamHandle};
+use super::{Backend, StreamHandle, core::AutoCreateOn};
 use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
 
 impl Backend {
+    /// Open a stream for an append or append session.
+    ///
+    /// `stream_config` is applied if the stream is created on append. Unset fields inherit the
+    /// basin's default stream configuration. Ignored if the stream already exists.
     pub async fn open_for_append(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         encryption_key: Option<EncryptionKey>,
+        stream_config: OptionalStreamConfig,
     ) -> Result<StreamHandle, AppendError> {
         self.stream_handle_with_auto_create::<AppendError>(
             basin,
             stream,
-            |config| config.create_stream_on_append,
+            AutoCreateOn::Append,
+            stream_config,
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await

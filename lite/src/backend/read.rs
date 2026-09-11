@@ -4,6 +4,7 @@ use futures::{Stream, StreamExt as _};
 use s2_common::{
     basin::BasinName,
     caps,
+    config::OptionalStreamConfig,
     encryption::{EncryptionKey, EncryptionSpec},
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{Metered, MeteredSize as _, SeqNum, StreamPosition, Timestamp},
@@ -15,7 +16,7 @@ use s2_storage::record::{
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
 
-use super::{Backend, StreamHandle};
+use super::{Backend, StreamHandle, core::AutoCreateOn};
 use crate::{
     backend::{
         error::{
@@ -28,6 +29,7 @@ use crate::{
 };
 
 impl Backend {
+    /// Open a stream for a check tail.
     pub async fn open_for_check_tail(
         &self,
         basin: &BasinName,
@@ -36,22 +38,29 @@ impl Backend {
         self.stream_handle_with_auto_create::<CheckTailError>(
             basin,
             stream,
-            |config| config.create_stream_on_read,
+            AutoCreateOn::Read,
+            OptionalStreamConfig::default(),
             |_| Ok(EncryptionSpec::Plain),
         )
         .await
     }
 
+    /// Open a stream for a read or read session.
+    ///
+    /// `stream_config` is applied if the stream is created on read. Unset fields inherit the
+    /// basin's default stream configuration. Ignored if the stream already exists.
     pub async fn open_for_read(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         encryption_key: Option<EncryptionKey>,
+        stream_config: OptionalStreamConfig,
     ) -> Result<StreamHandle, ReadError> {
         self.stream_handle_with_auto_create::<ReadError>(
             basin,
             stream,
-            |config| config.create_stream_on_read,
+            AutoCreateOn::Read,
+            stream_config,
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await
@@ -562,7 +571,7 @@ mod tests {
 
         let input = append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
         let ack = backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(input)
@@ -585,7 +594,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -642,7 +651,7 @@ mod tests {
         };
 
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -716,7 +725,7 @@ mod tests {
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(initial_input)
@@ -736,7 +745,7 @@ mod tests {
         };
 
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -776,7 +785,7 @@ mod tests {
         let follow_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(follow_input)
@@ -881,7 +890,7 @@ mod tests {
             wait: Some(wait),
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -906,7 +915,7 @@ mod tests {
                 Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap(),
             );
             let ack = backend
-                .open_for_append(&basin, &stream, None)
+                .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
                 .await
                 .unwrap()
                 .append(input)
@@ -960,7 +969,7 @@ mod tests {
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(initial_input)
@@ -977,7 +986,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -1007,7 +1016,7 @@ mod tests {
         let follow_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(follow_input)

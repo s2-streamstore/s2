@@ -18,7 +18,10 @@ use s2_api::v1::{
     basin::{
         BasinInfo, CreateBasinRequest, EnsureBasinRequest, ListBasinsRequest, ListBasinsResponse,
     },
-    config::{BasinConfig, BasinReconfiguration, StreamConfig, StreamReconfiguration},
+    config::{
+        BasinConfig, BasinReconfiguration, STREAM_CONFIG_HEADER, StreamConfig,
+        StreamReconfiguration,
+    },
     location::LocationInfo,
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
@@ -384,6 +387,7 @@ impl BasinClient {
         name: &StreamName,
         input: AppendInput,
         encryption: Option<&EncryptionKey>,
+        stream_config: Option<&StreamConfig>,
         append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
@@ -394,6 +398,7 @@ impl BasinClient {
             .body(input.encode_to_vec())
             .build()?;
         set_encryption_header(&mut request, encryption);
+        set_stream_config_header(&mut request, stream_config);
         let response = self
             .request(request)
             .with_append_retry_policy(append_retry_policy)
@@ -420,6 +425,7 @@ impl BasinClient {
         start: ReadStart,
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
+        stream_config: Option<&StreamConfig>,
     ) -> Result<ReadBatch, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
         let mut builder = self
@@ -433,6 +439,7 @@ impl BasinClient {
         }
         let mut request = builder.build()?;
         set_encryption_header(&mut request, encryption);
+        set_stream_config_header(&mut request, stream_config);
         let response = self
             .request(request)
             .error_handler(read_response_error_handler)
@@ -446,6 +453,7 @@ impl BasinClient {
         name: &StreamName,
         inputs: I,
         encryption: Option<&EncryptionKey>,
+        stream_config: Option<&StreamConfig>,
         frame_signal: Option<FrameSignal>,
         reconnect: ReconnectAdvice,
     ) -> Result<Streaming<AppendAck>, ApiError>
@@ -476,6 +484,7 @@ impl BasinClient {
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
         let mut request = request_builder.build()?;
         set_encryption_header(&mut request, encryption);
+        set_stream_config_header(&mut request, stream_config);
         let (response, access_token) = self.client.init_streaming_authorized(request).await?;
         let response = match response.into_result().await {
             Ok(response) => response,
@@ -538,6 +547,7 @@ impl BasinClient {
         start: ReadStart,
         end: ReadEnd,
         encryption: Option<&EncryptionKey>,
+        stream_config: Option<&StreamConfig>,
         reconnect: ReconnectAdvice,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
@@ -553,6 +563,7 @@ impl BasinClient {
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
         let mut request = request_builder.build()?;
         set_encryption_header(&mut request, encryption);
+        set_stream_config_header(&mut request, stream_config);
         let (response, access_token) = self.client.init_streaming_authorized(request).await?;
         let response = match response.into_result().await {
             Ok(response) => response,
@@ -965,6 +976,14 @@ fn set_encryption_header(request: &mut client::Request, encryption: Option<&Encr
             S2_ENCRYPTION_KEY_HEADER.clone(),
             encryption.to_header_value(),
         );
+    }
+}
+
+fn set_stream_config_header(request: &mut client::Request, stream_config: Option<&StreamConfig>) {
+    if let Some(config) = stream_config {
+        request
+            .headers_mut()
+            .insert(STREAM_CONFIG_HEADER.clone(), config.to_header_value());
     }
 }
 
@@ -1396,6 +1415,7 @@ mod tests {
                         wait: None
                     },
                     None,
+                    None,
                     ReconnectAdvice::default(),
                 )
                 .await
@@ -1406,6 +1426,7 @@ mod tests {
                 .append_session(
                     &stream,
                     futures_util::stream::empty(),
+                    None,
                     None,
                     None,
                     ReconnectAdvice::default(),

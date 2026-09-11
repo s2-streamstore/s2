@@ -3411,6 +3411,16 @@ pub struct AppendInput {
     /// If unspecified, no matching is performed. If specified and mismatched,
     /// the append fails. A stream defaults to `""` as its fencing token.
     pub fencing_token: Option<FencingToken>,
+    /// Stream configuration to apply if the stream is created on append.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    ///
+    /// Only used by [`append`](crate::S2Stream::append). Append sessions send the header once
+    /// at connect; see
+    /// [`AppendSessionConfig::with_stream_config`](crate::append_session::AppendSessionConfig::with_stream_config)
+    /// and [`ProducerConfig::with_stream_config`](crate::producer::ProducerConfig::with_stream_config).
+    pub stream_config: Option<StreamConfig>,
 }
 
 impl AppendInput {
@@ -3420,6 +3430,15 @@ impl AppendInput {
             records,
             match_seq_num: None,
             fencing_token: None,
+            stream_config: None,
+        }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on append.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
+            ..self
         }
     }
 
@@ -3676,6 +3695,11 @@ pub struct ReadInput {
     ///
     /// Defaults to `false`.
     pub ignore_command_records: bool,
+    /// Stream configuration to apply if the stream is created on read.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    pub stream_config: Option<StreamConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -3740,6 +3764,14 @@ impl ReadInput {
     pub fn with_ignore_command_records(self, ignore_command_records: bool) -> Self {
         Self {
             ignore_command_records,
+            ..self
+        }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on read.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
             ..self
         }
     }

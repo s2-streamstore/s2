@@ -100,6 +100,25 @@ pub struct S2FormatHeader {
 #[derive(Debug)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
+pub struct S2StreamConfigHeader {
+    /// JSON-encoded `StreamConfig` to apply if the stream is created on append or read.
+    /// Unset fields inherit the basin's default stream configuration.
+    /// Ignored if the stream already exists.
+    /// Compact JSON is preferred.
+    #[cfg_attr(feature = "utoipa", param(
+        required = false,
+        rename = "s2-stream-config",
+        content_type = "application/json",
+        value_type = crate::v1::config::StreamConfig,
+        example = json!({"retention_policy":{"age":3600},"delete_on_empty":{"min_age_secs":300}}),
+    ))]
+    pub s2_stream_config: String,
+}
+
+#[rustfmt::skip]
+#[derive(Debug)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Header))]
 pub struct S2EncryptionKeyHeader {
     /// Encryption key material for append and read operations.
     /// Provide base64-encoded key when stream encryption is enabled.
