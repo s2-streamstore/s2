@@ -146,12 +146,12 @@ impl ErrorCode {
             | Self::ServerDraining
             | Self::StreamDeletionPending
             | Self::StreamNotFound
-            | Self::TransactionConflict => true,
+            | Self::TransactionConflict
+            | Self::Unavailable => true,
             Self::ClientHangup
             | Self::Other
             | Self::RequestTimeout
             | Self::Storage
-            | Self::Unavailable
             | Self::UpstreamTimeout => false,
         }
     }
@@ -208,5 +208,61 @@ impl axum::response::IntoResponse for ErrorResponse {
             .into_response();
         *response.status_mut() = status;
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Guards against silently misclassifying a variant as side-effecting (or
+    // side-effect free) by requiring every variant to be listed explicitly.
+    #[test]
+    fn has_no_side_effects_classifies_every_variant() {
+        let no_side_effects: &[ErrorCode] = &[
+            ErrorCode::AccessTokenNotFound,
+            ErrorCode::Authn,
+            ErrorCode::BadFrame,
+            ErrorCode::BadHeader,
+            ErrorCode::BadJson,
+            ErrorCode::BadPath,
+            ErrorCode::BadProto,
+            ErrorCode::BadQuery,
+            ErrorCode::BasinDeletionPending,
+            ErrorCode::BasinNotFound,
+            ErrorCode::DecryptionFailed,
+            ErrorCode::HotServer,
+            ErrorCode::Invalid,
+            ErrorCode::NotImplemented,
+            ErrorCode::PermissionDenied,
+            ErrorCode::QuotaExhausted,
+            ErrorCode::RateLimited,
+            ErrorCode::ResourceAlreadyExists,
+            ErrorCode::StreamDeletionPending,
+            ErrorCode::StreamNotFound,
+            ErrorCode::TransactionConflict,
+            ErrorCode::Unavailable,
+        ];
+
+        let side_effecting: &[ErrorCode] = &[
+            ErrorCode::ClientHangup,
+            ErrorCode::Other,
+            ErrorCode::RequestTimeout,
+            ErrorCode::Storage,
+            ErrorCode::UpstreamTimeout,
+        ];
+
+        for code in no_side_effects {
+            assert!(
+                code.has_no_side_effects(),
+                "{code} should be side-effect free"
+            );
+        }
+        for code in side_effecting {
+            assert!(
+                !code.has_no_side_effects(),
+                "{code} should be side-effecting"
+            );
+        }
     }
 }
