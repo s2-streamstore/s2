@@ -14,7 +14,7 @@ use s2_common::{
     resources::ProvisionMode,
     stream::StreamName,
 };
-use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
+use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
@@ -26,6 +26,7 @@ use super::{
         StreamerMissingInActionError, TransactionConflictError,
     },
     kv,
+    store::db_txn_get,
     streamer::{GuardedStreamerClient, StreamerClient, StreamerGenerationId},
 };
 use crate::{backend::bgtasks::BgtaskTrigger, stream_id::StreamId};
@@ -114,17 +115,38 @@ impl Backend {
     ) -> Result<StreamerClient, StreamerError> {
         let stream_id = StreamId::new(&basin, &stream);
 
+        // Read `stream_meta`, the persisted tail, the fencing token, and the
+        // trim point inside a single `SerializableSnapshot` transaction so all
+        // four reads share one consistent snapshot. `DurabilityLevel::Remote`
+        // point reads each sample SlateDB's remote watermark independently; a
+        // concurrent `finalize_trim` (which deletes all four keys atomically
+        // in one `WriteBatch`) could become Remote-visible strictly between
+        // the `stream_meta` and `stream_trim_point` reads, leaving `meta`
+        // observed as present while `trim_point` is observed as absent and
+        // reviving a finalized-deleted stream. The snapshot pins all four
+        // reads to a single watermark, eliminating the skew. As a
+        // belt-and-suspenders guard, also reject when `meta.deleted_at` is set
+        // regardless of `trim_point`, so the deletion-pending decision no
+        // longer depends solely on the trim-point key.
+        let txn = self
+            .db
+            .begin(slatedb::IsolationLevel::SerializableSnapshot)
+            .await
+            .map_err(StorageError::from)?;
         let (meta, persisted_tail, fencing_token, trim_point) = tokio::try_join!(
-            self.db_get(
+            db_txn_get(
+                &txn,
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
             ),
-            self.load_persisted_stream_tail(stream_id),
-            self.db_get(
+            self.load_persisted_stream_tail(&txn, stream_id),
+            db_txn_get(
+                &txn,
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
             ),
-            self.db_get(
+            db_txn_get(
+                &txn,
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::deser_value,
             )
@@ -142,7 +164,7 @@ impl Backend {
 
         let fencing_token = fencing_token.unwrap_or_default();
 
-        if trim_point == Some(..NonZeroSeqNum::MAX) {
+        if meta.deleted_at.is_some() || trim_point == Some(..NonZeroSeqNum::MAX) {
             return Err(StreamDeletionPendingError.into());
         }
 
@@ -170,15 +192,11 @@ impl Backend {
 
     async fn load_persisted_stream_tail(
         &self,
+        txn: &slatedb::DbTransaction,
         stream_id: StreamId,
     ) -> Result<Option<(StreamPosition, kv::timestamp::TimestampSecs)>, StorageError> {
-        let read_opts = ReadOptions {
-            durability_filter: DurabilityLevel::Remote,
-            ..Default::default()
-        };
-        let Some(entry) = self
-            .db
-            .get_key_value_with_options(kv::stream_tail_position::ser_key(stream_id), &read_opts)
+        let Some(entry) = txn
+            .get_key_value(kv::stream_tail_position::ser_key(stream_id))
             .await?
         else {
             return Ok(None);
@@ -423,7 +441,7 @@ mod tests {
     use bytes::Bytes;
     use s2_common::{
         config::{BasinConfig, OptionalStreamConfig, StreamConfig},
-        record::{Metered, MeteredExt as _, Record, StreamPosition},
+        record::{Metered, MeteredExt as _, NonZeroSeqNum, Record, StreamPosition},
         resources::ProvisionMode,
     };
     use s2_storage::record::StoredRecord;
@@ -490,6 +508,91 @@ mod tests {
             .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())
             .await
             .unwrap();
+    }
+
+    /// Regression test for the read-skew bug. `finalize_trim` atomically
+    /// deletes `stream_trim_point` together with `stream_meta`, the persisted
+    /// tail, and the fencing token in a single `WriteBatch`. With independent
+    /// `Remote`-level point reads, `start_streamer` could observe a skewed
+    /// snapshot where `stream_meta` is still present (with `deleted_at` set,
+    /// as `mark_stream_deleted` left it — `mark_stream_deleted` commits to
+    /// durability before `finalize_trim` even runs) while `stream_trim_point`
+    /// is already absent. The old code gated deletion solely on
+    /// `trim_point == ..MAX`, so `{meta: Some, trim_point: None}` fell through
+    /// and revived the finalized-deleted stream. `start_streamer` must reject
+    /// this state via the `meta.deleted_at` guard.
+    #[tokio::test]
+    async fn start_streamer_rejects_deleted_stream_with_absent_trim_point() {
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("deletedbasin").unwrap();
+        let stream = StreamName::from_str("deletedstream").unwrap();
+
+        let meta = kv::stream_meta::StreamMeta {
+            config: StreamConfig::default(),
+            cipher: None,
+            created_at: OffsetDateTime::now_utc(),
+            deleted_at: Some(OffsetDateTime::now_utc()),
+            creation_idempotency_key: None,
+        };
+        let mut wb = WriteBatch::new();
+        wb.put(
+            kv::stream_meta::ser_key(&basin, &stream),
+            kv::stream_meta::ser_value(&meta),
+        );
+        backend.db.write(wb).await.unwrap();
+
+        let err = backend
+            .start_streamer(StreamerGenerationId::next(), basin, stream)
+            .await
+            .expect_err(
+                "start_streamer must reject a deleted stream even when trim_point is absent",
+            );
+        assert!(
+            matches!(err, StreamerError::StreamDeletionPending(_)),
+            "expected StreamDeletionPending, got {err:?}"
+        );
+    }
+
+    /// Guards the deletion-pending window between `terminal_trim` (which sets
+    /// `stream_trim_point` to `..MAX`) and `mark_stream_deleted` (which sets
+    /// `deleted_at`): `deleted_at` may not yet be visible there, so the
+    /// `trim_point == ..MAX` check must still reject the stream. Ensures the
+    /// `deleted_at || trim_point` guard keeps the trim-point path intact.
+    #[tokio::test]
+    async fn start_streamer_rejects_stream_pending_deletion_via_terminal_trim_point() {
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("deletingbasin").unwrap();
+        let stream = StreamName::from_str("deletingstream").unwrap();
+        let stream_id = StreamId::new(&basin, &stream);
+
+        let meta = kv::stream_meta::StreamMeta {
+            config: StreamConfig::default(),
+            cipher: None,
+            created_at: OffsetDateTime::now_utc(),
+            deleted_at: None,
+            creation_idempotency_key: None,
+        };
+        let mut wb = WriteBatch::new();
+        wb.put(
+            kv::stream_meta::ser_key(&basin, &stream),
+            kv::stream_meta::ser_value(&meta),
+        );
+        wb.put(
+            kv::stream_trim_point::ser_key(stream_id),
+            kv::stream_trim_point::ser_value(..NonZeroSeqNum::MAX),
+        );
+        backend.db.write(wb).await.unwrap();
+
+        let err = backend
+            .start_streamer(StreamerGenerationId::next(), basin, stream)
+            .await
+            .expect_err(
+                "start_streamer must reject a stream pending deletion via terminal trim point",
+            );
+        assert!(
+            matches!(err, StreamerError::StreamDeletionPending(_)),
+            "expected StreamDeletionPending, got {err:?}"
+        );
     }
 
     #[tokio::test]
