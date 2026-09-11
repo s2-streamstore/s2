@@ -1364,7 +1364,6 @@ mod tests {
                 http::header::HeaderName::from_static(S2_BASIN),
                 HeaderValue::from_static("wrong-basin"),
             ),
-            (CONTENT_TYPE, HeaderValue::from_static("wrong-content-type")),
         ]);
         let config = S2Config::new("actual-token")
             .with_endpoints(S2Endpoints::for_endpoint("http://example.test").unwrap())

@@ -568,8 +568,9 @@ impl S2Config {
     ///
     /// # Errors
     ///
-    /// Returns an error if `default_headers` contains `Content-Encoding`,
-    /// `Content-Length`, or `Transfer-Encoding`. The SDK controls body framing.
+    /// Returns an error if `default_headers` contains `Content-Type`,
+    /// `Content-Encoding`, `Content-Length`, or `Transfer-Encoding`.
+    /// The SDK controls request format and body framing.
     /// Use [`Self::with_compression`] to configure request body encoding.
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
@@ -581,12 +582,13 @@ impl S2Config {
             ));
         }
         for name in [
+            http::header::CONTENT_TYPE,
             http::header::CONTENT_LENGTH,
             http::header::TRANSFER_ENCODING,
         ] {
             if default_headers.contains_key(&name) {
                 return Err(ValidationError(format!(
-                    "{name} cannot be set in default headers; the SDK controls request body framing"
+                    "{name} cannot be set in default headers; the SDK controls request format and body framing"
                 )));
             }
         }
@@ -4094,6 +4096,11 @@ mod tests {
 
     #[cfg(feature = "_hidden")]
     #[rstest]
+    #[case::content_type_s2s("content-type", "s2s/proto")]
+    #[case::content_type_protobuf("content-type", "application/protobuf")]
+    #[case::content_type_json("content-type", "application/json")]
+    #[case::content_type_mixed_case("Content-Type", "s2s/proto")]
+    #[case::content_type_empty("content-type", "")]
     #[case::content_length("content-length", "123")]
     #[case::content_length_mixed_case("Content-Length", "0")]
     #[case::content_length_empty("content-length", "")]
