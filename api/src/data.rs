@@ -104,11 +104,13 @@ pub struct S2StreamConfigHeader {
     /// JSON-encoded `StreamConfig` to apply if the stream is created on append or read.
     /// Unset fields inherit the basin's default stream configuration.
     /// Ignored if the stream already exists.
+    /// Whitespace is insignificant; compact JSON is recommended.
     #[cfg_attr(feature = "utoipa", param(
         required = false,
         rename = "s2-stream-config",
-        value_type = String,
-        example = json!(r#"{"retention_policy":{"age":3600},"delete_on_empty":{"min_age_secs":300}}"#),
+        content_type = "application/json",
+        value_type = crate::v1::config::StreamConfig,
+        example = json!({"retention_policy":{"age":3600},"delete_on_empty":{"min_age_secs":300}}),
     ))]
     pub s2_stream_config: String,
 }

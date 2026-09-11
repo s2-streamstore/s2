@@ -333,7 +333,7 @@ impl StreamConfig {
         }
     }
 
-    /// Encode as the value of the `s2-stream-config` header.
+    /// Encode as compact JSON for the `s2-stream-config` header.
     pub fn to_header_value(&self) -> HeaderValue {
         let json = serde_json::to_string(self).expect("StreamConfig serializes to JSON");
         HeaderValue::from_str(&json).expect("compact JSON of StreamConfig is a valid header value")
@@ -363,7 +363,9 @@ pub static STREAM_CONFIG_HEADER: HeaderName = HeaderName::from_static("s2-stream
 /// Value of the `s2-stream-config` header: a JSON-encoded [`StreamConfig`] to apply if the stream
 /// is created on append or read. Ignored if the stream already exists.
 ///
-/// Encode with [`StreamConfig::to_header_value`].
+/// Whitespace is insignificant; any JSON that a `CreateStream` body accepts is accepted here.
+/// Compact JSON is recommended since the header accompanies every request; encode with
+/// [`StreamConfig::to_header_value`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamConfigHeader(pub s2_common::config::OptionalStreamConfig);
 
@@ -1108,6 +1110,15 @@ mod tests {
                 ..Default::default()
             }
         );
+
+        for spaced in [
+            r#"{ "retention_policy": { "age": 3600 }, "delete_on_empty": { "min_age_secs": 300 } }"#,
+            "{\t\"delete_on_empty\":\t{\"min_age_secs\":\t300},\t\"retention_policy\":\t{\"age\":\t3600}\t}",
+            "  {\"retention_policy\":{\"age\":3600},\"delete_on_empty\":{\"min_age_secs\":300}}  ",
+        ] {
+            let parsed: StreamConfigHeader = spaced.parse().unwrap();
+            assert_eq!(parsed, header, "{spaced:?}");
+        }
 
         let empty: StreamConfigHeader = "{}".parse().unwrap();
         assert_eq!(empty.0, Default::default());
