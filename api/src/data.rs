@@ -104,7 +104,7 @@ pub struct S2StreamConfigHeader {
     /// JSON-encoded `StreamConfig` to apply if the stream is created on append or read.
     /// Unset fields inherit the basin's default stream configuration.
     /// Ignored if the stream already exists.
-    /// Whitespace is insignificant; compact JSON is recommended.
+    /// Compact JSON is preferred.
     #[cfg_attr(feature = "utoipa", param(
         required = false,
         rename = "s2-stream-config",

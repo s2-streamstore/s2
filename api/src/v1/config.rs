@@ -363,9 +363,7 @@ pub static STREAM_CONFIG_HEADER: HeaderName = HeaderName::from_static("s2-stream
 /// Value of the `s2-stream-config` header: a JSON-encoded [`StreamConfig`] to apply if the stream
 /// is created on append or read. Ignored if the stream already exists.
 ///
-/// Whitespace is insignificant; any JSON that a `CreateStream` body accepts is accepted here.
-/// Compact JSON is recommended since the header accompanies every request; encode with
-/// [`StreamConfig::to_header_value`].
+/// Compact JSON is preferred; encode with [`StreamConfig::to_header_value`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamConfigHeader(pub s2_common::config::OptionalStreamConfig);
 
