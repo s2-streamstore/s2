@@ -16,7 +16,7 @@ clippy *args: sync
 
 # Run clippy on the simulator (separate workspace)
 sim-clippy *args:
-    RUSTFLAGS="--cfg tokio_unstable" cargo clippy --manifest-path sim/Cargo.toml --all-targets {{args}} -- -D warnings --allow deprecated
+    RUSTFLAGS="--cfg tokio_unstable" cargo clippy --locked --manifest-path sim/Cargo.toml --all-targets {{args}} -- -D warnings --allow deprecated
 
 # Ensure cargo-deny is installed
 _ensure-deny:
@@ -55,6 +55,7 @@ test-sdk-integration: sync _ensure-nextest
 # Verify Cargo.lock is up-to-date
 check-locked:
     cargo metadata --locked --format-version 1 >/dev/null
+    cargo metadata --locked --manifest-path sim/Cargo.toml --format-version 1 >/dev/null
 
 # Install git hooks from hooks/
 install-hooks:
@@ -75,4 +76,4 @@ lite *args:
 # dependencies (getrandom fork, etc.) from the main workspace.
 # tokio_unstable is required so turmoil can seed tokio's internal RNG.
 sim *args:
-    RUSTFLAGS="--cfg tokio_unstable" cargo run --manifest-path sim/Cargo.toml --profile sim -- {{args}}
+    RUSTFLAGS="--cfg tokio_unstable" cargo run --locked --manifest-path sim/Cargo.toml --profile sim -- {{args}}
