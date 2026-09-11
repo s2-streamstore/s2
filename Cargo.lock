@@ -4908,7 +4908,7 @@ dependencies = [
 
 [[package]]
 name = "s2-cli"
-version = "0.42.9"
+version = "0.42.10"
 dependencies = [
  "assert_cmd",
  "async-stream",
@@ -4992,7 +4992,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.42.9"
+version = "0.42.10"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5051,7 +5051,7 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.34.5"
+version = "0.34.6"
 dependencies = [
  "assert_matches",
  "async-compression",
@@ -5111,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.42.9"
+version = "0.42.10"
 dependencies = [
  "reqwest",
  "s2-sdk",
