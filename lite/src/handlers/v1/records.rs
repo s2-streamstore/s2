@@ -187,13 +187,13 @@ pub async fn read(
     match request {
         v1t::stream::ReadRequest::Unary {
             encryption_key,
-            stream_config,
+            create_stream_config_patch,
             format,
             response_mime,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend
-                .open_for_read(&basin, &stream, encryption_key, stream_config)
+                .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?;
@@ -211,14 +211,14 @@ pub async fn read(
         }
         v1t::stream::ReadRequest::EventStream {
             encryption_key,
-            stream_config,
+            create_stream_config_patch,
             format,
             last_event_id,
         } => {
             let (start, end) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend
-                .open_for_read(&basin, &stream, encryption_key, stream_config)
+                .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?;
@@ -268,12 +268,12 @@ pub async fn read(
         }
         v1t::stream::ReadRequest::S2s {
             encryption_key,
-            stream_config,
+            create_stream_config_patch,
             response_compression,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let s2s_stream = backend
-                .open_for_read(&basin, &stream, encryption_key, stream_config)
+                .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?
@@ -389,12 +389,12 @@ pub async fn append(
     match request {
         v1t::stream::AppendRequest::Unary {
             encryption_key,
-            stream_config,
+            create_stream_config_patch,
             input,
             response_mime,
         } => {
             let handle = backend
-                .open_for_append(&basin, &stream, encryption_key, stream_config)
+                .open_for_append(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?;
             let ack = handle.append(input).await?;
             match response_mime {
@@ -410,12 +410,12 @@ pub async fn append(
         }
         v1t::stream::AppendRequest::S2s {
             encryption_key,
-            stream_config,
+            create_stream_config_patch,
             inputs,
             response_compression,
         } => {
             let handle = backend
-                .open_for_append(&basin, &stream, encryption_key, stream_config)
+                .open_for_append(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?;
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 

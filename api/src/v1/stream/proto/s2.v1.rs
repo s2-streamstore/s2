@@ -38,8 +38,8 @@ pub struct AppendRecord {
 /// Payload of an Append request message.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AppendInput {
-    /// Batch of records to append atomically, which must contain at least one record, and no more
-    /// than 1000. The total size of a batch of records may not exceed 1MiB of metered bytes.
+    /// Batch of records to append atomically, which must contain at least one record, and no more than 1000.
+    /// The total size of a batch of records may not exceed 1MiB of metered bytes.
     #[prost(message, repeated, tag = "1")]
     pub records: ::prost::alloc::vec::Vec<AppendRecord>,
     /// Enforce that the sequence number issued to the first record matches.
@@ -55,14 +55,12 @@ pub struct AppendAck {
     /// Sequence number and timestamp of the first record that was appended.
     #[prost(message, optional, tag = "1")]
     pub start: ::core::option::Option<StreamPosition>,
-    /// Sequence number of the last record that was appended + 1, and timestamp of the last record
-    /// that was appended. The difference between `end.seq_num` and `start.seq_num` will be the
-    /// number of records appended.
+    /// Sequence number of the last record that was appended + 1, and timestamp of the last record that was appended.
+    /// The difference between `end.seq_num` and `start.seq_num` will be the number of records appended.
     #[prost(message, optional, tag = "2")]
     pub end: ::core::option::Option<StreamPosition>,
-    /// Sequence number that will be assigned to the next record on the stream, and timestamp of
-    /// the last record on the stream. This can be greater than the `end` position in case of
-    /// concurrent appends.
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record on the stream.
+    /// This can be greater than the `end` position in case of concurrent appends.
     #[prost(message, optional, tag = "3")]
     pub tail: ::core::option::Option<StreamPosition>,
 }
@@ -85,16 +83,13 @@ pub struct SequencedRecord {
 /// Success response message to a Read request.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReadBatch {
-    /// Records that are durably sequenced on the stream, retrieved based on the requested
-    /// criteria. This can only be empty in response to a unary read if the request cannot be
-    /// satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
-    /// In the context of a session, it can be empty as a heartbeat message. A heartbeat will be
-    /// sent whenever a switch to following in real-time happens, and then at a randomized gap
-    /// between 5 and 15 seconds if no records have become available.
+    /// Records that are durably sequenced on the stream, retrieved based on the requested criteria.
+    /// This can only be empty in response to a unary read if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
+    /// In the context of a session, it can be empty as a heartbeat message. A heartbeat will be sent whenever a switch to following in real-time happens, and then at a randomized gap between 5 and 15 seconds if no records have become available.
     #[prost(message, repeated, tag = "1")]
     pub records: ::prost::alloc::vec::Vec<SequencedRecord>,
-    /// Sequence number that will be assigned to the next record on the stream, and timestamp of
-    /// the last record. It will only be present when reading recent records.
+    /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
+    /// It will only be present when reading recent records.
     #[prost(message, optional, tag = "2")]
     pub tail: ::core::option::Option<StreamPosition>,
 }

@@ -1415,6 +1415,7 @@ mod tests {
                         wait: None
                     },
                     None,
+                    None,
                     ReconnectAdvice::default(),
                 )
                 .await
@@ -1425,6 +1426,7 @@ mod tests {
                 .append_session(
                     &stream,
                     futures_util::stream::empty(),
+                    None,
                     None,
                     None,
                     ReconnectAdvice::default(),

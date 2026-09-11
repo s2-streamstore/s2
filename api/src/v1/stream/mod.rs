@@ -212,7 +212,7 @@ pub enum ReadRequest {
     Unary {
         encryption_key: Option<EncryptionKey>,
         /// Parsed `s2-stream-config` header; empty if absent.
-        stream_config: OptionalStreamConfig,
+        create_stream_config_patch: OptionalStreamConfig,
         format: Format,
         response_mime: JsonOrProto,
     },
@@ -220,7 +220,7 @@ pub enum ReadRequest {
     EventStream {
         encryption_key: Option<EncryptionKey>,
         /// Parsed `s2-stream-config` header; empty if absent.
-        stream_config: OptionalStreamConfig,
+        create_stream_config_patch: OptionalStreamConfig,
         format: Format,
         last_event_id: Option<sse::LastEventId>,
     },
@@ -228,7 +228,7 @@ pub enum ReadRequest {
     S2s {
         encryption_key: Option<EncryptionKey>,
         /// Parsed `s2-stream-config` header; empty if absent.
-        stream_config: OptionalStreamConfig,
+        create_stream_config_patch: OptionalStreamConfig,
         response_compression: s2s::CompressionAlgorithm,
     },
 }
@@ -238,7 +238,7 @@ pub enum AppendRequest {
     Unary {
         encryption_key: Option<EncryptionKey>,
         /// Parsed `s2-stream-config` header; empty if absent.
-        stream_config: OptionalStreamConfig,
+        create_stream_config_patch: OptionalStreamConfig,
         input: s2_common::stream::AppendInput,
         response_mime: JsonOrProto,
     },
@@ -246,7 +246,7 @@ pub enum AppendRequest {
     S2s {
         encryption_key: Option<EncryptionKey>,
         /// Parsed `s2-stream-config` header; empty if absent.
-        stream_config: OptionalStreamConfig,
+        create_stream_config_patch: OptionalStreamConfig,
         inputs: BoxStream<'static, Result<s2_common::stream::AppendInput, AppendInputStreamError>>,
         response_compression: s2s::CompressionAlgorithm,
     },
@@ -257,25 +257,25 @@ impl std::fmt::Debug for AppendRequest {
         match self {
             AppendRequest::Unary {
                 encryption_key,
-                stream_config,
+                create_stream_config_patch,
                 input,
                 response_mime: response,
             } => f
                 .debug_struct("AppendRequest::Unary")
                 .field("encryption_key", encryption_key)
-                .field("stream_config", stream_config)
+                .field("create_stream_config_patch", create_stream_config_patch)
                 .field("input", input)
                 .field("response", response)
                 .finish(),
             AppendRequest::S2s {
                 encryption_key,
-                stream_config,
+                create_stream_config_patch,
                 response_compression,
                 ..
             } => f
                 .debug_struct("AppendRequest::S2s")
                 .field("encryption_key", encryption_key)
-                .field("stream_config", stream_config)
+                .field("create_stream_config_patch", create_stream_config_patch)
                 .field("response_compression", response_compression)
                 .finish(),
         }
