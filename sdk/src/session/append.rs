@@ -846,10 +846,10 @@ async fn resend(
     Ok(())
 }
 
-/// Half-close so the server acknowledges everything it accepted and then ends
-/// the response cleanly. Every input reaches the server ahead of the request's
-/// end, so a clean end with appends still unacknowledged is a truncated
-/// response, and nothing is resent.
+/// Half-close and wait only for outstanding acknowledgements, not a trailing EOF.
+/// Every input reaches the server ahead of the request's end, so an EOF with
+/// appends still unacknowledged remains a truncated response. Explicit
+/// server-draining responses retain the caller's existing safe-replay behavior.
 async fn drain_for_reconnect(
     input_tx: mpsc::Sender<AppendInput>,
     mut acks: Streaming<AppendAck>,
@@ -858,13 +858,19 @@ async fn drain_for_reconnect(
     ack_timeout: Duration,
 ) -> Result<(), AppendSessionError> {
     drop(input_tx);
-    loop {
-        // Bound the wait for the server's end of stream, which is otherwise
-        // unbounded once nothing is in flight.
+    // Advice is a clean reconnect once all submitted appends are acknowledged.
+    // Waiting for a trailing EOF would turn an idle server into a false AckTimeout.
+    while !state.inflight_appends.is_empty() {
+        // Keep the acknowledgement deadline bounded while records are outstanding.
         if !timer.is_armed() {
+            let ack_deadline = state
+                .inflight_appends
+                .front()
+                .map(|append| append.ack_deadline)
+                .unwrap_or_else(|| Instant::now() + ack_timeout);
             timer.as_mut().fire_at(
                 TimerEvent::AckDeadline,
-                Instant::now() + ack_timeout,
+                ack_deadline,
                 CoalesceMode::Earliest,
             );
         }
@@ -899,6 +905,7 @@ async fn drain_for_reconnect(
             }
         }
     }
+    Ok(())
 }
 
 async fn connect(
@@ -1200,5 +1207,302 @@ mod tests {
             Some(&signal),
             mode,
         ));
+    }
+
+    fn reconnect_test_state(
+        count: usize,
+        deadline: tokio::time::Instant,
+    ) -> (
+        super::SessionState,
+        Vec<tokio::sync::oneshot::Receiver<Result<crate::types::AppendAck, AppendSessionError>>>,
+    ) {
+        use crate::types::{AppendInput, AppendRecord, AppendRecordBatch};
+
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
+        let mut inflight_appends = std::collections::VecDeque::new();
+        let mut tickets = Vec::new();
+        for _ in 0..count {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            tickets.push(ack_rx);
+            inflight_appends.push_back(super::InflightAppend {
+                input: AppendInput::new(
+                    AppendRecordBatch::try_from_iter([AppendRecord::new("x").unwrap()]).unwrap(),
+                ),
+                input_metered_bytes: 0,
+                ack_tx,
+                ack_deadline: deadline,
+                _permit: None,
+            });
+        }
+        (
+            super::SessionState {
+                cmd_rx,
+                inflight_appends,
+                inflight_bytes: 0,
+                close_tx: None,
+                total_records: count,
+                total_acked_records: 0,
+                prev_ack_end: None,
+                stashed_submission: None,
+            },
+            tickets,
+        )
+    }
+
+    fn reconnect_test_ack(start: u64, end: u64) -> crate::types::AppendAck {
+        let start = crate::types::StreamPosition {
+            seq_num: start,
+            timestamp: 0,
+        };
+        let end = crate::types::StreamPosition {
+            seq_num: end,
+            timestamp: 0,
+        };
+        crate::types::AppendAck {
+            start,
+            end,
+            tail: end,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_empty_does_not_poll_response_or_wait() {
+        use std::time::Duration;
+        let start = tokio::time::Instant::now();
+        let (mut state, _) = reconnect_test_state(0, start);
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let acks: super::Streaming<crate::types::AppendAck> =
+            Box::pin(futures_util::stream::poll_fn(|_| {
+                panic!("empty drain must not poll response")
+            }));
+        let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+        tokio::pin!(timer);
+        let result = super::drain_for_reconnect(
+            input_tx,
+            acks,
+            &mut state,
+            timer.as_mut(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(tokio::time::Instant::now(), start);
+        assert!(
+            input_rx.recv().await.is_none(),
+            "request sender must be dropped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_final_ack_does_not_wait_for_eof() {
+        use std::time::Duration;
+
+        use futures_util::StreamExt;
+        let start = tokio::time::Instant::now();
+        let (mut state, tickets) = reconnect_test_state(1, start + Duration::from_secs(5));
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let acks: super::Streaming<crate::types::AppendAck> = Box::pin(
+            futures_util::stream::iter([Ok(reconnect_test_ack(0, 1))])
+                .chain(futures_util::stream::pending()),
+        );
+        let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+        tokio::pin!(timer);
+        let result = super::drain_for_reconnect(
+            input_tx,
+            acks,
+            &mut state,
+            timer.as_mut(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_ok(), "all appends were acknowledged: {result:?}");
+        assert_eq!(tokio::time::Instant::now(), start);
+        assert_eq!(state.total_acked_records, 1);
+        assert!(state.inflight_appends.is_empty());
+        assert!(!timer.is_armed());
+        for ticket in tickets {
+            assert_eq!(ticket.await.unwrap().unwrap().end.seq_num, 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_waits_for_every_ack_but_not_eof() {
+        use std::time::Duration;
+
+        use futures_util::StreamExt;
+        let start = tokio::time::Instant::now();
+        let (mut state, tickets) = reconnect_test_state(2, start + Duration::from_secs(5));
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let acks: super::Streaming<crate::types::AppendAck> = Box::pin(
+            futures_util::stream::iter([
+                Ok(reconnect_test_ack(0, 1)),
+                Ok(reconnect_test_ack(1, 2)),
+            ])
+            .chain(futures_util::stream::pending()),
+        );
+        let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+        tokio::pin!(timer);
+        let result = super::drain_for_reconnect(
+            input_tx,
+            acks,
+            &mut state,
+            timer.as_mut(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(state.total_acked_records, 2);
+        assert_eq!(tokio::time::Instant::now(), start);
+        for (index, ticket) in tickets.into_iter().enumerate() {
+            assert_eq!(
+                ticket.await.unwrap().unwrap().end.seq_num,
+                (index + 1) as u64
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_unacked_records_still_time_out() {
+        use std::time::Duration;
+        let duration = Duration::from_millis(10);
+        let start = tokio::time::Instant::now();
+        let (mut state, mut tickets) = reconnect_test_state(1, start + duration);
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let acks: super::Streaming<crate::types::AppendAck> =
+            Box::pin(futures_util::stream::pending());
+        let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+        tokio::pin!(timer);
+        let result =
+            super::drain_for_reconnect(input_tx, acks, &mut state, timer.as_mut(), duration).await;
+        assert!(matches!(result, Err(AppendSessionError::AckTimeout)));
+        assert_eq!(state.inflight_appends.len(), 1);
+        assert_eq!(state.total_acked_records, 0);
+        assert!(matches!(
+            tickets[0].try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(tokio::time::Instant::now() - start, duration);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_partial_ack_keeps_remaining_deadline() {
+        use std::time::Duration;
+
+        use futures_util::StreamExt;
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(30);
+        let (mut state, mut tickets) = reconnect_test_state(2, deadline);
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let acks: super::Streaming<crate::types::AppendAck> = Box::pin(
+            futures_util::stream::iter([Ok(reconnect_test_ack(0, 1))])
+                .chain(futures_util::stream::pending()),
+        );
+        let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+        tokio::pin!(timer);
+        let result = super::drain_for_reconnect(
+            input_tx,
+            acks,
+            &mut state,
+            timer.as_mut(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(result, Err(AppendSessionError::AckTimeout)));
+        assert_eq!(state.total_acked_records, 1);
+        assert_eq!(state.inflight_appends.len(), 1);
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        assert_eq!(tickets[0].try_recv().unwrap().unwrap().end.seq_num, 1);
+        assert!(matches!(
+            tickets[1].try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_early_eof_is_not_success() {
+        use std::time::Duration;
+        let start = tokio::time::Instant::now();
+        let (mut state, _) = reconnect_test_state(1, start + Duration::from_secs(5));
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let acks: super::Streaming<crate::types::AppendAck> =
+            Box::pin(futures_util::stream::empty());
+        let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+        tokio::pin!(timer);
+        let result = super::drain_for_reconnect(
+            input_tx,
+            acks,
+            &mut state,
+            timer.as_mut(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(result, Err(AppendSessionError::StreamClosedEarly)));
+        assert_eq!(state.total_acked_records, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_invalid_ack_is_not_success() {
+        use std::time::Duration;
+        let start = tokio::time::Instant::now();
+        let (mut state, _) = reconnect_test_state(1, start + Duration::from_secs(5));
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let acks: super::Streaming<crate::types::AppendAck> =
+            Box::pin(futures_util::stream::iter([Ok(reconnect_test_ack(0, 2))]));
+        let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+        tokio::pin!(timer);
+        let result = super::drain_for_reconnect(
+            input_tx,
+            acks,
+            &mut state,
+            timer.as_mut(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(result, Err(AppendSessionError::InvalidAck(_))));
+        assert_eq!(state.total_acked_records, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_reconnect_preserves_server_errors_and_draining_replay() {
+        use std::time::Duration;
+        for (code, expect_clean_reconnect) in [("server_draining", true), ("internal", false)] {
+            let (mut state, mut tickets) =
+                reconnect_test_state(1, tokio::time::Instant::now() + Duration::from_secs(5));
+            let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+            let status = if expect_clean_reconnect {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            let acks: super::Streaming<crate::types::AppendAck> =
+                Box::pin(futures_util::stream::iter([Err(ApiError::Server(
+                    status,
+                    ServerErrorBody {
+                        code: code.to_owned(),
+                        message: "test".to_owned(),
+                    },
+                ))]));
+            let timer = tokio_muxt::MuxTimer::<{ super::N_TIMER_VARIANTS }>::default();
+            tokio::pin!(timer);
+            let result = super::drain_for_reconnect(
+                input_tx,
+                acks,
+                &mut state,
+                timer.as_mut(),
+                Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(result.is_ok(), expect_clean_reconnect, "{code}: {result:?}");
+            assert_eq!(state.total_acked_records, 0);
+            assert_eq!(
+                state.inflight_appends.len(),
+                1,
+                "unacked work remains owned by the retry loop"
+            );
+            assert!(matches!(
+                tickets[0].try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
     }
 }
