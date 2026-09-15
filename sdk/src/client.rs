@@ -39,7 +39,10 @@ use tokio::{
 };
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::frame_signal::{FrameSignal, RequestFrameMonitorBody};
+use crate::{
+    frame_signal::{FrameSignal, RequestFrameMonitorBody},
+    types::Http2Config,
+};
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 90;
@@ -786,6 +789,7 @@ impl Drop for RequestPermit {
 }
 
 struct PooledClient<C> {
+    max_concurrent_requests: usize,
     id: ConnectionId,
     client: Arc<HyperClient<C, BoxBody>>,
     active_requests: Arc<AtomicUsize>,
@@ -793,8 +797,9 @@ struct PooledClient<C> {
 }
 
 impl<C> PooledClient<C> {
-    fn new(client: HyperClient<C, BoxBody>) -> Self {
+    fn new(client: HyperClient<C, BoxBody>, max_concurrent_requests: usize) -> Self {
         Self {
+            max_concurrent_requests,
             id: ConnectionId::next(),
             client: Arc::new(client),
             active_requests: Arc::new(AtomicUsize::new(0)),
@@ -805,7 +810,7 @@ impl<C> PooledClient<C> {
     fn request_permit(&self) -> Option<RequestPermit> {
         self.active_requests
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ar| {
-                (ar < MAX_CONCURRENT_REQUESTS_PER_CLIENT).then_some(ar + 1)
+                (ar < self.max_concurrent_requests).then_some(ar + 1)
             })
             .ok()?;
         *self.idle_since.lock().unwrap() = None;
@@ -827,6 +832,7 @@ impl<C> PooledClient<C> {
 }
 
 struct HostPool<C> {
+    http2: Option<Http2Config>,
     clients: StdRwLock<Vec<PooledClient<C>>>,
     connector: C,
 }
@@ -835,21 +841,31 @@ impl<C> HostPool<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    fn new(connector: C) -> Self {
+    fn new(connector: C, http2: Option<Http2Config>) -> Self {
         Self {
+            http2,
             clients: StdRwLock::new(Vec::new()),
             connector,
         }
     }
 
     fn create_client(&self) -> PooledClient<C> {
-        let client = HyperClient::builder(TokioExecutor::new())
+        let mut builder = HyperClient::builder(TokioExecutor::new());
+        builder
             .timer(TokioTimer::new())
             .http2_only(true)
             .http2_keep_alive_interval(Duration::from_secs(20))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .build(self.connector.clone());
-        PooledClient::new(client)
+            .http2_keep_alive_timeout(Duration::from_secs(10));
+        let max_requests = if let Some(config) = self.http2 {
+            builder
+                .http2_initial_stream_window_size(config.stream_receive_window)
+                .http2_initial_connection_window_size(config.connection_receive_window)
+                .http2_adaptive_window(false);
+            config.max_concurrent_requests
+        } else {
+            MAX_CONCURRENT_REQUESTS_PER_CLIENT
+        };
+        PooledClient::new(builder.build(self.connector.clone()), max_requests)
     }
 
     fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
@@ -905,6 +921,7 @@ where
 }
 
 pub struct Pool<C> {
+    http2: Option<Http2Config>,
     hosts: Arc<RwLock<HashMap<String, Arc<HostPool<C>>>>>,
     connector: C,
     _reaper: AbortOnDropHandle<()>,
@@ -914,7 +931,7 @@ impl<C> Pool<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    pub fn new(connector: C) -> Self {
+    pub fn new(connector: C, http2: Option<Http2Config>) -> Self {
         let hosts = Arc::new(RwLock::new(HashMap::new()));
 
         let _reaper = AbortOnDropHandle::new(tokio::spawn({
@@ -929,6 +946,7 @@ where
         }));
 
         Self {
+            http2,
             hosts,
             connector,
             _reaper,
@@ -945,7 +963,7 @@ where
         let mut hosts = self.hosts.write().await;
         hosts
             .entry(host.to_owned())
-            .or_insert_with(|| Arc::new(HostPool::new(self.connector.clone())))
+            .or_insert_with(|| Arc::new(HostPool::new(self.connector.clone(), self.http2)))
             .clone()
     }
 
@@ -1008,7 +1026,7 @@ mod tests {
     const TEST_HOST: &str = "localhost:8080";
 
     fn test_pool() -> Pool<HttpConnector> {
-        Pool::new(HttpConnector::new())
+        Pool::new(HttpConnector::new(), None)
     }
 
     #[test]
@@ -1112,6 +1130,71 @@ mod tests {
                 .signature_verification_algorithms
                 .supported_schemes()
         );
+    }
+
+    #[tokio::test]
+    async fn http2_limits_preserve_progress_and_bound_concurrency() {
+        const MESSAGE_BYTES: usize = 6 * 1024 * 1024;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let observed = accepted.clone();
+        let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+            let payload = Bytes::from(vec![b'x'; MESSAGE_BYTES]);
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let payload = payload.clone();
+                connections.spawn(async move {
+                    let mut connection = h2::server::handshake(socket).await.unwrap();
+                    while let Some(request) = connection.accept().await {
+                        let (_request, mut response) = request.unwrap();
+                        let response_headers = http::Response::builder()
+                            .header(http::header::CONTENT_LENGTH, MESSAGE_BYTES)
+                            .body(())
+                            .unwrap();
+                        let mut body = response.send_response(response_headers, false).unwrap();
+                        body.send_data(payload.clone(), true).unwrap();
+                    }
+                });
+            }
+        }));
+        let config = Http2Config::new(4, 64 * 1024, 512 * 1024).unwrap();
+        let pool = Pool::new(HttpConnector::new(), Some(config));
+        let uri: Uri = format!("http://{address}/read").parse().unwrap();
+        let request = || RequestBuilder::get(uri.clone()).build().unwrap();
+        timeout(Duration::from_secs(10), async {
+            let mut open_streams = Vec::new();
+            for _ in 0..3 {
+                let response = pool.init_streaming(request()).await.unwrap();
+                let (stream, _poison) = response.into_stream();
+                let mut stream = Box::pin(stream);
+                let first = stream.next().await.unwrap().unwrap();
+                open_streams.push((stream, first.len()));
+            }
+            // Exercise flow control with a response larger than either window.
+            let response = pool.execute_unary(request()).await.unwrap();
+            assert_eq!(response.into_bytes().len(), MESSAGE_BYTES);
+            assert_eq!(observed.load(Ordering::SeqCst), 1);
+
+            let response = pool.init_streaming(request()).await.unwrap();
+            let (stream, _poison) = response.into_stream();
+            open_streams.push((Box::pin(stream), 0));
+            // Existing response bodies occupy all request slots.
+            let response = pool.execute_unary(request()).await.unwrap();
+            assert_eq!(response.into_bytes().len(), MESSAGE_BYTES);
+            assert_eq!(observed.load(Ordering::SeqCst), 2);
+
+            for (mut stream, mut received) in open_streams {
+                while let Some(chunk) = stream.next().await {
+                    received += chunk.unwrap().len();
+                }
+                assert_eq!(received, MESSAGE_BYTES);
+            }
+        })
+        .await
+        .expect("concurrent HTTP/2 requests must make progress");
     }
 
     #[tokio::test]
