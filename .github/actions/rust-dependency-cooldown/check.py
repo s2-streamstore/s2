@@ -20,6 +20,7 @@ ACTION_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = Path.cwd()
 CONFIG = REPO_ROOT / ".cargo" / "config.toml"
 ALLOWLIST = ACTION_ROOT / "first-party-crates.txt"
+SECURITY_EXCEPTIONS = ACTION_ROOT / "security-exceptions.toml"
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 INDEX_BASE = "https://index.crates.io"
 USER_AGENT = "s2 minimum-publish-age check (github.com/s2-streamstore/s2)"
@@ -67,6 +68,36 @@ def allowed_crates() -> set[str]:
         for line in ALLOWLIST.read_text().splitlines()
         if (name := line.split("#", 1)[0].strip())
     }
+
+
+def security_exceptions() -> dict[tuple[str, str], dict[str, str]]:
+    with SECURITY_EXCEPTIONS.open("rb") as exceptions_file:
+        document = tomllib.load(exceptions_file)
+    if document.keys() - {"exception"}:
+        raise ValueError(f"unexpected fields in {SECURITY_EXCEPTIONS}")
+    entries = document.get("exception", [])
+    if not isinstance(entries, list):
+        raise ValueError(f"expected [[exception]] entries in {SECURITY_EXCEPTIONS}")
+    required_fields = {"crate", "version", "advisory", "reason"}
+    exceptions: dict[tuple[str, str], dict[str, str]] = {}
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict) or entry.keys() != required_fields:
+            raise ValueError(f"security exception {index} must contain {sorted(required_fields)}")
+        for field, value in entry.items():
+            if not isinstance(value, str) or not value or value != value.strip():
+                raise ValueError(f"security exception {index} has invalid {field}")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", entry["crate"]) is None:
+            raise ValueError(f"security exception {index} requires an exact crate name")
+        if re.fullmatch(
+            r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+            entry["version"],
+        ) is None:
+            raise ValueError(f"security exception {index} requires an exact version")
+        key = (entry["crate"], entry["version"])
+        if key in exceptions:
+            raise ValueError(f"duplicate security exception for {key[0]} {key[1]}")
+        exceptions[key] = entry
+    return exceptions
 
 
 def crates_io_versions(lock_text: str) -> set[tuple[str, str]]:
@@ -196,6 +227,7 @@ def main() -> int:
     try:
         if args.base_ref and run_git("rev-parse", "--verify", "--quiet", args.base_ref).returncode:
             raise ValueError(f"base ref {args.base_ref!r} is not available")
+        approved_exceptions = security_exceptions()
         if args.base_ref and not has_relevant_changes(args.base_ref):
             print("No Rust dependency cooldown files changed; check skipped.")
             return 0
@@ -231,6 +263,12 @@ def main() -> int:
                 checked += 1
                 crate_age = now - pubtime
                 if crate_age < age_limit:
+                    if exception := approved_exceptions.get((name, version)):
+                        print(
+                            f"Publication cooldown waived for {name} {version} ({lockfile}): "
+                            f"{exception['advisory']} — {exception['reason']}"
+                        )
+                        continue
                     violations.append(
                         f"{name} {version} ({lockfile}): published "
                         f"{crate_age.total_seconds() / 86400:.1f} days ago; "
@@ -246,7 +284,7 @@ def main() -> int:
             print(f"  - {violation}", file=sys.stderr)
         return 1
 
-    print(f"Checked {checked} new crates.io version(s); all are at least {age_text} old.")
+    print(f"Checked {checked} new crates.io version(s); publication cooldown policy satisfied.")
     return 0
 
 
