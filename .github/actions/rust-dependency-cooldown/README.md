@@ -32,6 +32,16 @@ Entries need no expiry field: an approved release follows the normal age check
 once it is old enough. Old entries may be removed in a later cleanup. An empty
 file or `exception = []` means there are no security exceptions.
 
+Cargo also enforces publication age during dependency resolution. To select an
+approved release, override that resolver check for the targeted update command:
+
+```sh
+CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo +nightly update -p rustls --precise 0.23.45
+```
+
+Run the cooldown action on the resulting lockfile to check every newly selected
+version against the exception list and normal age requirement.
+
 ## Tests
 
 Run from the repository root:
