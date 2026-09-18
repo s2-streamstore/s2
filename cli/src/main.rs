@@ -872,19 +872,25 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 args.duration, args.target_mibps, args.record_size,
             );
 
-            bench::run(
+            let bench_result = bench::run(
                 basin.stream(stream_name.clone()),
                 args.record_size as usize,
                 args.target_mibps,
                 *args.duration,
                 *args.catchup_delay,
             )
-            .await?;
+            .await;
 
-            basin
+            let delete_result = basin
                 .delete_stream(DeleteStreamInput::new(stream_name))
                 .await
-                .map_err(|e| CliError::op(OpKind::Bench, e))?;
+                .map_err(|e| CliError::op(OpKind::Bench, e));
+
+            match (bench_result, delete_result) {
+                (Ok(()), Ok(())) => {}
+                (Err(bench_err), _) => return Err(bench_err),
+                (Ok(()), Err(delete_err)) => return Err(delete_err),
+            }
         }
         }
         Ok(())
