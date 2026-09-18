@@ -44,9 +44,13 @@ pub(super) async fn db_txn_get<K: AsRef<[u8]> + Send, V>(
 }
 
 /// Commit metadata changes and wait until remote reads can observe them.
-pub(super) async fn db_txn_commit_durable(txn: DbTransaction) -> Result<(), slatedb::Error> {
-    if let Some(handle) = txn.commit().await? {
-        handle.await_durable().await?;
-    }
-    Ok(())
+/// Return the committed sequence number, or `None` if there were no writes.
+pub(super) async fn db_txn_commit_durable(
+    txn: DbTransaction,
+) -> Result<Option<u64>, slatedb::Error> {
+    let Some(handle) = txn.commit().await? else {
+        return Ok(None);
+    };
+    handle.await_durable().await?;
+    Ok(Some(handle.seqnum()))
 }

@@ -226,13 +226,14 @@ impl Backend {
                 )?;
             }
 
-            let handle = txn.commit().await?.expect("stream metadata was written");
-            handle.await_durable().await?;
+            let config_seq = db_txn_commit_durable(txn)
+                .await?
+                .expect("stream metadata was written");
 
             if let ProvisionResult::Updated(meta) = &outcome
                 && let Some(client) = self.streamer_client_if_active(&basin, &stream)
             {
-                client.advise_reconfig(handle.seqnum(), meta.config.clone());
+                client.advise_reconfig(config_seq, meta.config.clone());
             }
         }
 
@@ -334,11 +335,12 @@ impl Backend {
             )?;
         }
 
-        let handle = txn.commit().await?.expect("stream metadata was written");
-        handle.await_durable().await?;
+        let config_seq = db_txn_commit_durable(txn)
+            .await?
+            .expect("stream metadata was written");
 
         if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(handle.seqnum(), meta.config.clone());
+            client.advise_reconfig(config_seq, meta.config.clone());
         }
 
         Ok(meta.config)
