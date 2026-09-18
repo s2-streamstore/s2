@@ -47,9 +47,6 @@ pub enum ClientError {
     #[error("connection refused: {0}")]
     ConnectionRefused(String),
     /// The server reset the request's HTTP/2 stream.
-    ///
-    /// The request may have been partially processed before the reset, so a
-    /// retried append can be applied twice.
     #[error("stream reset: {0}")]
     StreamReset(String),
     /// Client configuration prevented a request from being attempted.
