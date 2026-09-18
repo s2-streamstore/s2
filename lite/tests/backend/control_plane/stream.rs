@@ -807,6 +807,61 @@ async fn test_create_stream_fails_when_basin_deleting() {
     ));
 }
 
+#[rstest::rstest]
+#[case::concurrent(false)]
+#[case::cancelled(true)]
+#[tokio::test(start_paused = true)]
+async fn test_delete_stream_retry_waits_for_durable_metadata(#[case] cancel_first: bool) {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = test_basin_name("durable-delete");
+    let stream = test_stream_name("durable-delete");
+    assert_waits_for_flush(
+        &db,
+        backend.provision_basin(basin.clone(), BasinConfig::default(), ProvisionMode::Ensure),
+    )
+    .await
+    .unwrap();
+    assert_waits_for_flush(
+        &db,
+        backend.provision_stream(
+            basin.clone(),
+            stream.clone(),
+            Default::default(),
+            ProvisionMode::Ensure,
+        ),
+    )
+    .await
+    .unwrap();
+
+    let mut first = Box::pin(backend.delete_stream(basin.clone(), stream.clone()));
+    // Stream deletion first persists the terminal trim, then the metadata marker.
+    assert_pending_until_committed(&db, &mut first).await;
+    db.flush().await.unwrap();
+    assert_pending_until_committed(&db, &mut first).await;
+    let first = (!cancel_first).then_some(first);
+    backend
+        .get_stream_config(basin.clone(), stream.clone())
+        .await
+        .unwrap();
+
+    let retry = backend.delete_stream(basin.clone(), stream.clone());
+    tokio::pin!(retry);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut retry)
+            .await
+            .is_err()
+    );
+    assert_waits_for_flush(&db, retry).await.unwrap();
+    if let Some(first) = first {
+        first.await.unwrap();
+    }
+    assert!(matches!(
+        backend.get_stream_config(basin, stream).await,
+        Err(GetStreamConfigError::StreamDeletionPending(_))
+    ));
+    backend.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
     let backend = create_backend().await;

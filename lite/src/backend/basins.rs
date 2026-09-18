@@ -208,9 +208,10 @@ impl Backend {
     pub async fn delete_basin(&self, basin: BasinName) -> Result<(), DeleteBasinError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let meta_key = kv::basin_meta::ser_key(&basin);
-        let Some(mut meta) = db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await? else {
+        let Some(entry) = txn.get_key_value(&meta_key).await? else {
             return Err(BasinNotFoundError { basin }.into());
         };
+        let mut meta = kv::basin_meta::deser_value(entry.value).map_err(StorageError::from)?;
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
             txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
@@ -219,8 +220,12 @@ impl Backend {
                 kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
             )?;
             db_txn_commit_durable(txn).await?;
-            self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
+        } else {
+            // A retry may observe the marker before the first delete has flushed.
+            drop(txn);
+            self.await_durable_seq(entry.seq).await?;
         }
+        self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
         Ok(())
     }
 }
