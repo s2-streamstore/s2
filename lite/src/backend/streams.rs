@@ -7,11 +7,11 @@ use s2_common::{
 };
 use s2_storage::bash::Bash;
 use slatedb::{
-    IsolationLevel,
+    DbTransaction, IsolationLevel,
     config::{DurabilityLevel, ScanOptions},
 };
 use time::OffsetDateTime;
-use tracing::instrument;
+use tracing::{Instrument as _, instrument};
 
 use super::{
     Backend,
@@ -130,17 +130,23 @@ impl Backend {
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
                     Ok(ProvisionResult::Noop(StreamInfo {
-                        name: stream,
+                        name: stream.clone(),
                         created_at: existing.created_at,
                         deleted_at: None,
                         cipher: existing.cipher,
                     }))
                 } else {
-                    Err(StreamAlreadyExistsError { basin, stream }.into())
+                    Err(StreamAlreadyExistsError {
+                        basin: basin.clone(),
+                        stream: stream.clone(),
+                    }
+                    .into())
                 };
                 drop(txn);
-                self.await_durable_seq(existing_seq.expect("existing meta was read"))
-                    .await?;
+                let seq = existing_seq.expect("existing meta was read");
+                self.await_durable_seq(seq).await?;
+                self.advise_stream_config(&basin, &stream, seq, existing.config)
+                    .await;
                 return result;
             }
             (Some(existing), ProvisionMode::Ensure) => {
@@ -191,8 +197,10 @@ impl Backend {
 
         if matches!(&outcome, ProvisionResult::Noop(_)) {
             drop(txn);
-            self.await_durable_seq(existing_seq.expect("noop implies existing meta"))
-                .await?;
+            let seq = existing_seq.expect("noop implies existing meta");
+            self.await_durable_seq(seq).await?;
+            self.advise_stream_config(&basin, &stream, seq, outcome.inner().config.clone())
+                .await;
         } else {
             let meta = outcome.inner();
 
@@ -226,13 +234,8 @@ impl Backend {
                 )?;
             }
 
-            db_txn_commit_durable(txn).await?;
-        }
-
-        if let ProvisionResult::Updated(meta) = &outcome
-            && let Some(client) = self.streamer_client_if_active(&basin, &stream)
-        {
-            client.advise_reconfig(meta.config.clone());
+            self.commit_stream_config(txn, basin.clone(), stream.clone(), meta.config.clone())
+                .await?;
         }
 
         Ok(outcome.map(|meta| StreamInfo {
@@ -333,13 +336,36 @@ impl Backend {
             )?;
         }
 
-        db_txn_commit_durable(txn).await?;
-
-        if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(meta.config.clone());
-        }
+        self.commit_stream_config(txn, basin, stream, meta.config.clone())
+            .await?;
 
         Ok(meta.config)
+    }
+
+    /// Once a commit starts, cancellation must not discard its config delivery.
+    async fn commit_stream_config(
+        &self,
+        txn: DbTransaction,
+        basin: BasinName,
+        stream: StreamName,
+        config: StreamConfig,
+    ) -> Result<(), slatedb::Error> {
+        let backend = self.clone();
+        tokio::spawn(
+            async move {
+                let handle = txn.commit().await?.expect("stream metadata was written");
+                handle.await_durable().await?;
+                backend
+                    .advise_stream_config(&basin, &stream, handle.seqnum(), config)
+                    .await;
+                Ok::<_, slatedb::Error>(())
+            }
+            .in_current_span(),
+        )
+        .await
+        .map_err(|error| {
+            slatedb::Error::internal(format!("stream config commit task failed: {error}"))
+        })?
     }
 
     #[instrument(ret, err, skip(self))]
