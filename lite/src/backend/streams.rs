@@ -7,7 +7,7 @@ use s2_common::{
 };
 use s2_storage::bash::Bash;
 use slatedb::{
-    IsolationLevel,
+    DbTransaction, IsolationLevel,
     config::{DurabilityLevel, ScanOptions},
 };
 use time::OffsetDateTime;
@@ -15,7 +15,7 @@ use tracing::instrument;
 
 use super::{
     Backend,
-    store::{db_txn_commit_durable, db_txn_get},
+    store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
     streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
 };
 use crate::{
@@ -106,12 +106,11 @@ impl Backend {
 
         // Existence is decided from a Memory-level read; capture the row's
         // commit seq so exists-outcomes can await durability (see fn doc).
-        let existing_entry = txn.get_key_value(&stream_meta_key).await?;
-        let existing_seq = existing_entry.as_ref().map(|kv| kv.seq);
-        let existing_meta = existing_entry
-            .map(|kv| kv::stream_meta::deser_value(kv.value))
-            .transpose()
-            .map_err(StorageError::from)?;
+        let (existing_meta, existing_seq) = db_txn_get_with(&txn, &stream_meta_key, |entry| {
+            Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        .unzip();
         if let Some(existing_meta) = &existing_meta
             && existing_meta.deleted_at.is_some()
         {
@@ -226,13 +225,8 @@ impl Backend {
                 )?;
             }
 
-            db_txn_commit_durable(txn).await?;
-        }
-
-        if let ProvisionResult::Updated(meta) = &outcome
-            && let Some(client) = self.streamer_client_if_active(&basin, &stream)
-        {
-            client.advise_reconfig(meta.config.clone());
+            self.commit_stream_config(txn, basin.clone(), stream.clone(), meta.config.clone())
+                .await?;
         }
 
         Ok(outcome.map(|meta| StreamInfo {
@@ -333,13 +327,30 @@ impl Backend {
             )?;
         }
 
-        db_txn_commit_durable(txn).await?;
-
-        if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(meta.config.clone());
-        }
+        self.commit_stream_config(txn, basin, stream, meta.config.clone())
+            .await?;
 
         Ok(meta.config)
+    }
+
+    async fn commit_stream_config(
+        &self,
+        txn: DbTransaction,
+        basin: BasinName,
+        stream: StreamName,
+        config: StreamConfig,
+    ) -> Result<(), slatedb::Error> {
+        let backend = self.clone();
+        // Once a commit starts, cancellation must not discard its notification.
+        tokio::spawn(async move {
+            let seq = db_txn_commit_durable(txn)
+                .await?
+                .expect("stream metadata was written");
+            backend.advise_stream_config(&basin, &stream, seq, config);
+            Ok(())
+        })
+        .await
+        .expect("stream config commit task panicked")
     }
 
     #[instrument(ret, err, skip(self))]
@@ -381,14 +392,14 @@ impl Backend {
     ) -> Result<(), DeleteStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
-        let entry = txn
-            .get_key_value(&meta_key)
-            .await?
-            .ok_or_else(|| StreamNotFoundError {
-                basin,
-                stream: stream.clone(),
-            })?;
-        let mut meta = kv::stream_meta::deser_value(entry.value).map_err(StorageError::from)?;
+        let (mut meta, seq) = db_txn_get_with(&txn, &meta_key, |entry| {
+            Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        .ok_or_else(|| StreamNotFoundError {
+            basin,
+            stream: stream.clone(),
+        })?;
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
             txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
@@ -396,7 +407,7 @@ impl Backend {
         } else {
             // The terminal trim is durable, but the metadata marker may not be yet.
             drop(txn);
-            self.await_durable_seq(entry.seq).await?;
+            self.await_durable_seq(seq).await?;
         }
         Ok(())
     }

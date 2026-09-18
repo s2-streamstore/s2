@@ -211,6 +211,7 @@ pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: StreamConfig,
+    pub config_seq: u64,
     pub cipher: Option<EncryptionAlgorithm>,
     pub tail_pos: StreamPosition,
     pub last_tail_write_timestamp: kv::timestamp::TimestampSecs,
@@ -231,6 +232,7 @@ impl Spawner {
             db,
             stream_id,
             config,
+            config_seq,
             cipher,
             tail_pos,
             last_tail_write_timestamp,
@@ -248,6 +250,7 @@ impl Spawner {
             stream_id,
             msg_tx: msg_tx.clone(),
             config,
+            config_seq,
             last_tail_write_timestamp,
             fencing_token: CommandState {
                 state: fencing_token,
@@ -308,6 +311,7 @@ struct Streamer {
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: StreamConfig,
+    config_seq: u64,
     last_tail_write_timestamp: kv::timestamp::TimestampSecs,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
@@ -684,8 +688,11 @@ impl Streamer {
                         Message::CheckTail { reply_tx } => {
                             let _ = reply_tx.send(self.stable_pos);
                         }
-                        Message::Reconfigure { config } => {
-                            self.config = config;
+                        Message::Reconfigure { seq, config } => {
+                            if seq > self.config_seq {
+                                self.config = config;
+                                self.config_seq = seq;
+                            }
                         }
                         Message::DurabilityStatus(status) => {
                             match status {
@@ -747,6 +754,7 @@ enum Message {
         reply_tx: oneshot::Sender<StreamPosition>,
     },
     Reconfigure {
+        seq: u64,
         config: StreamConfig,
     },
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
@@ -842,8 +850,10 @@ impl StreamerClient {
         })
     }
 
-    pub(super) fn advise_reconfig(&self, config: StreamConfig) -> bool {
-        self.msg_tx.send(Message::Reconfigure { config }).is_ok()
+    pub(super) fn advise_reconfig(&self, seq: u64, config: StreamConfig) -> bool {
+        self.msg_tx
+            .send(Message::Reconfigure { seq, config })
+            .is_ok()
     }
 
     async fn terminal_trim(
@@ -1430,6 +1440,7 @@ mod tests {
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
             config: StreamConfig::default(),
+            config_seq: 0,
             last_tail_write_timestamp: kv::timestamp::TimestampSecs::ZERO,
             fencing_token: CommandState {
                 state: FencingToken::default(),
@@ -1450,6 +1461,62 @@ mod tests {
             durability_notifier: DurabilityNotifier::spawn(&db),
             bgtask_trigger_tx,
         }
+    }
+
+    #[tokio::test]
+    async fn stale_config_notifications_cannot_restore_old_retention() {
+        let mut streamer = test_streamer().await;
+        let db = streamer.db.clone();
+        let stream_id = streamer.stream_id;
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx.clone();
+        streamer.config.retention_policy = RetentionPolicy::Age(Duration::from_secs(1));
+        let task = tokio::spawn(streamer.run(msg_rx));
+        msg_tx
+            .send(Message::Reconfigure {
+                seq: 20,
+                config: StreamConfig {
+                    retention_policy: RetentionPolicy::Infinite(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let old = StreamConfig {
+            retention_policy: RetentionPolicy::Age(Duration::from_secs(1)),
+            ..Default::default()
+        };
+        msg_tx
+            .send(Message::Reconfigure {
+                seq: 10,
+                config: old,
+            })
+            .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        msg_tx
+            .send(Message::Append {
+                input: append_input(b"must not expire"),
+                session: None,
+                reply_tx,
+                append_type: AppendType::Regular,
+            })
+            .unwrap();
+        let ack = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let entry = db
+            .get_key_value(kv::stream_record_data::ser_key(stream_id, ack.start))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            entry.expire_ts.is_none(),
+            "late config notification restored stale retention"
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        db.close().await.unwrap();
     }
 
     #[test]

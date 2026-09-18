@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use slatedb::{
-    DbTransaction,
+    DbTransaction, KeyValue,
     config::{DurabilityLevel, ReadOptions},
 };
 
@@ -20,13 +20,22 @@ impl Backend {
         key: K,
         deser: impl FnOnce(Bytes) -> Result<V, kv::DeserializationError>,
     ) -> Result<Option<V>, StorageError> {
+        self.db_get_with(key, |entry| deser(entry.value)).await
+    }
+
+    /// Read a remotely durable row, including its sequence and timestamps.
+    pub(super) async fn db_get_with<K: AsRef<[u8]> + Send, V>(
+        &self,
+        key: K,
+        deser: impl FnOnce(KeyValue) -> Result<V, kv::DeserializationError>,
+    ) -> Result<Option<V>, StorageError> {
         let read_opts = ReadOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
         };
         let value = self
             .db
-            .get_with_options(key, &read_opts)
+            .get_key_value_with_options(key, &read_opts)
             .await?
             .map(deser)
             .transpose()?;
@@ -39,14 +48,27 @@ pub(super) async fn db_txn_get<K: AsRef<[u8]> + Send, V>(
     key: K,
     deser: impl FnOnce(Bytes) -> Result<V, kv::DeserializationError>,
 ) -> Result<Option<V>, StorageError> {
-    let value = txn.get(key).await?.map(deser).transpose()?;
+    db_txn_get_with(txn, key, |entry| deser(entry.value)).await
+}
+
+/// Read a transaction row, which may not yet be durable.
+pub(super) async fn db_txn_get_with<K: AsRef<[u8]> + Send, V>(
+    txn: &DbTransaction,
+    key: K,
+    deser: impl FnOnce(KeyValue) -> Result<V, kv::DeserializationError>,
+) -> Result<Option<V>, StorageError> {
+    let value = txn.get_key_value(key).await?.map(deser).transpose()?;
     Ok(value)
 }
 
 /// Commit metadata changes and wait until remote reads can observe them.
-pub(super) async fn db_txn_commit_durable(txn: DbTransaction) -> Result<(), slatedb::Error> {
-    if let Some(handle) = txn.commit().await? {
-        handle.await_durable().await?;
-    }
-    Ok(())
+/// Return the committed sequence number, or `None` if there were no writes.
+pub(super) async fn db_txn_commit_durable(
+    txn: DbTransaction,
+) -> Result<Option<u64>, slatedb::Error> {
+    let Some(handle) = txn.commit().await? else {
+        return Ok(None);
+    };
+    handle.await_durable().await?;
+    Ok(Some(handle.seqnum()))
 }

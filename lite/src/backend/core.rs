@@ -8,13 +8,13 @@ use futures::{
 };
 use s2_common::{
     basin::BasinName,
-    config::{BasinConfig, OptionalStreamConfig},
+    config::{BasinConfig, OptionalStreamConfig, StreamConfig},
     encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::{NonZeroSeqNum, SeqNum, StreamPosition},
     resources::ProvisionMode,
     stream::StreamName,
 };
-use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
+use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
@@ -37,6 +37,7 @@ enum StreamerClientSlot {
     Initializing {
         generation_id: StreamerGenerationId,
         future: StreamerInitFuture,
+        pending_config: Option<(u64, StreamConfig)>,
     },
     Ready {
         client: StreamerClient,
@@ -115,11 +116,15 @@ impl Backend {
         let stream_id = StreamId::new(&basin, &stream);
 
         let (meta, persisted_tail, fencing_token, trim_point) = tokio::try_join!(
-            self.db_get(
-                kv::stream_meta::ser_key(&basin, &stream),
-                kv::stream_meta::deser_value,
-            ),
-            self.load_persisted_stream_tail(stream_id),
+            self.db_get_with(kv::stream_meta::ser_key(&basin, &stream), |entry| {
+                Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
+            }),
+            self.db_get_with(kv::stream_tail_position::ser_key(stream_id), |entry| {
+                Ok((
+                    kv::stream_tail_position::deser_value(entry.value)?,
+                    kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
+                ))
+            }),
             self.db_get(
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
@@ -130,7 +135,7 @@ impl Backend {
             )
         )?;
 
-        let Some(meta) = meta else {
+        let Some((meta, config_seq)) = meta else {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
 
@@ -152,6 +157,7 @@ impl Backend {
             db: self.db.clone(),
             stream_id,
             config: meta.config,
+            config_seq,
             cipher: meta.cipher,
             tail_pos,
             last_tail_write_timestamp,
@@ -166,27 +172,6 @@ impl Backend {
                 matches!(slot, StreamerClientSlot::Ready { client } if client.generation_id() == client_id)
             });
         }))
-    }
-
-    async fn load_persisted_stream_tail(
-        &self,
-        stream_id: StreamId,
-    ) -> Result<Option<(StreamPosition, kv::timestamp::TimestampSecs)>, StorageError> {
-        let read_opts = ReadOptions {
-            durability_filter: DurabilityLevel::Remote,
-            ..Default::default()
-        };
-        let Some(entry) = self
-            .db
-            .get_key_value_with_options(kv::stream_tail_position::ser_key(stream_id), &read_opts)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some((
-            kv::stream_tail_position::deser_value(entry.value)?,
-            kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
-        )))
     }
 
     async fn assert_no_records_following_tail(
@@ -248,6 +233,7 @@ impl Backend {
         StreamerClientSlot::Initializing {
             generation_id,
             future,
+            pending_config: None,
         }
     }
 
@@ -272,6 +258,13 @@ impl Backend {
                         if client.is_dead() {
                             oe.remove();
                         } else {
+                            if let StreamerClientSlot::Initializing {
+                                pending_config: Some((seq, config)),
+                                ..
+                            } = oe.get()
+                            {
+                                client.advise_reconfig(*seq, config.clone());
+                            }
                             oe.insert(StreamerClientSlot::Ready {
                                 client: client.clone(),
                             });
@@ -295,6 +288,7 @@ impl Backend {
             StreamerClientSlot::Initializing {
                 generation_id,
                 future,
+                ..
             } => {
                 let result = future.await;
                 self.streamer_finish_initialization(stream_id, generation_id, &result);
@@ -304,16 +298,29 @@ impl Backend {
         }
     }
 
-    pub(super) fn streamer_client_if_active(
+    pub(super) fn advise_stream_config(
         &self,
         basin: &BasinName,
         stream: &StreamName,
-    ) -> Option<StreamerClient> {
+        seq: u64,
+        config: StreamConfig,
+    ) {
         let stream_id = StreamId::new(basin, stream);
-        let slot = self.streamer_slots.get(&stream_id)?;
-        match slot.value() {
-            StreamerClientSlot::Ready { client } if !client.is_dead() => Some(client.clone()),
-            _ => None,
+        let Some(mut slot) = self.streamer_slots.get_mut(&stream_id) else {
+            return;
+        };
+        match slot.value_mut() {
+            StreamerClientSlot::Ready { client } => {
+                client.advise_reconfig(seq, config);
+            }
+            StreamerClientSlot::Initializing { pending_config, .. } => {
+                if pending_config
+                    .as_ref()
+                    .is_none_or(|(pending_seq, _)| seq > *pending_seq)
+                {
+                    *pending_config = Some((seq, config));
+                }
+            }
         }
     }
 
@@ -422,16 +429,17 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
-        config::{BasinConfig, OptionalStreamConfig, StreamConfig},
+        config::{BasinConfig, OptionalStreamConfig, StreamConfig, TimestampingMode},
         record::{Metered, MeteredExt as _, Record, StreamPosition},
         resources::ProvisionMode,
+        stream::{AppendInput, AppendRecord, AppendRecordParts},
     };
     use s2_storage::record::StoredRecord;
     use slatedb::{WriteBatch, object_store};
     use time::OffsetDateTime;
 
     use super::*;
-    use crate::backend::test_util::DbWriteTestExt as _;
+    use crate::backend::{error::AppendError, test_util::DbWriteTestExt as _};
 
     async fn new_test_backend() -> Backend {
         let object_store: Arc<dyn object_store::ObjectStore> =
@@ -441,6 +449,22 @@ mod tests {
             .await
             .unwrap();
         Backend::new(db, ByteSize::b(1))
+    }
+
+    fn append_input(body: &str) -> AppendInput {
+        let record =
+            Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
+        let record: AppendRecord = AppendRecordParts {
+            timestamp: None,
+            record: Metered::from(record),
+        }
+        .try_into()
+        .unwrap();
+        AppendInput {
+            records: vec![record].try_into().unwrap(),
+            match_seq_num: None,
+            fencing_token: None,
+        }
     }
 
     #[tokio::test]
@@ -520,19 +544,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streamer_client_if_active_is_peek_only() {
+    async fn config_notification_does_not_start_streamer() {
         let backend = new_test_backend().await;
         let basin = BasinName::from_str("testbasin3").unwrap();
         let stream = StreamName::from_str("stream3").unwrap();
 
+        backend.advise_stream_config(&basin, &stream, 1, StreamConfig::default());
+        assert!(backend.streamer_slots.is_empty());
+        backend.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initializing_streamer_receives_latest_config() {
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("config-init").unwrap();
+        let stream = StreamName::from_str("stream").unwrap();
+        let stream_id = StreamId::new(&basin, &stream);
         backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
+            .provision_basin(basin.clone(), BasinConfig::default(), ProvisionMode::Ensure)
             .await
             .unwrap();
         backend
@@ -540,16 +569,40 @@ mod tests {
                 basin.clone(),
                 stream.clone(),
                 OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
+                ProvisionMode::Ensure,
             )
             .await
             .unwrap();
 
-        assert!(backend.streamer_slots.is_empty());
-        assert!(backend.streamer_client_if_active(&basin, &stream).is_none());
-        assert!(backend.streamer_slots.is_empty());
+        // Pause initialization after reading metadata, before publishing the client.
+        let generation_id = StreamerGenerationId::next();
+        let client = backend
+            .start_streamer(generation_id, basin.clone(), stream.clone())
+            .await
+            .unwrap();
+        backend.streamer_slots.insert(
+            stream_id,
+            StreamerClientSlot::Initializing {
+                generation_id,
+                future: futures::future::pending().boxed().shared(),
+                pending_config: None,
+            },
+        );
+        let mut config = StreamConfig::default();
+        config.timestamping.mode = TimestampingMode::ClientRequire;
+        backend.advise_stream_config(&basin, &stream, 20, config);
+        backend.advise_stream_config(&basin, &stream, 10, StreamConfig::default());
+        backend.streamer_finish_initialization(stream_id, generation_id, &Ok(client));
+
+        let handle = backend
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap();
+        assert!(matches!(
+            handle.append(append_input("missing timestamp")).await,
+            Err(AppendError::TimestampMissing(_))
+        ));
+        backend.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -586,6 +639,7 @@ mod tests {
             StreamerClientSlot::Initializing {
                 generation_id: current_generation_id,
                 future: future.clone(),
+                pending_config: None,
             },
         );
 
@@ -605,26 +659,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_appends_auto_create_stream_without_spurious_not_found() {
-        use s2_common::stream::{AppendInput, AppendRecord, AppendRecordParts};
-
-        use crate::backend::error::AppendError;
-
-        fn append_input(body: &str) -> AppendInput {
-            let record =
-                Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
-            let record: AppendRecord = AppendRecordParts {
-                timestamp: None,
-                record: Metered::from(record),
-            }
-            .try_into()
-            .unwrap();
-            AppendInput {
-                records: vec![record].try_into().unwrap(),
-                match_seq_num: None,
-                fencing_token: None,
-            }
-        }
-
         let backend = new_test_backend().await;
         let basin = BasinName::from_str("autocreate").unwrap();
         backend
