@@ -381,16 +381,22 @@ impl Backend {
     ) -> Result<(), DeleteStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
-        let mut meta = db_txn_get(&txn, &meta_key, kv::stream_meta::deser_value)
+        let entry = txn
+            .get_key_value(&meta_key)
             .await?
             .ok_or_else(|| StreamNotFoundError {
                 basin,
                 stream: stream.clone(),
             })?;
+        let mut meta = kv::stream_meta::deser_value(entry.value).map_err(StorageError::from)?;
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
             txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
             db_txn_commit_durable(txn).await?;
+        } else {
+            // The terminal trim is durable, but the metadata marker may not be yet.
+            drop(txn);
+            self.await_durable_seq(entry.seq).await?;
         }
         Ok(())
     }

@@ -441,6 +441,30 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     assert!(fetched.create_stream_on_read);
 }
 
+#[tokio::test(start_paused = true)]
+async fn test_delete_basin_retry_waits_for_durable_metadata() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = assert_waits_for_flush(
+        &db,
+        create_test_basin(&backend, "durable-delete", BasinConfig::default()),
+    )
+    .await;
+
+    let mut first = Box::pin(backend.delete_basin(basin.clone()));
+    assert_pending_until_committed(&db, &mut first).await;
+    drop(first);
+
+    let retry = backend.delete_basin(basin);
+    tokio::pin!(retry);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut retry)
+            .await
+            .is_err()
+    );
+    assert_waits_for_flush(&db, retry).await.unwrap();
+    backend.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_delete_basin_marks_deleting_and_blocks_create() {
     let backend = create_backend().await;

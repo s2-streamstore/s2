@@ -807,6 +807,38 @@ async fn test_create_stream_fails_when_basin_deleting() {
     ));
 }
 
+#[tokio::test(start_paused = true)]
+async fn test_delete_stream_retry_waits_for_durable_metadata() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = assert_waits_for_flush(
+        &db,
+        create_test_basin(&backend, "durable-delete", BasinConfig::default()),
+    )
+    .await;
+    let stream = assert_waits_for_flush(
+        &db,
+        create_test_stream(&backend, &basin, "durable-delete", Default::default()),
+    )
+    .await;
+
+    let mut first = Box::pin(backend.delete_stream(basin.clone(), stream.clone()));
+    // Stream deletion first persists the terminal trim, then the metadata marker.
+    assert_pending_until_committed(&db, &mut first).await;
+    db.flush().await.unwrap();
+    assert_pending_until_committed(&db, &mut first).await;
+    drop(first);
+
+    let retry = backend.delete_stream(basin, stream);
+    tokio::pin!(retry);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut retry)
+            .await
+            .is_err()
+    );
+    assert_waits_for_flush(&db, retry).await.unwrap();
+    backend.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_delete_stream_marks_deleted_and_blocks_recreation() {
     let backend = create_backend().await;
