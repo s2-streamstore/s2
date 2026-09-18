@@ -24,6 +24,34 @@ use s2_lite::backend::error::{
 use super::common::*;
 
 #[tokio::test]
+async fn test_provision_stream_acknowledges_only_durable_metadata() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = test_basin_name("durable-stream");
+    let stream = test_stream_name("durable");
+    assert_waits_for_flush(
+        &db,
+        backend.provision_basin(basin.clone(), BasinConfig::default(), ProvisionMode::Ensure),
+    )
+    .await
+    .unwrap();
+
+    let result = assert_waits_for_flush(
+        &db,
+        backend.provision_stream(
+            basin.clone(),
+            stream.clone(),
+            OptionalStreamConfig::default(),
+            ProvisionMode::Ensure,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, ProvisionResult::Created(_)));
+    backend.get_stream_config(basin, stream).await.unwrap();
+    backend.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_create_stream_honors_basin_defaults() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("stream-defaults");
