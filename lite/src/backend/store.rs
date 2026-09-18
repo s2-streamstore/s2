@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use slatedb::{
-    DbTransaction, KeyValue,
+    DbSnapshot, DbTransaction, KeyValue,
     config::{DurabilityLevel, ReadOptions},
 };
 
@@ -8,6 +10,13 @@ use super::Backend;
 use crate::backend::{error::StorageError, kv};
 
 impl Backend {
+    /// Pin one snapshot and make all of it durable before reading multiple keys.
+    pub(super) async fn db_snapshot(&self) -> Result<Arc<DbSnapshot>, StorageError> {
+        let snapshot = self.db.snapshot().await?;
+        self.await_durable_seq(snapshot.seq()).await?;
+        Ok(snapshot)
+    }
+
     pub fn db_status(&self) -> Result<(), slatedb::CloseReason> {
         match self.db.status().close_reason {
             None => Ok(()),
@@ -41,6 +50,14 @@ impl Backend {
             .transpose()?;
         Ok(value)
     }
+}
+
+pub(super) async fn db_snapshot_get_with<K: AsRef<[u8]> + Send, V>(
+    snapshot: &DbSnapshot,
+    key: K,
+    deser: impl FnOnce(KeyValue) -> Result<V, kv::DeserializationError>,
+) -> Result<Option<V>, StorageError> {
+    Ok(snapshot.get_key_value(key).await?.map(deser).transpose()?)
 }
 
 pub(super) async fn db_txn_get<K: AsRef<[u8]> + Send, V>(

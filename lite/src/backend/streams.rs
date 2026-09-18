@@ -1,7 +1,7 @@
 use s2_common::{
     basin::BasinName,
     config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
-    record::StreamPosition,
+    record::{NonZeroSeqNum, StreamPosition},
     resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
     stream::{ListStreamsRequest, StreamInfo, StreamName},
 };
@@ -111,8 +111,10 @@ impl Backend {
         })
         .await?
         .unzip();
-        if let Some(existing_meta) = &existing_meta
-            && existing_meta.deleted_at.is_some()
+        if existing_meta
+            .as_ref()
+            .is_some_and(|meta| meta.deleted_at.is_some())
+            || stream_terminally_trimmed(&txn, StreamId::new(&basin, &stream)).await?
         {
             return Err(ProvisionStreamError::StreamDeletionPending(
                 StreamDeletionPendingError,
@@ -237,17 +239,6 @@ impl Backend {
         }))
     }
 
-    pub(super) async fn stream_id_mapping(
-        &self,
-        stream_id: StreamId,
-    ) -> Result<Option<(BasinName, StreamName)>, StorageError> {
-        self.db_get(
-            kv::stream_id_mapping::ser_key(stream_id),
-            kv::stream_id_mapping::deser_value,
-        )
-        .await
-    }
-
     pub async fn get_stream_config(
         &self,
         basin: BasinName,
@@ -299,7 +290,9 @@ impl Backend {
             stream: stream.clone(),
         })?;
 
-        if meta.deleted_at.is_some() {
+        if meta.deleted_at.is_some()
+            || stream_terminally_trimmed(&txn, StreamId::new(&basin, &stream)).await?
+        {
             return Err(StreamDeletionPendingError.into());
         }
 
@@ -391,6 +384,15 @@ impl Backend {
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        // A delayed DELETE may resume after purge and recreation. Only mark
+        // metadata while the same transaction observes a terminal trim.
+        if !stream_terminally_trimmed(&txn, StreamId::new(&basin, &stream)).await? {
+            drop(txn);
+            // The missing marker may be an unflushed purge. Its removal must
+            // become durable before this DELETE can acknowledge completion.
+            let _snapshot = self.db_snapshot().await?;
+            return Ok(());
+        }
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
         let (mut meta, seq) = db_txn_get_with(&txn, &meta_key, |entry| {
             Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
@@ -411,6 +413,19 @@ impl Backend {
         }
         Ok(())
     }
+}
+
+async fn stream_terminally_trimmed(
+    txn: &DbTransaction,
+    stream_id: StreamId,
+) -> Result<bool, StorageError> {
+    Ok(db_txn_get(
+        txn,
+        kv::stream_trim_point::ser_key(stream_id),
+        kv::stream_trim_point::deser_value,
+    )
+    .await?
+        == Some(..NonZeroSeqNum::MAX))
 }
 
 fn creation_idempotency_key(req_token: &RequestToken, config: &OptionalStreamConfig) -> Bash {

@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use s2_common::resources::Page;
 use slatedb::{
-    WriteBatch,
+    DbTransaction, IsolationLevel,
     config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
@@ -15,6 +15,7 @@ use crate::{
         Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
         kv::{self, timestamp::TimestampSecs},
+        store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
         streamer::{TerminalTrimCondition, doe_arm_delay},
     },
     stream_id::StreamId,
@@ -25,24 +26,17 @@ const CONCURRENCY: usize = 4;
 
 #[derive(Debug)]
 struct PendingDoeBatch {
-    entries: Vec<kv::stream_doe_deadline::Entry>,
-    last_write_cutoff: Option<TimestampSecs>,
+    entries: Vec<(kv::stream_doe_deadline::Entry, u64)>,
 }
 
 impl PendingDoeBatch {
-    fn new(entries: Vec<kv::stream_doe_deadline::Entry>) -> Self {
-        let last_write_cutoff = entries
+    fn last_write_cutoff(&self, creation_seq: u64) -> Option<TimestampSecs> {
+        self.entries
             .iter()
-            .filter_map(|entry| entry.last_write_cutoff())
-            .max();
-        Self {
-            entries,
-            last_write_cutoff,
-        }
-    }
-
-    fn entries(&self) -> &[kv::stream_doe_deadline::Entry] {
-        &self.entries
+            // The ID mapping is written only when this incarnation is created.
+            .filter(|(_, seq)| *seq >= creation_seq)
+            .filter_map(|(entry, _)| entry.last_write_cutoff())
+            .max()
     }
 }
 
@@ -77,7 +71,8 @@ impl Backend {
             .db
             .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &scan_opts)
             .await?;
-        let mut pending: IndexMap<StreamId, Vec<kv::stream_doe_deadline::Entry>> = IndexMap::new();
+        let mut pending: IndexMap<StreamId, Vec<(kv::stream_doe_deadline::Entry, u64)>> =
+            IndexMap::new();
         let mut has_more = false;
         let mut count = 0;
         while let Some(kv) = it.next().await? {
@@ -87,7 +82,7 @@ impl Backend {
             pending
                 .entry(stream_id)
                 .or_default()
-                .push(kv::stream_doe_deadline::Entry { deadline, min_age });
+                .push((kv::stream_doe_deadline::Entry { deadline, min_age }, kv.seq));
             count += 1;
             if count == PENDING_LIST_LIMIT {
                 has_more = true;
@@ -97,7 +92,7 @@ impl Backend {
         Ok(Page::new(
             pending
                 .into_iter()
-                .map(|(stream_id, entries)| (stream_id, PendingDoeBatch::new(entries)))
+                .map(|(stream_id, entries)| (stream_id, PendingDoeBatch { entries }))
                 .collect_vec(),
             has_more,
         ))
@@ -108,14 +103,21 @@ impl Backend {
         stream_id: StreamId,
         pending: PendingDoeBatch,
     ) -> Result<(), StreamDeleteOnEmptyError> {
-        if let Some(last_write_cutoff) = pending.last_write_cutoff
-            && let Some((basin, stream)) = self.stream_id_mapping(stream_id).await?
+        if let Some(((basin, stream), creation_seq)) = self
+            .db_get_with(kv::stream_id_mapping::ser_key(stream_id), |entry| {
+                Ok((kv::stream_id_mapping::deser_value(entry.value)?, entry.seq))
+            })
+            .await?
+            && let Some(last_write_cutoff) = pending.last_write_cutoff(creation_seq)
         {
             match self
                 .delete_stream_with_condition(
                     basin,
                     stream,
-                    TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff },
+                    TerminalTrimCondition::DeleteOnEmpty {
+                        last_write_cutoff,
+                        creation_seq,
+                    },
                 )
                 .await
             {
@@ -123,7 +125,7 @@ impl Backend {
                 Err(err) => return Err(err.into()),
             }
         }
-        self.clear_doe_deadlines(stream_id, pending.entries())
+        self.clear_doe_deadlines(stream_id, &pending.entries)
             .await?;
         Ok(())
     }
@@ -132,29 +134,40 @@ impl Backend {
     async fn clear_doe_deadlines(
         &self,
         stream_id: StreamId,
-        pending: &[kv::stream_doe_deadline::Entry],
+        pending: &[(kv::stream_doe_deadline::Entry, u64)],
     ) -> Result<(), StorageError> {
-        let mut batch = WriteBatch::new();
-        for entry in pending {
-            batch.delete(kv::stream_doe_deadline::ser_key(entry.deadline, stream_id));
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        for (entry, seq) in pending {
+            let key = kv::stream_doe_deadline::ser_key(entry.deadline, stream_id);
+            // A new incarnation may have scheduled the same deadline key.
+            if db_txn_get_with(&txn, &key, |row| Ok(row.seq)).await? == Some(*seq) {
+                txn.delete(key)?;
+            }
         }
-        self.db.write(batch).await?.await_durable().await?;
+        db_txn_commit_durable(txn).await?;
         Ok(())
     }
 
     pub(super) async fn arm_doe_on_full_trim(
         &self,
+        txn: &DbTransaction,
         stream_id: StreamId,
     ) -> Result<(), StorageError> {
-        let Some((basin, stream)) = self.stream_id_mapping(stream_id).await? else {
+        let Some((basin, stream)) = db_txn_get(
+            txn,
+            kv::stream_id_mapping::ser_key(stream_id),
+            kv::stream_id_mapping::deser_value,
+        )
+        .await?
+        else {
             return Ok(());
         };
-        let Some(meta) = self
-            .db_get(
-                &kv::stream_meta::ser_key(&basin, &stream),
-                kv::stream_meta::deser_value,
-            )
-            .await?
+        let Some(meta) = db_txn_get(
+            txn,
+            &kv::stream_meta::ser_key(&basin, &stream),
+            kv::stream_meta::deser_value,
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -165,14 +178,10 @@ impl Backend {
             return Ok(());
         };
         let deadline = TimestampSecs::after(doe_arm_delay(Duration::ZERO, min_age));
-        self.db
-            .put(
-                kv::stream_doe_deadline::ser_key(deadline, stream_id),
-                kv::stream_doe_deadline::ser_value(min_age),
-            )
-            .await?
-            .await_durable()
-            .await?;
+        txn.put(
+            kv::stream_doe_deadline::ser_key(deadline, stream_id),
+            kv::stream_doe_deadline::ser_value(min_age),
+        )?;
         Ok(())
     }
 }
@@ -613,9 +622,9 @@ mod tests {
         let (pending_stream_id, pending) = page.values.into_iter().next().unwrap();
         assert_eq!(pending_stream_id, stream_id);
         let mut deadlines: Vec<_> = pending
-            .entries()
+            .entries
             .iter()
-            .map(|entry| entry.deadline)
+            .map(|(entry, _)| entry.deadline)
             .collect();
         deadlines.sort();
         let mut expected = vec![deadline_a, deadline_b];
@@ -637,54 +646,38 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn stream_doe_uses_latest_eligible_cutoff_across_pending_entries() {
-        let backend = test_backend().await;
-        let basin = BasinName::from_str("doe-basin-pairs").unwrap();
-        let stream = StreamName::from_str("doe-stream-pairs").unwrap();
-        let stream_id = seed_stream_with_meta(
-            &backend,
-            &basin,
-            &stream,
-            stream_meta_with_doe_min_age(MIN_AGE),
-        )
-        .await;
-
-        let write_timestamp = put_tail_position(
-            &backend,
-            stream_id,
-            StreamPosition {
-                seq_num: 1,
-                timestamp: 1234,
-            },
-        )
-        .await;
-
-        backend
-            .process_stream_doe(
-                stream_id,
-                PendingDoeBatch::new(vec![
+    #[test]
+    fn pending_doe_uses_latest_eligible_cutoff_from_this_incarnation() {
+        let pending = PendingDoeBatch {
+            entries: vec![
+                (
                     kv::stream_doe_deadline::Entry {
-                        deadline: deadline_after(write_timestamp, Duration::from_secs(50)),
+                        deadline: TimestampSecs::from_secs(50),
                         min_age: Duration::from_secs(100),
                     },
+                    20,
+                ),
+                (
                     kv::stream_doe_deadline::Entry {
-                        deadline: deadline_after(write_timestamp, Duration::from_secs(100)),
+                        deadline: TimestampSecs::from_secs(100),
                         min_age: Duration::from_secs(10),
                     },
-                ]),
-            )
-            .await
-            .unwrap();
-
-        let meta = backend
-            .db
-            .get(kv::stream_meta::ser_key(&basin, &stream))
-            .await
-            .unwrap()
-            .expect("stream meta should remain");
-        let decoded = kv::stream_meta::deser_value(meta).unwrap();
-        assert!(decoded.deleted_at.is_some());
+                    20,
+                ),
+                // An old incarnation's later cutoff must not win.
+                (
+                    kv::stream_doe_deadline::Entry {
+                        deadline: TimestampSecs::MAX,
+                        min_age: MIN_AGE,
+                    },
+                    10,
+                ),
+            ],
+        };
+        assert_eq!(
+            pending.last_write_cutoff(20),
+            Some(TimestampSecs::from_secs(90))
+        );
     }
 
     #[tokio::test]
@@ -800,5 +793,98 @@ mod tests {
             entries,
             vec![(existing_deadline, stream_id, initial_min_age)]
         );
+    }
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn old_doe_work_cannot_delete_recreated_stream(#[case] replace_deadline: bool) {
+        use s2_common::resources::ProvisionMode;
+
+        use crate::backend::streamer::{TerminalTrimCondition, TerminalTrimOutcome};
+        let backend = test_backend().await;
+        let mut config = OptionalStreamConfig::default();
+        config.delete_on_empty.min_age = Some(MIN_AGE);
+        let (basin, stream) =
+            crate::backend::test_util::create_stream(&backend, config.clone()).await;
+        let stream_id = StreamId::new(&basin, &stream);
+        let creation_seq = backend
+            .db_get_with(kv::stream_id_mapping::ser_key(stream_id), |row| Ok(row.seq))
+            .await
+            .unwrap()
+            .unwrap();
+        let deadline = TimestampSecs::after(Duration::from_secs(3600));
+        let key = kv::stream_doe_deadline::ser_key(deadline, stream_id);
+        backend
+            .db
+            .put(&key, kv::stream_doe_deadline::ser_value(MIN_AGE))
+            .assert_durable()
+            .await;
+        let (_, mut pending) = backend
+            .list_pending_stream_doe(deadline)
+            .await
+            .unwrap()
+            .values
+            .pop()
+            .unwrap();
+        pending
+            .entries
+            .retain(|(entry, _)| entry.deadline == deadline);
+        backend
+            .delete_stream(basin.clone(), stream.clone())
+            .await
+            .unwrap();
+        backend.clone().tick_stream_trim().await.unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                config,
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let replacement_seq = if replace_deadline {
+            Some(
+                backend
+                    .db
+                    .put(&key, kv::stream_doe_deadline::ser_value(MIN_AGE))
+                    .assert_durable()
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        // Cover recreation after the worker already validated the ID mapping.
+        let outcome = backend
+            .streamer_client_guarded(&basin, &stream)
+            .await
+            .unwrap()
+            .terminal_trim(TerminalTrimCondition::DeleteOnEmpty {
+                last_write_cutoff: deadline,
+                creation_seq,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, TerminalTrimOutcome::Ineligible);
+        backend
+            .process_stream_doe(stream_id, pending)
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .get_stream_config(basin.clone(), stream.clone())
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            backend.db_get_with(&key, |row| Ok(row.seq)).await.unwrap(),
+            replacement_seq,
+            "cleanup must preserve a replacement deadline at the same key"
+        );
+        backend.close().await.unwrap();
     }
 }
