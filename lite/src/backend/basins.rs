@@ -14,13 +14,12 @@ use time::OffsetDateTime;
 use super::{
     Backend,
     bgtasks::BgtaskTrigger,
-    store::{db_txn_commit_durable, db_txn_get},
+    store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
 };
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, DeleteBasinError,
         GetBasinConfigError, ListBasinsError, ProvisionBasinError, ReconfigureBasinError,
-        StorageError,
     },
     kv,
 };
@@ -81,12 +80,11 @@ impl Backend {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         // A transaction can see metadata that has not been flushed yet.
-        let existing_entry = txn.get_key_value(&meta_key).await?;
-        let existing_seq = existing_entry.as_ref().map(|kv| kv.seq);
-        let existing_meta = existing_entry
-            .map(|kv| kv::basin_meta::deser_value(kv.value))
-            .transpose()
-            .map_err(StorageError::from)?;
+        let (existing_meta, existing_seq) = db_txn_get_with(&txn, &meta_key, |entry| {
+            Ok((kv::basin_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        .unzip();
         if let Some(existing_meta) = &existing_meta
             && existing_meta.deleted_at.is_some()
         {
@@ -208,10 +206,13 @@ impl Backend {
     pub async fn delete_basin(&self, basin: BasinName) -> Result<(), DeleteBasinError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let meta_key = kv::basin_meta::ser_key(&basin);
-        let Some(entry) = txn.get_key_value(&meta_key).await? else {
+        let Some((mut meta, seq)) = db_txn_get_with(&txn, &meta_key, |entry| {
+            Ok((kv::basin_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        else {
             return Err(BasinNotFoundError { basin }.into());
         };
-        let mut meta = kv::basin_meta::deser_value(entry.value).map_err(StorageError::from)?;
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
             txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
@@ -223,7 +224,7 @@ impl Backend {
         } else {
             // A retry may observe the marker before the first delete has flushed.
             drop(txn);
-            self.await_durable_seq(entry.seq).await?;
+            self.await_durable_seq(seq).await?;
         }
         self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
         Ok(())

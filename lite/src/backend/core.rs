@@ -14,7 +14,7 @@ use s2_common::{
     resources::ProvisionMode,
     stream::StreamName,
 };
-use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
+use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
@@ -115,19 +115,15 @@ impl Backend {
         let stream_id = StreamId::new(&basin, &stream);
 
         let (meta, persisted_tail, fencing_token, trim_point) = tokio::try_join!(
-            async {
-                self.db
-                    .get_key_value_with_options(
-                        kv::stream_meta::ser_key(&basin, &stream),
-                        &ReadOptions {
-                            durability_filter: DurabilityLevel::Remote,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .map_err(StorageError::from)
-            },
-            self.load_persisted_stream_tail(stream_id),
+            self.db_get_with(kv::stream_meta::ser_key(&basin, &stream), |entry| {
+                Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
+            }),
+            self.db_get_with(kv::stream_tail_position::ser_key(stream_id), |entry| {
+                Ok((
+                    kv::stream_tail_position::deser_value(entry.value)?,
+                    kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
+                ))
+            }),
             self.db_get(
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::deser_value,
@@ -138,11 +134,9 @@ impl Backend {
             )
         )?;
 
-        let Some(meta) = meta else {
+        let Some((meta, config_seq)) = meta else {
             return Err(StreamNotFoundError { basin, stream }.into());
         };
-        let config_seq = meta.seq;
-        let meta = kv::stream_meta::deser_value(meta.value).map_err(StorageError::from)?;
 
         let (tail_pos, last_tail_write_timestamp) =
             persisted_tail.unwrap_or((StreamPosition::MIN, kv::timestamp::TimestampSecs::ZERO));
@@ -177,27 +171,6 @@ impl Backend {
                 matches!(slot, StreamerClientSlot::Ready { client } if client.generation_id() == client_id)
             });
         }))
-    }
-
-    async fn load_persisted_stream_tail(
-        &self,
-        stream_id: StreamId,
-    ) -> Result<Option<(StreamPosition, kv::timestamp::TimestampSecs)>, StorageError> {
-        let read_opts = ReadOptions {
-            durability_filter: DurabilityLevel::Remote,
-            ..Default::default()
-        };
-        let Some(entry) = self
-            .db
-            .get_key_value_with_options(kv::stream_tail_position::ser_key(stream_id), &read_opts)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some((
-            kv::stream_tail_position::deser_value(entry.value)?,
-            kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
-        )))
     }
 
     async fn assert_no_records_following_tail(

@@ -15,7 +15,7 @@ use tracing::instrument;
 
 use super::{
     Backend,
-    store::{db_txn_commit_durable, db_txn_get},
+    store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
     streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
 };
 use crate::{
@@ -106,12 +106,11 @@ impl Backend {
 
         // Existence is decided from a Memory-level read; capture the row's
         // commit seq so exists-outcomes can await durability (see fn doc).
-        let existing_entry = txn.get_key_value(&stream_meta_key).await?;
-        let existing_seq = existing_entry.as_ref().map(|kv| kv.seq);
-        let existing_meta = existing_entry
-            .map(|kv| kv::stream_meta::deser_value(kv.value))
-            .transpose()
-            .map_err(StorageError::from)?;
+        let (existing_meta, existing_seq) = db_txn_get_with(&txn, &stream_meta_key, |entry| {
+            Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        .unzip();
         if let Some(existing_meta) = &existing_meta
             && existing_meta.deleted_at.is_some()
         {
@@ -385,14 +384,14 @@ impl Backend {
     ) -> Result<(), DeleteStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
-        let entry = txn
-            .get_key_value(&meta_key)
-            .await?
-            .ok_or_else(|| StreamNotFoundError {
-                basin,
-                stream: stream.clone(),
-            })?;
-        let mut meta = kv::stream_meta::deser_value(entry.value).map_err(StorageError::from)?;
+        let (mut meta, seq) = db_txn_get_with(&txn, &meta_key, |entry| {
+            Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        .ok_or_else(|| StreamNotFoundError {
+            basin,
+            stream: stream.clone(),
+        })?;
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
             txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
@@ -400,7 +399,7 @@ impl Backend {
         } else {
             // The terminal trim is durable, but the metadata marker may not be yet.
             drop(txn);
-            self.await_durable_seq(entry.seq).await?;
+            self.await_durable_seq(seq).await?;
         }
         Ok(())
     }
