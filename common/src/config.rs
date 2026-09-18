@@ -70,6 +70,9 @@ impl RetentionPolicy {
             Self::Age(duration) if duration.is_zero() => Err(ValidationError(
                 "age must be greater than 0 seconds".to_string(),
             )),
+            Self::Age(duration) if duration.subsec_nanos() != 0 => Err(ValidationError(
+                "retention age must be a whole number of seconds".to_string(),
+            )),
             policy => Ok(policy),
         }
     }
@@ -366,4 +369,46 @@ pub struct BasinReconfiguration {
     pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     pub create_stream_on_append: Maybe<bool>,
     pub create_stream_on_read: Maybe<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_accepts_whole_second_age() {
+        for secs in [1u64, 60, 3600, 7 * 24 * 3600] {
+            let policy = RetentionPolicy::Age(Duration::from_secs(secs));
+            let validated = policy.validate().expect("whole-second age is valid");
+            assert!(matches!(
+                validated,
+                RetentionPolicy::Age(d) if d == Duration::from_secs(secs)
+            ));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_subsecond_age() {
+        let policy = RetentionPolicy::Age(Duration::from_millis(500));
+        let err = policy
+            .validate()
+            .expect_err("sub-second age must be rejected");
+        assert!(
+            err.to_string()
+                .contains("retention age must be a whole number of seconds"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_whole_second_plus_subsecond_age() {
+        let policy = RetentionPolicy::Age(Duration::from_secs(1) + Duration::from_millis(500));
+        let err = policy
+            .validate()
+            .expect_err("fractional age must be rejected");
+        assert!(
+            err.to_string()
+                .contains("retention age must be a whole number of seconds")
+        );
+    }
 }

@@ -155,7 +155,10 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::{
         basin::BasinName,
-        config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass, StreamConfig},
+        config::{
+            OptionalDeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy, StorageClass,
+            StreamConfig,
+        },
         encryption::EncryptionAlgorithm,
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     };
@@ -209,6 +212,30 @@ mod tests {
         assert_eq!(stream_meta.cipher, decoded.cipher);
         assert_eq!(stream_meta.created_at, decoded.created_at);
         assert_eq!(stream_meta.deleted_at, decoded.deleted_at);
+    }
+
+    #[test]
+    fn stream_meta_whole_second_retention_roundtrips() {
+        let config = StreamConfig {
+            retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+        let stream_meta = super::StreamMeta {
+            config,
+            cipher: None,
+            created_at: OffsetDateTime::from_unix_timestamp(1234567890).unwrap(),
+            deleted_at: None,
+            creation_idempotency_key: None,
+        };
+
+        let bytes = super::ser_value(&stream_meta);
+        let decoded = super::deser_value(bytes)
+            .expect("whole-second retention should round-trip through stream meta");
+
+        assert_eq!(
+            decoded.config.retention_policy,
+            RetentionPolicy::Age(Duration::from_secs(3600))
+        );
     }
 
     #[test]
