@@ -1475,7 +1475,11 @@ mod tests {
         streamer.msg_tx = msg_tx.clone();
         // The initial metadata read can already be newer than a late notification.
         streamer.config_seq = if delivered { 0 } else { 20 };
-        streamer.config.retention_policy = RetentionPolicy::Infinite();
+        streamer.config.retention_policy = if delivered {
+            RetentionPolicy::Age(Duration::from_secs(1))
+        } else {
+            RetentionPolicy::Infinite()
+        };
         let task = tokio::spawn(streamer.run(msg_rx));
         if delivered {
             msg_tx
@@ -1523,6 +1527,7 @@ mod tests {
         );
         db.close().await.unwrap();
         task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 
     #[test]

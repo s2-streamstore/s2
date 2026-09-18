@@ -53,15 +53,6 @@ pub async fn assert_pending_until_committed<T: Debug>(
     db: &Db,
     operation: &mut (impl Future<Output = T> + Unpin),
 ) -> u64 {
-    assert_pending_until_committed_after(db, db.status().durable_seq, operation).await
-}
-
-/// Wait for a later commit when an earlier write is also still unflushed.
-pub async fn assert_pending_until_committed_after<T: Debug>(
-    db: &Db,
-    after_seq: u64,
-    operation: &mut (impl Future<Output = T> + Unpin),
-) -> u64 {
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::select! {
             biased;
@@ -69,8 +60,7 @@ pub async fn assert_pending_until_committed_after<T: Debug>(
             seq = async {
                 loop {
                     let seq = db.snapshot().await.unwrap().seq();
-                    if seq > after_seq {
-                        assert!(seq > db.status().durable_seq, "write flushed unexpectedly");
+                    if seq > db.status().durable_seq {
                         return seq;
                     }
                     tokio::task::yield_now().await;

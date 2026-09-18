@@ -644,7 +644,7 @@ mod tests {
             let update = backend.provision_stream(
                 basin.clone(),
                 stream.clone(),
-                desired.clone(),
+                desired,
                 ProvisionMode::Ensure,
             );
             tokio::pin!(update);
@@ -667,16 +667,21 @@ mod tests {
             .unwrap()
             .unwrap();
         release_tx.send(()).unwrap();
-        // An Ensure retry is also a delivery barrier, including during initialization.
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                desired,
-                ProvisionMode::Ensure,
-            )
-            .await
-            .unwrap();
+        // Only the detached commit task can publish this initializer. Wait for it
+        // directly: a provisioning retry could repair a missing notification.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                backend
+                    .streamer_slots
+                    .get(&StreamId::new(&basin, &stream))
+                    .as_deref(),
+                Some(StreamerClientSlot::Ready { .. })
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let handle = backend
             .open_for_append(&basin, &stream, None, Default::default())
             .await

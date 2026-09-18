@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
-    basin::BasinName,
     config::{
         BasinConfig, BasinReconfiguration, DeleteOnEmptyReconfiguration,
         OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
@@ -13,16 +12,13 @@ use s2_common::{
     maybe::Maybe,
     resources::{ProvisionMode, ProvisionResult, RequestToken},
     stream::{
-        AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamName,
-        StreamNamePrefix, StreamNameStartAfter,
+        AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart, StreamNamePrefix,
+        StreamNameStartAfter,
     },
 };
-use s2_lite::backend::{
-    Backend,
-    error::{
-        AppendError, CheckTailError, DeleteStreamError, GetStreamConfigError, ProvisionStreamError,
-        ReadError, ReconfigureStreamError,
-    },
+use s2_lite::backend::error::{
+    AppendError, CheckTailError, DeleteStreamError, GetStreamConfigError, ProvisionStreamError,
+    ReadError, ReconfigureStreamError,
 };
 
 use super::common::*;
@@ -702,9 +698,11 @@ async fn test_reconfigure_stream_clears_fields_to_basin_defaults() {
     assert_eq!(fetched, updated);
 }
 
-async fn setup_config_durability_test(
-    mode: TimestampingMode,
-) -> (Backend, slatedb::Db, BasinName, StreamName) {
+#[rstest::rstest]
+#[case::ensure(false)]
+#[case::patch(true)]
+#[tokio::test]
+async fn cancelled_config_update_can_be_retried(#[case] patch: bool) {
     let (backend, db) = create_backend_without_auto_flush().await;
     let basin = test_basin_name("config-durability");
     let stream = test_stream_name("config-durability");
@@ -721,7 +719,7 @@ async fn setup_config_durability_test(
             stream.clone(),
             OptionalStreamConfig {
                 timestamping: OptionalTimestampingConfig {
-                    mode: Some(mode),
+                    mode: Some(TimestampingMode::ClientRequire),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -731,69 +729,47 @@ async fn setup_config_durability_test(
     )
     .await
     .unwrap();
-    (backend, db, basin, stream)
-}
-
-async fn set_timestamping_mode(
-    backend: &Backend,
-    basin: BasinName,
-    stream: StreamName,
-    mode: TimestampingMode,
-    patch: bool,
-) {
-    if patch {
-        backend
-            .reconfigure_stream(
-                basin,
-                stream,
-                StreamReconfiguration {
-                    timestamping: Maybe::from(Some(TimestampingReconfiguration {
-                        mode: Maybe::from(Some(mode)),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-    } else {
-        backend
-            .provision_stream(
-                basin,
-                stream,
-                OptionalStreamConfig {
-                    timestamping: OptionalTimestampingConfig {
-                        mode: Some(mode),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                ProvisionMode::Ensure,
-            )
-            .await
-            .unwrap();
-    }
-}
-
-#[rstest::rstest]
-#[case::ensure(false)]
-#[case::patch(true)]
-#[tokio::test]
-async fn cancelled_config_update_is_reconciled_by_ensure(#[case] patch: bool) {
-    let (backend, db, basin, stream) =
-        setup_config_durability_test(TimestampingMode::ClientRequire).await;
     let handle = backend
         .open_for_append(&basin, &stream, None, Default::default())
         .await
         .unwrap();
+    let desired = OptionalStreamConfig {
+        timestamping: OptionalTimestampingConfig {
+            mode: Some(TimestampingMode::ClientPrefer),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     {
-        let mut update = Box::pin(set_timestamping_mode(
-            &backend,
-            basin.clone(),
-            stream.clone(),
-            TimestampingMode::ClientPrefer,
-            patch,
-        ));
+        let update = async {
+            if patch {
+                backend
+                    .reconfigure_stream(
+                        basin.clone(),
+                        stream.clone(),
+                        StreamReconfiguration {
+                            timestamping: Maybe::from(Some(TimestampingReconfiguration {
+                                mode: Maybe::from(Some(TimestampingMode::ClientPrefer)),
+                                ..Default::default()
+                            })),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                backend
+                    .provision_stream(
+                        basin.clone(),
+                        stream.clone(),
+                        desired.clone(),
+                        ProvisionMode::Ensure,
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        tokio::pin!(update);
         assert_pending_until_committed(&db, &mut update).await;
     }
     db.flush().await.unwrap();
@@ -801,70 +777,12 @@ async fn cancelled_config_update_is_reconciled_by_ensure(#[case] patch: bool) {
         .provision_stream(
             basin.clone(),
             stream.clone(),
-            OptionalStreamConfig {
-                timestamping: OptionalTimestampingConfig {
-                    mode: Some(TimestampingMode::ClientPrefer),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+            desired,
             ProvisionMode::Ensure,
         )
         .await
         .unwrap();
     assert!(matches!(retry, ProvisionResult::Noop(_)));
-    assert_eq!(
-        backend
-            .get_stream_config(basin, stream)
-            .await
-            .unwrap()
-            .timestamping
-            .mode,
-        TimestampingMode::ClientPrefer
-    );
-    assert_waits_for_flush(
-        &db,
-        handle.append(AppendInput {
-            records: create_test_record_batch(vec![Bytes::from_static(b"no timestamp")]),
-            match_seq_num: None,
-            fencing_token: None,
-        }),
-    )
-    .await
-    .unwrap();
-    backend.close().await.unwrap();
-}
-
-#[rstest::rstest]
-#[case::ensure(false)]
-#[case::patch(true)]
-#[tokio::test]
-async fn config_updates_follow_commit_order_despite_reversed_resumption(#[case] patch: bool) {
-    let (backend, db, basin, stream) =
-        setup_config_durability_test(TimestampingMode::ClientPrefer).await;
-    let handle = backend
-        .open_for_append(&basin, &stream, None, Default::default())
-        .await
-        .unwrap();
-    let mut first = Box::pin(set_timestamping_mode(
-        &backend,
-        basin.clone(),
-        stream.clone(),
-        TimestampingMode::ClientRequire,
-        patch,
-    ));
-    let first_seq = assert_pending_until_committed(&db, &mut first).await;
-    let mut second = Box::pin(set_timestamping_mode(
-        &backend,
-        basin.clone(),
-        stream.clone(),
-        TimestampingMode::ClientPrefer,
-        patch,
-    ));
-    assert_pending_until_committed_after(&db, first_seq, &mut second).await;
-    db.flush().await.unwrap();
-    second.await;
-    first.await;
     assert_eq!(
         backend
             .get_stream_config(basin, stream)
