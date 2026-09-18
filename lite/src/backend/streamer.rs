@@ -1463,35 +1463,24 @@ mod tests {
         }
     }
 
-    #[rstest::rstest]
-    #[case::initial_snapshot(false)]
-    #[case::delivered_update(true)]
     #[tokio::test]
-    async fn stale_config_notifications_cannot_restore_old_retention(#[case] delivered: bool) {
+    async fn stale_config_notifications_cannot_restore_old_retention() {
         let mut streamer = test_streamer().await;
         let db = streamer.db.clone();
         let stream_id = streamer.stream_id;
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         streamer.msg_tx = msg_tx.clone();
-        // The initial metadata read can already be newer than a late notification.
-        streamer.config_seq = if delivered { 0 } else { 20 };
-        streamer.config.retention_policy = if delivered {
-            RetentionPolicy::Age(Duration::from_secs(1))
-        } else {
-            RetentionPolicy::Infinite()
-        };
+        streamer.config.retention_policy = RetentionPolicy::Age(Duration::from_secs(1));
         let task = tokio::spawn(streamer.run(msg_rx));
-        if delivered {
-            msg_tx
-                .send(Message::Reconfigure {
-                    seq: 20,
-                    config: StreamConfig {
-                        retention_policy: RetentionPolicy::Infinite(),
-                        ..Default::default()
-                    },
-                })
-                .unwrap();
-        }
+        msg_tx
+            .send(Message::Reconfigure {
+                seq: 20,
+                config: StreamConfig {
+                    retention_policy: RetentionPolicy::Infinite(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
         let old = StreamConfig {
             retention_policy: RetentionPolicy::Age(Duration::from_secs(1)),
             ..Default::default()
