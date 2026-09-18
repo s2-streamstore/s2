@@ -46,6 +46,12 @@ pub enum ClientError {
     /// The connection was refused.
     #[error("connection refused: {0}")]
     ConnectionRefused(String),
+    /// The server reset the request's HTTP/2 stream.
+    ///
+    /// The request may have been partially processed before the reset, so a
+    /// retried append can be applied twice.
+    #[error("stream reset: {0}")]
+    StreamReset(String),
     /// Client configuration prevented a request from being attempted.
     #[error("configuration: {0}")]
     Configuration(String),
@@ -82,6 +88,7 @@ impl ClientError {
                 | Self::ConnectionReset(_)
                 | Self::ConnectionAborted(_)
                 | Self::ConnectionRefused(_)
+                | Self::StreamReset(_)
         )
     }
 
@@ -131,13 +138,23 @@ fn classify_hyper_source(err: &client::HttpError, err_msg: &str) -> Option<Clien
         Some(ClientError::ConnectionClosedEarly(err_msg))
     } else if hyper_err.is_canceled() {
         Some(ClientError::RequestCanceled(err_msg))
-    } else if source_err::<h2::Error>(err).is_some_and(|e| {
-        e.is_io() || e.is_go_away() || e.reason() == Some(h2::Reason::REFUSED_STREAM)
-    }) {
+    } else if let Some(h2_err) = source_err::<h2::Error>(err) {
+        classify_h2_error(h2_err, err_msg)
+    } else {
+        None
+    }
+}
+
+fn classify_h2_error(err: &h2::Error, err_msg: String) -> Option<ClientError> {
+    if err.is_io() || err.is_go_away() || err.reason() == Some(h2::Reason::REFUSED_STREAM) {
         // An I/O failure ends streaming bodies without tripping any hyper marker above.
         // A remote GOAWAY ends streams dispatched onto a connection the server is
-        // gracefully shutting down.
+        // gracefully shutting down. REFUSED_STREAM is sent before any processing.
         Some(ClientError::ConnectionClosedEarly(err_msg))
+    } else if err.reason().is_some() && (!err.is_reset() || err.is_remote()) {
+        // A received RST_STREAM surfaces as a remote reset while reading the
+        // response, or as a bare reason while still sending the request.
+        Some(ClientError::StreamReset(err_msg))
     } else {
         None
     }
