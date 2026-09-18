@@ -7,7 +7,7 @@ use s2_common::{
 };
 use s2_storage::bash::Bash;
 use slatedb::{
-    IsolationLevel,
+    DbTransaction, IsolationLevel,
     config::{DurabilityLevel, ScanOptions},
 };
 use time::OffsetDateTime;
@@ -225,15 +225,8 @@ impl Backend {
                 )?;
             }
 
-            let config_seq = db_txn_commit_durable(txn)
-                .await?
-                .expect("stream metadata was written");
-
-            if let ProvisionResult::Updated(meta) = &outcome
-                && let Some(client) = self.streamer_client_if_active(&basin, &stream)
-            {
-                client.advise_reconfig(config_seq, meta.config.clone());
-            }
+            self.commit_stream_config(txn, basin.clone(), stream.clone(), meta.config.clone())
+                .await?;
         }
 
         Ok(outcome.map(|meta| StreamInfo {
@@ -334,15 +327,30 @@ impl Backend {
             )?;
         }
 
-        let config_seq = db_txn_commit_durable(txn)
-            .await?
-            .expect("stream metadata was written");
-
-        if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
-            client.advise_reconfig(config_seq, meta.config.clone());
-        }
+        self.commit_stream_config(txn, basin, stream, meta.config.clone())
+            .await?;
 
         Ok(meta.config)
+    }
+
+    async fn commit_stream_config(
+        &self,
+        txn: DbTransaction,
+        basin: BasinName,
+        stream: StreamName,
+        config: StreamConfig,
+    ) -> Result<(), slatedb::Error> {
+        let backend = self.clone();
+        // Once a commit starts, cancellation must not discard its notification.
+        tokio::spawn(async move {
+            let seq = db_txn_commit_durable(txn)
+                .await?
+                .expect("stream metadata was written");
+            backend.advise_stream_config(&basin, &stream, seq, config);
+            Ok(())
+        })
+        .await
+        .expect("stream config commit task panicked")
     }
 
     #[instrument(ret, err, skip(self))]
