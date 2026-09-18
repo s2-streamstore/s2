@@ -5,7 +5,7 @@ use s2_sdk::{S2, error::ErrorCode, types::ListBasinsInput};
 
 use crate::{
     config::{CliConfig, CredentialStore, DEFAULT_ACCOUNT_ENDPOINT, sdk_config},
-    error::{CliConfigError, CliError, TokenSource},
+    error::{CliConfigError, CliError, TokenSource, recovery_command},
     login::{LoginError, effective_endpoints, resolve_access_token, uses_loopback_endpoints},
     update,
 };
@@ -240,15 +240,5 @@ fn print_configured_credentials(config: &CliConfig, active: Option<TokenSource>)
             "{}",
             "  ! Credentials are stored in a private plaintext file.".yellow()
         );
-    }
-}
-
-fn recovery_command(source: TokenSource) -> &'static str {
-    match source {
-        TokenSource::BrowserLogin => "Run `s2 login` again.",
-        TokenSource::Environment => "Set S2_ACCESS_TOKEN to a valid access token.",
-        TokenSource::StoredAccessToken | TokenSource::ConfigFile => {
-            "Run `s2 auth access-token set` to replace it."
-        }
     }
 }

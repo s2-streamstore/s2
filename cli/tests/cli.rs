@@ -1,13 +1,16 @@
 use std::{
     convert::Infallible,
     net::TcpListener,
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread::JoinHandle,
     time::Duration,
 };
 
 use assert_cmd::Command;
+use base64ct::{Base64UrlUnpadded, Encoding};
 use predicates::prelude::*;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -34,6 +37,15 @@ impl TestServer {
     /// Serves one HTTP/2 request and returns the request line and headers it
     /// saw. The client speaks h2 with prior knowledge over cleartext.
     fn start() -> Self {
+        Self::start_with(
+            axum::http::StatusCode::OK,
+            r#"{"basins":[],"has_more":false}"#.to_owned(),
+        )
+    }
+
+    /// Serves one HTTP/2 request responding with `status` and `body` (sent
+    /// verbatim as the response body).
+    fn start_with(status: axum::http::StatusCode, body: String) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
         let handle = std::thread::spawn(move || {
@@ -41,7 +53,7 @@ impl TestServer {
                 .enable_all()
                 .build()
                 .expect("test runtime")
-                .block_on(serve_one_request(listener))
+                .block_on(serve_one_request(listener, status, body))
         });
         Self { endpoint, handle }
     }
@@ -53,7 +65,11 @@ impl TestServer {
 
 const TEST_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn serve_one_request(listener: TcpListener) -> String {
+async fn serve_one_request(
+    listener: TcpListener,
+    status: axum::http::StatusCode,
+    body: String,
+) -> String {
     listener
         .set_nonblocking(true)
         .expect("non-blocking listener");
@@ -67,6 +83,7 @@ async fn serve_one_request(listener: TcpListener) -> String {
     let captured = observed.clone();
     let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
         let captured = captured.clone();
+        let body = body.clone();
         async move {
             let mut rendered = format!("{} {}\r\n", req.method(), req.uri());
             for (name, value) in req.headers() {
@@ -77,9 +94,9 @@ async fn serve_one_request(listener: TcpListener) -> String {
             }
             *captured.lock().expect("capture request") = Some(rendered);
 
-            let body = r#"{"basins":[],"has_more":false}"#;
             Ok::<_, Infallible>(
                 hyper::Response::builder()
+                    .status(status)
                     .header("content-type", "application/json")
                     .body(http_body_util::Full::new(bytes::Bytes::from(body)))
                     .expect("build response"),
@@ -612,5 +629,175 @@ fn only_account_endpoint_set_warns_and_uses_defaults() {
     assert!(
         !stderr.contains("Unable to parse S2 endpoints"),
         "stderr should not report an endpoint parse error, got: {stderr}"
+    );
+}
+
+// --- Auth-error recovery text is source-aware ------------------------------
+//
+// When the server rejects a request with an auth-class error code
+// (`permission_denied` / 403 here) the CLI upgrades the operation error to
+// `UnauthorizedAccessToken` and renders source-specific recovery guidance.
+// These tests pin the end-to-end behavior: a browser-login user is told to run
+// `s2 login` again (not to store an access token), and access-token sources keep
+// access-token remediation.
+
+/// OAuth credential `credential_id` used by the browser-login fixtures.
+const OAUTH_CREDENTIAL_ID: &str = "test-credential-id";
+/// A far-future expiry so the stored OAuth token is always fresh and the CLI
+/// never attempts an OAuth refresh (which would require a reachable issuer).
+const OAUTH_EXPIRES_AT: u64 = 4_000_000_000;
+
+fn oauth_credential_file_path(config_dir: &std::path::Path) -> PathBuf {
+    let digest = Sha256::digest(OAUTH_CREDENTIAL_ID.as_bytes());
+    let filename = format!(
+        "oauth-{}.json",
+        Base64UrlUnpadded::encode_string(digest.as_slice())
+    );
+    config_dir.join(filename)
+}
+
+/// Writes a browser-login configuration (config.toml + stored OAuth credential
+/// file) whose credentials point `account`/`basin` endpoints at `endpoint`.
+/// The OAuth issuer is a loopback URL that is never contacted for non-refresh
+/// flows (a 403 `permission_denied` does not trigger OAuth refresh).
+fn install_browser_login(env: &TestEnv, endpoint: &str) {
+    let config_dir = env.config_dir();
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let issuer = "http://127.0.0.1:3000";
+    let config_toml = format!(
+        "\
+account_endpoint = \"{endpoint}\"
+basin_endpoint = \"{endpoint}\"
+
+[oauth]
+issuer = \"{issuer}\"
+client_id = \"test-client\"
+account_endpoint = \"{endpoint}\"
+basin_endpoint = \"{endpoint}\"
+credential_id = \"{OAUTH_CREDENTIAL_ID}\"
+credential_store = \"file\"
+"
+    );
+    std::fs::write(config_dir.join("config.toml"), config_toml).expect("write config.toml");
+
+    let stored = serde_json::json!({
+        "version": 1,
+        "kind": "s2_oauth",
+        "credential_id": OAUTH_CREDENTIAL_ID,
+        "issuer": issuer,
+        "client_id": "test-client",
+        "access_token": "fake-access-token",
+        "refresh_token": "fake-refresh-token",
+        "expires_at": OAUTH_EXPIRES_AT,
+    });
+    std::fs::write(
+        oauth_credential_file_path(&config_dir),
+        serde_json::to_vec(&stored).expect("serialize credential"),
+    )
+    .expect("write credential file");
+}
+
+/// A server-encoded S2 error response body for `code`.
+fn error_body(code: &str) -> String {
+    serde_json::json!({ "code": code, "message": "denied" }).to_string()
+}
+
+/// A browser-login user rejected with `permission_denied` is told to re-run
+/// `s2 login`, and is never told to store/replace an access token.
+#[test]
+fn browser_login_permission_denied_shows_login_recovery_not_access_token() {
+    let env = TestEnv::new();
+    let server = TestServer::start_with(
+        axum::http::StatusCode::FORBIDDEN,
+        error_body("permission_denied"),
+    );
+    install_browser_login(&env, &server.endpoint);
+
+    let assert = env
+        .s2()
+        .args(["list-basins", "--limit", "1"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    assert!(
+        stderr.contains("browser login"),
+        "stderr should name the browser-login token source, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("`s2 login`"),
+        "stderr should suggest running `s2 login` again, got: {stderr}"
+    );
+    // The access-token remediation must not be suggested for a browser-login user.
+    assert!(
+        !stderr.contains("s2 auth access-token set"),
+        "stderr must not suggest storing an access token for browser login, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("S2_ACCESS_TOKEN"),
+        "stderr must not suggest S2_ACCESS_TOKEN for browser login, got: {stderr}"
+    );
+    // The old hardcoded combined recovery string must be entirely absent.
+    assert!(
+        !stderr.contains("Store one with `s2 auth access-token set`"),
+        "stderr must not render the old access-token-only recovery text, got: {stderr}"
+    );
+    // The server error must have reached the CLI (it is not auto-refreshed on 403).
+    assert!(
+        stderr.contains("permission_denied"),
+        "stderr should surface the server error code, got: {stderr}"
+    );
+
+    // The request was authenticated with the browser-login access token.
+    let request = server.finish().to_ascii_lowercase();
+    assert!(
+        request.contains("authorization: bearer fake-access-token"),
+        "request should carry the browser-login access token, got: {request}"
+    );
+}
+
+/// An access-token (stored) user rejected with `permission_denied` keeps
+/// access-token recovery guidance (no regression for access-token sources),
+/// and never suggests `s2 login`.
+#[test]
+fn stored_access_token_permission_denied_keeps_access_token_recovery() {
+    let env = TestEnv::new();
+    env.remember_access_token("stored-secret");
+    let server = TestServer::start_with(
+        axum::http::StatusCode::FORBIDDEN,
+        error_body("permission_denied"),
+    );
+
+    let assert = env
+        .s2()
+        .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
+        .env("S2_BASIN_ENDPOINT", &server.endpoint)
+        .args(["list-basins", "--limit", "1"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    assert!(
+        stderr.contains("stored access token"),
+        "stderr should name the stored-access-token source, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Run `s2 auth access-token set` to replace it."),
+        "stderr should suggest replacing the access token, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("`s2 login`"),
+        "stderr must not suggest `s2 login` for an access-token source, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`"),
+        "stderr must not render the old combined recovery text, got: {stderr}"
+    );
+
+    let request = server.finish().to_ascii_lowercase();
+    assert!(
+        request.contains("authorization: bearer stored-secret"),
+        "request should carry the stored access token, got: {request}"
     );
 }
