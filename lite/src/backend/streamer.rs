@@ -706,7 +706,12 @@ impl Streamer {
                     }
                 }
                 _ = dormancy.as_mut() => {
-                    if self.lease_state.close_if_idle() {
+                    // Cancelled requests can still have writes become durable. Keep
+                    // their assigned positions until a replacement can recover them.
+                    if self.db_writes_pending.is_empty()
+                        && self.inflight_appends.is_empty()
+                        && self.lease_state.close_if_idle()
+                    {
                         break;
                     }
                 }
@@ -1407,8 +1412,13 @@ mod tests {
     }
 
     async fn test_streamer() -> Streamer {
+        test_streamer_with_settings(Default::default()).await
+    }
+
+    async fn test_streamer_with_settings(settings: slatedb::config::Settings) -> Streamer {
         let object_store = Arc::new(InMemory::new());
         let db = slatedb::Db::builder("/test", object_store)
+            .with_settings(settings)
             .build()
             .await
             .expect("db");
@@ -1671,5 +1681,51 @@ mod tests {
         }
         assert_eq!(streamer.stable_pos.seq_num, 4);
         assert!(streamer.inflight_appends.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_append_delays_dormancy_until_writes_are_durable() {
+        let mut streamer = test_streamer_with_settings(slatedb::config::Settings {
+            flush_interval: None,
+            ..Default::default()
+        })
+        .await;
+        let db = streamer.db.clone();
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_append(
+            append_input(b"cancelled"),
+            None,
+            reply_tx,
+            AppendType::Regular,
+        );
+        let task = tokio::spawn(streamer.run(msg_rx));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while db.snapshot().await.unwrap().seq() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(reply_rx);
+        tokio::time::sleep(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
+        assert_eq!(
+            db.status().durable_seq,
+            0,
+            "the write must still be unflushed"
+        );
+        assert!(
+            !task.is_finished(),
+            "dormancy abandoned an unflushed append"
+        );
+
+        db.flush().await.unwrap();
+        tokio::time::timeout(DORMANT_TIMEOUT + Duration::from_secs(1), task)
+            .await
+            .expect("durable writes should allow normal dormancy")
+            .unwrap();
+        db.close().await.unwrap();
     }
 }
