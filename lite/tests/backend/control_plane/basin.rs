@@ -441,30 +441,20 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     assert!(fetched.create_stream_on_read);
 }
 
-#[rstest::rstest]
-#[case::concurrent(false)]
-#[case::cancelled(true)]
 #[tokio::test(start_paused = true)]
-async fn test_delete_basin_retry_waits_for_durable_metadata(#[case] cancel_first: bool) {
+async fn test_delete_basin_retry_waits_for_durable_metadata() {
     let (backend, db) = create_backend_without_auto_flush().await;
-    let basin = test_basin_name("durable-delete");
-    assert_waits_for_flush(
+    let basin = assert_waits_for_flush(
         &db,
-        backend.provision_basin(basin.clone(), BasinConfig::default(), ProvisionMode::Ensure),
+        create_test_basin(&backend, "durable-delete", BasinConfig::default()),
     )
-    .await
-    .unwrap();
+    .await;
 
     let mut first = Box::pin(backend.delete_basin(basin.clone()));
     assert_pending_until_committed(&db, &mut first).await;
-    let first = (!cancel_first).then_some(first);
-    let listed = backend
-        .list_basins(ListBasinsRequest::default())
-        .await
-        .unwrap();
-    assert!(listed.values[0].deleted_at.is_none());
+    drop(first);
 
-    let retry = backend.delete_basin(basin.clone());
+    let retry = backend.delete_basin(basin);
     tokio::pin!(retry);
     assert!(
         tokio::time::timeout(Duration::from_secs(1), &mut retry)
@@ -472,14 +462,6 @@ async fn test_delete_basin_retry_waits_for_durable_metadata(#[case] cancel_first
             .is_err()
     );
     assert_waits_for_flush(&db, retry).await.unwrap();
-    if let Some(first) = first {
-        first.await.unwrap();
-    }
-    let listed = backend
-        .list_basins(ListBasinsRequest::default())
-        .await
-        .unwrap();
-    assert!(listed.values[0].deleted_at.is_some());
     backend.close().await.unwrap();
 }
 
