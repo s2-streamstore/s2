@@ -196,7 +196,7 @@ mod tests {
 
     use super::{super::tests::test_backend, PendingDoeBatch, TimestampSecs};
     use crate::{
-        backend::{Backend, kv},
+        backend::{Backend, kv, test_util::DbWriteTestExt as _},
         stream_id::StreamId,
     };
 
@@ -239,33 +239,24 @@ mod tests {
                     creation_idempotency_key: None,
                 }),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_meta::ser_key(basin, stream),
                 kv::stream_meta::ser_value(&meta),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_id_mapping::ser_key(stream_id),
                 kv::stream_id_mapping::ser_value(basin, stream),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         stream_id
     }
 
@@ -300,11 +291,8 @@ mod tests {
         backend
             .db
             .put(key.clone(), kv::stream_tail_position::ser_value(position))
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         let kv = backend
             .db
             .get_key_value(key)
@@ -367,11 +355,8 @@ mod tests {
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
@@ -411,11 +396,8 @@ mod tests {
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(min_age),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
@@ -465,11 +447,8 @@ mod tests {
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
@@ -514,22 +493,16 @@ mod tests {
                 kv::stream_record_timestamp::ser_key(stream_id, pos),
                 kv::stream_record_timestamp::ser_value(),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         let has_more = backend.clone().tick_stream_doe().await.unwrap();
         assert!(!has_more);
@@ -578,11 +551,8 @@ mod tests {
                 kv::stream_doe_deadline::ser_key(deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         let has_more = backend.clone().tick_stream_doe().await.unwrap();
         assert!(!has_more);
@@ -626,22 +596,16 @@ mod tests {
                 kv::stream_doe_deadline::ser_key(deadline_a, stream_id),
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_doe_deadline::ser_key(deadline_b, stream_id),
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         let page = backend.list_pending_stream_doe(far_future).await.unwrap();
         assert!(!page.has_more);
@@ -749,22 +713,16 @@ mod tests {
                 kv::stream_tail_position::ser_key(stream_id),
                 kv::stream_tail_position::ser_value(pos),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_record_timestamp::ser_key(stream_id, pos),
                 kv::stream_record_timestamp::ser_value(),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         let min_age = Duration::from_secs(30);
         let expected_delay =
@@ -820,11 +778,8 @@ mod tests {
                 kv::stream_doe_deadline::ser_key(existing_deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(initial_min_age),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         backend
             .reconfigure_stream(

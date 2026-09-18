@@ -430,7 +430,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        backend::{FOLLOWER_MAX_LAG, kv, streamer::DORMANT_TIMEOUT},
+        backend::{
+            FOLLOWER_MAX_LAG, kv, streamer::DORMANT_TIMEOUT, test_util::DbWriteTestExt as _,
+        },
         stream_id::StreamId,
     };
 
@@ -505,11 +507,8 @@ mod tests {
                 ),
                 kv::stream_record_timestamp::ser_value(),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
@@ -522,11 +521,8 @@ mod tests {
                 ),
                 kv::stream_record_timestamp::ser_value(),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         // Should find record in stream_a
         let result = resolve_timestamp(&backend.db, stream_a, 500).await.unwrap();
@@ -588,14 +584,7 @@ mod tests {
         let stream_id = StreamId::new(&basin, &stream);
         let mut batch = WriteBatch::new();
         batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
-        backend
-            .db
-            .write(batch)
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+        backend.db.write(batch).assert_durable().await;
 
         let start = ReadStart {
             from: ReadFrom::SeqNum(0),
@@ -937,14 +926,7 @@ mod tests {
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
         }
 
-        backend
-            .db
-            .write(delete_batch)
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+        backend.db.write(delete_batch).assert_durable().await;
 
         tokio::time::advance(wait + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;

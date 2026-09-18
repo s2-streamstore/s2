@@ -20,6 +20,7 @@ use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, DeleteBasinError,
         GetBasinConfigError, ListBasinsError, ProvisionBasinError, ReconfigureBasinError,
+        StorageError,
     },
     kv,
 };
@@ -67,6 +68,8 @@ impl Backend {
         Ok(Page::new(basins, has_more))
     }
 
+    /// Any outcome asserting the basin exists — `Created`, `Updated`, `Noop`,
+    /// or `BasinAlreadyExists` — is readable at `DurabilityLevel::Remote`.
     pub async fn provision_basin(
         &self,
         basin: BasinName,
@@ -77,7 +80,13 @@ impl Backend {
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
-        let existing_meta = db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?;
+        // A transaction can see metadata that has not been flushed yet.
+        let existing_entry = txn.get_key_value(&meta_key).await?;
+        let existing_seq = existing_entry.as_ref().map(|kv| kv.seq);
+        let existing_meta = existing_entry
+            .map(|kv| kv::basin_meta::deser_value(kv.value))
+            .transpose()
+            .map_err(StorageError::from)?;
         if let Some(existing_meta) = &existing_meta
             && existing_meta.deleted_at.is_some()
         {
@@ -89,7 +98,7 @@ impl Backend {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
-                return if new_creation_idempotency_key.is_some()
+                let result = if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
                     Ok(ProvisionResult::Noop(BasinInfo {
@@ -101,6 +110,10 @@ impl Backend {
                 } else {
                     Err(BasinAlreadyExistsError { basin }.into())
                 };
+                drop(txn);
+                self.await_durable_seq(existing_seq.expect("existing meta was read"))
+                    .await?;
+                return result;
             }
             (Some(existing), ProvisionMode::Ensure) => {
                 let meta = kv::basin_meta::BasinMeta {
@@ -134,7 +147,11 @@ impl Backend {
             }),
         };
 
-        if !matches!(&outcome, ProvisionResult::Noop(_)) {
+        if matches!(&outcome, ProvisionResult::Noop(_)) {
+            drop(txn);
+            self.await_durable_seq(existing_seq.expect("noop implies existing meta"))
+                .await?;
+        } else {
             let meta = outcome.inner();
             txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 

@@ -431,6 +431,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::*;
+    use crate::backend::test_util::DbWriteTestExt as _;
 
     async fn new_test_backend() -> Backend {
         let object_store: Arc<dyn object_store::ObjectStore> =
@@ -484,14 +485,7 @@ mod tests {
             kv::stream_record_data::ser_key(stream_id, record_pos),
             kv::stream_record_data::ser_value(metered_record.as_ref()),
         );
-        backend
-            .db
-            .write(wb)
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+        backend.db.write(wb).assert_durable().await;
 
         backend
             .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())

@@ -175,7 +175,10 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
-    use crate::{backend::kv, stream_id::StreamId};
+    use crate::{
+        backend::{kv, test_util::DbWriteTestExt as _},
+        stream_id::StreamId,
+    };
 
     fn test_record() -> Metered<StoredRecord> {
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"trim-test")).unwrap();
@@ -203,22 +206,16 @@ mod tests {
                     kv::stream_record_data::ser_key(stream_id, pos),
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
             backend
                 .db
                 .put(
                     kv::stream_record_timestamp::ser_key(stream_id, pos),
                     kv::stream_record_timestamp::ser_value(),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
         }
 
         backend
@@ -227,11 +224,8 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(3)),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         backend.clone().tick_stream_trim().await.unwrap();
 
@@ -289,22 +283,16 @@ mod tests {
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::ser_value(&meta),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_id_mapping::ser_key(stream_id),
                 kv::stream_id_mapping::ser_value(&basin, &stream),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
@@ -314,11 +302,8 @@ mod tests {
                     timestamp: 1234,
                 }),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         let token = FencingToken::from_str("token-1").unwrap();
         backend
             .db
@@ -326,11 +311,8 @@ mod tests {
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::ser_value(&token),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         for seq in 0..3 {
             let pos = StreamPosition {
@@ -343,22 +325,16 @@ mod tests {
                     kv::stream_record_data::ser_key(stream_id, pos),
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
             backend
                 .db
                 .put(
                     kv::stream_record_timestamp::ser_key(stream_id, pos),
                     kv::stream_record_timestamp::ser_value(),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
         }
 
         backend
@@ -367,11 +343,8 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(SeqNum::MAX)),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         backend.clone().tick_stream_trim().await.unwrap();
 
@@ -437,11 +410,8 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(10)),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         backend
             .finalize_trim(stream_id, trim_point(5))
@@ -473,14 +443,7 @@ mod tests {
                 kv::stream_trim_point::ser_value(trim_point(1)),
             );
         }
-        backend
-            .db
-            .write(batch)
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+        backend.db.write(batch).assert_durable().await;
 
         let has_more = backend.clone().tick_stream_trim().await.unwrap();
         assert!(has_more);
@@ -517,33 +480,24 @@ mod tests {
                 kv::stream_record_data::ser_key(stream_id, pos),
                 kv::stream_record_data::ser_value(metered.as_ref()),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_record_timestamp::ser_key(stream_id, pos),
                 kv::stream_record_timestamp::ser_value(),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(1)),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         backend.clone().tick_stream_trim().await.unwrap();
 
@@ -586,22 +540,16 @@ mod tests {
                     kv::stream_record_data::ser_key(stream_id_a, pos_a),
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
             backend
                 .db
                 .put(
                     kv::stream_record_timestamp::ser_key(stream_id_a, pos_a),
                     kv::stream_record_timestamp::ser_value(),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
 
             let pos_b = StreamPosition {
                 seq_num: seq,
@@ -613,22 +561,16 @@ mod tests {
                     kv::stream_record_data::ser_key(stream_id_b, pos_b),
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
             backend
                 .db
                 .put(
                     kv::stream_record_timestamp::ser_key(stream_id_b, pos_b),
                     kv::stream_record_timestamp::ser_value(),
                 )
-                .await
-                .unwrap()
-                .await_durable()
-                .await
-                .unwrap();
+                .assert_durable()
+                .await;
         }
 
         backend
@@ -637,11 +579,8 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id_a),
                 kv::stream_trim_point::ser_value(trim_point(2)),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         backend.clone().tick_stream_trim().await.unwrap();
 
@@ -714,14 +653,7 @@ mod tests {
             kv::stream_trim_point::ser_key(stream_id),
             kv::stream_trim_point::ser_value(trim_point(total)),
         );
-        backend
-            .db
-            .write(batch)
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+        backend.db.write(batch).assert_durable().await;
 
         backend.clone().tick_stream_trim().await.unwrap();
 
@@ -782,11 +714,8 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(5)),
             )
-            .await
-            .unwrap()
-            .await_durable()
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         backend
             .finalize_trim(stream_id, trim_point(5))
