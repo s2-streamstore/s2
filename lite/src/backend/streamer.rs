@@ -706,7 +706,12 @@ impl Streamer {
                     }
                 }
                 _ = dormancy.as_mut() => {
-                    if self.lease_state.close_if_idle() {
+                    // Cancelled requests can still have writes become durable. Keep
+                    // their assigned positions until a replacement can recover them.
+                    if self.db_writes_pending.is_empty()
+                        && self.inflight_appends.is_empty()
+                        && self.lease_state.close_if_idle()
+                    {
                         break;
                     }
                 }

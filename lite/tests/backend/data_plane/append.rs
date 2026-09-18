@@ -8,6 +8,7 @@ use s2_common::{
     config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
     encryption::EncryptionSpec,
     record::FencingToken,
+    resources::ProvisionMode,
     stream::{AppendAck, AppendInput, AppendRecordBatch, StreamName},
 };
 use s2_lite::backend::{
@@ -16,6 +17,91 @@ use s2_lite::backend::{
 };
 
 use super::common::*;
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_append_keeps_its_sequence_through_dormancy() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = test_basin_name("cancelled-append");
+    let stream = test_stream_name("cancelled-append");
+    assert_waits_for_flush(
+        &db,
+        backend.provision_basin(basin.clone(), Default::default(), ProvisionMode::Ensure),
+    )
+    .await
+    .unwrap();
+    assert_waits_for_flush(
+        &db,
+        backend.provision_stream(
+            basin.clone(),
+            stream.clone(),
+            Default::default(),
+            ProvisionMode::Ensure,
+        ),
+    )
+    .await
+    .unwrap();
+
+    {
+        let handle = backend
+            .open_for_append(&basin, &stream, None, Default::default())
+            .await
+            .unwrap();
+        let mut first = Box::pin(handle.append(AppendInput {
+            records: create_test_record_batch_with_timestamps(vec![(
+                Bytes::from_static(b"first"),
+                1000,
+            )]),
+            match_seq_num: None,
+            fencing_token: None,
+        }));
+        assert_pending_until_committed(&db, &mut first).await;
+        // Drop both the request and its lease while its write is still unflushed.
+    }
+    let first_seq = db.snapshot().await.unwrap().seq();
+    // Exceed the 60-second idle timeout and let the idle task run, using paused time.
+    tokio::time::sleep(Duration::from_secs(61)).await;
+
+    let handle = backend
+        .open_for_append(&basin, &stream, None, Default::default())
+        .await
+        .unwrap();
+    let second = handle.append(AppendInput {
+        records: create_test_record_batch_with_timestamps(vec![(
+            Bytes::from_static(b"second"),
+            2000,
+        )]),
+        match_seq_num: None,
+        fencing_token: None,
+    });
+    tokio::pin!(second);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut second)
+            .await
+            .is_err()
+    );
+    assert!(
+        db.snapshot().await.unwrap().seq() > first_seq,
+        "second append should reach memory before flushing either write"
+    );
+    let ack = assert_waits_for_flush(&db, second).await.unwrap();
+    assert_eq!(ack.start.seq_num, 1);
+    assert_eq!(ack.tail.seq_num, 2);
+
+    let (start, end) = read_all_bounds();
+    let records = read_records(&backend, &basin, &stream, start, end).await;
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.position().seq_num)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(
+        envelope_bodies(&records),
+        vec![b"first".to_vec(), b"second".to_vec()]
+    );
+    backend.close().await.unwrap();
+}
 
 async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionSpec) {
     let (backend, basin_name, stream_name) =
