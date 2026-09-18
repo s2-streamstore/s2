@@ -1682,6 +1682,7 @@ mod tests {
         assert_eq!(streamer.stable_pos.seq_num, 4);
         assert!(streamer.inflight_appends.is_empty());
     }
+
     #[tokio::test(start_paused = true)]
     async fn cancelled_append_delays_dormancy_until_writes_are_durable() {
         let mut streamer = test_streamer_with_settings(slatedb::config::Settings {
