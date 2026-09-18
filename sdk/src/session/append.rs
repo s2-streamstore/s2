@@ -804,7 +804,7 @@ async fn resend(
                     timer.as_mut().fire_at(
                         TimerEvent::AckDeadline,
                         inflight_append.ack_deadline,
-                        CoalesceMode::Latest,
+                        CoalesceMode::Earliest,
                     );
                     input_tx_permit.send(inflight_append.input.clone());
                     resend_index += 1;
@@ -1073,14 +1073,26 @@ impl From<usize> for TimerEvent {
 
 #[cfg(test)]
 mod tests {
-    use http::StatusCode;
+    use std::{collections::VecDeque, time::Duration};
 
-    use super::{AppendSessionError, is_safe_to_retry};
+    use bytes::Bytes;
+    use futures_util::{StreamExt, stream};
+    use http::StatusCode;
+    use tokio::{
+        sync::{mpsc, oneshot},
+        time::Instant,
+    };
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    use super::{AppendSessionError, InflightAppend, SessionState, is_safe_to_retry, resend};
     use crate::{
-        api::{ApiError, ServerErrorBody},
+        api::{ApiError, ServerErrorBody, Streaming},
         error::{AppendError, RequestError},
         frame_signal::FrameSignal,
-        types::{AccessTokenMode, AppendRetryPolicy},
+        types::{
+            AccessTokenMode, AppendAck, AppendInput, AppendRecord, AppendRecordBatch,
+            AppendRetryPolicy, MeteredBytes, StreamPosition,
+        },
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
@@ -1200,5 +1212,192 @@ mod tests {
             Some(&signal),
             mode,
         ));
+    }
+
+    fn ack(start: u64, end: u64) -> AppendAck {
+        AppendAck::new(
+            StreamPosition::new(start, 0),
+            StreamPosition::new(end, 0),
+            StreamPosition::new(end, 0),
+        )
+    }
+
+    /// Build a [`SessionState`] with `count` single-record inflight appends.
+    fn make_state_with_inflight(
+        count: usize,
+    ) -> (
+        SessionState,
+        Vec<oneshot::Receiver<Result<AppendAck, AppendSessionError>>>,
+    ) {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let mut inflight_appends = VecDeque::new();
+        let mut inflight_bytes = 0;
+        let mut total_records = 0;
+        let mut ack_rxs = Vec::new();
+
+        for _ in 0..count {
+            let record = AppendRecord::new(Bytes::from_static(b"x")).expect("valid record");
+            let batch = AppendRecordBatch::try_from_iter([record]).expect("valid batch");
+            let input = AppendInput::new(batch);
+            let metered = input.records.metered_bytes();
+            inflight_bytes += metered;
+            total_records += 1;
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            ack_rxs.push(ack_rx);
+            inflight_appends.push_back(InflightAppend {
+                input,
+                input_metered_bytes: metered,
+                ack_tx,
+                ack_deadline: Instant::now(),
+                _permit: None,
+            });
+        }
+
+        let state = SessionState {
+            cmd_rx,
+            inflight_appends,
+            inflight_bytes,
+            close_tx: None,
+            total_records,
+            total_acked_records: 0,
+            prev_ack_end: None,
+            stashed_submission: None,
+        };
+        (state, ack_rxs)
+    }
+
+    /// `resend` must arm the acknowledgement deadline with `CoalesceMode::Earliest`
+    /// (not `Latest`), so the timer keeps tracking the *oldest* un-acked append.
+    ///
+    /// This reproduces the reported slip: with `Latest`, replaying several inflight
+    /// appends back-to-back pins the timer to the *last* resend's deadline, so a
+    /// reconnect-then-stall surfaces `AckTimeout` only after the wall-clock time
+    /// spent replaying the trailing inflight appends — far later than the configured
+    /// `ack_timeout` bound measured from the first resend.
+    #[tokio::test]
+    async fn resend_acks_track_oldest_unacked_deadline_not_newest() {
+        // Three inflight appends, replayed into a 1-slot channel so each resend is
+        // paced by the receiver freeing a slot. The acknowledgement stream stalls
+        // (never yields), modelling a freshly-reconnected server that accepts the
+        // appends but never acks them.
+        const COUNT: usize = 3;
+        const CHANNEL_CAP: usize = 1;
+        const ACK_TIMEOUT: Duration = Duration::from_millis(300);
+        const SEND_GAP: Duration = Duration::from_millis(100);
+
+        let (input_tx, input_rx) = mpsc::channel::<AppendInput>(CHANNEL_CAP);
+        let (mut state, _ack_rxs) = make_state_with_inflight(COUNT);
+        assert_eq!(state.inflight_appends.len(), COUNT);
+
+        // Pace the resends: free one slot every `SEND_GAP` so the second and third
+        // appends are sent `SEND_GAP` and `2 * SEND_GAP` after the first. Keep the
+        // receiver alive past `ACK_TIMEOUT` so the trailing `reserve()` stays
+        // blocked (full channel) rather than erroring out with `ServerDisconnected`.
+        tokio::spawn(async move {
+            let mut input_rx = input_rx;
+            for _ in 0..(COUNT - 1) {
+                tokio::time::sleep(SEND_GAP).await;
+                let _ = input_rx.recv().await;
+            }
+            tokio::time::sleep(ACK_TIMEOUT * 5).await;
+        });
+
+        let mut acks: Streaming<AppendAck> =
+            Box::pin(stream::pending::<Result<AppendAck, ApiError>>());
+
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            resend(&mut state, &input_tx, &mut acks, ACK_TIMEOUT),
+        )
+        .await
+        .expect("resend should surface AckTimeout, not hang");
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(AppendSessionError::AckTimeout)),
+            "expected AckTimeout, got {result:?}"
+        );
+        // The timer must not fire before the configured deadline of the oldest
+        // un-acked resend.
+        assert!(
+            elapsed >= ACK_TIMEOUT.saturating_sub(Duration::from_millis(50)),
+            "AckTimeout fired too early: {elapsed:?}"
+        );
+        // The timer must track the *oldest* resend (deadline `ACK_TIMEOUT` after
+        // the first send), not the *newest* (deadline `ACK_TIMEOUT` after the last
+        // send, i.e. `2 * SEND_GAP` later). With the bug (`Latest`), this fires at
+        // ~`ACK_TIMEOUT + 2 * SEND_GAP` = 500 ms; the fix (`Earliest`) fires at
+        // ~`ACK_TIMEOUT` = 300 ms.
+        assert!(
+            elapsed < ACK_TIMEOUT + SEND_GAP,
+            "AckTimeout fired too late (timer tracked newest resend, not oldest): {elapsed:?}"
+        );
+        assert!(!state.inflight_appends.is_empty());
+    }
+
+    /// With the fix, `resend`'s `Earliest` arming restores the invariant
+    /// `process_ack` (which advances with `Latest`) relies on: as acks arrive in
+    /// order, the timer advances to the new oldest un-acked deadline and `resend`
+    /// completes cleanly without spurious `AckTimeout`.
+    #[tokio::test]
+    async fn resend_completes_when_acks_arrive_in_order() {
+        const COUNT: usize = 3;
+        const CHANNEL_CAP: usize = COUNT;
+        const ACK_TIMEOUT: Duration = Duration::from_secs(1);
+
+        let (input_tx, input_rx) = mpsc::channel::<AppendInput>(CHANNEL_CAP);
+        let (mut state, ack_rxs) = make_state_with_inflight(COUNT);
+        assert_eq!(state.inflight_appends.len(), COUNT);
+
+        // Hold the receiver undrained: the sent appends fill the channel (capacity
+        // == count), so the trailing `reserve()` stays blocked while the ack stream
+        // drains `state.inflight_appends` and closes the loop.
+        let _input_rx = input_rx;
+
+        let (ack_send, ack_recv) = mpsc::unbounded_channel::<AppendAck>();
+        let mut acks: Streaming<AppendAck> =
+            Box::pin(UnboundedReceiverStream::new(ack_recv).map(Ok::<_, ApiError>));
+
+        // Let all resends dispatch before the first ack arrives, so an ack never
+        // precedes its resend (which `resend` rejects as an invalid ack).
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = ack_send.send(ack(0, 1));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = ack_send.send(ack(1, 2));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = ack_send.send(ack(2, 3));
+        });
+
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            resend(&mut state, &input_tx, &mut acks, ACK_TIMEOUT),
+        )
+        .await
+        .expect("resend should complete, not hang");
+        let elapsed = started.elapsed();
+
+        assert!(result.is_ok(), "resend should complete, got {result:?}");
+        assert!(state.inflight_appends.is_empty());
+        assert_eq!(state.inflight_bytes, 0);
+        assert_eq!(state.total_acked_records, COUNT);
+        assert!(state.close_tx.is_none());
+        assert!(
+            elapsed < ACK_TIMEOUT,
+            "resend should not hit AckTimeout during a healthy replay, took {elapsed:?}"
+        );
+
+        let mut ends = Vec::new();
+        for rx in ack_rxs {
+            let ack = rx
+                .await
+                .expect("ack channel should not close")
+                .expect("ok ack");
+            ends.push(ack.end.seq_num);
+        }
+        assert_eq!(ends, vec![1, 2, 3]);
     }
 }
