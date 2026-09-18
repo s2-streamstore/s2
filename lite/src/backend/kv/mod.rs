@@ -13,10 +13,7 @@ pub mod timestamp;
 use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use s2_common::{
-    basin::BasinName, caps::MIN_BASIN_NAME_LEN, record::StreamPosition, stream::StreamName,
-};
-use strum::FromRepr;
+use s2_common::{basin::BasinName, caps::MIN_BASIN_NAME_LEN};
 use thiserror::Error;
 
 use crate::stream_id::StreamId;
@@ -37,7 +34,7 @@ pub enum DeserializationError {
 
 // IDs persisted so must be kept stable.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromRepr)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyType {
     BasinMeta = 1,
     BasinDeletionPending = 8,
@@ -49,108 +46,6 @@ pub enum KeyType {
     StreamRecordData = 6,
     StreamRecordTimestamp = 7,
     StreamDeleteOnEmptyDeadline = 10,
-}
-
-#[derive(Debug, Clone)]
-pub enum Key {
-    /// (BM) per-basin, updatable
-    /// Key: BasinName
-    /// Value: BasinMeta
-    BasinMeta(BasinName),
-    /// (BDP) per-basin, deletable, only present while basin deletion pending
-    /// Key: BasinName
-    /// Value: StreamNameStartAfter (cursor for resumable deletion)
-    BasinDeletionPending(BasinName),
-    /// (SM) per-stream, updatable
-    /// Key: BasinName \0 StreamName
-    /// Value: StreamMeta
-    StreamMeta(BasinName, StreamName),
-    /// (SIM) per-stream, immutable
-    /// Key: StreamID
-    /// Value: BasinName \0 StreamName
-    StreamIdMapping(StreamId),
-    /// (SP) per-stream, updatable
-    /// Key: StreamID
-    /// Value: SeqNum Timestamp
-    StreamTailPosition(StreamId),
-    /// (SFT) per-stream, updatable, optional, default empty
-    /// Key: StreamID
-    /// Value: FencingToken
-    StreamFencingToken(StreamId),
-    /// (STP) per-stream, updatable, optional; missing implies 0; only present while trim pending
-    /// Key: StreamID
-    /// Value: NonZeroSeqNum
-    StreamTrimPoint(StreamId),
-    /// (SRD) per-record, immutable
-    /// Key: StreamID StreamPosition
-    /// Value: EnvelopedRecord
-    StreamRecordData(StreamId, StreamPosition),
-    /// (SRT) per-record, immutable
-    /// Key: StreamID Timestamp SeqNum
-    /// Value: empty
-    StreamRecordTimestamp(StreamId, StreamPosition),
-    /// (SDOED) per-deadline-per-stream, deletable, present while pending
-    /// Key: TimestampSecs StreamID
-    /// Value: MinAge seconds (u64)
-    StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId),
-}
-
-impl From<Key> for Bytes {
-    fn from(value: Key) -> Self {
-        match value {
-            Key::BasinMeta(basin) => basin_meta::ser_key(&basin),
-            Key::BasinDeletionPending(basin) => basin_deletion_pending::ser_key(&basin),
-            Key::StreamMeta(basin, stream) => stream_meta::ser_key(&basin, &stream),
-            Key::StreamIdMapping(stream_id) => stream_id_mapping::ser_key(stream_id),
-            Key::StreamTailPosition(stream_id) => stream_tail_position::ser_key(stream_id),
-            Key::StreamFencingToken(stream_id) => stream_fencing_token::ser_key(stream_id),
-            Key::StreamTrimPoint(stream_id) => stream_trim_point::ser_key(stream_id),
-            Key::StreamRecordData(stream_id, pos) => stream_record_data::ser_key(stream_id, pos),
-            Key::StreamRecordTimestamp(stream_id, pos) => {
-                stream_record_timestamp::ser_key(stream_id, pos)
-            }
-            Key::StreamDeleteOnEmptyDeadline(deadline, stream_id) => {
-                stream_doe_deadline::ser_key(deadline, stream_id)
-            }
-        }
-    }
-}
-
-impl TryFrom<Bytes> for Key {
-    type Error = DeserializationError;
-
-    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
-        check_min_size(&bytes, 1)?;
-        let ordinal = KeyType::from_repr(bytes[0])
-            .ok_or_else(|| DeserializationError::InvalidOrdinal(bytes[0]))?;
-        match ordinal {
-            KeyType::BasinMeta => basin_meta::deser_key(bytes).map(Key::BasinMeta),
-            KeyType::BasinDeletionPending => {
-                basin_deletion_pending::deser_key(bytes).map(Key::BasinDeletionPending)
-            }
-            KeyType::StreamMeta => {
-                stream_meta::deser_key(bytes).map(|(basin, stream)| Key::StreamMeta(basin, stream))
-            }
-            KeyType::StreamIdMapping => {
-                stream_id_mapping::deser_key(bytes).map(Key::StreamIdMapping)
-            }
-            KeyType::StreamTailPosition => {
-                stream_tail_position::deser_key(bytes).map(Key::StreamTailPosition)
-            }
-            KeyType::StreamFencingToken => {
-                stream_fencing_token::deser_key(bytes).map(Key::StreamFencingToken)
-            }
-            KeyType::StreamTrimPoint => {
-                stream_trim_point::deser_key(bytes).map(Key::StreamTrimPoint)
-            }
-            KeyType::StreamRecordData => stream_record_data::deser_key(bytes)
-                .map(|(stream_id, pos)| Key::StreamRecordData(stream_id, pos)),
-            KeyType::StreamRecordTimestamp => stream_record_timestamp::deser_key(bytes)
-                .map(|(stream_id, pos)| Key::StreamRecordTimestamp(stream_id, pos)),
-            KeyType::StreamDeleteOnEmptyDeadline => stream_doe_deadline::deser_key(bytes)
-                .map(|(deadline, stream_id)| Key::StreamDeleteOnEmptyDeadline(deadline, stream_id)),
-        }
-    }
 }
 
 /// Shared serializer for keys of the form `[KeyType][StreamId]`.
@@ -286,46 +181,5 @@ mod proptest_strategies {
 
     pub(super) fn stream_name_strategy() -> impl Strategy<Value = StreamName> {
         "[a-zA-Z0-9_-]{1,100}".prop_map(|s| StreamName::from_str(&s).unwrap())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use bytes::{BufMut, Bytes, BytesMut};
-
-    use super::{DeserializationError, Key, KeyType};
-
-    #[test]
-    fn error_on_invalid_ordinal() {
-        let bytes = Bytes::from(vec![255u8]);
-        let result = Key::try_from(bytes);
-        assert!(matches!(
-            result,
-            Err(DeserializationError::InvalidOrdinal(255))
-        ));
-    }
-
-    #[test]
-    fn error_on_insufficient_data() {
-        let bytes = Bytes::from(vec![KeyType::StreamTailPosition as u8, 1, 2, 3]);
-        let result = Key::try_from(bytes);
-        assert!(matches!(
-            result,
-            Err(DeserializationError::InvalidSize { .. })
-        ));
-    }
-
-    #[test]
-    fn error_on_missing_separator() {
-        let mut buf = BytesMut::new();
-        buf.put_u8(KeyType::StreamMeta as u8);
-        buf.put_slice(b"basin-without-separator");
-        let bytes = buf.freeze();
-
-        let result = Key::try_from(bytes);
-        assert!(matches!(
-            result,
-            Err(DeserializationError::MissingFieldSeparator)
-        ));
     }
 }
