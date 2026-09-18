@@ -455,13 +455,30 @@ mod tests {
         config::{BasinConfig, OptionalStreamConfig, StreamConfig},
         record::{Metered, MeteredExt as _, Record, StreamPosition},
         resources::ProvisionMode,
+        stream::{AppendInput, AppendRecord, AppendRecordParts},
     };
     use s2_storage::record::StoredRecord;
     use slatedb::{WriteBatch, object_store};
     use time::OffsetDateTime;
 
     use super::*;
-    use crate::backend::test_util::DbWriteTestExt as _;
+    use crate::backend::{error::AppendError, test_util::DbWriteTestExt as _};
+
+    fn append_input(body: &str) -> AppendInput {
+        let record =
+            Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
+        let record: AppendRecord = AppendRecordParts {
+            timestamp: None,
+            record: Metered::from(record),
+        }
+        .try_into()
+        .unwrap();
+        AppendInput {
+            records: vec![record].try_into().unwrap(),
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
 
     async fn new_test_backend() -> Backend {
         let object_store: Arc<dyn object_store::ObjectStore> =
@@ -471,6 +488,26 @@ mod tests {
             .await
             .unwrap();
         Backend::new(db, ByteSize::b(1))
+    }
+
+    async fn new_test_backend_with_stream() -> (Backend, BasinName, StreamName) {
+        let backend = new_test_backend().await;
+        let basin: BasinName = "testbasin".parse().unwrap();
+        let stream: StreamName = "stream".parse().unwrap();
+        backend
+            .provision_basin(basin.clone(), Default::default(), ProvisionMode::Ensure)
+            .await
+            .unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                Default::default(),
+                ProvisionMode::Ensure,
+            )
+            .await
+            .unwrap();
+        (backend, basin, stream)
     }
 
     #[tokio::test]
@@ -551,31 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn advising_config_does_not_initialize_inactive_streamer() {
-        let backend = new_test_backend().await;
-        let basin = BasinName::from_str("testbasin3").unwrap();
-        let stream = StreamName::from_str("stream3").unwrap();
-
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = new_test_backend_with_stream().await;
 
         assert!(backend.streamer_slots.is_empty());
         backend
@@ -584,33 +597,23 @@ mod tests {
         assert!(backend.streamer_slots.is_empty());
     }
 
+    #[rstest::rstest]
+    #[case::ensure(false)]
+    #[case::patch(true)]
     #[tokio::test]
-    async fn cancelled_config_commit_reaches_initializing_streamer() {
+    async fn cancelled_config_commit_reaches_initializing_streamer(#[case] patch: bool) {
         use std::time::Duration;
 
         use s2_common::{
-            config::{OptionalTimestampingConfig, TimestampingMode},
-            stream::{AppendInput, AppendRecordParts},
+            config::{
+                OptionalTimestampingConfig, StreamReconfiguration, TimestampingMode,
+                TimestampingReconfiguration,
+            },
+            maybe::Maybe,
         };
 
-        use crate::backend::error::AppendError;
-
-        let backend = new_test_backend().await;
-        let basin: BasinName = "config-init".parse().unwrap();
-        let stream: StreamName = "stream".parse().unwrap();
-        backend
-            .provision_basin(basin.clone(), Default::default(), ProvisionMode::Ensure)
-            .await
-            .unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                Default::default(),
-                ProvisionMode::Ensure,
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = new_test_backend_with_stream().await;
+        let stream_id = StreamId::new(&basin, &stream);
         let generation_id = StreamerGenerationId::next();
         // Hold initialization after its old metadata read, before publishing Ready.
         let client = backend
@@ -620,7 +623,7 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         backend.streamer_slots.insert(
-            StreamId::new(&basin, &stream),
+            stream_id,
             StreamerClientSlot::Initializing {
                 generation_id,
                 future: async move {
@@ -632,49 +635,57 @@ mod tests {
                 .shared(),
             },
         );
-        let desired = OptionalStreamConfig {
-            timestamping: OptionalTimestampingConfig {
-                mode: Some(TimestampingMode::ClientRequire),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let before = backend.db.snapshot().await.unwrap().seq();
         {
-            let update = backend.provision_stream(
-                basin.clone(),
-                stream.clone(),
-                desired,
-                ProvisionMode::Ensure,
-            );
+            let update = async {
+                if patch {
+                    backend
+                        .reconfigure_stream(
+                            basin.clone(),
+                            stream.clone(),
+                            StreamReconfiguration {
+                                timestamping: Maybe::from(Some(TimestampingReconfiguration {
+                                    mode: Maybe::from(Some(TimestampingMode::ClientRequire)),
+                                    ..Default::default()
+                                })),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    backend
+                        .provision_stream(
+                            basin.clone(),
+                            stream.clone(),
+                            OptionalStreamConfig {
+                                timestamping: OptionalTimestampingConfig {
+                                    mode: Some(TimestampingMode::ClientRequire),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                            ProvisionMode::Ensure,
+                        )
+                        .await
+                        .unwrap();
+                }
+            };
             tokio::pin!(update);
             tokio::time::timeout(Duration::from_secs(5), async {
                 tokio::select! {
                     biased;
                     result = &mut update => panic!("update finished before initialization: {result:?}"),
-                    () = async {
-                        while backend.db.snapshot().await.unwrap().seq() <= before {
-                            tokio::task::yield_now().await;
-                        }
-                    } => {}
+                    result = started_rx => result.unwrap(),
                 }
             }).await.unwrap();
-            // Cancel the caller after the config write reaches memory.
+            // Cancel after the durable commit, while delivery waits on initialization.
         }
-        backend.db.flush().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), started_rx)
-            .await
-            .unwrap()
-            .unwrap();
         release_tx.send(()).unwrap();
         // Only the detached commit task can publish this initializer. Wait for it
         // directly: a provisioning retry could repair a missing notification.
         tokio::time::timeout(Duration::from_secs(5), async {
             while !matches!(
-                backend
-                    .streamer_slots
-                    .get(&StreamId::new(&basin, &stream))
-                    .as_deref(),
+                backend.streamer_slots.get(&stream_id).as_deref(),
                 Some(StreamerClientSlot::Ready { .. })
             ) {
                 tokio::task::yield_now().await;
@@ -686,27 +697,7 @@ mod tests {
             .open_for_append(&basin, &stream, None, Default::default())
             .await
             .unwrap();
-        let result = handle
-            .append(AppendInput {
-                records: vec![
-                    AppendRecordParts {
-                        timestamp: None,
-                        record: Record::try_from_parts(
-                            vec![],
-                            Bytes::from_static(b"requires timestamp"),
-                        )
-                        .unwrap()
-                        .metered(),
-                    }
-                    .try_into()
-                    .unwrap(),
-                ]
-                .try_into()
-                .unwrap(),
-                match_seq_num: None,
-                fencing_token: None,
-            })
-            .await;
+        let result = handle.append(append_input("requires timestamp")).await;
         assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
         backend.close().await.unwrap();
     }
@@ -764,26 +755,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_appends_auto_create_stream_without_spurious_not_found() {
-        use s2_common::stream::{AppendInput, AppendRecord, AppendRecordParts};
-
-        use crate::backend::error::AppendError;
-
-        fn append_input(body: &str) -> AppendInput {
-            let record =
-                Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
-            let record: AppendRecord = AppendRecordParts {
-                timestamp: None,
-                record: Metered::from(record),
-            }
-            .try_into()
-            .unwrap();
-            AppendInput {
-                records: vec![record].try_into().unwrap(),
-                match_seq_num: None,
-                fencing_token: None,
-            }
-        }
-
         let backend = new_test_backend().await;
         let basin = BasinName::from_str("autocreate").unwrap();
         backend

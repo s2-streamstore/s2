@@ -1525,9 +1525,9 @@ mod tests {
             entry.expire_ts.is_none(),
             "late config notification restored stale retention"
         );
-        db.close().await.unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        db.close().await.unwrap();
     }
 
     #[test]
