@@ -50,8 +50,8 @@ fn apply_last_event_id(
     mut start: ReadStart,
     mut end: v1t::stream::ReadEnd,
     last_event_id: Option<v1t::stream::sse::LastEventId>,
-) -> (ReadStart, v1t::stream::ReadEnd) {
-    if let Some(v1t::stream::sse::LastEventId {
+) -> (ReadStart, v1t::stream::ReadEnd, CountOrBytes) {
+    let processed = if let Some(v1t::stream::sse::LastEventId {
         seq_num,
         count,
         bytes,
@@ -60,8 +60,11 @@ fn apply_last_event_id(
         start.from = ReadFrom::SeqNum(seq_num.saturating_add(1));
         end.count = end.count.map(|c| c.saturating_sub(count));
         end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
-    }
-    (start, end)
+        CountOrBytes { count, bytes }
+    } else {
+        CountOrBytes::ZERO
+    };
+    (start, end, processed)
 }
 
 enum ReadMode {
@@ -215,7 +218,7 @@ pub async fn read(
             format,
             last_event_id,
         } => {
-            let (start, end) = apply_last_event_id(start, end, last_event_id);
+            let (start, end, initial) = apply_last_event_id(start, end, last_event_id);
             let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
             let session = backend
                 .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
@@ -223,7 +226,7 @@ pub async fn read(
                 .read(start, end)
                 .await?;
             let events = async_stream::stream! {
-                let mut processed = CountOrBytes::ZERO;
+                let mut processed = initial;
                 tokio::pin!(session);
                 let mut errored = false;
                 while let Some(output) = session.next().await {
@@ -481,6 +484,7 @@ mod tests {
         stream::{
             proto,
             s2s::{self, FrameDecoder, SessionMessage},
+            sse::LastEventId,
         },
     };
     use s2_common::{
@@ -491,7 +495,7 @@ mod tests {
         },
         encryption::{EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
         read_extent::{ReadLimit, ReadUntil},
-        record::{EnvelopeRecord, Metered, Record},
+        record::{EnvelopeRecord, Metered, MeteredSize as _, Record},
         resources::ProvisionMode,
         stream::{
             AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts, ListStreamsRequest,
@@ -1109,5 +1113,268 @@ mod tests {
             .expect("decode read batch proto");
         assert_eq!(batch.records.len(), 1);
         assert_eq!(batch.records[0].body.as_ref(), b"secret");
+    }
+
+    fn envelope_record(body: &'static [u8]) -> Record {
+        Record::Envelope(EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap())
+    }
+
+    fn record_metered_bytes(body: &'static [u8]) -> usize {
+        Metered::from(envelope_record(body)).metered_size()
+    }
+
+    async fn append_plain_records(
+        backend: &Backend,
+        basin: &BasinName,
+        stream: &StreamName,
+        body: &'static [u8],
+        count: usize,
+    ) {
+        let records = (0..count)
+            .map(|_| {
+                AppendRecord::try_from(AppendRecordParts {
+                    timestamp: None,
+                    record: Metered::from(envelope_record(body)),
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let input = AppendInput {
+            records: AppendRecordBatch::try_from(records).unwrap(),
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        backend
+            .open_for_append(basin, stream, None, OptionalStreamConfig::default())
+            .await
+            .expect("open append handle")
+            .append(input)
+            .await
+            .expect("append records");
+    }
+
+    fn sse_read_request(
+        basin: &BasinName,
+        uri: String,
+        last_event_id: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder =
+            request_builder("GET", uri, basin).header(header::ACCEPT, "text/event-stream");
+        if let Some(id) = last_event_id {
+            builder = builder.header("Last-Event-Id", id);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    struct SseReadResponse {
+        batch_events: usize,
+        records: usize,
+        last_id: Option<LastEventId>,
+        errored: bool,
+        done: bool,
+    }
+
+    fn parse_sse_read_response(body: &str) -> SseReadResponse {
+        let mut out = SseReadResponse {
+            batch_events: 0,
+            records: 0,
+            last_id: None,
+            errored: false,
+            done: false,
+        };
+        for event in body.replace("\r\n", "\n").split("\n\n") {
+            let mut event_name: Option<String> = None;
+            let mut id_str: Option<String> = None;
+            let mut data = String::new();
+            for line in event.lines() {
+                if let Some(rest) = line.strip_prefix("event:") {
+                    event_name = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("id:") {
+                    id_str = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(rest.trim_start());
+                }
+            }
+            match event_name.as_deref() {
+                Some("error") => out.errored = true,
+                Some("batch") => {
+                    out.batch_events += 1;
+                    let json: serde_json::Value =
+                        serde_json::from_str(data.trim()).expect("batch data is JSON");
+                    out.records += json["records"].as_array().expect("records array").len();
+                    if let Some(id) = id_str {
+                        out.last_id = Some(id.parse::<LastEventId>().expect("last event id"));
+                    }
+                }
+                _ => {
+                    if data.trim() == "[DONE]" {
+                        out.done = true;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    async fn sse_read(
+        app: &axum::Router,
+        basin: &BasinName,
+        stream: &StreamName,
+        query: &str,
+        last_event_id: Option<&str>,
+    ) -> SseReadResponse {
+        let uri = format!("/v1/streams/{stream}/records?{query}");
+        let response = send(app, sse_read_request(basin, uri, last_event_id)).await;
+        assert_eq!(response.status(), StatusCode::OK, "sse read status");
+        let body = tokio::time::timeout(
+            Duration::from_secs(10),
+            body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("sse response should terminate")
+        .expect("sse body bytes");
+        parse_sse_read_response(std::str::from_utf8(&body).expect("utf8 sse body"))
+    }
+
+    #[tokio::test]
+    async fn sse_read_resume_seeds_accumulator_and_emits_cumulative_last_event_id() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "sse-resume-cumulative",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        append_plain_records(&backend, &basin, &stream, b"r", 30).await;
+
+        let per_record = record_metered_bytes(b"r");
+        let parsed = sse_read(
+            &app,
+            &basin,
+            &stream,
+            "seq_num=0&count=10&wait=0",
+            Some("2,3,0"),
+        )
+        .await;
+
+        assert_eq!(parsed.records, 7);
+        assert!(parsed.done);
+        assert!(!parsed.errored);
+        let id = parsed.last_id.expect("batch id");
+        assert_eq!(id.seq_num, 9);
+        assert_eq!(id.count, 10);
+        assert_eq!(id.bytes, 7 * per_record);
+    }
+
+    #[tokio::test]
+    async fn sse_read_does_not_over_deliver_count_across_reconnects() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "sse-reconnect-count",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        append_plain_records(&backend, &basin, &stream, b"r", 30).await;
+
+        let session_b = sse_read(
+            &app,
+            &basin,
+            &stream,
+            "seq_num=0&count=10&wait=0",
+            Some("2,3,0"),
+        )
+        .await;
+        assert_eq!(session_b.records, 7);
+        let b_id = session_b.last_id.expect("batch id");
+        assert_eq!(b_id.count, 10);
+
+        let session_c = sse_read(
+            &app,
+            &basin,
+            &stream,
+            "seq_num=0&count=10&wait=0",
+            Some(&b_id.to_string()),
+        )
+        .await;
+        assert_eq!(session_c.records, 0);
+        assert_eq!(session_c.batch_events, 0);
+        assert!(session_c.done);
+
+        let cumulative = 3 + session_b.records + session_c.records;
+        assert_eq!(cumulative, 10);
+    }
+
+    #[tokio::test]
+    async fn sse_read_does_not_over_deliver_bytes_across_reconnects() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "sse-reconnect-bytes",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        append_plain_records(&backend, &basin, &stream, b"r", 30).await;
+
+        let per_record = record_metered_bytes(b"r");
+        let budget = 5 * per_record;
+        let already_delivered_bytes = 2 * per_record;
+
+        let session_b = sse_read(
+            &app,
+            &basin,
+            &stream,
+            &format!("seq_num=0&bytes={budget}&wait=0"),
+            Some(&format!("1,2,{already_delivered_bytes}")),
+        )
+        .await;
+        assert_eq!(session_b.records, 3);
+        let b_id = session_b.last_id.expect("batch id");
+        assert_eq!(b_id.bytes, budget);
+        assert_eq!(b_id.count, 5);
+
+        let session_c = sse_read(
+            &app,
+            &basin,
+            &stream,
+            &format!("seq_num=0&bytes={budget}&wait=0"),
+            Some(&b_id.to_string()),
+        )
+        .await;
+        assert_eq!(session_c.records, 0);
+        assert_eq!(session_c.batch_events, 0);
+        assert!(session_c.done);
+
+        let cumulative_bytes = already_delivered_bytes
+            + (session_b.records * per_record)
+            + (session_c.records * per_record);
+        assert_eq!(cumulative_bytes, budget);
+    }
+
+    #[tokio::test]
+    async fn sse_read_resume_with_zero_count_keeps_fresh_budget_from_advanced_position() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "sse-resume-zero-count",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        append_plain_records(&backend, &basin, &stream, b"r", 30).await;
+
+        let per_record = record_metered_bytes(b"r");
+        let parsed = sse_read(
+            &app,
+            &basin,
+            &stream,
+            "seq_num=0&count=10&wait=0",
+            Some("4,0,0"),
+        )
+        .await;
+
+        assert_eq!(parsed.records, 10);
+        let id = parsed.last_id.expect("batch id");
+        assert_eq!(id.seq_num, 14);
+        assert_eq!(id.count, 10);
+        assert_eq!(id.bytes, 10 * per_record);
     }
 }
