@@ -27,13 +27,45 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          token: ${{ steps.generate-token.outputs.token }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@1528104d2ca23787631a1c1f022abb64b34c1e11 # v0.5.128
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+
+      - name: Refresh simulator lockfile in release PR
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          RELEASE_PR: ${{ steps.release-plz.outputs.pr }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$RELEASE_PR" || "$RELEASE_PR" == "null" ]]; then
+            exit 0
+          fi
+
+          pr_number="$(jq -r '.number // empty' <<<"$RELEASE_PR")"
+          if [[ -z "$pr_number" ]]; then
+            exit 0
+          fi
+
+          gh pr checkout "$pr_number"
+          cargo metadata --manifest-path sim/Cargo.toml --format-version 1 >/dev/null
+          cargo metadata --locked --manifest-path sim/Cargo.toml --format-version 1 >/dev/null
+
+          if git diff --quiet -- sim/Cargo.lock; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sim/Cargo.lock
+          git commit -m "chore: refresh simulator lockfile"
+          git push
