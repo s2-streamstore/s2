@@ -210,6 +210,8 @@ pub(super) struct Spawner {
     pub generation_id: StreamerGenerationId,
     pub db: slatedb::Db,
     pub stream_id: StreamId,
+    /// Commit sequence of the ID mapping, unchanged throughout this incarnation.
+    pub creation_seq: u64,
     pub config: StreamConfig,
     pub config_seq: u64,
     pub cipher: Option<EncryptionAlgorithm>,
@@ -231,6 +233,7 @@ impl Spawner {
             generation_id,
             db,
             stream_id,
+            creation_seq,
             config,
             config_seq,
             cipher,
@@ -248,6 +251,7 @@ impl Spawner {
         let streamer = Streamer {
             db,
             stream_id,
+            creation_seq,
             msg_tx: msg_tx.clone(),
             config,
             config_seq,
@@ -309,6 +313,7 @@ impl<T> CommandState<T> {
 struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
+    creation_seq: u64,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: StreamConfig,
     config_seq: u64,
@@ -458,8 +463,12 @@ impl Streamer {
             TerminalTrimCondition::Always => {
                 self.append_terminal_trim(reply_tx);
             }
-            TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff } => {
-                if self.last_tail_write_timestamp > last_write_cutoff
+            TerminalTrimCondition::DeleteOnEmpty {
+                last_write_cutoff,
+                creation_seq,
+            } => {
+                if self.creation_seq != creation_seq
+                    || self.last_tail_write_timestamp > last_write_cutoff
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                     || self.config.delete_on_empty.min_age().is_none()
                 {
@@ -764,6 +773,7 @@ pub(super) enum TerminalTrimCondition {
     Always,
     DeleteOnEmpty {
         last_write_cutoff: kv::timestamp::TimestampSecs,
+        creation_seq: u64,
     },
 }
 
@@ -1438,6 +1448,7 @@ mod tests {
         Streamer {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
+            creation_seq: 0,
             msg_tx,
             config: StreamConfig::default(),
             config_seq: 0,
@@ -1608,6 +1619,7 @@ mod tests {
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
                 last_write_cutoff: kv::timestamp::TimestampSecs::MAX,
+                creation_seq: 0,
             },
             trim_tx,
         );

@@ -14,7 +14,6 @@ use s2_common::{
     resources::ProvisionMode,
     stream::StreamName,
 };
-use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
@@ -26,6 +25,7 @@ use super::{
         StreamerMissingInActionError, TransactionConflictError,
     },
     kv,
+    store::db_snapshot_get_with,
     streamer::{GuardedStreamerClient, StreamerClient, StreamerGenerationId},
 };
 use crate::{backend::bgtasks::BgtaskTrigger, stream_id::StreamId};
@@ -113,26 +113,51 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<StreamerClient, StreamerError> {
+        let snapshot = self.db_snapshot().await?;
+        self.start_streamer_from_snapshot(generation_id, basin, stream, &snapshot)
+            .await
+    }
+
+    async fn start_streamer_from_snapshot(
+        &self,
+        generation_id: StreamerGenerationId,
+        basin: BasinName,
+        stream: StreamName,
+        snapshot: &slatedb::DbSnapshot,
+    ) -> Result<StreamerClient, StreamerError> {
         let stream_id = StreamId::new(&basin, &stream);
 
-        let (meta, persisted_tail, fencing_token, trim_point) = tokio::try_join!(
-            self.db_get_with(kv::stream_meta::ser_key(&basin, &stream), |entry| {
-                Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
-            }),
-            self.db_get_with(kv::stream_tail_position::ser_key(stream_id), |entry| {
-                Ok((
-                    kv::stream_tail_position::deser_value(entry.value)?,
-                    kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
-                ))
-            }),
-            self.db_get(
-                kv::stream_fencing_token::ser_key(stream_id),
-                kv::stream_fencing_token::deser_value,
+        let (meta, persisted_tail, fencing_token, trim_point, creation_seq) = tokio::try_join!(
+            db_snapshot_get_with(
+                snapshot,
+                kv::stream_meta::ser_key(&basin, &stream),
+                |entry| { Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq)) }
             ),
-            self.db_get(
+            db_snapshot_get_with(
+                snapshot,
+                kv::stream_tail_position::ser_key(stream_id),
+                |entry| {
+                    Ok((
+                        kv::stream_tail_position::deser_value(entry.value)?,
+                        kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
+                    ))
+                }
+            ),
+            db_snapshot_get_with(
+                snapshot,
+                kv::stream_fencing_token::ser_key(stream_id),
+                |entry| kv::stream_fencing_token::deser_value(entry.value),
+            ),
+            db_snapshot_get_with(
+                snapshot,
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::deser_value,
-            )
+                |entry| kv::stream_trim_point::deser_value(entry.value),
+            ),
+            db_snapshot_get_with(
+                snapshot,
+                kv::stream_id_mapping::ser_key(stream_id),
+                |entry| Ok(entry.seq)
+            ),
         )?;
 
         let Some((meta, config_seq)) = meta else {
@@ -142,20 +167,21 @@ impl Backend {
         let (tail_pos, last_tail_write_timestamp) =
             persisted_tail.unwrap_or((StreamPosition::MIN, kv::timestamp::TimestampSecs::ZERO));
 
-        self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
+        if meta.deleted_at.is_some() || trim_point == Some(..NonZeroSeqNum::MAX) {
+            return Err(StreamDeletionPendingError.into());
+        }
+
+        self.assert_no_records_following_tail(snapshot, stream_id, &basin, &stream, tail_pos)
             .await?;
 
         let fencing_token = fencing_token.unwrap_or_default();
-
-        if trim_point == Some(..NonZeroSeqNum::MAX) {
-            return Err(StreamDeletionPendingError.into());
-        }
 
         let streamer_slots = self.streamer_slots.clone();
         Ok(super::streamer::Spawner {
             generation_id,
             db: self.db.clone(),
             stream_id,
+            creation_seq: creation_seq.expect("live stream has an ID mapping"),
             config: meta.config,
             config_seq,
             cipher: meta.cipher,
@@ -176,6 +202,7 @@ impl Backend {
 
     async fn assert_no_records_following_tail(
         &self,
+        snapshot: &slatedb::DbSnapshot,
         stream_id: StreamId,
         basin: &BasinName,
         stream: &StreamName,
@@ -186,14 +213,7 @@ impl Backend {
             seq_num: tail_pos.seq_num,
             timestamp: 0,
         });
-        let scan_opts = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
-            ..Default::default()
-        };
-        let mut it = self
-            .db
-            .scan_prefix_with_options(prefix, start_suffix.., &scan_opts)
-            .await?;
+        let mut it = snapshot.scan_prefix(prefix, start_suffix..).await?;
         let Some(kv) = it.next().await? else {
             return Ok(());
         };
@@ -515,6 +535,61 @@ mod tests {
             .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_streamer_rejects_snapshot_of_deleted_incarnation() {
+        use crate::backend::streamer::TerminalTrimCondition;
+        let backend = new_test_backend().await;
+        let (basin, stream) =
+            crate::backend::test_util::create_stream(&backend, OptionalStreamConfig::default())
+                .await;
+        backend
+            .streamer_client_guarded(&basin, &stream)
+            .await
+            .unwrap()
+            .terminal_trim(TerminalTrimCondition::Always)
+            .await
+            .unwrap();
+
+        // This durable split state is also what a crash before mark_stream_deleted leaves.
+        let snapshot = backend.db_snapshot().await.unwrap();
+        let meta_key = kv::stream_meta::ser_key(&basin, &stream);
+        let meta =
+            kv::stream_meta::deser_value(snapshot.get(&meta_key).await.unwrap().unwrap()).unwrap();
+        assert!(meta.deleted_at.is_none());
+        backend.clone().tick_stream_trim().await.unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        // Initialization must not combine the old metadata with the replacement's tail/trim.
+        assert!(matches!(
+            backend
+                .start_streamer_from_snapshot(
+                    StreamerGenerationId::next(),
+                    basin.clone(),
+                    stream.clone(),
+                    &snapshot
+                )
+                .await,
+            Err(StreamerError::StreamDeletionPending(_))
+        ));
+        backend
+            .open_for_check_tail(&basin, &stream)
+            .await
+            .unwrap()
+            .check_tail()
+            .await
+            .unwrap();
+        backend.close().await.unwrap();
     }
 
     #[tokio::test]
