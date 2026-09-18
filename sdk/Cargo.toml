@@ -46,7 +46,7 @@ serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
 time = { workspace = true }
-tokio = { version = "1.6", features = ["time", "macros", "io-util", "sync"] }
+tokio = { version = "1.53", features = ["time", "macros", "io-util", "sync"] }
 tokio-muxt = "0.7"
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["rt", "codec"] }

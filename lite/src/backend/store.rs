@@ -42,3 +42,11 @@ pub(super) async fn db_txn_get<K: AsRef<[u8]> + Send, V>(
     let value = txn.get(key).await?.map(deser).transpose()?;
     Ok(value)
 }
+
+/// Commit metadata changes and wait until remote reads can observe them.
+pub(super) async fn db_txn_commit_durable(txn: DbTransaction) -> Result<(), slatedb::Error> {
+    if let Some(handle) = txn.commit().await? {
+        handle.await_durable().await?;
+    }
+    Ok(())
+}
