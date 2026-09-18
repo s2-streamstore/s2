@@ -49,6 +49,8 @@ pub enum StorageClass {
     #[default]
     #[strum(serialize = "express")]
     Express = 2,
+    #[strum(serialize = "native")]
+    Native = 3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

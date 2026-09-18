@@ -736,10 +736,12 @@ impl<T> Page<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Storage class for recent appends.
 pub enum StorageClass {
-    /// Standard storage class that offers append latencies under `500ms`.
+    /// Append tail latency under 400 ms with s2.dev.
     Standard,
-    /// Express storage class that offers append latencies under `50ms`.
+    /// Append tail latency under 40 ms with s2.dev.
     Express,
+    /// Append tail latency under 4 ms with s2.dev.
+    Native,
 }
 
 impl From<api::config::StorageClass> for StorageClass {
@@ -747,6 +749,7 @@ impl From<api::config::StorageClass> for StorageClass {
         match value {
             api::config::StorageClass::Standard => StorageClass::Standard,
             api::config::StorageClass::Express => StorageClass::Express,
+            api::config::StorageClass::Native => StorageClass::Native,
         }
     }
 }
@@ -756,6 +759,7 @@ impl From<StorageClass> for api::config::StorageClass {
         match value {
             StorageClass::Standard => api::config::StorageClass::Standard,
             StorageClass::Express => api::config::StorageClass::Express,
+            StorageClass::Native => api::config::StorageClass::Native,
         }
     }
 }
@@ -4122,11 +4126,21 @@ mod tests {
     // -- StorageClass --
 
     #[rstest]
-    #[case::standard(StorageClass::Standard)]
-    #[case::express(StorageClass::Express)]
-    fn storage_class_roundtrip(#[case] sdk: StorageClass) {
+    #[case::standard(StorageClass::Standard, "standard", 1)]
+    #[case::express(StorageClass::Express, "express", 2)]
+    #[case::native(StorageClass::Native, "native", 3)]
+    fn storage_class_roundtrip(#[case] sdk: StorageClass, #[case] wire: &str, #[case] repr: u8) {
         let api: api::config::StorageClass = sdk.into();
-        let back: StorageClass = api.into();
+        assert_eq!(serde_json::to_value(api).unwrap(), wire);
+        let decoded: api::config::StorageClass =
+            serde_json::from_value(serde_json::json!(wire)).unwrap();
+        let common: s2_common::config::StorageClass = decoded.into();
+        assert_eq!(common as u8, repr);
+        assert_eq!(
+            s2_common::config::StorageClass::from_repr(repr),
+            Some(common)
+        );
+        let back: StorageClass = api::config::StorageClass::from(common).into();
         assert_eq!(back, sdk);
     }
 
