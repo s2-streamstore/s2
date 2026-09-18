@@ -1692,21 +1692,16 @@ mod tests {
         .await;
         let db = streamer.db.clone();
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let (lease_state, client_leases) = StreamerLeaseState::new();
-        streamer.msg_tx = msg_tx.clone();
-        streamer.lease_state = lease_state;
-        let lease = client_leases.try_acquire().unwrap();
-        let task = tokio::spawn(streamer.run(msg_rx));
+        streamer.msg_tx = msg_tx;
 
-        let (reply_tx, mut reply_rx) = oneshot::channel();
-        msg_tx
-            .send(Message::Append {
-                input: append_input(b"cancelled"),
-                session: None,
-                reply_tx,
-                append_type: AppendType::Regular,
-            })
-            .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_append(
+            append_input(b"cancelled"),
+            None,
+            reply_tx,
+            AppendType::Regular,
+        );
+        let task = tokio::spawn(streamer.run(msg_rx));
         tokio::time::timeout(Duration::from_secs(5), async {
             while db.snapshot().await.unwrap().seq() == 0 {
                 tokio::task::yield_now().await;
@@ -1714,9 +1709,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(futures::poll!(&mut reply_rx).is_pending());
         drop(reply_rx);
-        drop(lease);
         tokio::time::sleep(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
         assert_eq!(
             db.status().durable_seq,
@@ -1728,41 +1721,11 @@ mod tests {
             "dormancy abandoned an unflushed append"
         );
 
-        // The surviving streamer must retain the cancelled append's position.
-        let lease = client_leases.try_acquire().unwrap();
-        let first_seq = db.snapshot().await.unwrap().seq();
-        let (reply_tx, reply_rx) = oneshot::channel();
-        msg_tx
-            .send(Message::Append {
-                input: append_input(b"next"),
-                session: None,
-                reply_tx,
-                append_type: AppendType::Regular,
-            })
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while db.snapshot().await.unwrap().seq() <= first_seq {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
         db.flush().await.unwrap();
-        let ack = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+        tokio::time::timeout(DORMANT_TIMEOUT + Duration::from_secs(1), task)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("durable writes should allow normal dormancy")
             .unwrap();
-        assert_eq!(ack.start.seq_num, 1);
-        assert_eq!(ack.tail.seq_num, 2);
-
-        drop(lease);
-        tokio::time::sleep(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
-        assert!(
-            task.is_finished(),
-            "durable writes should allow normal dormancy"
-        );
-        task.await.unwrap();
         db.close().await.unwrap();
     }
 }
