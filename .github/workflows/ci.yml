@@ -234,6 +234,13 @@ jobs:
             /tmp/s2-porcupine -file="history.$seed.jsonl"
             echo "finished"
           done
+          # And under server-side stream resets.
+          for seed in 6 7; do
+            echo "starting"
+            ./sim/target/sim/sim --stream-reset-rate 0.05 linearizable --seed "$seed" --clients 3 --ops-per-client 50
+            /tmp/s2-porcupine -file="history.$seed.jsonl"
+            echo "finished"
+          done
 
       - name: Upload histories on failure
         if: failure()
