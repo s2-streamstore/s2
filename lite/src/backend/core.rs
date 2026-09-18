@@ -8,7 +8,7 @@ use futures::{
 };
 use s2_common::{
     basin::BasinName,
-    config::{BasinConfig, OptionalStreamConfig, StreamConfig},
+    config::{BasinConfig, OptionalStreamConfig},
     encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::{NonZeroSeqNum, SeqNum, StreamPosition},
     resources::ProvisionMode,
@@ -315,36 +315,17 @@ impl Backend {
         }
     }
 
-    /// Include initializing slots so an update cannot be lost between the
-    /// initial metadata read and publication of the ready client.
-    pub(super) async fn advise_stream_config(
+    pub(super) fn streamer_client_if_active(
         &self,
         basin: &BasinName,
         stream: &StreamName,
-        seq: u64,
-        config: StreamConfig,
-    ) {
+    ) -> Option<StreamerClient> {
         let stream_id = StreamId::new(basin, stream);
-        let slot = self
-            .streamer_slots
-            .get(&stream_id)
-            .map(|slot| slot.value().clone());
-        let client = match slot {
-            Some(StreamerClientSlot::Ready { client }) => client,
-            Some(StreamerClientSlot::Initializing {
-                generation_id,
-                future,
-            }) => {
-                let result = future.await;
-                self.streamer_finish_initialization(stream_id, generation_id, &result);
-                let Ok(client) = result else {
-                    return;
-                };
-                client
-            }
-            None => return,
-        };
-        client.advise_reconfig(seq, config);
+        let slot = self.streamer_slots.get(&stream_id)?;
+        match slot.value() {
+            StreamerClientSlot::Ready { client } if !client.is_dead() => Some(client.clone()),
+            _ => None,
+        }
     }
 
     pub(super) async fn streamer_client_guarded(
@@ -455,30 +436,13 @@ mod tests {
         config::{BasinConfig, OptionalStreamConfig, StreamConfig},
         record::{Metered, MeteredExt as _, Record, StreamPosition},
         resources::ProvisionMode,
-        stream::{AppendInput, AppendRecord, AppendRecordParts},
     };
     use s2_storage::record::StoredRecord;
     use slatedb::{WriteBatch, object_store};
     use time::OffsetDateTime;
 
     use super::*;
-    use crate::backend::{error::AppendError, test_util::DbWriteTestExt as _};
-
-    fn append_input(body: &str) -> AppendInput {
-        let record =
-            Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
-        let record: AppendRecord = AppendRecordParts {
-            timestamp: None,
-            record: Metered::from(record),
-        }
-        .try_into()
-        .unwrap();
-        AppendInput {
-            records: vec![record].try_into().unwrap(),
-            match_seq_num: None,
-            fencing_token: None,
-        }
-    }
+    use crate::backend::test_util::DbWriteTestExt as _;
 
     async fn new_test_backend() -> Backend {
         let object_store: Arc<dyn object_store::ObjectStore> =
@@ -488,26 +452,6 @@ mod tests {
             .await
             .unwrap();
         Backend::new(db, ByteSize::b(1))
-    }
-
-    async fn new_test_backend_with_stream() -> (Backend, BasinName, StreamName) {
-        let backend = new_test_backend().await;
-        let basin: BasinName = "testbasin".parse().unwrap();
-        let stream: StreamName = "stream".parse().unwrap();
-        backend
-            .provision_basin(basin.clone(), Default::default(), ProvisionMode::Ensure)
-            .await
-            .unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                Default::default(),
-                ProvisionMode::Ensure,
-            )
-            .await
-            .unwrap();
-        (backend, basin, stream)
     }
 
     #[tokio::test]
@@ -587,119 +531,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advising_config_does_not_initialize_inactive_streamer() {
-        let (backend, basin, stream) = new_test_backend_with_stream().await;
+    async fn streamer_client_if_active_is_peek_only() {
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("testbasin3").unwrap();
+        let stream = StreamName::from_str("stream3").unwrap();
 
-        assert!(backend.streamer_slots.is_empty());
         backend
-            .advise_stream_config(&basin, &stream, 1, StreamConfig::default())
-            .await;
+            .provision_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+
         assert!(backend.streamer_slots.is_empty());
-    }
-
-    #[rstest::rstest]
-    #[case::ensure(false)]
-    #[case::patch(true)]
-    #[tokio::test]
-    async fn cancelled_config_commit_reaches_initializing_streamer(#[case] patch: bool) {
-        use std::time::Duration;
-
-        use s2_common::{
-            config::{
-                OptionalTimestampingConfig, StreamReconfiguration, TimestampingMode,
-                TimestampingReconfiguration,
-            },
-            maybe::Maybe,
-        };
-
-        let (backend, basin, stream) = new_test_backend_with_stream().await;
-        let stream_id = StreamId::new(&basin, &stream);
-        let generation_id = StreamerGenerationId::next();
-        // Hold initialization after its old metadata read, before publishing Ready.
-        let client = backend
-            .start_streamer(generation_id, basin.clone(), stream.clone())
-            .await
-            .unwrap();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        backend.streamer_slots.insert(
-            stream_id,
-            StreamerClientSlot::Initializing {
-                generation_id,
-                future: async move {
-                    started_tx.send(()).unwrap();
-                    release_rx.await.unwrap();
-                    Ok(client)
-                }
-                .boxed()
-                .shared(),
-            },
-        );
-        {
-            let update = async {
-                if patch {
-                    backend
-                        .reconfigure_stream(
-                            basin.clone(),
-                            stream.clone(),
-                            StreamReconfiguration {
-                                timestamping: Maybe::from(Some(TimestampingReconfiguration {
-                                    mode: Maybe::from(Some(TimestampingMode::ClientRequire)),
-                                    ..Default::default()
-                                })),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .unwrap();
-                } else {
-                    backend
-                        .provision_stream(
-                            basin.clone(),
-                            stream.clone(),
-                            OptionalStreamConfig {
-                                timestamping: OptionalTimestampingConfig {
-                                    mode: Some(TimestampingMode::ClientRequire),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            },
-                            ProvisionMode::Ensure,
-                        )
-                        .await
-                        .unwrap();
-                }
-            };
-            tokio::pin!(update);
-            tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::select! {
-                    biased;
-                    result = &mut update => panic!("update finished before initialization: {result:?}"),
-                    result = started_rx => result.unwrap(),
-                }
-            }).await.unwrap();
-            // Cancel after the durable commit, while delivery waits on initialization.
-        }
-        release_tx.send(()).unwrap();
-        // Only the detached commit task can publish this initializer. Wait for it
-        // directly: a provisioning retry could repair a missing notification.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !matches!(
-                backend.streamer_slots.get(&stream_id).as_deref(),
-                Some(StreamerClientSlot::Ready { .. })
-            ) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let handle = backend
-            .open_for_append(&basin, &stream, None, Default::default())
-            .await
-            .unwrap();
-        let result = handle.append(append_input("requires timestamp")).await;
-        assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
-        backend.close().await.unwrap();
+        assert!(backend.streamer_client_if_active(&basin, &stream).is_none());
+        assert!(backend.streamer_slots.is_empty());
     }
 
     #[tokio::test]
@@ -755,6 +616,26 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_appends_auto_create_stream_without_spurious_not_found() {
+        use s2_common::stream::{AppendInput, AppendRecord, AppendRecordParts};
+
+        use crate::backend::error::AppendError;
+
+        fn append_input(body: &str) -> AppendInput {
+            let record =
+                Record::try_from_parts(vec![], Bytes::copy_from_slice(body.as_bytes())).unwrap();
+            let record: AppendRecord = AppendRecordParts {
+                timestamp: None,
+                record: Metered::from(record),
+            }
+            .try_into()
+            .unwrap();
+            AppendInput {
+                records: vec![record].try_into().unwrap(),
+                match_seq_num: None,
+                fencing_token: None,
+            }
+        }
+
         let backend = new_test_backend().await;
         let basin = BasinName::from_str("autocreate").unwrap();
         backend
