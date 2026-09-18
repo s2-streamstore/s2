@@ -506,6 +506,9 @@ mod tests {
                 kv::stream_record_timestamp::ser_value(),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         backend
             .db
@@ -519,6 +522,9 @@ mod tests {
                 ),
                 kv::stream_record_timestamp::ser_value(),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -582,7 +588,14 @@ mod tests {
         let stream_id = StreamId::new(&basin, &stream);
         let mut batch = WriteBatch::new();
         batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
-        backend.db.write(batch).await.unwrap();
+        backend
+            .db
+            .write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         let start = ReadStart {
             from: ReadFrom::SeqNum(0),
@@ -924,7 +937,14 @@ mod tests {
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
         }
 
-        backend.db.write(delete_batch).await.unwrap();
+        backend
+            .db
+            .write(delete_batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         tokio::time::advance(wait + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;

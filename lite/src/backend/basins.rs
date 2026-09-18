@@ -11,7 +11,11 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, bgtasks::BgtaskTrigger, store::db_txn_get};
+use super::{
+    Backend,
+    bgtasks::BgtaskTrigger,
+    store::{db_txn_commit_durable, db_txn_get},
+};
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, DeleteBasinError,
@@ -134,7 +138,7 @@ impl Backend {
             let meta = outcome.inner();
             txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 
-            txn.commit().await?;
+            db_txn_commit_durable(txn).await?;
         }
 
         Ok(outcome.map(|meta| BasinInfo {
@@ -179,7 +183,7 @@ impl Backend {
 
         txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
 
-        txn.commit().await?;
+        db_txn_commit_durable(txn).await?;
 
         Ok(meta.config)
     }
@@ -197,7 +201,7 @@ impl Backend {
                 kv::basin_deletion_pending::ser_key(&basin),
                 kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
             )?;
-            txn.commit().await?;
+            db_txn_commit_durable(txn).await?;
             self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
         }
         Ok(())

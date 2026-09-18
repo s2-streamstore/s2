@@ -28,7 +28,7 @@ use s2_storage::record::{
 };
 use slatedb::{
     IterationOrder, WriteBatch,
-    config::{PutOptions, ScanOptions, Ttl, WriteOptions},
+    config::{PutOptions, ScanOptions, Ttl},
 };
 use tokio::{
     sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
@@ -1019,7 +1019,7 @@ async fn db_submit_append(
     }: DbSubmitAppendOptions,
 ) -> Result<InFlightAppend, slatedb::Error> {
     let ttl = match retention {
-        RetentionPolicy::Age(age) => Ttl::ExpireAfter(age.as_millis() as u64),
+        RetentionPolicy::Age(age) => Ttl::ExpireAfterMillis(age.as_millis() as u64),
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
     };
     let ttl_put_opts = PutOptions { ttl };
@@ -1058,11 +1058,8 @@ async fn db_submit_append(
         kv::stream_tail_position::ser_key(stream_id),
         kv::stream_tail_position::ser_value(next_pos(&records)),
     );
-    let write_opts = WriteOptions {
-        await_durable: false,
-        ..Default::default()
-    };
-    let write_handle = db.write_with_options(wb, &write_opts).await?;
+    // The durability notifier tracks this sequence and acknowledges the append after flush.
+    let write_handle = db.write(wb).await?;
     Ok(InFlightAppend {
         db_seq: write_handle.seqnum(),
         records,

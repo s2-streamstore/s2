@@ -484,7 +484,14 @@ mod tests {
             kv::stream_record_data::ser_key(stream_id, record_pos),
             kv::stream_record_data::ser_value(metered_record.as_ref()),
         );
-        backend.db.write(wb).await.unwrap();
+        backend
+            .db
+            .write(wb)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         backend
             .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())

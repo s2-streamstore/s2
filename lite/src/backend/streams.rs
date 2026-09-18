@@ -15,7 +15,7 @@ use tracing::instrument;
 
 use super::{
     Backend,
-    store::db_txn_get,
+    store::{db_txn_commit_durable, db_txn_get},
     streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
 };
 use crate::{
@@ -226,7 +226,7 @@ impl Backend {
                 )?;
             }
 
-            txn.commit().await?;
+            db_txn_commit_durable(txn).await?;
         }
 
         if let ProvisionResult::Updated(meta) = &outcome
@@ -333,7 +333,7 @@ impl Backend {
             )?;
         }
 
-        txn.commit().await?;
+        db_txn_commit_durable(txn).await?;
 
         if let Some(client) = self.streamer_client_if_active(&basin, &stream) {
             client.advise_reconfig(meta.config.clone());
@@ -390,7 +390,7 @@ impl Backend {
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
             txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
-            txn.commit().await?;
+            db_txn_commit_durable(txn).await?;
         }
         Ok(())
     }

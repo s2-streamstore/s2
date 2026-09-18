@@ -9,7 +9,12 @@ use slatedb::{
 use tracing::instrument;
 
 use crate::{
-    backend::{Backend, error::StorageError, kv, store::db_txn_get},
+    backend::{
+        Backend,
+        error::StorageError,
+        kv,
+        store::{db_txn_commit_durable, db_txn_get},
+    },
     stream_id::StreamId,
 };
 
@@ -100,13 +105,13 @@ impl Backend {
             batch.delete(kv::stream_record_data::ser_key(stream_id, pos));
             batch_size += 1;
             if batch_size >= DELETE_BATCH_SIZE {
-                self.db.write(batch).await?;
+                self.db.write(batch).await?.await_durable().await?;
                 batch = WriteBatch::new();
                 batch_size = 0;
             }
         }
         if batch_size > 0 {
-            self.db.write(batch).await?;
+            self.db.write(batch).await?.await_durable().await?;
         }
         Ok(has_remaining_records)
     }
@@ -147,7 +152,7 @@ impl Backend {
             txn.delete(kv::stream_tail_position::ser_key(stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(stream_id))?;
         }
-        txn.commit().await?;
+        db_txn_commit_durable(txn).await?;
         Ok(())
     }
 }
@@ -199,6 +204,9 @@ mod tests {
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
                 .await
+                .unwrap()
+                .await_durable()
+                .await
                 .unwrap();
             backend
                 .db
@@ -206,6 +214,9 @@ mod tests {
                     kv::stream_record_timestamp::ser_key(stream_id, pos),
                     kv::stream_record_timestamp::ser_value(),
                 )
+                .await
+                .unwrap()
+                .await_durable()
                 .await
                 .unwrap();
         }
@@ -216,6 +227,9 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(3)),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -276,6 +290,9 @@ mod tests {
                 kv::stream_meta::ser_value(&meta),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         backend
             .db
@@ -283,6 +300,9 @@ mod tests {
                 kv::stream_id_mapping::ser_key(stream_id),
                 kv::stream_id_mapping::ser_value(&basin, &stream),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
         backend
@@ -295,6 +315,9 @@ mod tests {
                 }),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         let token = FencingToken::from_str("token-1").unwrap();
         backend
@@ -303,6 +326,9 @@ mod tests {
                 kv::stream_fencing_token::ser_key(stream_id),
                 kv::stream_fencing_token::ser_value(&token),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -318,6 +344,9 @@ mod tests {
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
                 .await
+                .unwrap()
+                .await_durable()
+                .await
                 .unwrap();
             backend
                 .db
@@ -325,6 +354,9 @@ mod tests {
                     kv::stream_record_timestamp::ser_key(stream_id, pos),
                     kv::stream_record_timestamp::ser_value(),
                 )
+                .await
+                .unwrap()
+                .await_durable()
                 .await
                 .unwrap();
         }
@@ -335,6 +367,9 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(SeqNum::MAX)),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -403,6 +438,9 @@ mod tests {
                 kv::stream_trim_point::ser_value(trim_point(10)),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
 
         backend
@@ -435,7 +473,14 @@ mod tests {
                 kv::stream_trim_point::ser_value(trim_point(1)),
             );
         }
-        backend.db.write(batch).await.unwrap();
+        backend
+            .db
+            .write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         let has_more = backend.clone().tick_stream_trim().await.unwrap();
         assert!(has_more);
@@ -473,6 +518,9 @@ mod tests {
                 kv::stream_record_data::ser_value(metered.as_ref()),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         backend
             .db
@@ -481,6 +529,9 @@ mod tests {
                 kv::stream_record_timestamp::ser_value(),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         backend
             .db
@@ -488,6 +539,9 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(1)),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -533,6 +587,9 @@ mod tests {
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
                 .await
+                .unwrap()
+                .await_durable()
+                .await
                 .unwrap();
             backend
                 .db
@@ -540,6 +597,9 @@ mod tests {
                     kv::stream_record_timestamp::ser_key(stream_id_a, pos_a),
                     kv::stream_record_timestamp::ser_value(),
                 )
+                .await
+                .unwrap()
+                .await_durable()
                 .await
                 .unwrap();
 
@@ -554,6 +614,9 @@ mod tests {
                     kv::stream_record_data::ser_value(metered.as_ref()),
                 )
                 .await
+                .unwrap()
+                .await_durable()
+                .await
                 .unwrap();
             backend
                 .db
@@ -561,6 +624,9 @@ mod tests {
                     kv::stream_record_timestamp::ser_key(stream_id_b, pos_b),
                     kv::stream_record_timestamp::ser_value(),
                 )
+                .await
+                .unwrap()
+                .await_durable()
                 .await
                 .unwrap();
         }
@@ -571,6 +637,9 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id_a),
                 kv::stream_trim_point::ser_value(trim_point(2)),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -645,7 +714,14 @@ mod tests {
             kv::stream_trim_point::ser_key(stream_id),
             kv::stream_trim_point::ser_value(trim_point(total)),
         );
-        backend.db.write(batch).await.unwrap();
+        backend
+            .db
+            .write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         backend.clone().tick_stream_trim().await.unwrap();
 
@@ -706,6 +782,9 @@ mod tests {
                 kv::stream_trim_point::ser_key(stream_id),
                 kv::stream_trim_point::ser_value(trim_point(5)),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 

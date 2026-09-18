@@ -122,7 +122,7 @@ impl Backend {
             kv::basin_deletion_pending::ser_key(basin),
             kv::basin_deletion_pending::ser_value(cursor),
         );
-        self.db.write(batch).await?;
+        self.db.write(batch).await?.await_durable().await?;
         Ok(())
     }
 
@@ -131,7 +131,7 @@ impl Backend {
         let mut batch = WriteBatch::new();
         batch.delete(kv::basin_meta::ser_key(basin));
         batch.delete(kv::basin_deletion_pending::ser_key(basin));
-        self.db.write(batch).await?;
+        self.db.write(batch).await?.await_durable().await?;
         Ok(())
     }
 }
@@ -186,6 +186,9 @@ mod tests {
                 kv::basin_meta::ser_value(&basin_meta(Some(OffsetDateTime::now_utc()))),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         backend
             .db
@@ -193,6 +196,9 @@ mod tests {
                 kv::basin_deletion_pending::ser_key(basin),
                 kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
     }
@@ -207,7 +213,14 @@ mod tests {
                 kv::stream_meta::ser_value(&stream_meta(Some(deleted_at))),
             );
         }
-        backend.db.write(batch).await.unwrap();
+        backend
+            .db
+            .write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -222,6 +235,9 @@ mod tests {
                 kv::basin_meta::ser_value(&basin_meta(Some(OffsetDateTime::now_utc()))),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         backend
             .db
@@ -229,6 +245,9 @@ mod tests {
                 kv::basin_deletion_pending::ser_key(&basin),
                 kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -266,6 +285,9 @@ mod tests {
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::ser_value(&stream_meta(None)),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -385,6 +407,9 @@ mod tests {
                 kv::basin_meta::ser_value(&basin_meta(Some(OffsetDateTime::now_utc()))),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         backend
             .db
@@ -392,6 +417,9 @@ mod tests {
                 kv::basin_deletion_pending::ser_key(&basin),
                 kv::basin_deletion_pending::ser_value(&cursor),
             )
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
@@ -436,6 +464,9 @@ mod tests {
                 kv::stream_meta::ser_value(&stream_meta(Some(deleted_at))),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
 
         let has_more = backend.clone().tick_basin_deletion().await.unwrap();
@@ -475,6 +506,9 @@ mod tests {
                 kv::stream_meta::ser_value(&stream_meta(Some(deleted_at))),
             )
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
 
         // First tick: blocked by tombstoned stream.
@@ -493,6 +527,9 @@ mod tests {
         backend
             .db
             .delete(kv::stream_meta::ser_key(&basin, &stream))
+            .await
+            .unwrap()
+            .await_durable()
             .await
             .unwrap();
 
