@@ -112,17 +112,6 @@ impl Backend {
         generation_id: StreamerGenerationId,
         basin: BasinName,
         stream: StreamName,
-    ) -> Result<StreamerClient, StreamerError> {
-        let snapshot = self.db_snapshot().await?;
-        self.start_streamer_from_snapshot(generation_id, basin, stream, &snapshot)
-            .await
-    }
-
-    async fn start_streamer_from_snapshot(
-        &self,
-        generation_id: StreamerGenerationId,
-        basin: BasinName,
-        stream: StreamName,
         snapshot: &slatedb::DbSnapshot,
     ) -> Result<StreamerClient, StreamerError> {
         let stream_id = StreamId::new(&basin, &stream);
@@ -253,9 +242,13 @@ impl Backend {
         let basin = basin.clone();
         let stream = stream.clone();
         let generation_id = StreamerGenerationId::next();
-        let future = async move { self.start_streamer(generation_id, basin, stream).await }
-            .boxed()
-            .shared();
+        let future = async move {
+            let snapshot = self.db_snapshot().await?;
+            self.start_streamer(generation_id, basin, stream, &snapshot)
+                .await
+        }
+        .boxed()
+        .shared();
         StreamerClientSlot::Initializing {
             generation_id,
             future,
@@ -538,7 +531,12 @@ mod tests {
         backend.db.write(wb).assert_durable().await;
 
         backend
-            .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())
+            .start_streamer(
+                StreamerGenerationId::next(),
+                basin.clone(),
+                stream.clone(),
+                &backend.db_snapshot().await.unwrap(),
+            )
             .await
             .unwrap();
     }
@@ -579,7 +577,7 @@ mod tests {
         // Initialization must not combine the old metadata with the replacement's tail/trim.
         assert!(matches!(
             backend
-                .start_streamer_from_snapshot(
+                .start_streamer(
                     StreamerGenerationId::next(),
                     basin.clone(),
                     stream.clone(),
@@ -658,7 +656,12 @@ mod tests {
         // Pause initialization after reading metadata, before publishing the client.
         let generation_id = StreamerGenerationId::next();
         let client = backend
-            .start_streamer(generation_id, basin.clone(), stream.clone())
+            .start_streamer(
+                generation_id,
+                basin.clone(),
+                stream.clone(),
+                &backend.db_snapshot().await.unwrap(),
+            )
             .await
             .unwrap();
         backend.streamer_slots.insert(
