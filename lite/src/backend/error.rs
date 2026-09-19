@@ -12,6 +12,8 @@ use crate::backend::kv;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum StorageError {
+    #[error("invariant violation: {0}")]
+    InvariantViolation(String),
     #[error("deserialization: {0}")]
     Deserialization(#[from] kv::DeserializationError),
     #[error("database: {0}")]

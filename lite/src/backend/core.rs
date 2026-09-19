@@ -176,12 +176,18 @@ impl Backend {
 
         let fencing_token = fencing_token.unwrap_or_default();
 
+        let creation_seq = creation_seq.ok_or_else(|| {
+            StorageError::InvariantViolation(format!(
+                "live stream `{basin}/{stream}` has no ID mapping"
+            ))
+        })?;
+
         let streamer_slots = self.streamer_slots.clone();
         Ok(super::streamer::Spawner {
             generation_id,
             db: self.db.clone(),
             stream_id,
-            creation_seq: creation_seq.expect("live stream has an ID mapping"),
+            creation_seq,
             config: meta.config,
             config_seq,
             cipher: meta.cipher,
