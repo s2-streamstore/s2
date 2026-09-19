@@ -117,7 +117,7 @@ impl Backend {
     ) -> Result<StreamerClient, StreamerError> {
         let stream_id = StreamId::new(&basin, &stream);
 
-        let (meta, persisted_tail, fencing_token, trim_point, creation_seq) = tokio::try_join!(
+        let (meta, persisted_tail, fencing_token, trim_point, stream_creation_seq) = tokio::try_join!(
             db_snapshot_get_with(
                 snapshot,
                 kv::stream_meta::ser_key(&basin, &stream),
@@ -166,7 +166,7 @@ impl Backend {
 
         let fencing_token = fencing_token.unwrap_or_default();
 
-        let creation_seq = creation_seq.ok_or_else(|| {
+        let stream_creation_seq = stream_creation_seq.ok_or_else(|| {
             StorageError::InvariantViolation(format!(
                 "live stream `{basin}/{stream}` has no ID mapping"
             ))
@@ -177,7 +177,7 @@ impl Backend {
             generation_id,
             db: self.db.clone(),
             stream_id,
-            creation_seq,
+            stream_creation_seq,
             config: meta.config,
             config_seq,
             cipher: meta.cipher,

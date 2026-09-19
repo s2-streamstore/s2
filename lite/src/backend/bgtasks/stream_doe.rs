@@ -30,11 +30,11 @@ struct PendingDoeBatch {
 }
 
 impl PendingDoeBatch {
-    fn last_write_cutoff(&self, creation_seq: u64) -> Option<TimestampSecs> {
+    fn last_write_cutoff(&self, stream_creation_seq: u64) -> Option<TimestampSecs> {
         self.entries
             .iter()
             // The ID mapping is written only when this incarnation is created.
-            .filter(|(_, deadline_seq)| *deadline_seq >= creation_seq)
+            .filter(|(_, deadline_seq)| *deadline_seq >= stream_creation_seq)
             .filter_map(|(entry, _)| entry.last_write_cutoff())
             .max()
     }
@@ -103,12 +103,12 @@ impl Backend {
         stream_id: StreamId,
         pending: PendingDoeBatch,
     ) -> Result<(), StreamDeleteOnEmptyError> {
-        if let Some(((basin, stream), creation_seq)) = self
+        if let Some(((basin, stream), stream_creation_seq)) = self
             .db_get_with(kv::stream_id_mapping::ser_key(stream_id), |entry| {
                 Ok((kv::stream_id_mapping::deser_value(entry.value)?, entry.seq))
             })
             .await?
-            && let Some(last_write_cutoff) = pending.last_write_cutoff(creation_seq)
+            && let Some(last_write_cutoff) = pending.last_write_cutoff(stream_creation_seq)
         {
             match self
                 .delete_stream_with_condition(
@@ -116,7 +116,7 @@ impl Backend {
                     stream,
                     TerminalTrimCondition::DeleteOnEmpty {
                         last_write_cutoff,
-                        expected_creation_seq: creation_seq,
+                        expected_stream_creation_seq: stream_creation_seq,
                     },
                 )
                 .await
@@ -809,7 +809,7 @@ mod tests {
         let (basin, stream) =
             crate::backend::test_util::create_stream(&backend, config.clone()).await;
         let stream_id = StreamId::new(&basin, &stream);
-        let creation_seq = backend
+        let stream_creation_seq = backend
             .db_get_with(kv::stream_id_mapping::ser_key(stream_id), |row| Ok(row.seq))
             .await
             .unwrap()
@@ -866,7 +866,7 @@ mod tests {
             .unwrap()
             .terminal_trim(TerminalTrimCondition::DeleteOnEmpty {
                 last_write_cutoff: deadline,
-                expected_creation_seq: creation_seq,
+                expected_stream_creation_seq: stream_creation_seq,
             })
             .await
             .unwrap();
