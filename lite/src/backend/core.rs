@@ -107,6 +107,7 @@ impl Backend {
         .into())
     }
 
+    /// Read one consistent view of the stream. The snapshot must already be durable.
     async fn start_streamer(
         &self,
         generation_id: StreamerGenerationId,
@@ -243,7 +244,7 @@ impl Backend {
         let stream = stream.clone();
         let generation_id = StreamerGenerationId::next();
         let future = async move {
-            let snapshot = self.db_snapshot().await?;
+            let snapshot = self.db_snapshot_durable().await?;
             self.start_streamer(generation_id, basin, stream, &snapshot)
                 .await
         }
@@ -535,14 +536,14 @@ mod tests {
                 StreamerGenerationId::next(),
                 basin.clone(),
                 stream.clone(),
-                &backend.db_snapshot().await.unwrap(),
+                &backend.db_snapshot_durable().await.unwrap(),
             )
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn start_streamer_rejects_snapshot_of_deleted_incarnation() {
+    async fn start_streamer_rejects_terminal_trim_snapshot_after_recreation() {
         use crate::backend::streamer::TerminalTrimCondition;
         let backend = new_test_backend().await;
         let (basin, stream) =
@@ -557,7 +558,7 @@ mod tests {
             .unwrap();
 
         // This durable split state is also what a crash before mark_stream_deleted leaves.
-        let snapshot = backend.db_snapshot().await.unwrap();
+        let snapshot = backend.db_snapshot_durable().await.unwrap();
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
         let meta =
             kv::stream_meta::deser_value(snapshot.get(&meta_key).await.unwrap().unwrap()).unwrap();
@@ -660,7 +661,7 @@ mod tests {
                 generation_id,
                 basin.clone(),
                 stream.clone(),
-                &backend.db_snapshot().await.unwrap(),
+                &backend.db_snapshot_durable().await.unwrap(),
             )
             .await
             .unwrap();

@@ -34,7 +34,7 @@ impl PendingDoeBatch {
         self.entries
             .iter()
             // The ID mapping is written only when this incarnation is created.
-            .filter(|(_, seq)| *seq >= creation_seq)
+            .filter(|(_, deadline_seq)| *deadline_seq >= creation_seq)
             .filter_map(|(entry, _)| entry.last_write_cutoff())
             .max()
     }
@@ -116,7 +116,7 @@ impl Backend {
                     stream,
                     TerminalTrimCondition::DeleteOnEmpty {
                         last_write_cutoff,
-                        creation_seq,
+                        expected_creation_seq: creation_seq,
                     },
                 )
                 .await
@@ -137,10 +137,10 @@ impl Backend {
         pending: &[(kv::stream_doe_deadline::Entry, u64)],
     ) -> Result<(), StorageError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        for (entry, seq) in pending {
+        for (entry, deadline_seq) in pending {
             let key = kv::stream_doe_deadline::ser_key(entry.deadline, stream_id);
             // A new incarnation may have scheduled the same deadline key.
-            if db_txn_get_with(&txn, &key, |row| Ok(row.seq)).await? == Some(*seq) {
+            if db_txn_get_with(&txn, &key, |row| Ok(row.seq)).await? == Some(*deadline_seq) {
                 txn.delete(key)?;
             }
         }
@@ -794,11 +794,12 @@ mod tests {
             vec![(existing_deadline, stream_id, initial_min_age)]
         );
     }
+
     #[rstest::rstest]
-    #[case(false)]
-    #[case(true)]
+    #[case::stale_deadline(false)]
+    #[case::replaced_deadline(true)]
     #[tokio::test]
-    async fn old_doe_work_cannot_delete_recreated_stream(#[case] replace_deadline: bool) {
+    async fn stale_doe_work_cannot_delete_recreated_stream(#[case] replace_deadline: bool) {
         use s2_common::resources::ProvisionMode;
 
         use crate::backend::streamer::{TerminalTrimCondition, TerminalTrimOutcome};
@@ -846,7 +847,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let replacement_seq = if replace_deadline {
+        let replacement_deadline_seq = if replace_deadline {
             Some(
                 backend
                     .db
@@ -865,7 +866,7 @@ mod tests {
             .unwrap()
             .terminal_trim(TerminalTrimCondition::DeleteOnEmpty {
                 last_write_cutoff: deadline,
-                creation_seq,
+                expected_creation_seq: creation_seq,
             })
             .await
             .unwrap();
@@ -882,7 +883,7 @@ mod tests {
         );
         assert_eq!(
             backend.db_get_with(&key, |row| Ok(row.seq)).await.unwrap(),
-            replacement_seq,
+            replacement_deadline_seq,
             "cleanup must preserve a replacement deadline at the same key"
         );
         backend.close().await.unwrap();

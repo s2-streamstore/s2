@@ -10,8 +10,8 @@ use super::Backend;
 use crate::backend::{error::StorageError, kv};
 
 impl Backend {
-    /// Pin one snapshot and make all of it durable before reading multiple keys.
-    pub(super) async fn db_snapshot(&self) -> Result<Arc<DbSnapshot>, StorageError> {
+    /// Pin a snapshot and wait until all writes it includes are durable.
+    pub(super) async fn db_snapshot_durable(&self) -> Result<Arc<DbSnapshot>, StorageError> {
         let snapshot = self.db.snapshot().await?;
         self.await_durable_seq(snapshot.seq()).await?;
         Ok(snapshot)

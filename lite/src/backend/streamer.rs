@@ -210,7 +210,8 @@ pub(super) struct Spawner {
     pub generation_id: StreamerGenerationId,
     pub db: slatedb::Db,
     pub stream_id: StreamId,
-    /// Commit sequence of the ID mapping, unchanged throughout this incarnation.
+    /// Database commit sequence that created the stream's ID mapping.
+    /// Stable across streamer restarts; changes when the stream is recreated.
     pub creation_seq: u64,
     pub config: StreamConfig,
     pub config_seq: u64,
@@ -465,9 +466,9 @@ impl Streamer {
             }
             TerminalTrimCondition::DeleteOnEmpty {
                 last_write_cutoff,
-                creation_seq,
+                expected_creation_seq,
             } => {
-                if self.creation_seq != creation_seq
+                if self.creation_seq != expected_creation_seq
                     || self.last_tail_write_timestamp > last_write_cutoff
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                     || self.config.delete_on_empty.min_age().is_none()
@@ -773,7 +774,7 @@ pub(super) enum TerminalTrimCondition {
     Always,
     DeleteOnEmpty {
         last_write_cutoff: kv::timestamp::TimestampSecs,
-        creation_seq: u64,
+        expected_creation_seq: u64,
     },
 }
 
@@ -1619,7 +1620,7 @@ mod tests {
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
                 last_write_cutoff: kv::timestamp::TimestampSecs::MAX,
-                creation_seq: 0,
+                expected_creation_seq: 0,
             },
             trim_tx,
         );

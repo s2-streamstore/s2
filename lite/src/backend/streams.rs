@@ -114,7 +114,7 @@ impl Backend {
         if existing_meta
             .as_ref()
             .is_some_and(|meta| meta.deleted_at.is_some())
-            || stream_terminally_trimmed(&txn, StreamId::new(&basin, &stream)).await?
+            || has_terminal_trim(&txn, StreamId::new(&basin, &stream)).await?
         {
             return Err(ProvisionStreamError::StreamDeletionPending(
                 StreamDeletionPendingError,
@@ -291,7 +291,7 @@ impl Backend {
         })?;
 
         if meta.deleted_at.is_some()
-            || stream_terminally_trimmed(&txn, StreamId::new(&basin, &stream)).await?
+            || has_terminal_trim(&txn, StreamId::new(&basin, &stream)).await?
         {
             return Err(StreamDeletionPendingError.into());
         }
@@ -384,13 +384,14 @@ impl Backend {
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        // A delayed DELETE may resume after purge and recreation. Only mark
-        // metadata while the same transaction observes a terminal trim.
-        if !stream_terminally_trimmed(&txn, StreamId::new(&basin, &stream)).await? {
+        // A delayed DELETE may resume after the trim worker has deleted the old
+        // stream and the name has been reused. Only mark metadata when this
+        // transaction also sees a terminal trim marker.
+        if !has_terminal_trim(&txn, StreamId::new(&basin, &stream)).await? {
             drop(txn);
-            // The missing marker may be an unflushed purge. Its removal must
-            // become durable before this DELETE can acknowledge completion.
-            let _snapshot = self.db_snapshot().await?;
+            // The trim worker may have removed the marker without flushing yet.
+            // Wait for that removal to become durable before acknowledging DELETE.
+            let _snapshot = self.db_snapshot_durable().await?;
             return Ok(());
         }
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
@@ -415,10 +416,7 @@ impl Backend {
     }
 }
 
-async fn stream_terminally_trimmed(
-    txn: &DbTransaction,
-    stream_id: StreamId,
-) -> Result<bool, StorageError> {
+async fn has_terminal_trim(txn: &DbTransaction, stream_id: StreamId) -> Result<bool, StorageError> {
     Ok(db_txn_get(
         txn,
         kv::stream_trim_point::ser_key(stream_id),
