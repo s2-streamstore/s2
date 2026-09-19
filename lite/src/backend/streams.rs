@@ -388,10 +388,11 @@ impl Backend {
         // stream and the name has been reused. Only mark metadata when this
         // transaction also sees a terminal trim marker.
         if !has_terminal_trim(&txn, StreamId::new(&basin, &stream)).await? {
+            let read_seq = txn.seqnum();
             drop(txn);
             // The trim worker may have removed the marker without flushing yet.
             // Wait for that removal to become durable before acknowledging DELETE.
-            let _snapshot = self.db_snapshot_durable().await?;
+            self.await_durable_seq(read_seq).await?;
             return Ok(());
         }
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);

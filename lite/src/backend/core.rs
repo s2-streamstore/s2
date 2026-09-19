@@ -242,12 +242,22 @@ impl Backend {
     fn new_initializing_slot(self, basin: &BasinName, stream: &StreamName) -> StreamerClientSlot {
         let basin = basin.clone();
         let stream = stream.clone();
+        let stream_id = StreamId::new(&basin, &stream);
         let generation_id = StreamerGenerationId::next();
-        let future = async move {
-            let snapshot = self.db_snapshot_durable().await?;
-            self.start_streamer(generation_id, basin, stream, &snapshot)
-                .await
-        }
+        // Drive initialization independently so cancelled callers cannot leave
+        // its snapshot pinned in a cached, unpolled future.
+        let future = tokio::spawn(async move {
+            let result = match self.db_snapshot_durable().await {
+                Ok(snapshot) => {
+                    self.start_streamer(generation_id, basin, stream, &snapshot)
+                        .await
+                }
+                Err(err) => Err(err.into()),
+            };
+            self.streamer_finish_initialization(stream_id, generation_id, &result);
+            result
+        })
+        .map(|result| result.expect("streamer initialization task panicked"))
         .boxed()
         .shared();
         StreamerClientSlot::Initializing {
@@ -303,17 +313,8 @@ impl Backend {
         basin: &BasinName,
         stream: &StreamName,
     ) -> Result<StreamerClient, StreamerError> {
-        let stream_id = StreamId::new(basin, stream);
         match self.streamer_client_slot(basin, stream) {
-            StreamerClientSlot::Initializing {
-                generation_id,
-                future,
-                ..
-            } => {
-                let result = future.await;
-                self.streamer_finish_initialization(stream_id, generation_id, &result);
-                result
-            }
+            StreamerClientSlot::Initializing { future, .. } => future.await,
             StreamerClientSlot::Ready { client } => Ok(client),
         }
     }
@@ -598,29 +599,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streamer_client_slot_uses_single_initializer() {
-        let backend = new_test_backend().await;
+    async fn streamer_initialization_is_shared_and_survives_cancellation() {
+        let db = slatedb::Db::builder("test", Arc::new(object_store::memory::InMemory::new()))
+            .with_settings(slatedb::config::Settings {
+                flush_interval: None,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let backend = Backend::new(db, ByteSize::b(1));
+        backend.db.put(b"unflushed", b"value").await.unwrap();
         let basin = BasinName::from_str("testbasin2").unwrap();
         let stream = StreamName::from_str("stream2").unwrap();
 
         let slot_1 = backend.streamer_client_slot(&basin, &stream);
         let slot_2 = backend.streamer_client_slot(&basin, &stream);
 
-        let (generation_id_1, generation_id_2) = match (slot_1, slot_2) {
+        let (generation_id_1, generation_id_2, mut future_1, future_2) = match (slot_1, slot_2) {
             (
                 StreamerClientSlot::Initializing {
                     generation_id: generation_id_1,
+                    future: future_1,
                     ..
                 },
                 StreamerClientSlot::Initializing {
                     generation_id: generation_id_2,
+                    future: future_2,
                     ..
                 },
-            ) => (generation_id_1, generation_id_2),
+            ) => (generation_id_1, generation_id_2, future_1, future_2),
             _ => panic!("expected both slots to be Initializing"),
         };
         assert_eq!(generation_id_1, generation_id_2);
         assert_eq!(backend.streamer_slots.len(), 1);
+
+        // Cancel every caller while initialization waits for its snapshot to be durable.
+        assert!(futures::poll!(&mut future_1).is_pending());
+        tokio::task::yield_now().await;
+        drop((future_1, future_2));
+        backend.db.flush().await.unwrap();
+
+        // The missing stream must still finish initialization and release its snapshot.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !backend.streamer_slots.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        backend.close().await.unwrap();
     }
 
     #[tokio::test]

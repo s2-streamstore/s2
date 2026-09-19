@@ -123,7 +123,7 @@ impl Backend {
         let mut batch = Vec::new();
         let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
-            let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
+            let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
             debug_assert_eq!(deser_stream_id, stream_id);
             if pos.seq_num >= trim_point.end.get() {
                 has_remaining_records = true;
