@@ -24,20 +24,18 @@ use crate::{
 const PENDING_LIST_LIMIT: usize = 10_000;
 const CONCURRENCY: usize = 4;
 
-#[derive(Debug)]
-struct PendingDoeBatch {
-    entries: Vec<(kv::stream_doe_deadline::Entry, u64)>,
-}
+type PendingDoeBatch = Vec<(kv::stream_doe_deadline::Entry, u64)>;
 
-impl PendingDoeBatch {
-    fn last_write_cutoff(&self, stream_creation_seq: u64) -> Option<TimestampSecs> {
-        self.entries
-            .iter()
-            // The ID mapping is written only when this incarnation is created.
-            .filter(|(_, deadline_seq)| *deadline_seq >= stream_creation_seq)
-            .filter_map(|(entry, _)| entry.last_write_cutoff())
-            .max()
-    }
+fn last_write_cutoff(
+    pending: &[(kv::stream_doe_deadline::Entry, u64)],
+    stream_creation_seq: u64,
+) -> Option<TimestampSecs> {
+    pending
+        .iter()
+        // The ID mapping is written only when this incarnation is created.
+        .filter(|(_, deadline_seq)| *deadline_seq >= stream_creation_seq)
+        .filter_map(|(entry, _)| entry.last_write_cutoff())
+        .max()
 }
 
 impl Backend {
@@ -71,8 +69,7 @@ impl Backend {
             .db
             .scan_with_options(kv::stream_doe_deadline::expired_key_range(now), &scan_opts)
             .await?;
-        let mut pending: IndexMap<StreamId, Vec<(kv::stream_doe_deadline::Entry, u64)>> =
-            IndexMap::new();
+        let mut pending: IndexMap<StreamId, PendingDoeBatch> = IndexMap::new();
         let mut has_more = false;
         let mut count = 0;
         while let Some(kv) = it.next().await? {
@@ -89,13 +86,7 @@ impl Backend {
                 break;
             }
         }
-        Ok(Page::new(
-            pending
-                .into_iter()
-                .map(|(stream_id, entries)| (stream_id, PendingDoeBatch { entries }))
-                .collect_vec(),
-            has_more,
-        ))
+        Ok(Page::new(pending.into_iter().collect_vec(), has_more))
     }
 
     async fn process_stream_doe(
@@ -108,7 +99,7 @@ impl Backend {
                 Ok((kv::stream_id_mapping::deser_value(entry.value)?, entry.seq))
             })
             .await?
-            && let Some(last_write_cutoff) = pending.last_write_cutoff(stream_creation_seq)
+            && let Some(last_write_cutoff) = last_write_cutoff(&pending, stream_creation_seq)
         {
             match self
                 .delete_stream_with_condition(
@@ -125,8 +116,7 @@ impl Backend {
                 Err(err) => return Err(err.into()),
             }
         }
-        self.clear_doe_deadlines(stream_id, &pending.entries)
-            .await?;
+        self.clear_doe_deadlines(stream_id, &pending).await?;
         Ok(())
     }
 
@@ -203,7 +193,7 @@ mod tests {
     use slatedb::config::{DurabilityLevel, ScanOptions};
     use time::OffsetDateTime;
 
-    use super::{super::tests::test_backend, PendingDoeBatch, TimestampSecs};
+    use super::{super::tests::test_backend, TimestampSecs, last_write_cutoff};
     use crate::{
         backend::{Backend, kv, test_util::DbWriteTestExt as _},
         stream_id::StreamId,
@@ -621,11 +611,7 @@ mod tests {
         assert_eq!(page.values.len(), 1);
         let (pending_stream_id, pending) = page.values.into_iter().next().unwrap();
         assert_eq!(pending_stream_id, stream_id);
-        let mut deadlines: Vec<_> = pending
-            .entries
-            .iter()
-            .map(|(entry, _)| entry.deadline)
-            .collect();
+        let mut deadlines: Vec<_> = pending.iter().map(|(entry, _)| entry.deadline).collect();
         deadlines.sort();
         let mut expected = vec![deadline_a, deadline_b];
         expected.sort();
@@ -648,34 +634,32 @@ mod tests {
 
     #[test]
     fn pending_doe_uses_latest_eligible_cutoff_from_this_incarnation() {
-        let pending = PendingDoeBatch {
-            entries: vec![
-                (
-                    kv::stream_doe_deadline::Entry {
-                        deadline: TimestampSecs::from_secs(50),
-                        min_age: Duration::from_secs(100),
-                    },
-                    20,
-                ),
-                (
-                    kv::stream_doe_deadline::Entry {
-                        deadline: TimestampSecs::from_secs(100),
-                        min_age: Duration::from_secs(10),
-                    },
-                    20,
-                ),
-                // An old incarnation's later cutoff must not win.
-                (
-                    kv::stream_doe_deadline::Entry {
-                        deadline: TimestampSecs::MAX,
-                        min_age: MIN_AGE,
-                    },
-                    10,
-                ),
-            ],
-        };
+        let pending = [
+            (
+                kv::stream_doe_deadline::Entry {
+                    deadline: TimestampSecs::from_secs(50),
+                    min_age: Duration::from_secs(100),
+                },
+                20,
+            ),
+            (
+                kv::stream_doe_deadline::Entry {
+                    deadline: TimestampSecs::from_secs(100),
+                    min_age: Duration::from_secs(10),
+                },
+                20,
+            ),
+            // An old incarnation's later cutoff must not win.
+            (
+                kv::stream_doe_deadline::Entry {
+                    deadline: TimestampSecs::MAX,
+                    min_age: MIN_AGE,
+                },
+                10,
+            ),
+        ];
         assert_eq!(
-            pending.last_write_cutoff(20),
+            last_write_cutoff(&pending, 20),
             Some(TimestampSecs::from_secs(90))
         );
     }
@@ -828,9 +812,7 @@ mod tests {
             .values
             .pop()
             .unwrap();
-        pending
-            .entries
-            .retain(|(entry, _)| entry.deadline == deadline);
+        pending.retain(|(entry, _)| entry.deadline == deadline);
         backend
             .delete_stream(basin.clone(), stream.clone())
             .await
