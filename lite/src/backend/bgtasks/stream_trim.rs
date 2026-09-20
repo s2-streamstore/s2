@@ -25,6 +25,14 @@ const PENDING_LIST_LIMIT: usize = 128;
 const CONCURRENCY: usize = 4;
 const DELETE_BATCH_SIZE: usize = 10_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingTrim {
+    stream_id: StreamId,
+    trim_point: RangeTo<NonZeroSeqNum>,
+    /// Database commit sequence of the observed trim marker.
+    marker_seq: u64,
+}
+
 impl Backend {
     pub(in crate::backend) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
         let page = self.list_stream_trim_pending().await?;
@@ -32,13 +40,9 @@ impl Backend {
             return Ok(page.has_more);
         }
         let mut processed = stream::iter(page.values)
-            .map(|(stream_id, trim_point, marker_seq)| {
+            .map(|pending| {
                 let backend = self.clone();
-                async move {
-                    backend
-                        .process_trim(stream_id, trim_point, marker_seq)
-                        .await
-                }
+                async move { backend.process_trim(pending).await }
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
@@ -47,9 +51,7 @@ impl Backend {
         Ok(page.has_more)
     }
 
-    async fn list_stream_trim_pending(
-        &self,
-    ) -> Result<Page<(StreamId, RangeTo<NonZeroSeqNum>, u64)>, StorageError> {
+    async fn list_stream_trim_pending(&self) -> Result<Page<PendingTrim>, StorageError> {
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
@@ -62,7 +64,11 @@ impl Backend {
         while let Some(kv) = it.next().await? {
             let stream_id = kv::stream_trim_point::deser_key(kv.key)?;
             let trim_point = kv::stream_trim_point::deser_value(kv.value)?;
-            pending.push((stream_id, trim_point, kv.seq));
+            pending.push(PendingTrim {
+                stream_id,
+                trim_point,
+                marker_seq: kv.seq,
+            });
             if pending.len() >= PENDING_LIST_LIMIT {
                 return Ok(Page::new(pending, true));
             }
@@ -70,48 +76,40 @@ impl Backend {
         Ok(Page::new(pending, false))
     }
 
-    async fn process_trim(
-        &self,
-        stream_id: StreamId,
-        trim_point: RangeTo<NonZeroSeqNum>,
-        marker_seq: u64,
-    ) -> Result<(), StorageError> {
-        let Some(has_remaining_records) = self
-            .delete_records(stream_id, trim_point, marker_seq)
-            .await?
-        else {
+    async fn process_trim(&self, pending: PendingTrim) -> Result<(), StorageError> {
+        let Some(has_remaining_records) = self.delete_records(pending).await? else {
             return Ok(());
         };
-        self.finalize_trim(stream_id, trim_point, marker_seq, has_remaining_records)
-            .await
+        self.finalize_trim(pending, has_remaining_records).await
     }
 
     /// Return a transaction only while the queued trim marker is still current.
     async fn begin_trim_txn_if_current(
         &self,
-        stream_id: StreamId,
-        trim_point: RangeTo<NonZeroSeqNum>,
-        marker_seq: u64,
+        pending: PendingTrim,
     ) -> Result<Option<DbTransaction>, StorageError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        let current = db_txn_get_with(&txn, kv::stream_trim_point::ser_key(stream_id), |entry| {
-            Ok((kv::stream_trim_point::deser_value(entry.value)?, entry.seq))
-        })
+        let current = db_txn_get_with(
+            &txn,
+            kv::stream_trim_point::ser_key(pending.stream_id),
+            |entry| {
+                Ok(PendingTrim {
+                    stream_id: pending.stream_id,
+                    trim_point: kv::stream_trim_point::deser_value(entry.value)?,
+                    marker_seq: entry.seq,
+                })
+            },
+        )
         .await?;
         // The value alone can repeat after deletion and recreation. Validate the
         // queued marker's sequence in every transaction that deletes stream keys.
-        Ok((current == Some((trim_point, marker_seq))).then_some(txn))
+        Ok((current == Some(pending)).then_some(txn))
     }
 
     /// Return whether records remain, or `None` if the trim marker changed.
     #[instrument(ret, err, skip(self))]
-    async fn delete_records(
-        &self,
-        stream_id: StreamId,
-        trim_point: RangeTo<NonZeroSeqNum>,
-        marker_seq: u64,
-    ) -> Result<Option<bool>, StorageError> {
-        let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
+    async fn delete_records(&self, pending: PendingTrim) -> Result<Option<bool>, StorageError> {
+        let prefix = kv::stream_record_timestamp::ser_key_prefix(pending.stream_id);
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
@@ -124,27 +122,20 @@ impl Backend {
         let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key)?;
-            debug_assert_eq!(deser_stream_id, stream_id);
-            if pos.seq_num >= trim_point.end.get() {
+            debug_assert_eq!(deser_stream_id, pending.stream_id);
+            if pos.seq_num >= pending.trim_point.end.get() {
                 has_remaining_records = true;
                 break;
             }
             batch.push(pos);
             if batch.len() >= DELETE_BATCH_SIZE {
-                if !self
-                    .delete_record_batch(stream_id, trim_point, marker_seq, &batch)
-                    .await?
-                {
+                if !self.delete_record_batch(pending, &batch).await? {
                     return Ok(None);
                 }
                 batch.clear();
             }
         }
-        if !batch.is_empty()
-            && !self
-                .delete_record_batch(stream_id, trim_point, marker_seq, &batch)
-                .await?
-        {
+        if !batch.is_empty() && !self.delete_record_batch(pending, &batch).await? {
             return Ok(None);
         }
         Ok(Some(has_remaining_records))
@@ -152,20 +143,18 @@ impl Backend {
 
     async fn delete_record_batch(
         &self,
-        stream_id: StreamId,
-        trim_point: RangeTo<NonZeroSeqNum>,
-        marker_seq: u64,
+        pending: PendingTrim,
         positions: &[StreamPosition],
     ) -> Result<bool, StorageError> {
-        let Some(txn) = self
-            .begin_trim_txn_if_current(stream_id, trim_point, marker_seq)
-            .await?
-        else {
+        let Some(txn) = self.begin_trim_txn_if_current(pending).await? else {
             return Ok(false);
         };
         for pos in positions {
-            txn.delete(kv::stream_record_timestamp::ser_key(stream_id, *pos))?;
-            txn.delete(kv::stream_record_data::ser_key(stream_id, *pos))?;
+            txn.delete(kv::stream_record_timestamp::ser_key(
+                pending.stream_id,
+                *pos,
+            ))?;
+            txn.delete(kv::stream_record_data::ser_key(pending.stream_id, *pos))?;
         }
         db_txn_commit_durable(txn).await?;
         Ok(true)
@@ -174,32 +163,27 @@ impl Backend {
     #[instrument(ret, err, skip(self))]
     async fn finalize_trim(
         &self,
-        stream_id: StreamId,
-        trim_point: RangeTo<NonZeroSeqNum>,
-        marker_seq: u64,
+        pending: PendingTrim,
         has_remaining_records: bool,
     ) -> Result<(), StorageError> {
-        let Some(txn) = self
-            .begin_trim_txn_if_current(stream_id, trim_point, marker_seq)
-            .await?
-        else {
+        let Some(txn) = self.begin_trim_txn_if_current(pending).await? else {
             return Ok(());
         };
-        let trim_point_key = kv::stream_trim_point::ser_key(stream_id);
-        let is_terminal_trim = trim_point == ..NonZeroSeqNum::MAX;
+        let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
+        let is_terminal_trim = pending.trim_point == ..NonZeroSeqNum::MAX;
         txn.delete(trim_point_key)?;
         if is_terminal_trim {
-            let id_mapping_key = kv::stream_id_mapping::ser_key(stream_id);
+            let id_mapping_key = kv::stream_id_mapping::ser_key(pending.stream_id);
             if let Some((basin, stream)) =
                 db_txn_get(&txn, &id_mapping_key, kv::stream_id_mapping::deser_value).await?
             {
                 txn.delete(kv::stream_meta::ser_key(&basin, &stream))?;
                 txn.delete(id_mapping_key)?;
             }
-            txn.delete(kv::stream_tail_position::ser_key(stream_id))?;
-            txn.delete(kv::stream_fencing_token::ser_key(stream_id))?;
+            txn.delete(kv::stream_tail_position::ser_key(pending.stream_id))?;
+            txn.delete(kv::stream_fencing_token::ser_key(pending.stream_id))?;
         } else if !has_remaining_records {
-            self.arm_doe_on_full_trim(&txn, stream_id).await?;
+            self.arm_doe_on_full_trim(&txn, pending.stream_id).await?;
         }
         db_txn_commit_durable(txn).await?;
         Ok(())
@@ -223,7 +207,7 @@ mod tests {
     use slatedb::WriteBatch;
     use time::OffsetDateTime;
 
-    use super::super::tests::test_backend;
+    use super::{super::tests::test_backend, PendingTrim};
     use crate::{
         backend::{kv, test_util::DbWriteTestExt as _},
         stream_id::StreamId,
@@ -481,10 +465,12 @@ mod tests {
         );
         backend.db.write(batch).assert_durable().await;
 
-        backend
-            .process_trim(stream_id, trim_point(5), marker_seq)
-            .await
-            .unwrap();
+        let pending = PendingTrim {
+            stream_id,
+            trim_point: trim_point(5),
+            marker_seq,
+        };
+        backend.process_trim(pending).await.unwrap();
         assert!(
             backend
                 .db
@@ -494,10 +480,7 @@ mod tests {
                 .is_some()
         );
         // Also cover a stale worker whose record scan finished before recreation.
-        backend
-            .finalize_trim(stream_id, trim_point(5), marker_seq, false)
-            .await
-            .unwrap();
+        backend.finalize_trim(pending, false).await.unwrap();
         assert_eq!(
             backend
                 .db_get(&key, kv::stream_trim_point::deser_value)
@@ -769,11 +752,13 @@ mod tests {
     async fn finalize_trim_no_trim_point_noop() {
         let backend = test_backend().await;
         let stream_id: StreamId = [4u8; StreamId::LEN].into();
+        let pending = PendingTrim {
+            stream_id,
+            trim_point: trim_point(5),
+            marker_seq: 0,
+        };
 
-        backend
-            .finalize_trim(stream_id, trim_point(5), 0, false)
-            .await
-            .unwrap();
+        backend.finalize_trim(pending, false).await.unwrap();
 
         let trim_point = backend
             .db
@@ -797,10 +782,12 @@ mod tests {
             .assert_durable()
             .await;
 
-        backend
-            .finalize_trim(stream_id, trim_point(5), marker_seq, false)
-            .await
-            .unwrap();
+        let pending = PendingTrim {
+            stream_id,
+            trim_point: trim_point(5),
+            marker_seq,
+        };
+        backend.finalize_trim(pending, false).await.unwrap();
 
         let trim_point = backend
             .db
@@ -869,17 +856,14 @@ mod tests {
             Err(ReconfigureStreamError::StreamDeletionPending(_))
         ));
 
-        let (_, trim, marker_seq) = backend
+        let pending = backend
             .list_stream_trim_pending()
             .await
             .unwrap()
             .values
             .pop()
             .unwrap();
-        backend
-            .process_trim(stream_id, trim, marker_seq)
-            .await
-            .unwrap();
+        backend.process_trim(pending).await.unwrap();
         backend
             .provision_stream(
                 basin.clone(),
@@ -921,10 +905,7 @@ mod tests {
             kv::stream_record_timestamp::ser_value(),
         );
         backend.db.write(batch).assert_durable().await;
-        backend
-            .process_trim(stream_id, trim, marker_seq)
-            .await
-            .unwrap();
+        backend.process_trim(pending).await.unwrap();
         assert!(
             backend
                 .db
