@@ -909,6 +909,55 @@ mod tests {
         assert_eq!(config, expected_auto_created_config());
     }
 
+    #[rstest::rstest]
+    #[case::count("count=0")]
+    #[case::bytes("bytes=0")]
+    #[tokio::test]
+    async fn unary_read_with_zero_limit_returns_empty(
+        #[case] bound: &str,
+        #[values(
+            "timestamp=0",
+            "seq_num=0",
+            "tail_offset=0",
+            "timestamp=1",
+            "seq_num=1"
+        )]
+        start: &str,
+        #[values(0, 60)] wait: u32,
+    ) {
+        let (app, _backend, basin, stream) = setup_app_with_config(
+            "read-zero-limit",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            send(
+                &app,
+                request_builder(
+                    "GET",
+                    format!("/v1/streams/{stream}/records?{start}&{bound}&wait={wait}"),
+                    &basin,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("a zero limit should complete without waiting for records");
+
+        let status = response.status();
+        let body = response_json(response, "read zero-limit response").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{start}&{bound}&wait={wait}: {body}"
+        );
+        assert_eq!(body["records"], serde_json::json!([]));
+    }
+
     #[tokio::test]
     async fn read_auto_creates_stream_with_stream_config_header() {
         let basin_config = BasinConfig {

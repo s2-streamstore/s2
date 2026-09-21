@@ -106,6 +106,10 @@ async fn read_session(
     start: ReadStart,
     end: ReadEnd,
 ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError> {
+    // An exhausted limit completes even when the requested start is unwritten.
+    if end.limit.remaining(0, 0) == EvaluatedReadLimit::Exhausted {
+        return Ok(futures::stream::empty().left_stream());
+    }
     let stream_id = client.stream_id();
     let tail = client.check_tail().await?;
     let mut state = ReadSessionState {
@@ -249,7 +253,7 @@ async fn read_session(
             }
         }
     };
-    Ok(session)
+    Ok(session.right_stream())
 }
 
 async fn read_start_seq_num(
