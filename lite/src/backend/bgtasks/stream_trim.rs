@@ -3,7 +3,7 @@ use std::ops::RangeTo;
 use futures::{StreamExt, stream};
 use s2_common::{record::NonZeroSeqNum, resources::Page};
 use slatedb::{
-    DbTransaction, IsolationLevel, WriteBatch,
+    IsolationLevel, WriteBatch,
     config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
@@ -90,28 +90,6 @@ impl Backend {
         self.finalize_trim(pending, has_remaining_records).await
     }
 
-    /// Return a transaction only while the queued trim marker is still current.
-    async fn begin_trim_txn_if_current(
-        &self,
-        pending: PendingTrim,
-    ) -> Result<Option<DbTransaction>, StorageError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        let current = db_txn_get_with(
-            &txn,
-            kv::stream_trim_point::ser_key(pending.stream_id),
-            |entry| {
-                Ok(PendingTrim {
-                    stream_id: pending.stream_id,
-                    trim_point: kv::stream_trim_point::deser_value(entry.value)?,
-                    marker_seq: entry.seq,
-                })
-            },
-        )
-        .await?;
-        // The value alone can repeat after deletion and recreation.
-        Ok((current == Some(pending)).then_some(txn))
-    }
-
     /// Return whether records remain beyond the trim point.
     #[instrument(ret, err, skip(self))]
     async fn delete_records(&self, pending: PendingTrim) -> Result<bool, StorageError> {
@@ -155,10 +133,20 @@ impl Backend {
         pending: PendingTrim,
         has_remaining_records: bool,
     ) -> Result<(), StorageError> {
-        let Some(txn) = self.begin_trim_txn_if_current(pending).await? else {
-            return Ok(());
-        };
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
+        let current = db_txn_get_with(&txn, &trim_point_key, |entry| {
+            Ok(PendingTrim {
+                stream_id: pending.stream_id,
+                trim_point: kv::stream_trim_point::deser_value(entry.value)?,
+                marker_seq: entry.seq,
+            })
+        })
+        .await?;
+        // The value alone can repeat after deletion and recreation.
+        if current != Some(pending) {
+            return Ok(());
+        }
         let is_terminal_trim = pending.trim_point == ..NonZeroSeqNum::MAX;
         txn.delete(trim_point_key)?;
         if is_terminal_trim {
