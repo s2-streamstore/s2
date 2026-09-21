@@ -1624,6 +1624,75 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "_hidden")]
+    #[derive(Default)]
+    struct AppendRetryExecutor {
+        attempts: AtomicUsize,
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[async_trait]
+    impl client::RequestExecutor for AppendRetryExecutor {
+        async fn execute_unary(
+            &self,
+            _request: client::Request,
+        ) -> Result<UnaryResponse, client::HttpError> {
+            let (status, code) = match self.attempts.fetch_add(1, Ordering::Relaxed) {
+                0 => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+                1 => (StatusCode::FORBIDDEN, "permission_denied"),
+                _ => panic!("unexpected retry after a terminal error"),
+            };
+            Ok(UnaryResponse::new_for_test(
+                status,
+                serde_json::json!({"code": code, "message": code}).to_string(),
+            ))
+        }
+
+        async fn init_streaming(
+            &self,
+            _request: client::Request,
+        ) -> Result<StreamingResponse, client::HttpError> {
+            unreachable!("unary retry test does not initialize a stream")
+        }
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[tokio::test]
+    async fn unary_append_returns_first_indefinite_error() {
+        let executor = Arc::new(AppendRetryExecutor::default());
+        let mut client =
+            BaseClient::init_with_connector(&S2Config::new("token"), HttpConnector::new()).unwrap();
+        client.client = executor.clone();
+        client.retry_builder = RetryBackoffBuilder::default()
+            .with_min_base_delay(Duration::ZERO)
+            .with_max_base_delay(Duration::ZERO)
+            .with_max_retries(2);
+        let request = client
+            .post(
+                "http://example.test/v1/streams/test/records"
+                    .parse()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        let error = client
+            .request(request)
+            .with_append_retry_policy(AppendRetryPolicy::All)
+            .send()
+            .await
+            .map(|_| ())
+            .unwrap_err();
+
+        assert_eq!(executor.attempts.load(Ordering::Relaxed), 2);
+        assert!(!error.has_no_side_effects());
+        assert!(matches!(
+            error,
+            ApiError::Server(StatusCode::SERVICE_UNAVAILABLE, body)
+                if body.code == "unavailable" && body.message == "unavailable"
+        ));
+    }
+
     fn server_error(status: StatusCode, code: &str) -> ApiError {
         ApiError::Server(
             status,
