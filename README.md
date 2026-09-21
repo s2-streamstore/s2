@@ -202,13 +202,22 @@ The main database still uses `--bucket` or `--local-root`; `--path` applies to b
 stores. The WAL options are also available as `S2LITE_WAL_BUCKET` and
 `S2LITE_WAL_LOCAL_ROOT`.
 
-For example, keep the WAL on local MinIO while storing the LSM in S3:
+To use a different bucket with the same endpoint, region and credentials, add
+`--wal-bucket` to your existing configuration:
+
+```bash
+s2 lite --bucket my-lsm-bucket --wal-bucket my-wal-bucket --path my-database
+```
+
+No WAL-specific environment variables are required. Both buckets use the usual
+AWS configuration, including a custom MinIO endpoint. To connect the WAL to a
+different server, set only the values that differ. For example, keep the WAL on
+local MinIO while storing the LSM in S3:
 
 ```bash
 export AWS_REGION=us-east-1
 # The main S3 store uses the usual AWS credentials/profile/instance role.
 export S2LITE_WAL_AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000
-export S2LITE_WAL_AWS_REGION=us-east-1
 export S2LITE_WAL_AWS_ACCESS_KEY_ID=your-minio-access-key
 export S2LITE_WAL_AWS_SECRET_ACCESS_KEY=your-minio-secret-key
 
@@ -217,14 +226,14 @@ s2 lite --bucket my-lsm-bucket --wal-bucket my-wal-bucket --path my-database
 
 For a remote MinIO main store, set its endpoint and credentials using the usual
 `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables.
-WAL-specific configuration is independent:
+The following optional overrides apply only to the WAL bucket:
 
 | Variable | Purpose |
 | --- | --- |
-| `S2LITE_WAL_AWS_ENDPOINT_URL_S3` | WAL endpoint; omitted means the normal S3 endpoint. HTTP endpoints are supported. |
-| `S2LITE_WAL_AWS_REGION` | WAL region; otherwise uses the standard AWS region configuration. |
-| `S2LITE_WAL_AWS_ACCESS_KEY_ID` / `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` | WAL static credentials; both must be supplied together. If omitted, use the standard AWS credential chain. |
-| `S2LITE_WAL_AWS_SESSION_TOKEN` | Optional token for the WAL static credentials. |
+| `S2LITE_WAL_AWS_ENDPOINT_URL_S3` | Overrides the shared S3 endpoint. HTTP endpoints are supported. |
+| `S2LITE_WAL_AWS_REGION` | Overrides the shared AWS region. |
+| `S2LITE_WAL_AWS_ACCESS_KEY_ID` / `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` | Overrides the shared credentials; both must be supplied together. If omitted, uses the same credentials/profile/instance role as the main store. |
+| `S2LITE_WAL_AWS_SESSION_TOKEN` | Optional token for the WAL-specific key pair. The main store's token is not inherited when a WAL key pair is supplied. |
 
 A filesystem WAL is also supported, with fsync enabled:
 
