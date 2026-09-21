@@ -61,7 +61,7 @@ pub enum AppendSessionError {
     InvalidAck(String),
     /// An earlier attempt may have appended records. Contains the last attempt's error.
     #[error("append outcome is unknown after an earlier attempt: {0}")]
-    Indeterminate(#[source] Box<AppendSessionError>),
+    IndefiniteFailure(#[source] Box<AppendSessionError>),
 }
 
 impl AppendSessionError {
@@ -69,7 +69,7 @@ impl AppendSessionError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Append(error) => error.is_retryable(),
-            Self::Indeterminate(error) => error.is_retryable(),
+            Self::IndefiniteFailure(error) => error.is_retryable(),
             Self::AckTimeout | Self::ServerDisconnected => true,
             Self::StreamClosedEarly
             | Self::SessionClosed
@@ -89,7 +89,7 @@ impl AppendSessionError {
             | Self::StreamClosedEarly
             | Self::SessionDropped
             | Self::InvalidAck(_)
-            | Self::Indeterminate(_) => false,
+            | Self::IndefiniteFailure(_) => false,
         }
     }
 
@@ -97,7 +97,7 @@ impl AppendSessionError {
     pub fn request_error(&self) -> Option<&RequestError> {
         match self {
             Self::Append(error) => error.request_error(),
-            Self::Indeterminate(error) => error.request_error(),
+            Self::IndefiniteFailure(error) => error.request_error(),
             Self::AckTimeout
             | Self::ServerDisconnected
             | Self::StreamClosedEarly
@@ -124,7 +124,7 @@ impl AppendSessionError {
 
     fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
         if prior_uncertainty {
-            Self::Indeterminate(Box::new(self))
+            Self::IndefiniteFailure(Box::new(self))
         } else {
             self
         }

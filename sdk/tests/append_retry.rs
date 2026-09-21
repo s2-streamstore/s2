@@ -206,11 +206,11 @@ async fn append(server: &TestServer, streaming: bool) -> Result<(), AppendSessio
     .expect("append timed out")
 }
 
-fn is_indeterminate(error: &AppendSessionError) -> bool {
+fn has_indefinite_failure_wrapper(error: &AppendSessionError) -> bool {
     matches!(
         error,
-        AppendSessionError::Indeterminate(_)
-            | AppendSessionError::Append(AppendError::Indeterminate(_))
+        AppendSessionError::IndefiniteFailure(_)
+            | AppendSessionError::Append(AppendError::IndefiniteFailure(_))
     )
 }
 
@@ -230,18 +230,18 @@ async fn ambiguous_attempt_preserves_uncertainty(
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(is_indeterminate(&error), "{error:?}");
+    assert!(has_indefinite_failure_wrapper(&error), "{error:?}");
     assert!(!error.has_no_side_effects());
     assert!(error.to_string().contains("outcome is unknown"));
     assert_eq!(server.attempts.load(Ordering::Relaxed), 2);
     match last {
         Reply::ConditionFailed => {
             let last = match &error {
-                AppendSessionError::Indeterminate(last) => match last.as_ref() {
+                AppendSessionError::IndefiniteFailure(last) => match last.as_ref() {
                     AppendSessionError::Append(last) => last,
                     other => panic!("unexpected error: {other:?}"),
                 },
-                AppendSessionError::Append(AppendError::Indeterminate(last)) => last.as_ref(),
+                AppendSessionError::Append(AppendError::IndefiniteFailure(last)) => last.as_ref(),
                 other => panic!("unexpected error: {other:?}"),
             };
             assert!(matches!(
@@ -272,7 +272,7 @@ async fn uncertainty_survives_intermediate_safe_failure(#[values(false, true)] s
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(is_indeterminate(&error));
+    assert!(has_indefinite_failure_wrapper(&error));
     assert!(!error.has_no_side_effects());
     assert_eq!(server.attempts.load(Ordering::Relaxed), 3);
 }
@@ -289,7 +289,7 @@ async fn definite_failures_remain_definite(#[values(false, true)] streaming: boo
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(!is_indeterminate(&error));
+    assert!(!has_indefinite_failure_wrapper(&error));
     assert!(error.has_no_side_effects());
     assert!(!error.is_retryable());
     assert_eq!(server.attempts.load(Ordering::Relaxed), 2);
@@ -321,7 +321,7 @@ async fn no_side_effects_policy_does_not_retry_ambiguous_append(
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(!is_indeterminate(&error));
+    assert!(!has_indefinite_failure_wrapper(&error));
     assert!(!error.has_no_side_effects());
     assert_eq!(
         error
@@ -349,7 +349,7 @@ async fn acknowledged_batch_does_not_taint_later_batch() {
         let session = server.stream.append_session(AppendSessionConfig::new());
         session.submit(input()).await.unwrap().await.unwrap();
         let error = session.submit(input()).await.unwrap().await.unwrap_err();
-        assert!(!is_indeterminate(&error));
+        assert!(!has_indefinite_failure_wrapper(&error));
         assert!(error.has_no_side_effects());
         assert!(session.close().await.unwrap_err().has_no_side_effects());
     })

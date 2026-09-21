@@ -668,7 +668,7 @@ pub(crate) enum ApiError {
     #[error("append condition check failed")]
     AppendConditionFailed(AppendConditionFailed),
     #[error("append outcome is unknown after an earlier attempt: {0}")]
-    AppendIndeterminate(#[source] Box<ApiError>),
+    AppendIndefiniteFailure(#[source] Box<ApiError>),
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
     #[error("{1}")]
@@ -680,7 +680,7 @@ impl ApiError {
         match self {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
-            Self::AppendIndeterminate(err) => err.is_retryable(),
+            Self::AppendIndefiniteFailure(err) => err.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
             _ => false,
@@ -1129,7 +1129,7 @@ impl<'a> RequestBuilder<'a> {
                     "not retrying request"
                 );
                 return Err(if prior_uncertainty {
-                    ApiError::AppendIndeterminate(Box::new(err))
+                    ApiError::AppendIndefiniteFailure(Box::new(err))
                 } else {
                     err
                 });
