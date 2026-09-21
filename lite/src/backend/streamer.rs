@@ -1040,36 +1040,36 @@ async fn db_submit_append(
     let ttl_put_opts = PutOptions { ttl };
     let mut wb = WriteBatch::new();
     for (position, record) in records.iter().map(|msr| msr.parts()) {
-        wb.put_with_options(
+        wb.put_bytes_with_options(
             kv::stream_record_data::ser_key(stream_id, position),
             kv::stream_record_data::ser_value(record),
             &ttl_put_opts,
         );
-        wb.put_with_options(
+        wb.put_bytes_with_options(
             kv::stream_record_timestamp::ser_key(stream_id, position),
             kv::stream_record_timestamp::ser_value(),
             &ttl_put_opts,
         );
     }
     if let Some(fencing_token) = fencing_token {
-        wb.put(
+        wb.put_bytes(
             kv::stream_fencing_token::ser_key(stream_id),
             kv::stream_fencing_token::ser_value(&fencing_token),
         );
     }
     if let Some(trim_point) = trim_point.and_then(|tp| NonZeroSeqNum::new(tp.end)) {
-        wb.put(
+        wb.put_bytes(
             kv::stream_trim_point::ser_key(stream_id),
             kv::stream_trim_point::ser_value(..trim_point),
         );
     }
     if let Some(doe_deadline) = doe_deadline {
-        wb.put(
+        wb.put_bytes(
             kv::stream_doe_deadline::ser_key(doe_deadline.deadline, stream_id),
             kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
-    wb.put(
+    wb.put_bytes(
         kv::stream_tail_position::ser_key(stream_id),
         kv::stream_tail_position::ser_value(next_pos(&records)),
     );
