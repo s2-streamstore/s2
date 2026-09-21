@@ -573,9 +573,7 @@ async fn run_session_with_retry(
                     access_token_mode,
                 ) && let Some(backoff) = retry_backoff.next()
                 {
-                    if !err.has_no_side_effects()
-                        && frame_signal.as_ref().is_none_or(|s| s.is_signalled())
-                    {
+                    if attempt_may_have_side_effects(&err, frame_signal.as_ref()) {
                         for append in &mut state.inflight_appends {
                             append.prior_uncertainty = true;
                         }
@@ -1050,6 +1048,13 @@ impl Command {
     }
 }
 
+fn attempt_may_have_side_effects(
+    err: &AppendSessionError,
+    frame_signal: Option<&FrameSignal>,
+) -> bool {
+    !err.has_no_side_effects() && frame_signal.is_none_or(|s| s.is_signalled())
+}
+
 fn is_safe_to_retry(
     err: &AppendSessionError,
     policy: AppendRetryPolicy,
@@ -1060,9 +1065,7 @@ fn is_safe_to_retry(
     let policy_compliant = match policy {
         AppendRetryPolicy::All => true,
         AppendRetryPolicy::NoSideEffects => {
-            !has_inflight
-                || !frame_signal.is_none_or(|s| s.is_signalled())
-                || err.has_no_side_effects()
+            !has_inflight || !attempt_may_have_side_effects(err, frame_signal)
         }
     };
     policy_compliant
