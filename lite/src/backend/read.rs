@@ -106,6 +106,10 @@ async fn read_session(
     start: ReadStart,
     end: ReadEnd,
 ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError> {
+    // An exhausted limit completes even when the requested start is unwritten.
+    if end.limit.remaining(0, 0) == EvaluatedReadLimit::Exhausted {
+        return Ok(futures::stream::empty().left_stream());
+    }
     let stream_id = client.stream_id();
     let tail = client.check_tail().await?;
     let mut state = ReadSessionState {
@@ -249,7 +253,7 @@ async fn read_session(
             }
         }
     };
-    Ok(session)
+    Ok(session.right_stream())
 }
 
 async fn read_start_seq_num(
@@ -276,13 +280,9 @@ async fn read_start_seq_num(
             return Err(UnwrittenError(tail).into());
         }
     }
-    if let ReadPosition::SeqNum(start_seq_num) = read_pos
-        && start_seq_num == tail.seq_num
-        && !end.may_follow()
-    {
-        return Err(UnwrittenError(tail).into());
-    }
-    Ok(match read_pos {
+    // Resolve to a sequence number before deciding whether the read starts at the tail, so a
+    // timestamp start that resolves to the tail is treated like a sequence number start there.
+    let start_seq_num = match read_pos {
         ReadPosition::SeqNum(start_seq_num) => start_seq_num,
         ReadPosition::Timestamp(start_timestamp) => {
             resolve_timestamp(db, stream_id, start_timestamp)
@@ -290,7 +290,11 @@ async fn read_start_seq_num(
                 .unwrap_or(tail)
                 .seq_num
         }
-    })
+    };
+    if start_seq_num == tail.seq_num && !end.may_follow() {
+        return Err(UnwrittenError(tail).into());
+    }
+    Ok(start_seq_num)
 }
 
 async fn resolve_timestamp(

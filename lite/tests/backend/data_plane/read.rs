@@ -326,6 +326,31 @@ async fn test_read_at_tail_without_follow_returns_unwritten(
     }
 }
 
+#[rstest]
+#[case::seq_num(ReadFrom::SeqNum(0))]
+#[case::timestamp(ReadFrom::Timestamp(0))]
+#[tokio::test]
+async fn test_read_at_tail_of_empty_stream_returns_unwritten(#[case] from: ReadFrom) {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-empty-at-tail",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let start = ReadStart { from, clamp: false };
+    let end = tail_read_end(TailEndCase::CountNoWait);
+    let result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+
+    match result {
+        Err(ReadError::Unwritten(UnwrittenError(tail))) => {
+            assert_eq!(tail, StreamPosition::MIN);
+        }
+        Ok(_) => panic!("Expected Unwritten error for {from:?} on an empty stream, got Ok"),
+        Err(e) => panic!("Expected Unwritten error for {from:?} on an empty stream, got: {e:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_read_from_tail_offset() {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
