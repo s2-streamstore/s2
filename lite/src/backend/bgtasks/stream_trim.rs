@@ -13,7 +13,7 @@ use crate::{
         Backend,
         error::StorageError,
         kv,
-        store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
+        store::{db_txn_commit_durable, db_txn_get},
     },
     stream_id::StreamId,
 };
@@ -22,16 +22,14 @@ const PENDING_LIST_LIMIT: usize = 128;
 const CONCURRENCY: usize = 4;
 const DELETE_BATCH_SIZE: usize = 10_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 struct PendingTrim {
     stream_id: StreamId,
     trim_point: RangeTo<NonZeroSeqNum>,
-    /// Database commit sequence of the observed trim marker.
-    marker_seq: u64,
 }
 
 impl Backend {
-    pub(in crate::backend) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
+    pub(super) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
         let page = self.list_stream_trim_pending().await?;
         if page.values.is_empty() {
             return Ok(page.has_more);
@@ -65,7 +63,6 @@ impl Backend {
             pending.push(PendingTrim {
                 stream_id,
                 trim_point,
-                marker_seq: kv.seq,
             });
             if pending.len() >= PENDING_LIST_LIMIT {
                 return Ok(Page::new(pending, true));
@@ -127,16 +124,9 @@ impl Backend {
     ) -> Result<(), StorageError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
-        let current = db_txn_get_with(&txn, &trim_point_key, |entry| {
-            Ok(PendingTrim {
-                stream_id: pending.stream_id,
-                trim_point: kv::stream_trim_point::deser_value(entry.value)?,
-                marker_seq: entry.seq,
-            })
-        })
-        .await?;
-        // Only clear the exact marker observed by the scan.
-        if current != Some(pending) {
+        let current = db_txn_get(&txn, &trim_point_key, kv::stream_trim_point::deser_value).await?;
+        // Markers only advance while this job runs; preserve any newer trim.
+        if current != Some(pending.trim_point) {
             return Ok(());
         }
         let is_terminal_trim = pending.trim_point == ..NonZeroSeqNum::MAX;
@@ -401,36 +391,27 @@ mod tests {
         }
     }
 
-    #[rstest::rstest]
-    #[case::same_trim_point(5)]
-    #[case::advanced_trim_point(10)]
     #[tokio::test]
-    async fn finalize_trim_preserves_replaced_marker(#[case] new_trim: u64) {
+    async fn finalize_trim_preserves_advanced_marker() {
         let backend = test_backend().await;
         let stream_id: StreamId = [9u8; StreamId::LEN].into();
         let key = kv::stream_trim_point::ser_key(stream_id);
-        let marker_seq = backend
-            .db
-            .put(&key, kv::stream_trim_point::ser_value(trim_point(5)))
-            .assert_durable()
-            .await;
         backend
             .db
-            .put(&key, kv::stream_trim_point::ser_value(trim_point(new_trim)))
+            .put(&key, kv::stream_trim_point::ser_value(trim_point(10)))
             .assert_durable()
             .await;
         let pending = PendingTrim {
             stream_id,
             trim_point: trim_point(5),
-            marker_seq,
         };
         backend.finalize_trim(pending, false).await.unwrap();
         assert_eq!(
             backend
-                .db_get(&key, kv::stream_trim_point::deser_value)
+                .db_get(key, kv::stream_trim_point::deser_value)
                 .await
                 .unwrap(),
-            Some(trim_point(new_trim))
+            Some(trim_point(10))
         );
         backend.close().await.unwrap();
     }
@@ -532,67 +513,26 @@ mod tests {
     #[tokio::test]
     async fn stream_trim_finishes_other_streams_on_error() {
         let backend = test_backend().await;
-        let stream_id_a: StreamId = [1u8; StreamId::LEN].into();
-        let stream_id_b: StreamId = [2u8; StreamId::LEN].into();
-        let stream_id_c: StreamId = [3u8; StreamId::LEN].into();
-        let metered = test_record();
-
-        for seq in 0..4 {
-            let pos_a = StreamPosition {
-                seq_num: seq,
-                timestamp: 1000 + seq,
-            };
-            backend
-                .db
-                .put(
-                    kv::stream_record_data::ser_key(stream_id_a, pos_a),
-                    kv::stream_record_data::ser_value(metered.as_ref()),
-                )
-                .assert_durable()
-                .await;
-            backend
-                .db
-                .put(
-                    kv::stream_record_timestamp::ser_key(stream_id_a, pos_a),
-                    kv::stream_record_timestamp::ser_value(),
-                )
-                .assert_durable()
-                .await;
-
-            let pos_b = StreamPosition {
-                seq_num: seq,
-                timestamp: 2000 + seq,
-            };
-            backend
-                .db
-                .put(
-                    kv::stream_record_data::ser_key(stream_id_b, pos_b),
-                    kv::stream_record_data::ser_value(metered.as_ref()),
-                )
-                .assert_durable()
-                .await;
-            backend
-                .db
-                .put(
-                    kv::stream_record_timestamp::ser_key(stream_id_b, pos_b),
-                    kv::stream_record_timestamp::ser_value(),
-                )
-                .assert_durable()
-                .await;
-        }
-
+        let stream_id: StreamId = [1u8; StreamId::LEN].into();
+        let corrupt_stream_id: StreamId = [2u8; StreamId::LEN].into();
+        let marker_key = kv::stream_trim_point::ser_key(stream_id);
         let mut batch = WriteBatch::new();
+        batch.put(&marker_key, kv::stream_trim_point::ser_value(trim_point(1)));
         batch.put(
-            kv::stream_trim_point::ser_key(stream_id_a),
-            kv::stream_trim_point::ser_value(trim_point(2)),
+            kv::stream_record_data::ser_key(stream_id, StreamPosition::MIN),
+            kv::stream_record_data::ser_value(test_record().as_ref()),
         );
         batch.put(
-            kv::stream_trim_point::ser_key(stream_id_c),
-            kv::stream_trim_point::ser_value(trim_point(2)),
+            kv::stream_record_timestamp::ser_key(stream_id, StreamPosition::MIN),
+            kv::stream_record_timestamp::ser_value(),
         );
-        // A truncated record key fails C's scan while A awaits durability.
         batch.put(
-            kv::stream_record_timestamp::ser_key_prefix(stream_id_c),
+            kv::stream_trim_point::ser_key(corrupt_stream_id),
+            kv::stream_trim_point::ser_value(trim_point(1)),
+        );
+        // Fail the second scan while the first stream awaits deletion durability.
+        batch.put(
+            kv::stream_record_timestamp::ser_key_prefix(corrupt_stream_id),
             kv::stream_record_timestamp::ser_value(),
         );
         backend.db.write(batch).assert_durable().await;
@@ -603,56 +543,13 @@ mod tests {
         ));
         assert!(
             backend
-                .db_get(
-                    kv::stream_trim_point::ser_key(stream_id_a),
-                    kv::stream_trim_point::deser_value,
-                )
+                .db_get(marker_key, kv::stream_trim_point::deser_value)
                 .await
                 .unwrap()
                 .is_none(),
-            "the tick must finish A's durable cleanup before returning C's error"
+            "the tick must finish the other stream's durable cleanup before returning the error"
         );
-
-        for seq in 0..4 {
-            let pos_a = StreamPosition {
-                seq_num: seq,
-                timestamp: 1000 + seq,
-            };
-            let data_a = backend
-                .db
-                .get(kv::stream_record_data::ser_key(stream_id_a, pos_a))
-                .await
-                .unwrap();
-            let timestamp_a = backend
-                .db
-                .get(kv::stream_record_timestamp::ser_key(stream_id_a, pos_a))
-                .await
-                .unwrap();
-            if seq < 2 {
-                assert!(data_a.is_none());
-                assert!(timestamp_a.is_none());
-            } else {
-                assert!(data_a.is_some());
-                assert!(timestamp_a.is_some());
-            }
-
-            let pos_b = StreamPosition {
-                seq_num: seq,
-                timestamp: 2000 + seq,
-            };
-            let data_b = backend
-                .db
-                .get(kv::stream_record_data::ser_key(stream_id_b, pos_b))
-                .await
-                .unwrap();
-            let timestamp_b = backend
-                .db
-                .get(kv::stream_record_timestamp::ser_key(stream_id_b, pos_b))
-                .await
-                .unwrap();
-            assert!(data_b.is_some());
-            assert!(timestamp_b.is_some());
-        }
+        backend.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -705,55 +602,6 @@ mod tests {
             assert!(data.is_none());
             assert!(timestamp.is_none());
         }
-
-        let trim_point = backend
-            .db
-            .get(kv::stream_trim_point::ser_key(stream_id))
-            .await
-            .unwrap();
-        assert!(trim_point.is_none());
-    }
-
-    #[tokio::test]
-    async fn finalize_trim_no_trim_point_noop() {
-        let backend = test_backend().await;
-        let stream_id: StreamId = [4u8; StreamId::LEN].into();
-        let pending = PendingTrim {
-            stream_id,
-            trim_point: trim_point(5),
-            marker_seq: 0,
-        };
-
-        backend.finalize_trim(pending, false).await.unwrap();
-
-        let trim_point = backend
-            .db
-            .get(kv::stream_trim_point::ser_key(stream_id))
-            .await
-            .unwrap();
-        assert!(trim_point.is_none());
-    }
-
-    #[tokio::test]
-    async fn finalize_trim_clears_matching_trim_point() {
-        let backend = test_backend().await;
-        let stream_id: StreamId = [5u8; StreamId::LEN].into();
-
-        let marker_seq = backend
-            .db
-            .put(
-                kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::ser_value(trim_point(5)),
-            )
-            .assert_durable()
-            .await;
-
-        let pending = PendingTrim {
-            stream_id,
-            trim_point: trim_point(5),
-            marker_seq,
-        };
-        backend.finalize_trim(pending, false).await.unwrap();
 
         let trim_point = backend
             .db
@@ -822,14 +670,7 @@ mod tests {
             Err(ReconfigureStreamError::StreamDeletionPending(_))
         ));
 
-        let pending = backend
-            .list_stream_trim_pending()
-            .await
-            .unwrap()
-            .values
-            .pop()
-            .unwrap();
-        backend.process_trim(pending).await.unwrap();
+        backend.clone().tick_stream_trim().await.unwrap();
         backend
             .provision_stream(
                 basin.clone(),

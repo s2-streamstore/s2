@@ -107,24 +107,25 @@ impl Backend {
         .into())
     }
 
-    /// Read one consistent view of the stream. The snapshot must already be durable.
     async fn start_streamer(
         &self,
         generation_id: StreamerGenerationId,
         basin: BasinName,
         stream: StreamName,
-        snapshot: &slatedb::DbSnapshot,
     ) -> Result<StreamerClient, StreamerError> {
+        // Read one consistent, durable view of the stream.
+        let snapshot = self.db.snapshot().await.map_err(StorageError::from)?;
+        self.await_durable_seq(snapshot.seq()).await?;
         let stream_id = StreamId::new(&basin, &stream);
 
         let (meta, persisted_tail, fencing_token, trim_point, stream_creation_seq) = tokio::try_join!(
             db_snapshot_get_with(
-                snapshot,
+                &snapshot,
                 kv::stream_meta::ser_key(&basin, &stream),
                 |entry| { Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq)) }
             ),
             db_snapshot_get_with(
-                snapshot,
+                &snapshot,
                 kv::stream_tail_position::ser_key(stream_id),
                 |entry| {
                     Ok((
@@ -134,17 +135,17 @@ impl Backend {
                 }
             ),
             db_snapshot_get_with(
-                snapshot,
+                &snapshot,
                 kv::stream_fencing_token::ser_key(stream_id),
                 |entry| kv::stream_fencing_token::deser_value(entry.value),
             ),
             db_snapshot_get_with(
-                snapshot,
+                &snapshot,
                 kv::stream_trim_point::ser_key(stream_id),
                 |entry| kv::stream_trim_point::deser_value(entry.value),
             ),
             db_snapshot_get_with(
-                snapshot,
+                &snapshot,
                 kv::stream_id_mapping::ser_key(stream_id),
                 |entry| Ok(entry.seq)
             ),
@@ -161,7 +162,7 @@ impl Backend {
             return Err(StreamDeletionPendingError.into());
         }
 
-        self.assert_no_records_following_tail(snapshot, stream_id, &basin, &stream, tail_pos)
+        self.assert_no_records_following_tail(&snapshot, stream_id, &basin, &stream, tail_pos)
             .await?;
 
         let fencing_token = fencing_token.unwrap_or_default();
@@ -247,13 +248,7 @@ impl Backend {
         // Drive initialization independently so cancelled callers cannot leave
         // its snapshot pinned in a cached, unpolled future.
         let future = tokio::spawn(async move {
-            let result = match self.db_snapshot_durable().await {
-                Ok(snapshot) => {
-                    self.start_streamer(generation_id, basin, stream, &snapshot)
-                        .await
-                }
-                Err(err) => Err(err.into()),
-            };
+            let result = self.start_streamer(generation_id, basin, stream).await;
             self.streamer_finish_initialization(stream_id, generation_id, &result);
             result
         })
@@ -533,69 +528,9 @@ mod tests {
         backend.db.write(wb).assert_durable().await;
 
         backend
-            .start_streamer(
-                StreamerGenerationId::next(),
-                basin.clone(),
-                stream.clone(),
-                &backend.db_snapshot_durable().await.unwrap(),
-            )
+            .start_streamer(StreamerGenerationId::next(), basin.clone(), stream.clone())
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn start_streamer_rejects_terminal_trim_snapshot_after_recreation() {
-        use crate::backend::streamer::TerminalTrimCondition;
-        let backend = new_test_backend().await;
-        let (basin, stream) =
-            crate::backend::test_util::create_stream(&backend, OptionalStreamConfig::default())
-                .await;
-        backend
-            .streamer_client_guarded(&basin, &stream)
-            .await
-            .unwrap()
-            .terminal_trim(TerminalTrimCondition::Always)
-            .await
-            .unwrap();
-
-        // This durable split state is also what a crash before mark_stream_deleted leaves.
-        let snapshot = backend.db_snapshot_durable().await.unwrap();
-        let meta_key = kv::stream_meta::ser_key(&basin, &stream);
-        let meta =
-            kv::stream_meta::deser_value(snapshot.get(&meta_key).await.unwrap().unwrap()).unwrap();
-        assert!(meta.deleted_at.is_none());
-        backend.clone().tick_stream_trim().await.unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        // Initialization must not combine the old metadata with the replacement's tail/trim.
-        assert!(matches!(
-            backend
-                .start_streamer(
-                    StreamerGenerationId::next(),
-                    basin.clone(),
-                    stream.clone(),
-                    &snapshot
-                )
-                .await,
-            Err(StreamerError::StreamDeletionPending(_))
-        ));
-        backend
-            .open_for_check_tail(&basin, &stream)
-            .await
-            .unwrap()
-            .check_tail()
-            .await
-            .unwrap();
-        backend.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -685,12 +620,7 @@ mod tests {
         // Pause initialization after reading metadata, before publishing the client.
         let generation_id = StreamerGenerationId::next();
         let client = backend
-            .start_streamer(
-                generation_id,
-                basin.clone(),
-                stream.clone(),
-                &backend.db_snapshot_durable().await.unwrap(),
-            )
+            .start_streamer(generation_id, basin.clone(), stream.clone())
             .await
             .unwrap();
         backend.streamer_slots.insert(

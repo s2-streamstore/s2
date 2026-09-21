@@ -186,7 +186,6 @@ impl Backend {
 mod tests {
     use std::{str::FromStr, time::Duration};
 
-    use bytes::Bytes;
     use s2_common::{
         basin::BasinName,
         config::{
@@ -200,7 +199,7 @@ mod tests {
     use slatedb::config::{DurabilityLevel, ScanOptions};
     use time::OffsetDateTime;
 
-    use super::{super::tests::test_backend, PendingDoeEntry, TimestampSecs, last_write_cutoff};
+    use super::{super::tests::test_backend, TimestampSecs};
     use crate::{
         backend::{Backend, kv, test_util::DbWriteTestExt as _},
         stream_id::StreamId,
@@ -624,35 +623,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pending_doe_uses_latest_eligible_cutoff_from_this_incarnation() {
-        let pending = [
-            PendingDoeEntry {
-                key: Bytes::new(),
-                deadline: TimestampSecs::from_secs(50),
-                min_age: Duration::from_secs(100),
-                deadline_seq: 20,
-            },
-            PendingDoeEntry {
-                key: Bytes::new(),
-                deadline: TimestampSecs::from_secs(100),
-                min_age: Duration::from_secs(10),
-                deadline_seq: 20,
-            },
-            // An old incarnation's later cutoff must not win.
-            PendingDoeEntry {
-                key: Bytes::new(),
-                deadline: TimestampSecs::MAX,
-                min_age: MIN_AGE,
-                deadline_seq: 10,
-            },
-        ];
-        assert_eq!(
-            last_write_cutoff(&pending, 20),
-            Some(TimestampSecs::from_secs(90))
-        );
-    }
-
     #[tokio::test]
     async fn reconfigure_enabling_doe_on_nonempty_retained_stream_arms_future_deadline() {
         let backend = test_backend().await;
@@ -768,11 +738,8 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    #[case::unique_deadline(false)]
-    #[case::legacy_deadline(true)]
     #[tokio::test]
-    async fn stale_doe_work_cannot_delete_recreated_stream(#[case] legacy_deadline: bool) {
+    async fn stale_doe_work_cannot_delete_recreated_stream() {
         use s2_common::resources::ProvisionMode;
 
         use crate::backend::streamer::{TerminalTrimCondition, TerminalTrimOutcome};
@@ -788,24 +755,22 @@ mod tests {
             .unwrap()
             .unwrap();
         let deadline = TimestampSecs::after(Duration::from_secs(3600));
-        let key = if legacy_deadline {
-            kv::stream_doe_deadline::ser_key(deadline, stream_id, None)
-        } else {
-            kv::stream_doe_deadline::new_key(deadline, stream_id)
-        };
-        backend
-            .db
-            .put(&key, kv::stream_doe_deadline::ser_value(MIN_AGE))
-            .assert_durable()
-            .await;
-        let (_, mut pending) = backend
+        let keys = [
+            kv::stream_doe_deadline::ser_key(deadline, stream_id, None),
+            kv::stream_doe_deadline::new_key(deadline, stream_id),
+        ];
+        let mut batch = slatedb::WriteBatch::new();
+        for key in &keys {
+            batch.put(key, kv::stream_doe_deadline::ser_value(MIN_AGE));
+        }
+        backend.db.write(batch).assert_durable().await;
+        let (_, pending) = backend
             .list_pending_stream_doe(deadline)
             .await
             .unwrap()
             .values
             .pop()
             .unwrap();
-        pending.retain(|entry| entry.deadline == deadline);
         backend
             .delete_stream(basin.clone(), stream.clone())
             .await
@@ -823,7 +788,7 @@ mod tests {
             .await
             .unwrap();
         let replacement_key = kv::stream_doe_deadline::new_key(deadline, stream_id);
-        let replacement_deadline_seq = backend
+        backend
             .db
             .put(
                 &replacement_key,
@@ -854,19 +819,21 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert!(
-            backend
-                .db_get(key, kv::stream_doe_deadline::deser_value)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        for key in keys {
+            assert!(
+                backend
+                    .db_get(key, kv::stream_doe_deadline::deser_value)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
         assert_eq!(
             backend
-                .db_get_with(replacement_key, |row| Ok(row.seq))
+                .db_get(replacement_key, kv::stream_doe_deadline::deser_value)
                 .await
                 .unwrap(),
-            Some(replacement_deadline_seq),
+            Some(MIN_AGE),
             "cleanup must preserve a new schedule for the same deadline"
         );
         backend.close().await.unwrap();

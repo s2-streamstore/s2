@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use bytes::Bytes;
 use slatedb::{
     DbSnapshot, DbTransaction, KeyValue,
@@ -10,13 +8,6 @@ use super::Backend;
 use crate::backend::{error::StorageError, kv};
 
 impl Backend {
-    /// Pin a snapshot and wait until all writes it includes are durable.
-    pub(super) async fn db_snapshot_durable(&self) -> Result<Arc<DbSnapshot>, StorageError> {
-        let snapshot = self.db.snapshot().await?;
-        self.await_durable_seq(snapshot.seq()).await?;
-        Ok(snapshot)
-    }
-
     pub fn db_status(&self) -> Result<(), slatedb::CloseReason> {
         match self.db.status().close_reason {
             None => Ok(()),

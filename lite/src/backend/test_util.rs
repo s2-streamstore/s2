@@ -6,13 +6,12 @@ use slatedb::{Error, WriteHandle};
 pub(super) trait DbWriteTestExt:
     Future<Output = Result<WriteHandle, Error>> + Sized
 {
-    async fn assert_durable(self) -> u64 {
-        let handle = self.await.expect("fixture write should succeed");
-        handle
+    async fn assert_durable(self) {
+        self.await
+            .expect("fixture write should succeed")
             .await_durable()
             .await
             .expect("fixture write should become durable");
-        handle.seqnum()
     }
 }
 
