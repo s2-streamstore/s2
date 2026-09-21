@@ -15,7 +15,7 @@ use crate::{
         Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
         kv::{self, timestamp::TimestampSecs},
-        store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
+        store::{db_txn_get, db_txn_get_with},
         streamer::{TerminalTrimCondition, doe_arm_delay},
     },
     stream_id::StreamId,
@@ -23,6 +23,7 @@ use crate::{
 
 const PENDING_LIST_LIMIT: usize = 10_000;
 const CONCURRENCY: usize = 4;
+const DELETE_BATCH_SIZE: usize = 128;
 
 #[derive(Debug)]
 struct PendingDoeEntry {
@@ -69,6 +70,8 @@ impl Backend {
     ) -> Result<Page<(StreamId, Vec<PendingDoeEntry>)>, StorageError> {
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
+            // Cleanup rereads these rows to validate their commit sequences.
+            cache_blocks: true,
             ..Default::default()
         };
         let mut it = self
@@ -133,15 +136,25 @@ impl Backend {
         stream_id: StreamId,
         pending: &[PendingDoeEntry],
     ) -> Result<(), StorageError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        for entry in pending {
-            let key = kv::stream_doe_deadline::ser_key(entry.deadline, stream_id);
-            // A new incarnation may have scheduled the same deadline key.
-            if db_txn_get_with(&txn, &key, |row| Ok(row.seq)).await? == Some(entry.deadline_seq) {
-                txn.delete(key)?;
+        let mut last_commit = None;
+        for entries in pending.chunks(DELETE_BATCH_SIZE) {
+            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+            for entry in entries {
+                let key = kv::stream_doe_deadline::ser_key(entry.deadline, stream_id);
+                // A new incarnation may have scheduled the same deadline key.
+                if db_txn_get_with(&txn, &key, |row| Ok(row.seq)).await? == Some(entry.deadline_seq)
+                {
+                    txn.delete(key)?;
+                }
+            }
+            if let Some(commit) = txn.commit().await? {
+                last_commit = Some(commit);
             }
         }
-        db_txn_commit_durable(txn).await?;
+        // The last commit becoming durable also covers all earlier batches.
+        if let Some(commit) = last_commit {
+            commit.await_durable().await?;
+        }
         Ok(())
     }
 
@@ -581,7 +594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_doe_groups_multiple_deadlines() {
+    async fn stream_doe_groups_and_clears_multiple_batches_of_deadlines() {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-multi").unwrap();
         let stream = StreamName::from_str("doe-stream-multi").unwrap();
@@ -593,49 +606,46 @@ mod tests {
         )
         .await;
         let far_future = TimestampSecs::after(Duration::from_secs(3600));
-        let deadline_a = TimestampSecs::after(Duration::ZERO);
-        let deadline_b = TimestampSecs::after(Duration::from_secs(1));
-
-        backend
-            .db
-            .put(
-                kv::stream_doe_deadline::ser_key(deadline_a, stream_id),
+        let now = TimestampSecs::now().as_u32();
+        let deadlines: Vec<_> = (0..=super::DELETE_BATCH_SIZE)
+            .map(|i| TimestampSecs::from_secs(now + i as u32))
+            .collect();
+        let mut batch = slatedb::WriteBatch::new();
+        for deadline in &deadlines {
+            batch.put(
+                kv::stream_doe_deadline::ser_key(*deadline, stream_id),
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
-            )
-            .assert_durable()
-            .await;
-        backend
-            .db
-            .put(
-                kv::stream_doe_deadline::ser_key(deadline_b, stream_id),
-                kv::stream_doe_deadline::ser_value(MIN_AGE),
-            )
-            .assert_durable()
-            .await;
+            );
+        }
+        backend.db.write(batch).assert_durable().await;
 
         let page = backend.list_pending_stream_doe(far_future).await.unwrap();
         assert!(!page.has_more);
         assert_eq!(page.values.len(), 1);
         let (pending_stream_id, pending) = page.values.into_iter().next().unwrap();
         assert_eq!(pending_stream_id, stream_id);
-        let mut deadlines: Vec<_> = pending.iter().map(|entry| entry.deadline).collect();
-        deadlines.sort();
-        let mut expected = vec![deadline_a, deadline_b];
-        expected.sort();
-        assert_eq!(deadlines, expected);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|entry| entry.deadline)
+                .collect::<Vec<_>>(),
+            deadlines
+        );
 
         backend
             .process_stream_doe(stream_id, pending)
             .await
             .unwrap();
 
-        for deadline in [deadline_a, deadline_b] {
-            let deadline_key = backend
-                .db
-                .get(kv::stream_doe_deadline::ser_key(deadline, stream_id))
+        for deadline in deadlines {
+            let min_age = backend
+                .db_get(
+                    kv::stream_doe_deadline::ser_key(deadline, stream_id),
+                    kv::stream_doe_deadline::deser_value,
+                )
                 .await
                 .unwrap();
-            assert!(deadline_key.is_none());
+            assert!(min_age.is_none());
         }
     }
 
