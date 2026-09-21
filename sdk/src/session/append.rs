@@ -59,6 +59,9 @@ pub enum AppendSessionError {
     /// The server returned an invalid append acknowledgement.
     #[error("invalid append acknowledgement: {0}")]
     InvalidAck(String),
+    /// An earlier attempt may have appended records. Contains the last attempt's error.
+    #[error("append outcome is unknown after an earlier attempt: {0}")]
+    Indeterminate(#[source] Box<AppendSessionError>),
 }
 
 impl AppendSessionError {
@@ -66,6 +69,7 @@ impl AppendSessionError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Append(error) => error.is_retryable(),
+            Self::Indeterminate(error) => error.is_retryable(),
             Self::AckTimeout | Self::ServerDisconnected => true,
             Self::StreamClosedEarly
             | Self::SessionClosed
@@ -84,14 +88,16 @@ impl AppendSessionError {
             | Self::ServerDisconnected
             | Self::StreamClosedEarly
             | Self::SessionDropped
-            | Self::InvalidAck(_) => false,
+            | Self::InvalidAck(_)
+            | Self::Indeterminate(_) => false,
         }
     }
 
-    /// Return the underlying request error, if present.
+    /// Return the last attempt's underlying request error, if present.
     pub fn request_error(&self) -> Option<&RequestError> {
         match self {
             Self::Append(error) => error.request_error(),
+            Self::Indeterminate(error) => error.request_error(),
             Self::AckTimeout
             | Self::ServerDisconnected
             | Self::StreamClosedEarly
@@ -115,16 +121,19 @@ impl AppendSessionError {
             Self::Append(AppendError::Request(error)) if error.is_server_draining()
         )
     }
+
+    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
+        if prior_uncertainty {
+            Self::Indeterminate(Box::new(self))
+        } else {
+            self
+        }
+    }
 }
 
 impl From<ApiError> for AppendSessionError {
     fn from(error: ApiError) -> Self {
-        match error {
-            ApiError::AppendConditionFailed(condition) => {
-                Self::Append(AppendError::ConditionFailed(condition.into()))
-            }
-            other => Self::Append(AppendError::Request(other.into())),
-        }
+        Self::Append(error.into())
     }
 }
 
@@ -564,6 +573,13 @@ async fn run_session_with_retry(
                     access_token_mode,
                 ) && let Some(backoff) = retry_backoff.next()
                 {
+                    if !err.has_no_side_effects()
+                        && frame_signal.as_ref().is_none_or(|s| s.is_signalled())
+                    {
+                        for append in &mut state.inflight_appends {
+                            append.prior_uncertainty = true;
+                        }
+                    }
                     debug!(
                         %err,
                         ?backoff,
@@ -578,12 +594,15 @@ async fn run_session_with_retry(
                         "not retrying append session"
                     );
 
-                    let err: AppendSessionError = err;
-
-                    let _ = terminal_err.set(err.clone());
+                    let session_err = err.clone().with_prior_uncertainty(
+                        state.inflight_appends.iter().any(|a| a.prior_uncertainty),
+                    );
+                    let _ = terminal_err.set(session_err.clone());
 
                     for inflight_append in state.inflight_appends.drain(..) {
-                        let _ = inflight_append.ack_tx.send(Err(err.clone()));
+                        let _ = inflight_append.ack_tx.send(Err(err
+                            .clone()
+                            .with_prior_uncertainty(inflight_append.prior_uncertainty)));
                     }
 
                     if let Some(stashed) = state.stashed_submission.take() {
@@ -591,12 +610,16 @@ async fn run_session_with_retry(
                     }
 
                     if let Some(done_tx) = state.close_tx.take() {
-                        let _ = done_tx.send(Err(err.clone()));
+                        let _ = done_tx.send(Err(session_err.clone()));
                     }
 
                     state.cmd_rx.close();
                     while let Some(cmd) = state.cmd_rx.recv().await {
-                        cmd.reject(err.clone());
+                        let error = match &cmd {
+                            Command::Submit { .. } => &err,
+                            Command::Close { .. } => &session_err,
+                        };
+                        cmd.reject(error.clone());
                     }
                     break;
                 }
@@ -704,6 +727,7 @@ async fn run_session(
                     ack_tx: submission.ack_tx,
                     ack_deadline,
                     _permit: submission.permit,
+                    prior_uncertainty: false,
                 });
             }
 
@@ -999,6 +1023,7 @@ struct InflightAppend {
     ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
     ack_deadline: Instant,
     _permit: Option<AppendPermit>,
+    prior_uncertainty: bool,
 }
 
 enum Command {

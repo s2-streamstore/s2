@@ -667,6 +667,8 @@ pub(crate) enum ApiError {
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
     AppendConditionFailed(AppendConditionFailed),
+    #[error("append outcome is unknown after an earlier attempt: {0}")]
+    AppendIndeterminate(#[source] Box<ApiError>),
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
     #[error("{1}")]
@@ -678,6 +680,7 @@ impl ApiError {
         match self {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
+            Self::AppendIndeterminate(err) => err.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
             _ => false,
@@ -1035,6 +1038,7 @@ impl<'a> RequestBuilder<'a> {
         let mut retry_backoff: Option<RetryBackoff> = self
             .retry_enabled
             .then(|| self.client.retry_builder.build());
+        let mut prior_uncertainty = false;
 
         loop {
             if let Some(ref signal) = self.frame_signal {
@@ -1105,6 +1109,9 @@ impl<'a> RequestBuilder<'a> {
                 self.client.access_token_mode,
             ) && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
             {
+                prior_uncertainty |= self.append_retry_policy.is_some()
+                    && !err.has_no_side_effects()
+                    && self.frame_signal.as_ref().is_none_or(|s| s.is_signalled());
                 let backoff = retry_after.map_or(backoff, |ra| ra.max(backoff));
                 debug!(
                     %err,
@@ -1121,7 +1128,11 @@ impl<'a> RequestBuilder<'a> {
                     retries_exhausted = retry_backoff.as_ref().is_none_or(|b| b.is_exhausted()),
                     "not retrying request"
                 );
-                return Err(err);
+                return Err(if prior_uncertainty {
+                    ApiError::AppendIndeterminate(Box::new(err))
+                } else {
+                    err
+                });
             }
         }
     }

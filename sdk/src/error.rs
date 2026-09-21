@@ -332,12 +332,19 @@ pub enum AppendError {
     /// The append condition did not match.
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailed),
+    /// An earlier attempt may have appended records. Contains the last attempt's error.
+    #[error("append outcome is unknown after an earlier attempt: {0}")]
+    Indeterminate(#[source] Box<AppendError>),
 }
 
 impl AppendError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Request(error) if error.is_retryable())
+        match self {
+            Self::Request(error) => error.is_retryable(),
+            Self::ConditionFailed(_) => false,
+            Self::Indeterminate(error) => error.is_retryable(),
+        }
     }
 
     /// Whether retrying the operation cannot duplicate a mutation.
@@ -345,14 +352,16 @@ impl AppendError {
         match self {
             Self::Request(error) => error.has_no_side_effects(),
             Self::ConditionFailed(_) => true,
+            Self::Indeterminate(_) => false,
         }
     }
 
-    /// Return the underlying request error, if present.
+    /// Return the last attempt's underlying request error, if present.
     pub fn request_error(&self) -> Option<&RequestError> {
         match self {
             Self::Request(error) => Some(error),
             Self::ConditionFailed(_) => None,
+            Self::Indeterminate(error) => error.request_error(),
         }
     }
 }
@@ -361,6 +370,7 @@ impl From<ApiError> for AppendError {
     fn from(error: ApiError) -> Self {
         match error {
             ApiError::AppendConditionFailed(condition) => Self::ConditionFailed(condition.into()),
+            ApiError::AppendIndeterminate(error) => Self::Indeterminate(Box::new((*error).into())),
             other => Self::Request(other.into()),
         }
     }
