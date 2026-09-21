@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use s2_common::resources::Page;
 use slatedb::{
-    DbTransaction, WriteBatch,
+    WriteBatch,
     config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
@@ -16,8 +16,7 @@ use crate::{
         Backend,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
         kv::{self, timestamp::TimestampSecs},
-        store::db_txn_get,
-        streamer::{TerminalTrimCondition, doe_arm_delay},
+        streamer::TerminalTrimCondition,
     },
     stream_id::StreamId,
 };
@@ -141,43 +140,6 @@ impl Backend {
         if !batch.is_empty() {
             self.db.write(batch).await?.await_durable().await?;
         }
-        Ok(())
-    }
-
-    pub(super) async fn arm_doe_on_full_trim(
-        &self,
-        txn: &DbTransaction,
-        stream_id: StreamId,
-    ) -> Result<(), StorageError> {
-        let Some((basin, stream)) = db_txn_get(
-            txn,
-            kv::stream_id_mapping::ser_key(stream_id),
-            kv::stream_id_mapping::deser_value,
-        )
-        .await?
-        else {
-            return Ok(());
-        };
-        let Some(meta) = db_txn_get(
-            txn,
-            &kv::stream_meta::ser_key(&basin, &stream),
-            kv::stream_meta::deser_value,
-        )
-        .await?
-        else {
-            return Ok(());
-        };
-        if meta.deleted_at.is_some() {
-            return Ok(());
-        }
-        let Some(min_age) = meta.config.delete_on_empty.min_age() else {
-            return Ok(());
-        };
-        let deadline = TimestampSecs::after(doe_arm_delay(Duration::ZERO, min_age));
-        txn.put(
-            kv::stream_doe_deadline::new_key(deadline, stream_id),
-            kv::stream_doe_deadline::ser_value(min_age),
-        )?;
         Ok(())
     }
 }

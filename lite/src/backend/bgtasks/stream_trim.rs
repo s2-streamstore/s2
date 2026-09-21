@@ -1,9 +1,9 @@
-use std::ops::RangeTo;
+use std::{ops::RangeTo, time::Duration};
 
 use futures::{StreamExt, stream};
 use s2_common::{record::NonZeroSeqNum, resources::Page};
 use slatedb::{
-    IsolationLevel, WriteBatch,
+    DbTransaction, IsolationLevel, WriteBatch,
     config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
@@ -12,8 +12,9 @@ use crate::{
     backend::{
         Backend,
         error::StorageError,
-        kv,
+        kv::{self, timestamp::TimestampSecs},
         store::{db_txn_commit_durable, db_txn_get},
+        streamer::doe_arm_delay,
     },
     stream_id::StreamId,
 };
@@ -142,11 +143,47 @@ impl Backend {
             txn.delete(kv::stream_tail_position::ser_key(pending.stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(pending.stream_id))?;
         } else if !has_remaining_records {
-            self.arm_doe_on_full_trim(&txn, pending.stream_id).await?;
+            arm_doe_on_full_trim(&txn, pending.stream_id).await?;
         }
         db_txn_commit_durable(txn).await?;
         Ok(())
     }
+}
+
+async fn arm_doe_on_full_trim(
+    txn: &DbTransaction,
+    stream_id: StreamId,
+) -> Result<(), StorageError> {
+    let Some((basin, stream)) = db_txn_get(
+        txn,
+        kv::stream_id_mapping::ser_key(stream_id),
+        kv::stream_id_mapping::deser_value,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let Some(meta) = db_txn_get(
+        txn,
+        &kv::stream_meta::ser_key(&basin, &stream),
+        kv::stream_meta::deser_value,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    if meta.deleted_at.is_some() {
+        return Ok(());
+    }
+    let Some(min_age) = meta.config.delete_on_empty.min_age() else {
+        return Ok(());
+    };
+    let deadline = TimestampSecs::after(doe_arm_delay(Duration::ZERO, min_age));
+    txn.put(
+        kv::stream_doe_deadline::new_key(deadline, stream_id),
+        kv::stream_doe_deadline::ser_value(min_age),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
