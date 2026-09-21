@@ -42,6 +42,7 @@ pub struct LiteArgs {
     /// Name of the S3 bucket to back the database.
     ///
     /// If not specified, in-memory storage is used unless --local-root is set.
+    /// Uses the standard AWS configuration for the endpoint, region and credentials.
     #[arg(long, group = "main_store")]
     pub bucket: Option<String>,
 
@@ -56,12 +57,13 @@ pub struct LiteArgs {
     )]
     pub local_root: Option<PathBuf>,
 
-    /// S3 bucket dedicated to the write-ahead log (WAL).
+    /// Name of the S3 bucket to back the write-ahead log (WAL).
     ///
-    /// Requires --bucket or --local-root for the main database. Uses the same
-    /// AWS configuration as the main store, with optional S2LITE_WAL_AWS_*
-    /// overrides for a different endpoint, region or credentials.
-    /// If omitted, the WAL uses the main store unless --wal-local-root is set.
+    /// If not specified, the main store is used unless --wal-local-root is set.
+    /// Uses the same AWS configuration as --bucket, with optional
+    /// S2LITE_WAL_AWS_* overrides for the endpoint, region and credentials.
+    ///
+    /// Requires --bucket or --local-root. Conflicts with --wal-local-root.
     #[arg(
         long,
         env = "S2LITE_WAL_BUCKET",
@@ -70,10 +72,9 @@ pub struct LiteArgs {
     )]
     pub wal_bucket: Option<String>,
 
-    /// Directory dedicated to the write-ahead log (WAL), with fsync enabled.
+    /// Root directory to back the write-ahead log (WAL) on the local filesystem.
     ///
-    /// Requires --bucket or --local-root for the main database. Both stores
-    /// must remain available at the same locations when the database restarts.
+    /// Requires --bucket or --local-root. Conflicts with --wal-bucket.
     #[arg(
         long,
         env = "S2LITE_WAL_LOCAL_ROOT",
