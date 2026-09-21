@@ -980,6 +980,16 @@ mod tests {
 
     use super::{Cli, Command, DiffArgs, DiffOutput, DiffResourceKind, IssueAccessTokenArgs};
 
+    #[test]
+    fn lite_rejects_invalid_multipart_concurrency() {
+        for value in ["0".to_owned(), usize::MAX.to_string()] {
+            let error =
+                Cli::try_parse_from(["s2", "lite", "--multipart-upload-concurrency", &value])
+                    .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
     fn issue_access_token_args_from<I, T>(args: I) -> IssueAccessTokenArgs
     where
         I: IntoIterator<Item = T>,

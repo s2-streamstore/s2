@@ -1,5 +1,6 @@
 use std::{
     net::SocketAddr,
+    num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -83,6 +84,32 @@ pub struct LiteArgs {
     /// Maximum in-flight append metered bytes across all streams before admission blocks.
     #[arg(long, default_value = "128MiB")]
     pub append_inflight_bytes: ByteSize,
+
+    /// Cap the number of active parts in each multipart object upload.
+    ///
+    /// Lower values can reduce interference with WAL writes on shared storage,
+    /// at the cost of bulk upload throughput. Applies to memtable flushes and
+    /// compaction output. This does not limit the number of concurrent uploads
+    /// or increase the upload concurrency chosen by the underlying writer.
+    /// When omitted, the object store writer's concurrency is unchanged.
+    #[arg(
+        long,
+        env = "S2LITE_MULTIPART_UPLOAD_CONCURRENCY",
+        value_name = "PARTS",
+        value_parser = parse_multipart_upload_concurrency
+    )]
+    pub multipart_upload_concurrency: Option<NonZeroUsize>,
+}
+
+fn parse_multipart_upload_concurrency(value: &str) -> Result<NonZeroUsize, String> {
+    let concurrency = value.parse::<NonZeroUsize>().map_err(|e| e.to_string())?;
+    if concurrency.get() > tokio::sync::Semaphore::MAX_PERMITS {
+        return Err(format!(
+            "must be at most {}",
+            tokio::sync::Semaphore::MAX_PERMITS
+        ));
+    }
+    Ok(concurrency)
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +201,16 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     };
 
     let object_store = init_object_store(&store_type).await?;
+    let object_store = match args.multipart_upload_concurrency {
+        Some(concurrency) => {
+            info!(%concurrency, "capping concurrent parts per multipart upload");
+            Arc::new(crate::multipart_limit::MultipartLimitStore::new(
+                object_store,
+                concurrency,
+            )) as Arc<dyn object_store::ObjectStore>
+        }
+        None => object_store,
+    };
 
     let db_settings = slatedb::Settings::from_env_with_default(
         "SL8_",

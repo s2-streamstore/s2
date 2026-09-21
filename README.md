@@ -213,6 +213,21 @@ Use `SL8_` prefixed environment variables, e.g.:
 SL8_FLUSH_INTERVAL=10ms
 ```
 
+For object storage sharing a disk with latency-sensitive WAL writes, Lite can
+cap the active parts within each multipart upload:
+
+```bash
+s2 lite --bucket my-bucket --multipart-upload-concurrency 1
+```
+
+The same cap can be set with `S2LITE_MULTIPART_UPLOAD_CONCURRENCY`. It applies to
+both memtable-flush and compaction uploads; multiple uploads can still run
+concurrently. Ordinary PUTs, including WAL writes, are unaffected by the cap.
+Lower concurrency trades bulk upload throughput for less contention, so measure
+append latency and compaction backlog under your workload. Omitting the option
+preserves the writer's default concurrency. The cap must be positive and does
+not increase the writer's concurrency when set above its existing limit.
+
 #### Design
 
 [Concepts](https://s2.dev/docs/concepts)
