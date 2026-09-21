@@ -206,12 +206,11 @@ async fn append(server: &TestServer, streaming: bool) -> Result<(), AppendSessio
     .expect("append timed out")
 }
 
-fn has_indefinite_failure_wrapper(error: &AppendSessionError) -> bool {
-    matches!(
-        error,
-        AppendSessionError::IndefiniteFailure(_)
-            | AppendSessionError::Append(AppendError::IndefiniteFailure(_))
-    )
+fn assert_server_error(error: &AppendSessionError, code: ErrorCode) {
+    let cause = error.request_error().unwrap().server_error().unwrap();
+    assert_eq!(cause.known_code(), Some(code));
+    assert_eq!(error.is_retryable(), code.is_retryable());
+    assert_eq!(error.has_no_side_effects(), code.has_no_side_effects());
 }
 
 #[rstest]
@@ -219,8 +218,9 @@ fn has_indefinite_failure_wrapper(error: &AppendSessionError) -> bool {
 #[case::condition_failed(Reply::ConditionFailed)]
 #[case::retry_budget_exhausted(Reply::Error(ErrorCode::RateLimited))]
 #[case::reconnect_rejected(Reply::RejectRequest(ErrorCode::PermissionDenied))]
+#[case::later_indefinite_failure(Reply::Error(ErrorCode::Storage))]
 #[tokio::test]
-async fn ambiguous_attempt_preserves_uncertainty(
+async fn first_indefinite_error_is_returned(
     #[values(false, true)] streaming: bool,
     #[case] last: Reply,
 ) {
@@ -230,68 +230,58 @@ async fn ambiguous_attempt_preserves_uncertainty(
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(has_indefinite_failure_wrapper(&error), "{error:?}");
-    assert!(!error.has_no_side_effects());
-    assert!(error.to_string().contains("outcome is unknown"));
+    assert_server_error(&error, ErrorCode::Unavailable);
     assert_eq!(server.attempts.load(Ordering::Relaxed), 2);
-    match last {
-        Reply::ConditionFailed => {
-            let last = match &error {
-                AppendSessionError::IndefiniteFailure(last) => match last.as_ref() {
-                    AppendSessionError::Append(last) => last,
-                    other => panic!("unexpected error: {other:?}"),
-                },
-                AppendSessionError::Append(AppendError::IndefiniteFailure(last)) => last.as_ref(),
-                other => panic!("unexpected error: {other:?}"),
-            };
-            assert!(matches!(
-                last,
-                AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
-            ));
-            assert!(!error.is_retryable());
-        }
-        Reply::Error(code) | Reply::RejectRequest(code) => {
-            let cause = error.request_error().unwrap().server_error().unwrap();
-            assert_eq!(cause.known_code(), Some(code));
-            assert_eq!(error.is_retryable(), code.is_retryable());
-        }
-        Reply::Ack => unreachable!(),
-    }
 }
 
 #[rstest]
 #[tokio::test]
-async fn uncertainty_survives_intermediate_safe_failure(#[values(false, true)] streaming: bool) {
+async fn first_indefinite_error_survives_other_failures(
+    #[values(false, true)] streaming: bool,
+    #[values(ErrorCode::RateLimited, ErrorCode::Storage)] intermediate: ErrorCode,
+) {
     let server = TestServer::new(
         vec![
+            vec![Reply::Error(ErrorCode::RateLimited)],
             vec![Reply::Error(ErrorCode::Unavailable)],
-            vec![Reply::Error(ErrorCode::RateLimited)],
+            vec![Reply::Error(intermediate)],
             vec![Reply::Error(ErrorCode::PermissionDenied)],
+            vec![Reply::Ack],
         ],
         AppendRetryPolicy::All,
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(has_indefinite_failure_wrapper(&error));
-    assert!(!error.has_no_side_effects());
-    assert_eq!(server.attempts.load(Ordering::Relaxed), 3);
+    assert_server_error(&error, ErrorCode::Unavailable);
+    assert_eq!(server.attempts.load(Ordering::Relaxed), 4);
 }
 
 #[rstest]
+#[case::permission_denied(Reply::Error(ErrorCode::PermissionDenied))]
+#[case::condition_failed(Reply::ConditionFailed)]
 #[tokio::test]
-async fn definite_failures_remain_definite(#[values(false, true)] streaming: bool) {
+async fn definite_failures_remain_definite(
+    #[values(false, true)] streaming: bool,
+    #[case] last: Reply,
+) {
     let server = TestServer::new(
-        vec![
-            vec![Reply::Error(ErrorCode::RateLimited)],
-            vec![Reply::Error(ErrorCode::PermissionDenied)],
-        ],
+        vec![vec![Reply::Error(ErrorCode::RateLimited)], vec![last]],
         AppendRetryPolicy::All,
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(!has_indefinite_failure_wrapper(&error));
     assert!(error.has_no_side_effects());
     assert!(!error.is_retryable());
+    match last {
+        Reply::ConditionFailed => assert!(matches!(
+            error,
+            AppendSessionError::Append(AppendError::ConditionFailed(
+                AppendConditionFailed::SeqNumMismatch(1)
+            ))
+        )),
+        Reply::Error(code) => assert_server_error(&error, code),
+        _ => unreachable!(),
+    }
     assert_eq!(server.attempts.load(Ordering::Relaxed), 2);
 }
 
@@ -321,18 +311,38 @@ async fn no_side_effects_policy_does_not_retry_ambiguous_append(
     )
     .await;
     let error = append(&server, streaming).await.unwrap_err();
-    assert!(!has_indefinite_failure_wrapper(&error));
-    assert!(!error.has_no_side_effects());
-    assert_eq!(
-        error
-            .request_error()
-            .unwrap()
-            .server_error()
-            .unwrap()
-            .known_code(),
-        Some(ErrorCode::Unavailable),
-    );
+    assert_server_error(&error, ErrorCode::Unavailable);
     assert_eq!(server.attempts.load(Ordering::Relaxed), 1);
+}
+
+#[rstest]
+#[tokio::test]
+async fn session_close_returns_original_indefinite_error(
+    #[values(false, true)] close_before_ack: bool,
+) {
+    let server = TestServer::new(
+        vec![
+            vec![Reply::Error(ErrorCode::Unavailable)],
+            vec![Reply::Error(ErrorCode::PermissionDenied)],
+            vec![Reply::Ack],
+        ],
+        AppendRetryPolicy::All,
+    )
+    .await;
+    timeout(TEST_TIMEOUT, async {
+        let session = server.stream.append_session(AppendSessionConfig::new());
+        let ticket = session.submit(input()).await.unwrap();
+        let (append_result, close_result) = if close_before_ack {
+            tokio::join!(ticket, session.close())
+        } else {
+            (ticket.await, session.close().await)
+        };
+        assert_server_error(&append_result.unwrap_err(), ErrorCode::Unavailable);
+        assert_server_error(&close_result.unwrap_err(), ErrorCode::Unavailable);
+        assert_eq!(server.attempts.load(Ordering::Relaxed), 2);
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -349,9 +359,11 @@ async fn acknowledged_batch_does_not_taint_later_batch() {
         let session = server.stream.append_session(AppendSessionConfig::new());
         session.submit(input()).await.unwrap().await.unwrap();
         let error = session.submit(input()).await.unwrap().await.unwrap_err();
-        assert!(!has_indefinite_failure_wrapper(&error));
-        assert!(error.has_no_side_effects());
-        assert!(session.close().await.unwrap_err().has_no_side_effects());
+        assert_server_error(&error, ErrorCode::PermissionDenied);
+        assert_server_error(
+            &session.close().await.unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
     })
     .await
     .unwrap();
@@ -376,7 +388,7 @@ async fn producer_preserves_batch_uncertainty() {
             .await
             .unwrap_err();
         assert!(!error.has_no_side_effects());
-        assert!(!error.is_retryable());
+        assert!(error.is_retryable());
         assert_eq!(
             error
                 .request_error()
@@ -384,9 +396,19 @@ async fn producer_preserves_batch_uncertainty() {
                 .server_error()
                 .unwrap()
                 .known_code(),
-            Some(ErrorCode::PermissionDenied),
+            Some(ErrorCode::Unavailable),
         );
-        assert!(!producer.close().await.unwrap_err().has_no_side_effects());
+        let close_error = producer.close().await.unwrap_err();
+        assert!(!close_error.has_no_side_effects());
+        assert_eq!(
+            close_error
+                .request_error()
+                .unwrap()
+                .server_error()
+                .unwrap()
+                .known_code(),
+            Some(ErrorCode::Unavailable),
+        );
     })
     .await
     .unwrap();

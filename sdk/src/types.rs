@@ -403,6 +403,9 @@ impl From<Compression> for CompressionAlgorithm {
 /// [`append_session`](crate::S2Stream::append_session) operations.
 pub enum AppendRetryPolicy {
     /// Retry all appends. Use when duplicate records on the stream are acceptable.
+    ///
+    /// If retries fail, return the first error from an attempt that may have had side effects,
+    /// or the last error if all failures were definite.
     All,
     /// Retry when it can be determined that the request had no side effects.
     ///
