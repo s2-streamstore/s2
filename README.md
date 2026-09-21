@@ -194,6 +194,54 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite-helm/README.md) for installation instructions and configuration options.
 
+### Separate WAL storage
+
+By default, Lite stores the write-ahead log (WAL), LSM data and metadata together.
+Use `--wal-bucket` or `--wal-local-root` to place the WAL in a separate store.
+The main database still uses `--bucket` or `--local-root`; `--path` applies to both
+stores. The WAL options are also available as `S2LITE_WAL_BUCKET` and
+`S2LITE_WAL_LOCAL_ROOT`.
+
+For example, keep the WAL on local MinIO while storing the LSM in S3:
+
+```bash
+export AWS_REGION=us-east-1
+# The main S3 store uses the usual AWS credentials/profile/instance role.
+export S2LITE_WAL_AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000
+export S2LITE_WAL_AWS_REGION=us-east-1
+export S2LITE_WAL_AWS_ACCESS_KEY_ID=your-minio-access-key
+export S2LITE_WAL_AWS_SECRET_ACCESS_KEY=your-minio-secret-key
+
+s2 lite --bucket my-lsm-bucket --wal-bucket my-wal-bucket --path my-database
+```
+
+For a remote MinIO main store, set its endpoint and credentials using the usual
+`AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables.
+WAL-specific configuration is independent:
+
+| Variable | Purpose |
+| --- | --- |
+| `S2LITE_WAL_AWS_ENDPOINT_URL_S3` | WAL endpoint; omitted means the normal S3 endpoint. HTTP endpoints are supported. |
+| `S2LITE_WAL_AWS_REGION` | WAL region; otherwise uses the standard AWS region configuration. |
+| `S2LITE_WAL_AWS_ACCESS_KEY_ID` / `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` | WAL static credentials; both must be supplied together. If omitted, use the standard AWS credential chain. |
+| `S2LITE_WAL_AWS_SESSION_TOKEN` | Optional token for the WAL static credentials. |
+
+A filesystem WAL is also supported, with fsync enabled:
+
+```bash
+s2 lite --bucket my-lsm-bucket --wal-local-root /data/wal --path my-database
+```
+
+The default WAL flush interval follows the WAL store type: 50 ms for an S3 bucket,
+5 ms for a local filesystem. `SL8_FLUSH_INTERVAL` overrides it as usual; for a
+local MinIO benchmark, set it explicitly (for example, `SL8_FLUSH_INTERVAL=1ms`).
+
+Configure separate stores when creating a database and use the same locations
+on every restart. These options do not migrate existing WAL data. Acknowledged
+records depend on the WAL store until they are flushed into the main store, so
+the WAL store's durability and availability matter. Separate buckets on the same
+disk still share I/O; use separate storage resources to isolate that contention.
+
 ### Monitoring
 
 `/health` will return 200 on success for readiness and liveness checks

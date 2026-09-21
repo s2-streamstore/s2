@@ -42,14 +42,44 @@ pub struct LiteArgs {
     /// Name of the S3 bucket to back the database.
     ///
     /// If not specified, in-memory storage is used unless --local-root is set.
-    #[arg(long)]
+    #[arg(long, group = "main_store")]
     pub bucket: Option<String>,
 
     /// Root directory to back the database on the local filesystem.
     ///
     /// Conflicts with --bucket.
-    #[arg(long, value_name = "DIR", conflicts_with = "bucket")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        conflicts_with = "bucket",
+        group = "main_store"
+    )]
     pub local_root: Option<PathBuf>,
+
+    /// S3 bucket dedicated to the write-ahead log (WAL).
+    ///
+    /// Requires --bucket or --local-root for the main database. Configure this
+    /// store independently with S2LITE_WAL_AWS_* environment variables.
+    /// If omitted, the WAL uses the main store unless --wal-local-root is set.
+    #[arg(
+        long,
+        env = "S2LITE_WAL_BUCKET",
+        requires = "main_store",
+        conflicts_with = "wal_local_root"
+    )]
+    pub wal_bucket: Option<String>,
+
+    /// Directory dedicated to the write-ahead log (WAL), with fsync enabled.
+    ///
+    /// Requires --bucket or --local-root for the main database. Both stores
+    /// must remain available at the same locations when the database restarts.
+    #[arg(
+        long,
+        env = "S2LITE_WAL_LOCAL_ROOT",
+        value_name = "DIR",
+        requires = "main_store"
+    )]
+    pub wal_local_root: Option<PathBuf>,
 
     /// Base path on object storage.
     #[arg(long, default_value = "")]
@@ -174,21 +204,38 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     };
 
     let object_store = init_object_store(&store_type).await?;
+    let wal_store_type = if let Some(bucket) = args.wal_bucket {
+        Some(StoreType::S3Bucket(bucket))
+    } else {
+        args.wal_local_root.map(StoreType::LocalFileSystem)
+    };
+    let wal_object_store = match &wal_store_type {
+        Some(StoreType::S3Bucket(bucket)) => Some(WalS3Config::from_env()?.build(bucket).await?),
+        Some(store_type) => Some(init_object_store(store_type).await?),
+        None => None,
+    };
 
     let db_settings = slatedb::Settings::from_env_with_default(
         "SL8_",
         slatedb::Settings {
-            flush_interval: Some(store_type.default_flush_interval()),
+            flush_interval: Some(
+                wal_store_type
+                    .as_ref()
+                    .unwrap_or(&store_type)
+                    .default_flush_interval(),
+            ),
             ..Default::default()
         },
     )?;
 
     let manifest_poll_interval = db_settings.manifest_poll_interval;
 
-    let db = slatedb::Db::builder(args.path, object_store)
-        .with_settings(db_settings)
-        .build()
-        .await?;
+    let mut builder = slatedb::Db::builder(args.path, object_store).with_settings(db_settings);
+    if let Some(wal_object_store) = wal_object_store {
+        info!(store = ?wal_store_type, "using dedicated WAL object store");
+        builder = builder.with_wal_object_store(wal_object_store);
+    }
+    let db = builder.build().await?;
 
     info!(
         ?manifest_poll_interval,
@@ -367,6 +414,89 @@ async fn init_object_store(
     })
 }
 
+// Keep credentials out of LiteArgs and its startup Debug log. The WAL endpoint
+// and static credentials are independent from the primary store's AWS_* values.
+struct WalS3Config {
+    endpoint: Option<String>,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    session_token: Option<String>,
+}
+
+impl WalS3Config {
+    fn from_env() -> eyre::Result<Self> {
+        Self::from_getter(|name| match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(eyre::eyre!("{name} must contain valid UTF-8"))
+            }
+        })
+    }
+
+    fn from_getter(get: impl Fn(&str) -> eyre::Result<Option<String>>) -> eyre::Result<Self> {
+        let config = Self {
+            endpoint: get("S2LITE_WAL_AWS_ENDPOINT_URL_S3")?,
+            region: get("S2LITE_WAL_AWS_REGION")?,
+            access_key_id: get("S2LITE_WAL_AWS_ACCESS_KEY_ID")?,
+            secret_access_key: get("S2LITE_WAL_AWS_SECRET_ACCESS_KEY")?,
+            session_token: get("S2LITE_WAL_AWS_SESSION_TOKEN")?,
+        };
+        eyre::ensure!(
+            config.access_key_id.is_some() == config.secret_access_key.is_some(),
+            "S2LITE_WAL_AWS_ACCESS_KEY_ID and S2LITE_WAL_AWS_SECRET_ACCESS_KEY must be set together"
+        );
+        eyre::ensure!(
+            config.session_token.is_none() || config.access_key_id.is_some(),
+            "S2LITE_WAL_AWS_SESSION_TOKEN requires the WAL access key and secret key"
+        );
+        Ok(config)
+    }
+
+    async fn build(self, bucket: &str) -> eyre::Result<Arc<dyn object_store::ObjectStore>> {
+        // Do not use from_env(): that would also inherit the main store's
+        // endpoint, static credentials and session token.
+        let mut builder = object_store::aws::AmazonS3Builder::new().with_bucket_name(bucket);
+        let aws_config = if self.access_key_id.is_none() || self.region.is_none() {
+            Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
+        } else {
+            None
+        };
+        if let Some(endpoint) = &self.endpoint {
+            builder = builder
+                .with_allow_http(endpoint.starts_with("http://"))
+                .with_endpoint(endpoint);
+        }
+        if let Some(region) = self.region.as_deref().or_else(|| {
+            aws_config
+                .as_ref()
+                .and_then(|config| config.region())
+                .map(|region| region.as_ref())
+        }) {
+            builder = builder.with_region(region);
+        }
+        if let (Some(key_id), Some(secret_key)) = (self.access_key_id, self.secret_access_key) {
+            builder = builder.with_credentials(Arc::new(
+                object_store::StaticCredentialProvider::new(object_store::aws::AwsCredential {
+                    key_id,
+                    secret_key,
+                    token: self.session_token,
+                }),
+            ));
+        } else if let Some(credentials_provider) = aws_config
+            .as_ref()
+            .and_then(|config| config.credentials_provider())
+        {
+            builder = builder.with_credentials(Arc::new(S3CredentialProvider {
+                aws: credentials_provider.clone(),
+                cache: tokio::sync::Mutex::new(None),
+            }));
+        }
+        Ok(Arc::new(builder.build()?))
+    }
+}
+
 async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.expect("ctrl-c");
@@ -459,7 +589,99 @@ impl object_store::CredentialProvider for S3CredentialProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerProtocol, cli_endpoint, cli_env_hint};
+    use super::{ServerProtocol, WalS3Config, cli_endpoint, cli_env_hint};
+
+    fn wal_config(values: &[(&str, &str)]) -> eyre::Result<WalS3Config> {
+        WalS3Config::from_getter(|name| {
+            Ok(values
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned()))
+        })
+    }
+
+    #[test]
+    fn wal_static_credentials_must_be_complete() {
+        for values in [
+            vec![("S2LITE_WAL_AWS_ACCESS_KEY_ID", "test-key")],
+            vec![("S2LITE_WAL_AWS_SECRET_ACCESS_KEY", "do-not-log-this-secret")],
+            vec![("S2LITE_WAL_AWS_SESSION_TOKEN", "do-not-log-this-token")],
+        ] {
+            let error = wal_config(&values)
+                .err()
+                .expect("invalid credentials")
+                .to_string();
+            assert!(error.contains("S2LITE_WAL_AWS_"));
+            assert!(!error.contains("do-not-log-this"));
+        }
+        assert!(wal_config(&[]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn wal_s3_uses_its_own_endpoint_and_credentials() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            Router,
+            body::Bytes,
+            http::{HeaderMap, Uri},
+            routing::put,
+        };
+        use slatedb::object_store::{ObjectStoreExt, path::Path};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = Arc::new(Mutex::new(Some(tx)));
+        let app = Router::new().route(
+            "/{*path}",
+            put(move |uri: Uri, headers: HeaderMap, body: Bytes| {
+                let tx = tx.clone();
+                async move {
+                    tx.lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send((uri, headers, body))
+                        .unwrap();
+                    ([("etag", "\"test-etag\"")], "")
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = wal_config(&[
+            ("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:1"),
+            ("AWS_ACCESS_KEY_ID", "main-key"),
+            ("AWS_SECRET_ACCESS_KEY", "main-secret"),
+            ("AWS_SESSION_TOKEN", "main-token"),
+            ("S2LITE_WAL_AWS_ENDPOINT_URL_S3", &endpoint),
+            ("S2LITE_WAL_AWS_REGION", "us-east-1"),
+            ("S2LITE_WAL_AWS_ACCESS_KEY_ID", "wal-key"),
+            ("S2LITE_WAL_AWS_SECRET_ACCESS_KEY", "wal-secret"),
+            ("S2LITE_WAL_AWS_SESSION_TOKEN", "wal-token"),
+        ])
+        .unwrap();
+        let store = config.build("wal-bucket").await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            store.put(
+                &Path::from("db/wal/probe"),
+                Bytes::from_static(b"wal-data").into(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (uri, headers, body) = rx.await.unwrap();
+        assert_eq!(uri.path(), "/wal-bucket/db/wal/probe");
+        let authorization = headers["authorization"].to_str().unwrap();
+        assert!(authorization.contains("Credential=wal-key/"));
+        assert!(authorization.contains("/us-east-1/s3/aws4_request"));
+        assert!(!authorization.contains("main-key"));
+        assert_eq!(headers["x-amz-security-token"], "wal-token");
+        assert_eq!(body, "wal-data");
+        server.abort();
+    }
 
     #[test]
     fn cli_endpoint_uses_localhost_with_explicit_port() {
