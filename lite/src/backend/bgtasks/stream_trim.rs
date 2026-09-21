@@ -13,7 +13,7 @@ use crate::{
         Backend,
         error::StorageError,
         kv::{self, timestamp::TimestampSecs},
-        store::{db_txn_commit_durable, db_txn_get},
+        store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
         streamer::doe_arm_delay,
     },
     stream_id::StreamId,
@@ -27,6 +27,8 @@ const DELETE_BATCH_SIZE: usize = 10_000;
 struct PendingTrim {
     stream_id: StreamId,
     trim_point: RangeTo<NonZeroSeqNum>,
+    /// Commit sequence of the observed marker; bounds the records this job may delete.
+    marker_seq: u64,
 }
 
 impl Backend {
@@ -35,16 +37,15 @@ impl Backend {
         if page.values.is_empty() {
             return Ok(page.has_more);
         }
-        // Drain the whole tick even on error. Cancelling a job can leave its
-        // metadata cleanup committing after the next tick has scanned old work.
-        stream::iter(page.values)
+        let mut processed = stream::iter(page.values)
             .map(|pending| {
                 let backend = self.clone();
                 async move { backend.process_trim(pending).await }
             })
-            .buffer_unordered(CONCURRENCY)
-            .fold(Ok(()), |result, next| async move { result.and(next) })
-            .await?;
+            .buffer_unordered(CONCURRENCY);
+        while let Some(result) = processed.next().await {
+            result?;
+        }
         Ok(page.has_more)
     }
 
@@ -64,6 +65,7 @@ impl Backend {
             pending.push(PendingTrim {
                 stream_id,
                 trim_point,
+                marker_seq: kv.seq,
             });
             if pending.len() >= PENDING_LIST_LIMIT {
                 return Ok(Page::new(pending, true));
@@ -73,9 +75,6 @@ impl Backend {
     }
 
     async fn process_trim(&self, pending: PendingTrim) -> Result<(), StorageError> {
-        // Ticks never overlap, and only this worker removes stream metadata.
-        // The scanned incarnation cannot be replaced until this job finalizes,
-        // so records can be deleted in ordinary batches without rechecking the marker.
         let has_remaining_records = self.delete_records(pending).await?;
         self.finalize_trim(pending, has_remaining_records).await
     }
@@ -98,7 +97,10 @@ impl Backend {
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, pending.stream_id);
-            if pos.seq_num >= pending.trim_point.end.get() {
+            // Name reuse requires all old records to be durably deleted first.
+            // A stale job may see replacement records; stop before deleting any
+            // records committed after the trim marker it observed.
+            if pos.seq_num >= pending.trim_point.end.get() || kv.seq > pending.marker_seq {
                 has_remaining_records = true;
                 break;
             }
@@ -125,9 +127,9 @@ impl Backend {
     ) -> Result<(), StorageError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
-        let current = db_txn_get(&txn, &trim_point_key, kv::stream_trim_point::deser_value).await?;
-        // Markers only advance while this job runs; preserve any newer trim.
-        if current != Some(pending.trim_point) {
+        let current_seq = db_txn_get_with(&txn, &trim_point_key, |entry| Ok(entry.seq)).await?;
+        // A replacement stream can have the same trim point, but a different marker sequence.
+        if current_seq != Some(pending.marker_seq) {
             return Ok(());
         }
         let is_terminal_trim = pending.trim_point == ..NonZeroSeqNum::MAX;
@@ -203,7 +205,7 @@ mod tests {
     use slatedb::WriteBatch;
     use time::OffsetDateTime;
 
-    use super::{super::tests::test_backend, PendingTrim};
+    use super::super::tests::test_backend;
     use crate::{
         backend::{kv, test_util::DbWriteTestExt as _},
         stream_id::StreamId,
@@ -429,31 +431,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_trim_preserves_advanced_marker() {
-        let backend = test_backend().await;
-        let stream_id: StreamId = [9u8; StreamId::LEN].into();
-        let key = kv::stream_trim_point::ser_key(stream_id);
-        backend
-            .db
-            .put(&key, kv::stream_trim_point::ser_value(trim_point(10)))
-            .assert_durable()
-            .await;
-        let pending = PendingTrim {
-            stream_id,
-            trim_point: trim_point(5),
-        };
-        backend.finalize_trim(pending, false).await.unwrap();
-        assert_eq!(
-            backend
-                .db_get(key, kv::stream_trim_point::deser_value)
-                .await
-                .unwrap(),
-            Some(trim_point(10))
-        );
-        backend.close().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn stream_trim_paginates_pending_list() {
         let backend = test_backend().await;
         let total = super::PENDING_LIST_LIMIT + 1;
@@ -548,48 +525,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_trim_finishes_other_streams_on_error() {
-        let backend = test_backend().await;
-        let stream_id: StreamId = [1u8; StreamId::LEN].into();
-        let corrupt_stream_id: StreamId = [2u8; StreamId::LEN].into();
-        let marker_key = kv::stream_trim_point::ser_key(stream_id);
-        let mut batch = WriteBatch::new();
-        batch.put(&marker_key, kv::stream_trim_point::ser_value(trim_point(1)));
-        batch.put(
-            kv::stream_record_data::ser_key(stream_id, StreamPosition::MIN),
-            kv::stream_record_data::ser_value(test_record().as_ref()),
-        );
-        batch.put(
-            kv::stream_record_timestamp::ser_key(stream_id, StreamPosition::MIN),
-            kv::stream_record_timestamp::ser_value(),
-        );
-        batch.put(
-            kv::stream_trim_point::ser_key(corrupt_stream_id),
-            kv::stream_trim_point::ser_value(trim_point(1)),
-        );
-        // Fail the second scan while the first stream awaits deletion durability.
-        batch.put(
-            kv::stream_record_timestamp::ser_key_prefix(corrupt_stream_id),
-            kv::stream_record_timestamp::ser_value(),
-        );
-        backend.db.write(batch).assert_durable().await;
-
-        assert!(matches!(
-            backend.clone().tick_stream_trim().await,
-            Err(crate::backend::error::StorageError::Deserialization(_))
-        ));
-        assert!(
-            backend
-                .db_get(marker_key, kv::stream_trim_point::deser_value)
-                .await
-                .unwrap()
-                .is_none(),
-            "the tick must finish the other stream's durable cleanup before returning the error"
-        );
-        backend.close().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn stream_trim_large_batch_flushes() {
         let backend = test_backend().await;
         let stream_id: StreamId = [3u8; StreamId::LEN].into();
@@ -649,8 +584,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delayed_delete_preserves_recreated_stream() {
-        use s2_common::{config::OptionalStreamConfig, resources::ProvisionMode};
+    async fn stale_deletion_work_preserves_recreated_stream() {
+        use s2_common::{
+            config::OptionalStreamConfig,
+            resources::ProvisionMode,
+            stream::{AppendInput, AppendRecord, AppendRecordParts},
+        };
 
         use crate::backend::error::{ProvisionStreamError, ReconfigureStreamError};
         let backend = test_backend().await;
@@ -707,6 +646,13 @@ mod tests {
             Err(ReconfigureStreamError::StreamDeletionPending(_))
         ));
 
+        let stale_trim = backend
+            .list_stream_trim_pending()
+            .await
+            .unwrap()
+            .values
+            .pop()
+            .unwrap();
         backend.clone().tick_stream_trim().await.unwrap();
         backend
             .provision_stream(
@@ -734,6 +680,53 @@ mod tests {
             "the old DELETE must not mark the replacement"
         );
 
+        let record: AppendRecord = AppendRecordParts {
+            timestamp: None,
+            record: Record::try_from_parts(vec![], Bytes::from_static(b"replacement"))
+                .unwrap()
+                .metered(),
+        }
+        .try_into()
+        .unwrap();
+        let ack = backend
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .append(AppendInput {
+                records: vec![record].try_into().unwrap(),
+                match_seq_num: None,
+                fencing_token: None,
+            })
+            .await
+            .unwrap();
+        // A previous tick can have scanned the old marker before cleanup became durable.
+        backend.process_trim(stale_trim).await.unwrap();
+        assert!(
+            backend
+                .db_get(
+                    kv::stream_record_data::ser_key(stream_id, ack.start),
+                    kv::stream_record_data::deser_value,
+                )
+                .await
+                .unwrap()
+                .is_some(),
+            "old trim work must not delete replacement records"
+        );
+
+        // Even another terminal marker belongs to different work after recreation.
+        backend.delete_stream(basin, stream).await.unwrap();
+        backend.process_trim(stale_trim).await.unwrap();
+        assert_eq!(
+            backend
+                .db_get(
+                    kv::stream_trim_point::ser_key(stream_id),
+                    kv::stream_trim_point::deser_value,
+                )
+                .await
+                .unwrap(),
+            Some(..NonZeroSeqNum::MAX),
+            "old trim work must not finalize the replacement's deletion"
+        );
         backend.close().await.unwrap();
     }
 }
