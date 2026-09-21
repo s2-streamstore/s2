@@ -216,7 +216,7 @@ impl Backend {
                 && (matches!(&outcome, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
             {
                 txn.put(
-                    kv::stream_doe_deadline::ser_key(
+                    kv::stream_doe_deadline::new_key(
                         kv::timestamp::TimestampSecs::after(doe_arm_delay(
                             meta.config.retention_policy.age().unwrap_or_default(),
                             min_age,
@@ -309,7 +309,7 @@ impl Backend {
             && prior_doe_min_age.is_none()
         {
             txn.put(
-                kv::stream_doe_deadline::ser_key(
+                kv::stream_doe_deadline::new_key(
                     kv::timestamp::TimestampSecs::after(doe_arm_delay(
                         meta.config.retention_policy.age().unwrap_or_default(),
                         min_age,

@@ -1076,7 +1076,7 @@ async fn db_submit_append(
     }
     if let Some(doe_deadline) = doe_deadline {
         wb.put_bytes(
-            kv::stream_doe_deadline::ser_key(doe_deadline.deadline, stream_id),
+            kv::stream_doe_deadline::new_key(doe_deadline.deadline, stream_id),
             kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
