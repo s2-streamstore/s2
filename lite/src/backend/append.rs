@@ -141,6 +141,8 @@ pub fn admit(
     }
 }
 
+const MIN_PENDING_APPENDS_CAPACITY: usize = 16;
+
 #[derive(Debug, Default)]
 pub struct PendingAppends {
     queue: VecDeque<BlockedReplySender>,
@@ -195,8 +197,12 @@ impl PendingAppends {
         }
         // Lots of small appends could cause this,
         // as we bound only on total bytes not num batches.
-        if self.queue.capacity() >= 4 * self.queue.len() {
-            self.queue.shrink_to(self.queue.len() * 2);
+        // Keep a small buffer to reuse across ordinary drain/refill cycles.
+        if self.queue.capacity() > MIN_PENDING_APPENDS_CAPACITY
+            && self.queue.capacity() >= 4 * self.queue.len()
+        {
+            self.queue
+                .shrink_to((self.queue.len() * 2).max(MIN_PENDING_APPENDS_CAPACITY));
         }
     }
 
@@ -276,5 +282,117 @@ impl BlockedReplySender {
             Err(e) => Err(e.into()),
         };
         let _ = self.tx.send(reply);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn position(seq_num: SeqNum) -> StreamPosition {
+        StreamPosition {
+            seq_num,
+            timestamp: seq_num,
+        }
+    }
+
+    fn accept(
+        pending: &mut PendingAppends,
+        seq_num: SeqNum,
+    ) -> oneshot::Receiver<Result<AppendAck, AppendErrorInternal>> {
+        let (tx, rx) = oneshot::channel();
+        let ticket = admit(tx, None).expect("open receiver");
+        pending.accept(ticket, position(seq_num)..position(seq_num + 1));
+        rx
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(16)]
+    fn small_append_bursts_reuse_queue_capacity(#[case] burst_size: SeqNum) {
+        let mut pending = PendingAppends::new();
+        let mut retained_capacity = None;
+        for burst in 0..4 {
+            let start = burst * burst_size;
+            let receivers: Vec<_> = (start..start + burst_size)
+                .map(|seq_num| accept(&mut pending, seq_num))
+                .collect();
+            let capacity = *retained_capacity.get_or_insert(pending.queue.capacity());
+            assert_eq!(pending.queue.capacity(), capacity);
+
+            // The streamer advances durability one append at a time, even when
+            // the whole burst became durable in the same WAL flush.
+            for (offset, mut rx) in receivers.into_iter().enumerate() {
+                let seq_num = start + offset as SeqNum;
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                pending.on_stable(position(seq_num + 1));
+                let ack = rx
+                    .try_recv()
+                    .expect("ack delivered")
+                    .expect("append accepted");
+                assert_eq!(ack.start, position(seq_num));
+                assert_eq!(ack.end, position(seq_num + 1));
+                assert_eq!(ack.tail, position(seq_num + 1));
+                assert_eq!(pending.queue.capacity(), capacity);
+            }
+            assert!(pending.queue.is_empty());
+        }
+    }
+
+    #[test]
+    fn unused_queue_stays_unallocated() {
+        let mut pending = PendingAppends::new();
+        pending.on_stable(StreamPosition::MIN);
+        assert_eq!(pending.queue.capacity(), 0);
+    }
+
+    #[test]
+    fn large_append_burst_releases_excess_capacity() {
+        let mut pending = PendingAppends::new();
+        let mut receivers: Vec<_> = (0..128)
+            .map(|seq_num| accept(&mut pending, seq_num))
+            .collect();
+        let peak_capacity = pending.queue.capacity();
+
+        pending.on_stable(position(96));
+        assert_eq!(pending.queue.len(), 32);
+        let reduced_capacity = pending.queue.capacity();
+        assert!(reduced_capacity < peak_capacity);
+        for (seq_num, rx) in receivers.iter_mut().enumerate() {
+            if seq_num < 96 {
+                let ack = rx
+                    .try_recv()
+                    .expect("ack delivered")
+                    .expect("append accepted");
+                assert_eq!(ack.start, position(seq_num as SeqNum));
+                assert_eq!(ack.end, position(seq_num as SeqNum + 1));
+                assert_eq!(ack.tail, position(96));
+            } else {
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            }
+        }
+
+        // A small change in occupancy should not immediately shrink again.
+        pending.on_stable(position(97));
+        assert_eq!(pending.queue.capacity(), reduced_capacity);
+        pending.on_stable(position(128));
+        assert!(pending.queue.is_empty());
+        assert!(pending.queue.capacity() > 0);
+        assert!(pending.queue.capacity() <= MIN_PENDING_APPENDS_CAPACITY);
+        for (seq_num, rx) in receivers.iter_mut().enumerate().skip(96) {
+            let ack = rx
+                .try_recv()
+                .expect("ack delivered")
+                .expect("append accepted");
+            assert_eq!(ack.start, position(seq_num as SeqNum));
+            assert_eq!(ack.end, position(seq_num as SeqNum + 1));
+            assert_eq!(ack.tail, position(if seq_num == 96 { 97 } else { 128 }));
+        }
     }
 }
