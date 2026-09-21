@@ -450,7 +450,16 @@ impl Streamer {
                 self.last_tail_write_timestamp = kv::timestamp::TimestampSecs::now();
             }
             Err(e) => {
-                self.pending_appends.reject(ticket, e, self.stable_pos);
+                let durability_dependency = match (&e, append_type) {
+                    // This rejection becomes a successful DELETE reply, so it
+                    // must wait for the original terminal append to be durable.
+                    (AppendErrorInternal::StreamDeletionPending(_), AppendType::Terminal) => {
+                        self.trim_point.applied_point
+                    }
+                    _ => e.durability_dependency(),
+                };
+                self.pending_appends
+                    .reject(ticket, e, durability_dependency, self.stable_pos);
             }
         }
     }
@@ -507,7 +516,7 @@ impl Streamer {
             }
             Ok(false) => {
                 if self.trim_point.state.end == SeqNum::MAX {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::DeletionPending));
+                    self.append_terminal_trim(reply_tx);
                 } else if self.stable_pos != stable_pos_snapshot
                     || self.next_assignable_pos() != stable_pos_snapshot
                     || self.last_tail_write_timestamp > last_write_cutoff
@@ -780,6 +789,7 @@ pub(super) enum TerminalTrimCondition {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TerminalTrimOutcome {
+    /// Deletion is durably pending.
     DeletionPending,
     Ineligible,
 }
@@ -1575,34 +1585,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_during_terminal_trim_returns_stream_deletion_pending() {
-        let mut streamer = test_streamer().await;
-        streamer.trim_point = CommandState {
-            state: ..SeqNum::MAX,
-            applied_point: ..1,
-        };
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let run_handle = tokio::spawn(streamer.run(msg_rx));
+    async fn terminal_trim_retries_wait_for_durability() {
+        let mut streamer = test_streamer_with_settings(slatedb::config::Settings {
+            flush_interval: None,
+            ..Default::default()
+        })
+        .await;
+        let mut replies = Vec::new();
+        for _ in 0..2 {
+            let (tx, rx) = oneshot::channel();
+            streamer.handle_terminal_trim(TerminalTrimCondition::Always, tx);
+            replies.push(rx);
+        }
+        // An empty-stream check can also finish after another DELETE starts.
+        let (tx, rx) = oneshot::channel();
+        streamer.handle_doe_check_result(
+            StreamPosition::MIN,
+            kv::timestamp::TimestampSecs::MAX,
+            Ok(false),
+            tx,
+        );
+        replies.push(rx);
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        msg_tx
-            .send(Message::Append {
-                input: append_input(b"late"),
-                session: None,
-                reply_tx,
-                append_type: AppendType::Regular,
-            })
-            .expect("streamer should accept append message");
+        // Ordinary appends are still rejected immediately.
+        let (tx, rx) = oneshot::channel();
+        streamer.handle_append(append_input(b"late"), None, tx, AppendType::Regular);
+        assert!(matches!(
+            rx.await.unwrap(),
+            Err(AppendErrorInternal::StreamDeletionPending(_))
+        ));
+        assert_eq!(streamer.db_writes_pending.len(), 1);
+        tokio::task::yield_now().await;
+        for reply in &mut replies {
+            assert!(
+                matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "DELETE must wait even when the original trim has not been submitted"
+            );
+        }
 
-        let err = reply_rx
+        let submitted = streamer
+            .db_writes_pending
+            .pop_front()
+            .unwrap()
             .await
-            .expect("streamer should reply")
-            .expect_err("append should be rejected");
-        let AppendErrorInternal::StreamDeletionPending(_) = err else {
-            panic!("expected stream deletion pending");
-        };
-
-        run_handle.abort();
+            .unwrap();
+        let db_seq = submitted.db_seq;
+        streamer.inflight_appends.push_back(submitted);
+        tokio::task::yield_now().await;
+        for reply in &mut replies {
+            assert!(
+                matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "a committed but unflushed trim must not acknowledge DELETE"
+            );
+        }
+        streamer.db.flush().await.unwrap();
+        streamer.on_db_durable_seq_advanced(db_seq);
+        for reply in replies {
+            assert_eq!(
+                reply.await.unwrap().unwrap(),
+                TerminalTrimOutcome::DeletionPending
+            );
+        }
+        streamer.db.close().await.unwrap();
     }
 
     #[tokio::test]
