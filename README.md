@@ -237,7 +237,7 @@ s2 lite --bucket my-bucket --wal-bucket my-wal-bucket
 Use `SL8_` prefixed environment variables, e.g.:
 
 ```bash
-# Defaults to 50ms for remote bucket / 5ms in-memory
+# Defaults to 50ms for S3, 5ms otherwise; follows the WAL store when set
 SL8_FLUSH_INTERVAL=10ms
 ```
 
