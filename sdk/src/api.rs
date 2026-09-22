@@ -46,7 +46,7 @@ use crate::{
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
     reconnect::ReconnectAdvice,
-    retry::{RetryBackoff, RetryBackoffBuilder},
+    retry::{AppendRetryError, RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
         Compression, EncryptionKey, LocationName, RetryConfig, S2Config, S2Endpoints, StreamName,
@@ -708,8 +708,10 @@ impl ApiError {
             Self::Server(StatusCode::UNAUTHORIZED, response) if response.code == "authn"
         )
     }
+}
 
-    pub fn has_no_side_effects(&self) -> bool {
+impl AppendRetryError for ApiError {
+    fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Server(status, err_resp) => {
                 server_error_has_no_side_effects(*status, &err_resp.code)
@@ -722,13 +724,9 @@ impl ApiError {
         }
     }
 
-    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
-        if prior_uncertainty && self.has_no_side_effects() {
-            Self::IndefiniteFailure {
-                final_attempt_error: Box::new(self),
-            }
-        } else {
-            self
+    fn into_indefinite_failure(self) -> Self {
+        Self::IndefiniteFailure {
+            final_attempt_error: Box::new(self),
         }
     }
 }
@@ -1135,8 +1133,7 @@ impl<'a> RequestBuilder<'a> {
                     "retrying request"
                 );
                 if self.append_retry_policy.is_some()
-                    && !err.has_no_side_effects()
-                    && self.frame_signal.as_ref().is_none_or(|s| s.is_signalled())
+                    && err.attempt_may_have_side_effects(self.frame_signal.as_ref())
                 {
                     prior_uncertainty = true;
                 }
@@ -1163,9 +1160,7 @@ fn is_safe_to_retry(
 ) -> bool {
     let policy_compliant = match policy {
         None | Some(AppendRetryPolicy::All) => true,
-        Some(AppendRetryPolicy::NoSideEffects) => {
-            !frame_signal.is_none_or(|s| s.is_signalled()) || err.has_no_side_effects()
-        }
+        Some(AppendRetryPolicy::NoSideEffects) => !err.attempt_may_have_side_effects(frame_signal),
     };
     policy_compliant
         && (err.is_retryable()

@@ -23,7 +23,7 @@ use crate::{
     error::{AppendError, RequestError},
     frame_signal::FrameSignal,
     reconnect::{AdvisedReconnects, ReconnectAdvice},
-    retry::RetryBackoffBuilder,
+    retry::{AppendRetryError, RetryBackoffBuilder},
     session::StreamHeaders,
     types::{
         AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB,
@@ -132,14 +132,16 @@ impl AppendSessionError {
             Self::Append(AppendError::Request(error)) if error.is_server_draining()
         )
     }
+}
 
-    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
-        if prior_uncertainty && self.has_no_side_effects() {
-            Self::IndefiniteFailure {
-                final_attempt_error: Box::new(self),
-            }
-        } else {
-            self
+impl AppendRetryError for AppendSessionError {
+    fn has_no_side_effects(&self) -> bool {
+        Self::has_no_side_effects(self)
+    }
+
+    fn into_indefinite_failure(self) -> Self {
+        Self::IndefiniteFailure {
+            final_attempt_error: Box::new(self),
         }
     }
 }
@@ -586,7 +588,7 @@ async fn run_session_with_retry(
                     access_token_mode,
                 ) && let Some(backoff) = retry_backoff.next()
                 {
-                    if attempt_may_have_side_effects(&err, frame_signal.as_ref()) {
+                    if err.attempt_may_have_side_effects(frame_signal.as_ref()) {
                         for append in &mut state.inflight_appends {
                             append.prior_uncertainty = true;
                         }
@@ -1062,13 +1064,6 @@ impl Command {
     }
 }
 
-fn attempt_may_have_side_effects(
-    err: &AppendSessionError,
-    frame_signal: Option<&FrameSignal>,
-) -> bool {
-    !err.has_no_side_effects() && frame_signal.is_none_or(|s| s.is_signalled())
-}
-
 fn is_safe_to_retry(
     err: &AppendSessionError,
     policy: AppendRetryPolicy,
@@ -1079,7 +1074,7 @@ fn is_safe_to_retry(
     let policy_compliant = match policy {
         AppendRetryPolicy::All => true,
         AppendRetryPolicy::NoSideEffects => {
-            !has_inflight || !attempt_may_have_side_effects(err, frame_signal)
+            !has_inflight || !err.attempt_may_have_side_effects(frame_signal)
         }
     };
     policy_compliant
@@ -1124,6 +1119,7 @@ mod tests {
         api::{ApiError, ServerErrorBody},
         error::{AppendError, ProducerError, RequestError},
         frame_signal::FrameSignal,
+        retry::AppendRetryError,
         types::{AccessTokenMode, AppendRetryPolicy},
     };
 

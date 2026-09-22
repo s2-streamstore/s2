@@ -2,6 +2,26 @@ use std::time::Duration;
 
 use rand::{RngExt, rng};
 
+use crate::frame_signal::FrameSignal;
+
+pub(crate) trait AppendRetryError: Sized {
+    fn has_no_side_effects(&self) -> bool;
+
+    fn into_indefinite_failure(self) -> Self;
+
+    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
+        if prior_uncertainty && self.has_no_side_effects() {
+            self.into_indefinite_failure()
+        } else {
+            self
+        }
+    }
+
+    fn attempt_may_have_side_effects(&self, frame_signal: Option<&FrameSignal>) -> bool {
+        !self.has_no_side_effects() && frame_signal.is_none_or(|s| s.is_signalled())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RetryBackoffBuilder {
     pub min_base_delay: Duration,
