@@ -269,6 +269,15 @@ mod tests {
             .assert_durable()
             .await;
 
+        backend
+            .db
+            .put(
+                kv::stream_id_mapping::ser_key(crate::stream_id::StreamId::new(&basin, &stream)),
+                kv::stream_id_mapping::ser_value(&basin, &stream),
+            )
+            .assert_durable()
+            .await;
+
         let has_more = backend.clone().tick_basin_deletion().await.unwrap();
         assert!(!has_more);
 

@@ -14,7 +14,6 @@ use s2_common::{
     resources::ProvisionMode,
     stream::StreamName,
 };
-use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
@@ -26,6 +25,7 @@ use super::{
         StreamerMissingInActionError, TransactionConflictError,
     },
     kv,
+    store::db_snapshot_get_with,
     streamer::{GuardedStreamerClient, StreamerClient, StreamerGenerationId},
 };
 use crate::{backend::bgtasks::BgtaskTrigger, stream_id::StreamId};
@@ -113,26 +113,42 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<StreamerClient, StreamerError> {
+        // Read one consistent, durable view of the stream.
+        let snapshot = self.db.snapshot().await.map_err(StorageError::from)?;
+        self.await_durable_seq(snapshot.seq()).await?;
         let stream_id = StreamId::new(&basin, &stream);
 
-        let (meta, persisted_tail, fencing_token, trim_point) = tokio::try_join!(
-            self.db_get_with(kv::stream_meta::ser_key(&basin, &stream), |entry| {
-                Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
-            }),
-            self.db_get_with(kv::stream_tail_position::ser_key(stream_id), |entry| {
-                Ok((
-                    kv::stream_tail_position::deser_value(entry.value)?,
-                    kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
-                ))
-            }),
-            self.db_get(
-                kv::stream_fencing_token::ser_key(stream_id),
-                kv::stream_fencing_token::deser_value,
+        let (meta, persisted_tail, fencing_token, trim_point, stream_creation_seq) = tokio::try_join!(
+            db_snapshot_get_with(
+                &snapshot,
+                kv::stream_meta::ser_key(&basin, &stream),
+                |entry| { Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq)) }
             ),
-            self.db_get(
+            db_snapshot_get_with(
+                &snapshot,
+                kv::stream_tail_position::ser_key(stream_id),
+                |entry| {
+                    Ok((
+                        kv::stream_tail_position::deser_value(entry.value)?,
+                        kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
+                    ))
+                }
+            ),
+            db_snapshot_get_with(
+                &snapshot,
+                kv::stream_fencing_token::ser_key(stream_id),
+                |entry| kv::stream_fencing_token::deser_value(entry.value),
+            ),
+            db_snapshot_get_with(
+                &snapshot,
                 kv::stream_trim_point::ser_key(stream_id),
-                kv::stream_trim_point::deser_value,
-            )
+                |entry| kv::stream_trim_point::deser_value(entry.value),
+            ),
+            db_snapshot_get_with(
+                &snapshot,
+                kv::stream_id_mapping::ser_key(stream_id),
+                |entry| Ok(entry.seq)
+            ),
         )?;
 
         let Some((meta, config_seq)) = meta else {
@@ -142,20 +158,27 @@ impl Backend {
         let (tail_pos, last_tail_write_timestamp) =
             persisted_tail.unwrap_or((StreamPosition::MIN, kv::timestamp::TimestampSecs::ZERO));
 
-        self.assert_no_records_following_tail(stream_id, &basin, &stream, tail_pos)
+        if meta.deleted_at.is_some() || trim_point == Some(..NonZeroSeqNum::MAX) {
+            return Err(StreamDeletionPendingError.into());
+        }
+
+        self.assert_no_records_following_tail(&snapshot, stream_id, &basin, &stream, tail_pos)
             .await?;
 
         let fencing_token = fencing_token.unwrap_or_default();
 
-        if trim_point == Some(..NonZeroSeqNum::MAX) {
-            return Err(StreamDeletionPendingError.into());
-        }
+        let stream_creation_seq = stream_creation_seq.ok_or_else(|| {
+            StorageError::InvariantViolation(format!(
+                "live stream `{basin}/{stream}` has no ID mapping"
+            ))
+        })?;
 
         let streamer_slots = self.streamer_slots.clone();
         Ok(super::streamer::Spawner {
             generation_id,
             db: self.db.clone(),
             stream_id,
+            stream_creation_seq,
             config: meta.config,
             config_seq,
             cipher: meta.cipher,
@@ -176,6 +199,7 @@ impl Backend {
 
     async fn assert_no_records_following_tail(
         &self,
+        snapshot: &slatedb::DbSnapshot,
         stream_id: StreamId,
         basin: &BasinName,
         stream: &StreamName,
@@ -186,14 +210,7 @@ impl Backend {
             seq_num: tail_pos.seq_num,
             timestamp: 0,
         });
-        let scan_opts = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
-            ..Default::default()
-        };
-        let mut it = self
-            .db
-            .scan_prefix_with_options(prefix, start_suffix.., &scan_opts)
-            .await?;
+        let mut it = snapshot.scan_prefix(prefix, start_suffix..).await?;
         let Some(kv) = it.next().await? else {
             return Ok(());
         };
@@ -226,10 +243,18 @@ impl Backend {
     fn new_initializing_slot(self, basin: &BasinName, stream: &StreamName) -> StreamerClientSlot {
         let basin = basin.clone();
         let stream = stream.clone();
+        let stream_id = StreamId::new(&basin, &stream);
         let generation_id = StreamerGenerationId::next();
-        let future = async move { self.start_streamer(generation_id, basin, stream).await }
-            .boxed()
-            .shared();
+        // Drive initialization independently so cancelled callers cannot leave
+        // its snapshot pinned in a cached, unpolled future.
+        let future = tokio::spawn(async move {
+            let result = self.start_streamer(generation_id, basin, stream).await;
+            self.streamer_finish_initialization(stream_id, generation_id, &result);
+            result
+        })
+        .map(|result| result.expect("streamer initialization task panicked"))
+        .boxed()
+        .shared();
         StreamerClientSlot::Initializing {
             generation_id,
             future,
@@ -283,17 +308,8 @@ impl Backend {
         basin: &BasinName,
         stream: &StreamName,
     ) -> Result<StreamerClient, StreamerError> {
-        let stream_id = StreamId::new(basin, stream);
         match self.streamer_client_slot(basin, stream) {
-            StreamerClientSlot::Initializing {
-                generation_id,
-                future,
-                ..
-            } => {
-                let result = future.await;
-                self.streamer_finish_initialization(stream_id, generation_id, &result);
-                result
-            }
+            StreamerClientSlot::Initializing { future, .. } => future.await,
             StreamerClientSlot::Ready { client } => Ok(client),
         }
     }
@@ -518,29 +534,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streamer_client_slot_uses_single_initializer() {
-        let backend = new_test_backend().await;
+    async fn streamer_initialization_is_shared_and_survives_cancellation() {
+        let db = slatedb::Db::builder("test", Arc::new(object_store::memory::InMemory::new()))
+            .with_settings(slatedb::config::Settings {
+                flush_interval: None,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let backend = Backend::new(db, ByteSize::b(1));
+        backend.db.put(b"unflushed", b"value").await.unwrap();
         let basin = BasinName::from_str("testbasin2").unwrap();
         let stream = StreamName::from_str("stream2").unwrap();
 
         let slot_1 = backend.streamer_client_slot(&basin, &stream);
         let slot_2 = backend.streamer_client_slot(&basin, &stream);
 
-        let (generation_id_1, generation_id_2) = match (slot_1, slot_2) {
+        let (generation_id_1, generation_id_2, mut future_1, future_2) = match (slot_1, slot_2) {
             (
                 StreamerClientSlot::Initializing {
                     generation_id: generation_id_1,
+                    future: future_1,
                     ..
                 },
                 StreamerClientSlot::Initializing {
                     generation_id: generation_id_2,
+                    future: future_2,
                     ..
                 },
-            ) => (generation_id_1, generation_id_2),
+            ) => (generation_id_1, generation_id_2, future_1, future_2),
             _ => panic!("expected both slots to be Initializing"),
         };
         assert_eq!(generation_id_1, generation_id_2);
         assert_eq!(backend.streamer_slots.len(), 1);
+
+        // Cancel every caller while initialization waits for its snapshot to be durable.
+        assert!(futures::poll!(&mut future_1).is_pending());
+        tokio::task::yield_now().await;
+        drop((future_1, future_2));
+        backend.db.flush().await.unwrap();
+
+        // The missing stream must still finish initialization and release its snapshot.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !backend.streamer_slots.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        backend.close().await.unwrap();
     }
 
     #[tokio::test]

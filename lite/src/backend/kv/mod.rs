@@ -89,10 +89,10 @@ pub enum Key {
     /// Key: StreamID Timestamp SeqNum
     /// Value: empty
     StreamRecordTimestamp(StreamId, StreamPosition),
-    /// (SDOED) per-deadline-per-stream, deletable, present while pending
-    /// Key: TimestampSecs StreamID
+    /// (SDOED) per-schedule, immutable, deletable once processed
+    /// Key: TimestampSecs StreamID ScheduleID (u128, absent in legacy keys)
     /// Value: MinAge seconds (u64)
-    StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId),
+    StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId, Option<u128>),
 }
 
 impl From<Key> for Bytes {
@@ -109,8 +109,8 @@ impl From<Key> for Bytes {
             Key::StreamRecordTimestamp(stream_id, pos) => {
                 stream_record_timestamp::ser_key(stream_id, pos)
             }
-            Key::StreamDeleteOnEmptyDeadline(deadline, stream_id) => {
-                stream_doe_deadline::ser_key(deadline, stream_id)
+            Key::StreamDeleteOnEmptyDeadline(deadline, stream_id, schedule_id) => {
+                stream_doe_deadline::ser_key(deadline, stream_id, schedule_id)
             }
         }
     }
@@ -147,8 +147,11 @@ impl TryFrom<Bytes> for Key {
                 .map(|(stream_id, pos)| Key::StreamRecordData(stream_id, pos)),
             KeyType::StreamRecordTimestamp => stream_record_timestamp::deser_key(bytes)
                 .map(|(stream_id, pos)| Key::StreamRecordTimestamp(stream_id, pos)),
-            KeyType::StreamDeleteOnEmptyDeadline => stream_doe_deadline::deser_key(bytes)
-                .map(|(deadline, stream_id)| Key::StreamDeleteOnEmptyDeadline(deadline, stream_id)),
+            KeyType::StreamDeleteOnEmptyDeadline => {
+                stream_doe_deadline::deser_key(bytes).map(|(deadline, stream_id, schedule_id)| {
+                    Key::StreamDeleteOnEmptyDeadline(deadline, stream_id, schedule_id)
+                })
+            }
         }
     }
 }

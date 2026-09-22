@@ -44,7 +44,7 @@ use crate::{
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
             DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
-            StreamDeletionPendingError, StreamerMissingInActionError,
+            StreamerMissingInActionError,
         },
         kv,
     },
@@ -210,6 +210,9 @@ pub(super) struct Spawner {
     pub generation_id: StreamerGenerationId,
     pub db: slatedb::Db,
     pub stream_id: StreamId,
+    /// Database commit sequence that created the stream's ID mapping.
+    /// Stable across streamer restarts; changes when the stream is recreated.
+    pub stream_creation_seq: u64,
     pub config: StreamConfig,
     pub config_seq: u64,
     pub cipher: Option<EncryptionAlgorithm>,
@@ -231,6 +234,7 @@ impl Spawner {
             generation_id,
             db,
             stream_id,
+            stream_creation_seq,
             config,
             config_seq,
             cipher,
@@ -248,6 +252,7 @@ impl Spawner {
         let streamer = Streamer {
             db,
             stream_id,
+            stream_creation_seq,
             msg_tx: msg_tx.clone(),
             config,
             config_seq,
@@ -309,6 +314,7 @@ impl<T> CommandState<T> {
 struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
+    stream_creation_seq: u64,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: StreamConfig,
     config_seq: u64,
@@ -404,7 +410,10 @@ impl Streamer {
             return;
         };
         let sequenced_records = if self.trim_point.state.end == SeqNum::MAX {
-            Err(StreamDeletionPendingError.into())
+            Err(AppendErrorInternal::StreamDeletionPending {
+                // The terminal trim must be durable before reporting deletion pending.
+                durability_dependency: self.trim_point.applied_point,
+            })
         } else {
             self.sequence_records(input)
         };
@@ -458,8 +467,12 @@ impl Streamer {
             TerminalTrimCondition::Always => {
                 self.append_terminal_trim(reply_tx);
             }
-            TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff } => {
-                if self.last_tail_write_timestamp > last_write_cutoff
+            TerminalTrimCondition::DeleteOnEmpty {
+                last_write_cutoff,
+                expected_stream_creation_seq,
+            } => {
+                if self.stream_creation_seq != expected_stream_creation_seq
+                    || self.last_tail_write_timestamp > last_write_cutoff
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                     || self.config.delete_on_empty.min_age().is_none()
                 {
@@ -497,7 +510,7 @@ impl Streamer {
             }
             Ok(false) => {
                 if self.trim_point.state.end == SeqNum::MAX {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::DeletionPending));
+                    self.append_terminal_trim(reply_tx);
                 } else if self.stable_pos != stable_pos_snapshot
                     || self.next_assignable_pos() != stable_pos_snapshot
                     || self.last_tail_write_timestamp > last_write_cutoff
@@ -528,7 +541,7 @@ impl Streamer {
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
                 Ok(Ok(_)) => Ok(TerminalTrimOutcome::DeletionPending),
-                Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => {
+                Ok(Err(AppendErrorInternal::StreamDeletionPending { .. })) => {
                     Ok(TerminalTrimOutcome::DeletionPending)
                 }
                 Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
@@ -547,9 +560,7 @@ impl Streamer {
                 Ok(Err(AppendErrorInternal::MaxSeqNum(_))) => {
                     unreachable!("terminal append is plaintext command record")
                 }
-                Err(_) => Err(DeleteStreamError::StreamerMissingInActionError(
-                    StreamerMissingInActionError,
-                )),
+                Err(_) => Err(RequestDroppedError.into()),
             };
             let _ = reply_tx.send(result);
         });
@@ -714,7 +725,7 @@ impl Streamer {
                 }
                 _ = dormancy.as_mut() => {
                     // Cancelled requests can still have writes become durable. Keep
-                    // their assigned positions until a replacement can recover them.
+                    // their assigned positions until a new streamer can recover them.
                     if self.db_writes_pending.is_empty()
                         && self.inflight_appends.is_empty()
                         && self.lease_state.close_if_idle()
@@ -764,11 +775,13 @@ pub(super) enum TerminalTrimCondition {
     Always,
     DeleteOnEmpty {
         last_write_cutoff: kv::timestamp::TimestampSecs,
+        expected_stream_creation_seq: u64,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TerminalTrimOutcome {
+    /// Deletion is durably pending.
     DeletionPending,
     Ineligible,
 }
@@ -869,9 +882,7 @@ impl StreamerClient {
             .map_err(|_| {
                 DeleteStreamError::StreamerMissingInActionError(StreamerMissingInActionError)
             })?;
-        reply_rx.await.map_err(|_| {
-            DeleteStreamError::StreamerMissingInActionError(StreamerMissingInActionError)
-        })?
+        reply_rx.await.map_err(|_| RequestDroppedError)?
     }
 }
 
@@ -1065,7 +1076,7 @@ async fn db_submit_append(
     }
     if let Some(doe_deadline) = doe_deadline {
         wb.put_bytes(
-            kv::stream_doe_deadline::ser_key(doe_deadline.deadline, stream_id),
+            kv::stream_doe_deadline::new_key(doe_deadline.deadline, stream_id),
             kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
@@ -1438,6 +1449,7 @@ mod tests {
         Streamer {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
+            stream_creation_seq: 0,
             msg_tx,
             config: StreamConfig::default(),
             config_seq: 0,
@@ -1563,34 +1575,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_during_terminal_trim_returns_stream_deletion_pending() {
-        let mut streamer = test_streamer().await;
-        streamer.trim_point = CommandState {
-            state: ..SeqNum::MAX,
-            applied_point: ..1,
-        };
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let run_handle = tokio::spawn(streamer.run(msg_rx));
+    async fn terminal_trim_and_rejections_wait_for_durability() {
+        let mut streamer = test_streamer_with_settings(slatedb::config::Settings {
+            flush_interval: None,
+            ..Default::default()
+        })
+        .await;
+        let mut replies = Vec::new();
+        for _ in 0..2 {
+            let (tx, rx) = oneshot::channel();
+            streamer.handle_terminal_trim(TerminalTrimCondition::Always, tx);
+            replies.push(rx);
+        }
+        // An empty-stream check can also finish after another deletion request starts.
+        let (tx, rx) = oneshot::channel();
+        streamer.handle_doe_check_result(
+            StreamPosition::MIN,
+            kv::timestamp::TimestampSecs::MAX,
+            Ok(false),
+            tx,
+        );
+        replies.push(rx);
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        msg_tx
-            .send(Message::Append {
-                input: append_input(b"late"),
-                session: None,
-                reply_tx,
-                append_type: AppendType::Regular,
-            })
-            .expect("streamer should accept append message");
+        let (tx, mut append_reply) = oneshot::channel();
+        streamer.handle_append(append_input(b"late"), None, tx, AppendType::Regular);
+        assert_eq!(streamer.db_writes_pending.len(), 1);
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            append_reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        for reply in &mut replies {
+            assert!(
+                matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "stream deletion must wait even when the original trim has not been submitted"
+            );
+        }
 
-        let err = reply_rx
+        let submitted = streamer
+            .db_writes_pending
+            .pop_front()
+            .unwrap()
             .await
-            .expect("streamer should reply")
-            .expect_err("append should be rejected");
-        let AppendErrorInternal::StreamDeletionPending(_) = err else {
-            panic!("expected stream deletion pending");
-        };
-
-        run_handle.abort();
+            .unwrap();
+        let db_seq = submitted.db_seq;
+        streamer.inflight_appends.push_back(submitted);
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            append_reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        for reply in &mut replies {
+            assert!(
+                matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "a committed but unflushed trim must not acknowledge stream deletion"
+            );
+        }
+        streamer.db.flush().await.unwrap();
+        streamer.on_db_durable_seq_advanced(db_seq);
+        assert!(matches!(
+            append_reply.await.unwrap(),
+            Err(AppendErrorInternal::StreamDeletionPending { .. })
+        ));
+        for reply in replies {
+            assert_eq!(
+                reply.await.unwrap().unwrap(),
+                TerminalTrimOutcome::DeletionPending
+            );
+        }
+        streamer.db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1608,6 +1661,7 @@ mod tests {
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
                 last_write_cutoff: kv::timestamp::TimestampSecs::MAX,
+                expected_stream_creation_seq: 0,
             },
             trim_tx,
         );
