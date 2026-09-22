@@ -62,11 +62,24 @@ struct Server {
 
 impl Server {
     fn start(root: &Path, attempt: &str) -> Self {
+        for bind_attempt in 0.. {
+            let log_path = root.join(format!("server-{attempt}-{bind_attempt}.log"));
+            match Self::spawn(root, &log_path) {
+                Ok(server) => return server,
+                Err(log) if bind_attempt < 5 && log.contains("Address already in use") => {
+                    continue;
+                }
+                Err(log) => panic!("Server exited before becoming healthy: {log}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn spawn(root: &Path, log_path: &Path) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        let log_path = root.join(format!("server-{attempt}.log"));
-        let log = File::create(&log_path).unwrap();
+        let log = File::create(log_path).unwrap();
         let mut cmd = base_command(root);
         cmd.args([
             "lite",
@@ -89,11 +102,9 @@ impl Server {
         let mut server = Self { child, address };
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            assert!(
-                server.child.try_wait().unwrap().is_none(),
-                "{}",
-                fs::read_to_string(&log_path).unwrap()
-            );
+            if server.child.try_wait().unwrap().is_some() {
+                return Err(fs::read_to_string(log_path).unwrap());
+            }
             if let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(100))
             {
                 stream
@@ -111,13 +122,13 @@ impl Server {
                     && let Ok(n) = stream.read(&mut response)
                     && response[..n].starts_with(b"HTTP/1.1 200")
                 {
-                    return server;
+                    return Ok(server);
                 }
             }
             assert!(
                 Instant::now() < deadline,
                 "Server did not become healthy: {}",
-                fs::read_to_string(&log_path).unwrap()
+                fs::read_to_string(log_path).unwrap()
             );
             std::thread::sleep(Duration::from_millis(25));
         }

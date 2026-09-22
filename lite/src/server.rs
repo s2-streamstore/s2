@@ -205,20 +205,16 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         StoreType::InMemory
     };
 
-    let object_store = init_object_store(&store_type).await?;
+    let object_store = init_object_store(&store_type, None).await?;
     let wal_store_type = if let Some(bucket) = args.wal_bucket {
         Some(StoreType::S3Bucket(bucket))
     } else {
         args.wal_local_root.map(StoreType::LocalFileSystem)
     };
     let wal_object_store = match &wal_store_type {
-        Some(StoreType::S3Bucket(bucket)) => Some(Arc::new(
-            WalS3Overrides::from_env()?
-                .apply(s3_builder().await)
-                .with_bucket_name(bucket)
-                .build()?,
-        ) as Arc<dyn object_store::ObjectStore>),
-        Some(store_type) => Some(init_object_store(store_type).await?),
+        Some(wal_store_type) => {
+            Some(init_object_store(wal_store_type, Some(WalS3Overrides::from_env()?)).await?)
+        }
         None => None,
     };
 
@@ -349,12 +345,16 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
 async fn init_object_store(
     store_type: &StoreType,
+    s3_overrides: Option<WalS3Overrides>,
 ) -> eyre::Result<Arc<dyn object_store::ObjectStore>> {
-    Ok(match store_type {
+    let store: Arc<dyn object_store::ObjectStore> = match store_type {
         StoreType::S3Bucket(bucket) => {
             info!(bucket, "using s3 object store");
-            Arc::new(s3_builder().await.with_bucket_name(bucket).build()?)
-                as Arc<dyn object_store::ObjectStore>
+            let mut builder = s3_builder().await;
+            if let Some(overrides) = s3_overrides {
+                builder = overrides.apply(builder);
+            }
+            Arc::new(builder.with_bucket_name(bucket).build()?)
         }
         StoreType::LocalFileSystem(local_root) => {
             std::fs::create_dir_all(local_root)?;
@@ -372,7 +372,8 @@ async fn init_object_store(
             info!("using in-memory object store");
             Arc::new(object_store::memory::InMemory::new())
         }
-    })
+    };
+    Ok(store)
 }
 
 // Both buckets start with the same AWS configuration and credential chain.
