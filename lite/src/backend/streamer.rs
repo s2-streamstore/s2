@@ -411,12 +411,8 @@ impl Streamer {
         };
         let sequenced_records = if self.trim_point.state.end == SeqNum::MAX {
             Err(AppendErrorInternal::StreamDeletionPending {
-                // Deletion requests interpret this error as "deletion durably pending",
-                // so delay their replies until the existing terminal trim is durable.
-                durability_dependency: match append_type {
-                    AppendType::Regular => ..0,
-                    AppendType::Terminal => self.trim_point.applied_point,
-                },
+                // The terminal trim must be durable before reporting deletion pending.
+                durability_dependency: self.trim_point.applied_point,
             })
         } else {
             self.sequence_records(input)
@@ -1579,7 +1575,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_trim_retries_wait_for_durability() {
+    async fn terminal_trim_and_rejections_wait_for_durability() {
         let mut streamer = test_streamer_with_settings(slatedb::config::Settings {
             flush_interval: None,
             ..Default::default()
@@ -1601,15 +1597,14 @@ mod tests {
         );
         replies.push(rx);
 
-        // Ordinary appends are still rejected immediately.
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut append_reply) = oneshot::channel();
         streamer.handle_append(append_input(b"late"), None, tx, AppendType::Regular);
-        assert!(matches!(
-            rx.await.unwrap(),
-            Err(AppendErrorInternal::StreamDeletionPending { .. })
-        ));
         assert_eq!(streamer.db_writes_pending.len(), 1);
         tokio::task::yield_now().await;
+        assert!(matches!(
+            append_reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
         for reply in &mut replies {
             assert!(
                 matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
@@ -1626,6 +1621,10 @@ mod tests {
         let db_seq = submitted.db_seq;
         streamer.inflight_appends.push_back(submitted);
         tokio::task::yield_now().await;
+        assert!(matches!(
+            append_reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
         for reply in &mut replies {
             assert!(
                 matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
@@ -1634,6 +1633,10 @@ mod tests {
         }
         streamer.db.flush().await.unwrap();
         streamer.on_db_durable_seq_advanced(db_seq);
+        assert!(matches!(
+            append_reply.await.unwrap(),
+            Err(AppendErrorInternal::StreamDeletionPending { .. })
+        ));
         for reply in replies {
             assert_eq!(
                 reply.await.unwrap().unwrap(),
