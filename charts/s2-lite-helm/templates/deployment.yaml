@@ -1,3 +1,6 @@
+{{- $storageMode := include "s2-lite.storage.mode" . }}
+{{- $walMode := include "s2-lite.walStorage.mode" . }}
+{{- $volumes := include "s2-lite.persistentVolumes" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,26 +55,41 @@ spec:
           {{- fail "tls.enabled is true but neither tls.cert/tls.key nor tls.selfSigned are configured" }}
           {{- end }}
           {{- end }}
-          {{- if .Values.objectStorage.enabled }}
-          {{- if not .Values.objectStorage.bucket }}
-          {{- fail "objectStorage.enabled is true but objectStorage.bucket is not set" }}
-          {{- end }}
+          {{- if eq $storageMode "bucket" }}
           - --bucket
           - {{ .Values.objectStorage.bucket | quote }}
-          {{- if .Values.objectStorage.path }}
+          {{- with .Values.objectStorage.path }}
           - --path
-          - {{ .Values.objectStorage.path | quote }}
+          - {{ . | quote }}
           {{- end }}
+          {{- else if eq $storageMode "volume" }}
+          - --local-root
+          - {{ .Values.persistentVolume.mountPath | quote }}
+          {{- end }}
+          {{- if eq $walMode "bucket" }}
+          - --wal-bucket
+          - {{ .Values.walStorage.bucket | quote }}
+          {{- else if eq $walMode "volume" }}
+          - --wal-local-root
+          - {{ .Values.walStorage.persistentVolume.mountPath | quote }}
           {{- end }}
         ports:
         - name: http
           containerPort: {{ .Values.service.targetPort }}
           protocol: TCP
-        {{- if or (and .Values.objectStorage.enabled .Values.objectStorage.endpoint) .Values.env }}
+        {{- if or (and .Values.objectStorage.enabled .Values.objectStorage.endpoint) .Values.walStorage.endpoint .Values.walStorage.region .Values.env }}
         env:
         {{- if and .Values.objectStorage.enabled .Values.objectStorage.endpoint }}
         - name: AWS_ENDPOINT_URL_S3
           value: {{ .Values.objectStorage.endpoint | quote }}
+        {{- end }}
+        {{- with .Values.walStorage.endpoint }}
+        - name: S2LITE_WAL_AWS_ENDPOINT_URL_S3
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.walStorage.region }}
+        - name: S2LITE_WAL_AWS_REGION
+          value: {{ . | quote }}
         {{- end }}
         {{- with .Values.env }}
         {{- toYaml . | nindent 8 }}
@@ -108,13 +126,26 @@ spec:
         {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
-        {{- with .Values.volumeMounts }}
+        {{- if or $volumes .Values.volumeMounts }}
         volumeMounts:
+        {{- range $name, $volume := $volumes }}
+        - name: {{ $name }}
+          mountPath: {{ $volume.mountPath | quote }}
+        {{- end }}
+        {{- with .Values.volumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.volumes }}
+        {{- end }}
+      {{- if or $volumes .Values.volumes }}
       volumes:
+      {{- range $name, $volume := $volumes }}
+      - name: {{ $name }}
+        persistentVolumeClaim:
+          claimName: {{ include "s2-lite.claimName" (dict "root" $ "name" $name "volume" $volume) }}
+      {{- end }}
+      {{- with .Values.volumes }}
       {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

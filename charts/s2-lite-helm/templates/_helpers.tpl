@@ -66,3 +66,52 @@ Create the image name
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
+
+{{/*
+Main storage mode: "bucket", "volume", or "" for in-memory.
+*/}}
+{{- define "s2-lite.storage.mode" -}}
+{{- if and .Values.objectStorage.enabled .Values.persistentVolume.enabled }}
+{{- fail "objectStorage.enabled and persistentVolume.enabled are mutually exclusive" }}
+{{- end }}
+{{- if and .Values.objectStorage.enabled (not .Values.objectStorage.bucket) }}
+{{- fail "objectStorage.enabled is true but objectStorage.bucket is not set" }}
+{{- end }}
+{{- if .Values.objectStorage.enabled }}bucket{{- else if .Values.persistentVolume.enabled }}volume{{- end }}
+{{- end }}
+
+{{/*
+WAL storage mode: "bucket", "volume", or "" when the WAL shares the main store.
+*/}}
+{{- define "s2-lite.walStorage.mode" -}}
+{{- $bucket := .Values.walStorage.bucket }}
+{{- $volume := .Values.walStorage.persistentVolume.enabled }}
+{{- if and $bucket $volume }}
+{{- fail "walStorage.bucket and walStorage.persistentVolume.enabled are mutually exclusive" }}
+{{- end }}
+{{- if and (or $bucket $volume) (not (include "s2-lite.storage.mode" .)) }}
+{{- fail "walStorage requires objectStorage or persistentVolume" }}
+{{- end }}
+{{- if $bucket }}bucket{{- else if $volume }}volume{{- end }}
+{{- end }}
+
+{{/*
+Persistent volumes in use, keyed by volume name. Parse with fromYaml.
+*/}}
+{{- define "s2-lite.persistentVolumes" -}}
+{{- $volumes := dict }}
+{{- if eq (include "s2-lite.storage.mode" .) "volume" }}
+{{- $_ := set $volumes "data" .Values.persistentVolume }}
+{{- end }}
+{{- if eq (include "s2-lite.walStorage.mode" .) "volume" }}
+{{- $_ := set $volumes "wal" .Values.walStorage.persistentVolume }}
+{{- end }}
+{{- toYaml $volumes }}
+{{- end }}
+
+{{/*
+PersistentVolumeClaim name for a volume. Takes (dict "root" $ "name" <name> "volume" <values>).
+*/}}
+{{- define "s2-lite.claimName" -}}
+{{- .volume.existingClaim | default (printf "%s-%s" (include "s2-lite.fullname" .root) .name) }}
+{{- end }}

@@ -1,0 +1,24 @@
+{{- range $name, $volume := include "s2-lite.persistentVolumes" . | fromYaml }}
+{{- if not $volume.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "s2-lite.claimName" (dict "root" $ "name" $name "volume" $volume) }}
+  labels:
+    {{- include "s2-lite.labels" $ | nindent 4 }}
+  {{- with $volume.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with $volume.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $volume.size | quote }}
+{{- end }}
+{{- end }}
