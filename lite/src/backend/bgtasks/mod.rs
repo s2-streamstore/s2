@@ -9,12 +9,12 @@ mod basin_deletion;
 mod stream_doe;
 mod stream_trim;
 
-/// Finish independent work in a page after a conflict, but wait for the next
-/// tick before rereading it. Retrying a contended full page immediately can spin.
+/// Keep draining the backlog while work completes. A page where every item
+/// conflicts waits for the next tick instead of retrying in a tight loop.
 #[derive(Default)]
 struct PageProgress {
     has_more: bool,
-    conflicted: bool,
+    completed: bool,
 }
 
 impl PageProgress {
@@ -24,17 +24,17 @@ impl PageProgress {
         is_conflict: fn(&E) -> bool,
     ) -> Result<Option<T>, E> {
         match result {
-            Ok(value) => Ok(Some(value)),
-            Err(err) if is_conflict(&err) => {
-                self.conflicted = true;
-                Ok(None)
+            Ok(value) => {
+                self.completed = true;
+                Ok(Some(value))
             }
+            Err(err) if is_conflict(&err) => Ok(None),
             Err(err) => Err(err),
         }
     }
 
     fn should_continue(&self) -> bool {
-        self.has_more && !self.conflicted
+        self.has_more && self.completed
     }
 }
 
@@ -202,8 +202,15 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
+    #[rstest::rstest]
+    #[case::partial_page(false, 1, 2)]
+    #[case::backlog(true, 3, 4)]
     #[tokio::test]
-    async fn conflict_finishes_page_without_immediate_retry() {
+    async fn conflicts_drain_productive_pages_and_defer_unproductive_ones(
+        #[case] has_more: bool,
+        #[case] expected_calls: usize,
+        #[case] expected_completed: usize,
+    ) {
         use futures::{StreamExt, stream};
 
         use crate::backend::error::{
@@ -220,14 +227,20 @@ mod tests {
                 let calls = calls.clone();
                 let completed = completed.clone();
                 async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
+                    let page = calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        page < 3,
+                        "a fully conflicted page must wait for the next tick"
+                    );
                     let mut progress = PageProgress {
-                        has_more: true,
+                        has_more,
                         ..Default::default()
                     };
                     let mut results = stream::iter(0..3)
                         .map(|i| async move {
-                            if i == 0 {
+                            // Two mixed pages can make progress despite a
+                            // recurring conflict. The third page cannot.
+                            if i == 0 || page == 2 {
                                 Err(StreamDeleteOnEmptyError::DeleteStream(
                                     DeleteStreamError::TransactionConflict(
                                         TransactionConflictError,
@@ -252,8 +265,8 @@ mod tests {
             }
         };
         run_tick("test", &tick, &backend).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+        assert_eq!(completed.load(Ordering::SeqCst), expected_completed);
         backend.close().await.unwrap();
     }
 
