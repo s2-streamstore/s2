@@ -298,11 +298,12 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin").unwrap();
         let stream = StreamName::from_str("doe-stream").unwrap();
+        let min_age = Duration::from_secs(1);
         let stream_id = seed_stream_with_meta(
             &backend,
             &basin,
             &stream,
-            stream_meta_with_doe_min_age(MIN_AGE),
+            stream_meta_with_doe_min_age(min_age),
         )
         .await;
         let write_timestamp = put_tail_position(
@@ -314,15 +315,16 @@ mod tests {
             },
         )
         .await;
-        let deadline = deadline_after(write_timestamp, MIN_AGE);
+        let deadline = deadline_after(write_timestamp, min_age);
         let key = kv::stream_doe_deadline::new_key(deadline, stream_id);
 
         backend
             .db
-            .put(&key, kv::stream_doe_deadline::ser_value(MIN_AGE))
+            .put(&key, kv::stream_doe_deadline::ser_value(min_age))
             .assert_durable()
             .await;
 
+        tokio::time::sleep(min_age).await;
         process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
         let meta = backend
@@ -344,7 +346,7 @@ mod tests {
         let basin = BasinName::from_str("doe-basin-never").unwrap();
         let stream = StreamName::from_str("doe-stream-never").unwrap();
         let stream_id = StreamId::new(&basin, &stream);
-        let min_age = MIN_AGE;
+        let min_age = Duration::from_secs(1);
         let meta = stream_meta_with_doe_min_age(min_age);
 
         seed_stream_with_meta(&backend, &basin, &stream, meta).await;
@@ -358,6 +360,7 @@ mod tests {
             .assert_durable()
             .await;
 
+        tokio::time::sleep(min_age).await;
         process_pending_stream_doe_at(&backend, stream_id, deadline).await;
 
         let meta = backend
@@ -654,13 +657,25 @@ mod tests {
         assert!(deadline_secs <= upper_secs);
     }
 
+    #[rstest::rstest]
+    #[case::increased(600, true)]
+    #[case::decreased(5, true)]
+    #[case::unchanged(10, false)]
+    #[case::disabled(0, false)]
     #[tokio::test]
-    async fn reconfigure_changing_enabled_doe_does_not_arm_new_deadline() {
+    async fn reconfigure_doe_rearms_only_when_enabled_min_age_changes(
+        #[case] min_age_secs: u64,
+        #[case] rearmed: bool,
+    ) {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-stale").unwrap();
         let stream = StreamName::from_str("doe-stream-stale").unwrap();
         let initial_min_age = Duration::from_secs(10);
-        let mut config = OptionalStreamConfig::default();
+        let retention_age = Duration::from_secs(120);
+        let mut config = OptionalStreamConfig {
+            retention_policy: Some(RetentionPolicy::Age(retention_age)),
+            ..Default::default()
+        };
         config.delete_on_empty.min_age = Some(initial_min_age);
         let stream_id = seed_stream_with_meta(
             &backend,
@@ -679,13 +694,72 @@ mod tests {
             .assert_durable()
             .await;
 
+        let min_age = Duration::from_secs(min_age_secs);
+        let delay = crate::backend::streamer::doe_arm_delay(retention_age, min_age);
+        let lower_bound = TimestampSecs::after(delay);
         backend
             .reconfigure_stream(
                 basin,
                 stream,
                 StreamReconfiguration {
                     delete_on_empty: Maybe::from(Some(DeleteOnEmptyReconfiguration {
-                        min_age: Maybe::from(Some(Duration::from_secs(600))),
+                        min_age: Maybe::from(Some(min_age)),
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let upper_bound = TimestampSecs::after(delay);
+
+        let entries = list_doe_entries(&backend).await;
+        assert_eq!(entries.len(), 1 + usize::from(rearmed));
+        assert_eq!(entries[0], (existing_deadline, stream_id, initial_min_age));
+        if rearmed {
+            let (deadline, scheduled_stream_id, scheduled_min_age) = entries[1];
+            assert_eq!(scheduled_stream_id, stream_id);
+            assert_eq!(scheduled_min_age, min_age);
+            assert!((lower_bound..=upper_bound).contains(&deadline));
+        }
+        backend.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconfigure_increasing_doe_min_age_rejects_stale_deadline_and_keeps_new_one() {
+        let backend = test_backend().await;
+        let initial_min_age = Duration::from_secs(1);
+        let min_age = Duration::from_secs(600);
+        let basin = BasinName::from_str("doe-basin-increase").unwrap();
+        let stream = StreamName::from_str("doe-stream-increase").unwrap();
+        let stream_id = seed_stream_with_meta(
+            &backend,
+            &basin,
+            &stream,
+            stream_meta_with_doe_min_age(initial_min_age),
+        )
+        .await;
+        let write_timestamp = put_tail_position(&backend, stream_id, StreamPosition::MIN).await;
+        let deadline = deadline_after(write_timestamp, initial_min_age);
+        backend
+            .db
+            .put(
+                kv::stream_doe_deadline::new_key(deadline, stream_id),
+                kv::stream_doe_deadline::ser_value(initial_min_age),
+            )
+            .assert_durable()
+            .await;
+        // Start the streamer before reconfiguring to exercise its config notification.
+        let client = backend
+            .streamer_client_guarded(&basin, &stream)
+            .await
+            .unwrap();
+        backend
+            .reconfigure_stream(
+                basin.clone(),
+                stream.clone(),
+                StreamReconfiguration {
+                    delete_on_empty: Maybe::from(Some(DeleteOnEmptyReconfiguration {
+                        min_age: Maybe::from(Some(min_age)),
                     })),
                     ..Default::default()
                 },
@@ -693,11 +767,22 @@ mod tests {
             .await
             .unwrap();
 
+        tokio::time::sleep(initial_min_age).await;
+        assert!(!backend.clone().tick_stream_doe().await.unwrap());
+        let config = backend.get_stream_config(basin, stream).await.unwrap();
+        assert_eq!(config.delete_on_empty.min_age(), Some(min_age));
+        assert_eq!(client.check_tail().await.unwrap(), StreamPosition::MIN);
         let entries = list_doe_entries(&backend).await;
         assert_eq!(
-            entries,
-            vec![(existing_deadline, stream_id, initial_min_age)]
+            entries.len(),
+            1,
+            "only the new schedule should survive cleanup"
         );
+        assert_eq!(entries[0].1, stream_id);
+        assert_eq!(entries[0].2, min_age);
+        assert!(entries[0].0 > TimestampSecs::now());
+        drop(client);
+        backend.close().await.unwrap();
     }
 
     #[tokio::test]

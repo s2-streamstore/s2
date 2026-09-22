@@ -306,8 +306,9 @@ impl Backend {
 
         let stream_id = StreamId::new(&basin, &stream);
         if let Some(min_age) = meta.config.delete_on_empty.min_age()
-            && prior_doe_min_age.is_none()
+            && prior_doe_min_age != Some(min_age)
         {
+            // Old deadlines may now be ineligible and will be cleared when processed.
             txn.put(
                 kv::stream_doe_deadline::new_key(
                     kv::timestamp::TimestampSecs::after(doe_arm_delay(

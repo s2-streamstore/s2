@@ -472,9 +472,8 @@ impl Streamer {
                 expected_stream_creation_seq,
             } => {
                 if self.stream_creation_seq != expected_stream_creation_seq
-                    || self.last_tail_write_timestamp > last_write_cutoff
+                    || !self.doe_age_eligible(last_write_cutoff)
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
-                    || self.config.delete_on_empty.min_age().is_none()
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                     return;
@@ -513,8 +512,7 @@ impl Streamer {
                     self.append_terminal_trim(reply_tx);
                 } else if self.stable_pos != stable_pos_snapshot
                     || self.next_assignable_pos() != stable_pos_snapshot
-                    || self.last_tail_write_timestamp > last_write_cutoff
-                    || self.config.delete_on_empty.min_age().is_none()
+                    || !self.doe_age_eligible(last_write_cutoff)
                 {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
                 } else {
@@ -525,6 +523,16 @@ impl Streamer {
                 let _ = reply_tx.send(Err(err.into()));
             }
         }
+    }
+
+    fn doe_age_eligible(&self, last_write_cutoff: kv::timestamp::TimestampSecs) -> bool {
+        // The persisted deadline may have been armed with an older min_age.
+        // Enforce the current configuration as well as the deadline's write cutoff.
+        self.config
+            .delete_on_empty
+            .min_age()
+            .and_then(|min_age| kv::timestamp::TimestampSecs::now().checked_sub_duration(min_age))
+            .is_some_and(|cutoff| self.last_tail_write_timestamp <= cutoff.min(last_write_cutoff))
     }
 
     fn append_terminal_trim(
@@ -1671,6 +1679,72 @@ mod tests {
             TerminalTrimOutcome::Ineligible
         );
         assert_eq!(streamer.db_writes_pending.len(), 1);
+    }
+
+    #[rstest::rstest]
+    #[case::increased(600, false)]
+    #[case::increased_but_elapsed(90, true)]
+    #[case::unchanged(60, true)]
+    #[case::decreased(30, true)]
+    #[case::disabled(0, false)]
+    #[case::unrepresentable_cutoff(u64::MAX, false)]
+    #[tokio::test]
+    async fn delete_on_empty_rechecks_min_age_after_empty_check(
+        #[case] min_age_secs: u64,
+        #[case] eligible: bool,
+    ) {
+        let mut streamer = test_streamer().await;
+        let now = kv::timestamp::TimestampSecs::now();
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(60);
+        streamer.last_tail_write_timestamp =
+            now.checked_sub_duration(Duration::from_secs(120)).unwrap();
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                last_write_cutoff: now.checked_sub_duration(Duration::from_secs(60)).unwrap(),
+                expected_stream_creation_seq: streamer.stream_creation_seq,
+            },
+            reply_tx,
+        );
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            last_write_cutoff,
+            has_records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected empty-stream check result");
+        };
+        assert!(!has_records.as_ref().unwrap());
+
+        // Reconfiguration can be processed while the database scan is in flight.
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(min_age_secs);
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            last_write_cutoff,
+            has_records,
+            reply_tx,
+        );
+        assert_eq!(streamer.db_writes_pending.len(), usize::from(eligible));
+        let expected = if eligible {
+            let submitted = streamer
+                .db_writes_pending
+                .pop_front()
+                .unwrap()
+                .await
+                .unwrap();
+            let db_seq = submitted.db_seq;
+            streamer.inflight_appends.push_back(submitted);
+            streamer.db.flush().await.unwrap();
+            streamer.on_db_durable_seq_advanced(db_seq);
+            TerminalTrimOutcome::DeletionPending
+        } else {
+            TerminalTrimOutcome::Ineligible
+        };
+        assert_eq!(reply_rx.await.unwrap().unwrap(), expected);
+        streamer.db.close().await.unwrap();
     }
 
     #[tokio::test]
