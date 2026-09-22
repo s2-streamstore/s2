@@ -749,11 +749,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let replacement_key = kv::stream_doe_deadline::new_key(deadline, stream_id);
+        let recreated_stream_deadline_key = kv::stream_doe_deadline::new_key(deadline, stream_id);
         backend
             .db
             .put(
-                &replacement_key,
+                &recreated_stream_deadline_key,
                 kv::stream_doe_deadline::ser_value(MIN_AGE),
             )
             .assert_durable()
@@ -792,7 +792,10 @@ mod tests {
         }
         assert_eq!(
             backend
-                .db_get(replacement_key, kv::stream_doe_deadline::deser_value)
+                .db_get(
+                    recreated_stream_deadline_key,
+                    kv::stream_doe_deadline::deser_value
+                )
                 .await
                 .unwrap(),
             Some(MIN_AGE),

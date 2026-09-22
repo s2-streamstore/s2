@@ -98,8 +98,8 @@ impl Backend {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, pending.stream_id);
             // Name reuse requires all old records to be durably deleted first.
-            // A stale job may see replacement records; stop before deleting any
-            // records committed after the trim marker it observed.
+            // A stale job may see records from the recreated stream; stop before
+            // deleting records committed after the trim marker it observed.
             if pos.seq_num >= pending.trim_point.end.get() || kv.seq > pending.marker_seq {
                 has_remaining_records = true;
                 break;
@@ -128,7 +128,8 @@ impl Backend {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
         let current_seq = db_txn_get_with(&txn, &trim_point_key, |entry| Ok(entry.seq)).await?;
-        // A replacement stream can have the same trim point, but a different marker sequence.
+        // A stream recreated under the same name can have the same trim point,
+        // but its marker has a different commit sequence.
         if current_seq != Some(pending.marker_seq) {
             return Ok(());
         }
@@ -677,12 +678,12 @@ mod tests {
             .unwrap();
         assert!(
             meta.deleted_at.is_none(),
-            "the old deletion request must not mark the replacement"
+            "the old deletion request must not mark the recreated stream as deleted"
         );
 
         let record: AppendRecord = AppendRecordParts {
             timestamp: None,
-            record: Record::try_from_parts(vec![], Bytes::from_static(b"replacement"))
+            record: Record::try_from_parts(vec![], Bytes::from_static(b"recreated stream"))
                 .unwrap()
                 .metered(),
         }
@@ -710,7 +711,7 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some(),
-            "old trim work must not delete replacement records"
+            "old trim work must not delete records from the recreated stream"
         );
 
         // Even another terminal marker belongs to different work after recreation.
@@ -725,7 +726,7 @@ mod tests {
                 .await
                 .unwrap(),
             Some(..NonZeroSeqNum::MAX),
-            "old trim work must not finalize the replacement's deletion"
+            "old trim work must not finalize the recreated stream's deletion"
         );
         backend.close().await.unwrap();
     }
