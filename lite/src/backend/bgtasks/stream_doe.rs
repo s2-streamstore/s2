@@ -156,6 +156,7 @@ mod tests {
         },
         maybe::Maybe,
         record::StreamPosition,
+        resources::ProvisionMode,
         stream::StreamName,
     };
     use slatedb::config::{DurabilityLevel, ScanOptions};
@@ -291,6 +292,45 @@ mod tests {
             .process_stream_doe(stream_id, pending)
             .await
             .unwrap();
+    }
+
+    async fn configure_min_age(
+        backend: &Backend,
+        basin: &BasinName,
+        stream: &StreamName,
+        min_age: Duration,
+        via_ensure: bool,
+    ) {
+        if via_ensure {
+            let mut config = backend
+                .get_stream_config(basin.clone(), stream.clone())
+                .await
+                .unwrap();
+            config.delete_on_empty.min_age = min_age;
+            backend
+                .provision_stream(
+                    basin.clone(),
+                    stream.clone(),
+                    config.into(),
+                    ProvisionMode::Ensure,
+                )
+                .await
+                .unwrap();
+        } else {
+            backend
+                .reconfigure_stream(
+                    basin.clone(),
+                    stream.clone(),
+                    StreamReconfiguration {
+                        delete_on_empty: Maybe::from(Some(DeleteOnEmptyReconfiguration {
+                            min_age: Maybe::from(Some(min_age)),
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
@@ -663,9 +703,10 @@ mod tests {
     #[case::unchanged(10, false)]
     #[case::disabled(0, false)]
     #[tokio::test]
-    async fn reconfigure_doe_rearms_only_when_enabled_min_age_changes(
+    async fn configure_doe_rearms_only_when_enabled_min_age_changes(
         #[case] min_age_secs: u64,
         #[case] rearmed: bool,
+        #[values(false, true)] via_ensure: bool,
     ) {
         let backend = test_backend().await;
         let basin = BasinName::from_str("doe-basin-stale").unwrap();
@@ -697,19 +738,7 @@ mod tests {
         let min_age = Duration::from_secs(min_age_secs);
         let delay = crate::backend::streamer::doe_arm_delay(retention_age, min_age);
         let lower_bound = TimestampSecs::after(delay);
-        backend
-            .reconfigure_stream(
-                basin,
-                stream,
-                StreamReconfiguration {
-                    delete_on_empty: Maybe::from(Some(DeleteOnEmptyReconfiguration {
-                        min_age: Maybe::from(Some(min_age)),
-                    })),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+        configure_min_age(&backend, &basin, &stream, min_age, via_ensure).await;
         let upper_bound = TimestampSecs::after(delay);
 
         let entries = list_doe_entries(&backend).await;
@@ -724,8 +753,12 @@ mod tests {
         backend.close().await.unwrap();
     }
 
+    #[rstest::rstest]
     #[tokio::test]
-    async fn reconfigure_increasing_doe_min_age_rejects_stale_deadline_and_keeps_new_one() {
+    async fn configure_increasing_doe_min_age_rejects_stale_deadline_and_keeps_new_one(
+        #[values(false, true)] via_ensure: bool,
+        #[values(false, true)] start_streamer_before_configure: bool,
+    ) {
         let backend = test_backend().await;
         let initial_min_age = Duration::from_secs(1);
         let min_age = Duration::from_secs(600);
@@ -748,30 +781,36 @@ mod tests {
             )
             .assert_durable()
             .await;
-        // Start the streamer before reconfiguring to exercise its config notification.
-        let client = backend
-            .streamer_client_guarded(&basin, &stream)
-            .await
-            .unwrap();
-        backend
-            .reconfigure_stream(
-                basin.clone(),
-                stream.clone(),
-                StreamReconfiguration {
-                    delete_on_empty: Maybe::from(Some(DeleteOnEmptyReconfiguration {
-                        min_age: Maybe::from(Some(min_age)),
-                    })),
-                    ..Default::default()
-                },
+        // Cover both config notifications and recovery of the persisted config and tail.
+        let client = if start_streamer_before_configure {
+            Some(
+                backend
+                    .streamer_client_guarded(&basin, &stream)
+                    .await
+                    .unwrap(),
             )
-            .await
-            .unwrap();
+        } else {
+            None
+        };
+        configure_min_age(&backend, &basin, &stream, min_age, via_ensure).await;
 
         tokio::time::sleep(initial_min_age).await;
         assert!(!backend.clone().tick_stream_doe().await.unwrap());
-        let config = backend.get_stream_config(basin, stream).await.unwrap();
+        let config = backend
+            .get_stream_config(basin.clone(), stream.clone())
+            .await
+            .unwrap();
         assert_eq!(config.delete_on_empty.min_age(), Some(min_age));
-        assert_eq!(client.check_tail().await.unwrap(), StreamPosition::MIN);
+        assert_eq!(
+            backend
+                .streamer_client_guarded(&basin, &stream)
+                .await
+                .unwrap()
+                .check_tail()
+                .await
+                .unwrap(),
+            StreamPosition::MIN
+        );
         let entries = list_doe_entries(&backend).await;
         assert_eq!(
             entries.len(),

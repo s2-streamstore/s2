@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use s2_common::{
     basin::BasinName,
     config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
@@ -212,23 +214,14 @@ impl Backend {
                 )?;
             }
 
-            if let Some(min_age) = meta.config.delete_on_empty.min_age()
-                && (matches!(&outcome, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
-            {
-                txn.put(
-                    kv::stream_doe_deadline::new_key(
-                        kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                            meta.config.retention_policy.age().unwrap_or_default(),
-                            min_age,
-                        )),
-                        stream_id,
-                    ),
-                    kv::stream_doe_deadline::ser_value(min_age),
-                )?;
-            }
-
-            self.commit_stream_config(txn, basin.clone(), stream.clone(), meta.config.clone())
-                .await?;
+            self.commit_stream_config(
+                txn,
+                basin.clone(),
+                stream.clone(),
+                meta.config.clone(),
+                prior_doe_min_age,
+            )
+            .await?;
         }
 
         Ok(outcome.map(|meta| StreamInfo {
@@ -304,24 +297,7 @@ impl Backend {
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
-        let stream_id = StreamId::new(&basin, &stream);
-        if let Some(min_age) = meta.config.delete_on_empty.min_age()
-            && prior_doe_min_age != Some(min_age)
-        {
-            // Old deadlines may now be ineligible and will be cleared when processed.
-            txn.put(
-                kv::stream_doe_deadline::new_key(
-                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                        meta.config.retention_policy.age().unwrap_or_default(),
-                        min_age,
-                    )),
-                    stream_id,
-                ),
-                kv::stream_doe_deadline::ser_value(min_age),
-            )?;
-        }
-
-        self.commit_stream_config(txn, basin, stream, meta.config.clone())
+        self.commit_stream_config(txn, basin, stream, meta.config.clone(), prior_doe_min_age)
             .await?;
 
         Ok(meta.config)
@@ -333,7 +309,24 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         config: StreamConfig,
+        prior_doe_min_age: Option<Duration>,
     ) -> Result<(), slatedb::Error> {
+        if let Some(min_age) = config.delete_on_empty.min_age()
+            && prior_doe_min_age != Some(min_age)
+        {
+            // Old deadlines may now be ineligible and will be cleared when processed.
+            txn.put(
+                kv::stream_doe_deadline::new_key(
+                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
+                        config.retention_policy.age().unwrap_or_default(),
+                        min_age,
+                    )),
+                    StreamId::new(&basin, &stream),
+                ),
+                kv::stream_doe_deadline::ser_value(min_age),
+            )?;
+        }
+
         let backend = self.clone();
         // Once a commit starts, cancellation must not discard its notification.
         tokio::spawn(async move {
