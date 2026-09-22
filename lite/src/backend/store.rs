@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use slatedb::{
-    DbTransaction, KeyValue,
+    DbSnapshot, DbTransaction, KeyValue,
     config::{DurabilityLevel, ReadOptions},
 };
 
@@ -41,6 +41,14 @@ impl Backend {
             .transpose()?;
         Ok(value)
     }
+}
+
+pub(super) async fn db_snapshot_get_with<K: AsRef<[u8]> + Send, V>(
+    snapshot: &DbSnapshot,
+    key: K,
+    deser: impl FnOnce(KeyValue) -> Result<V, kv::DeserializationError>,
+) -> Result<Option<V>, StorageError> {
+    Ok(snapshot.get_key_value(key).await?.map(deser).transpose()?)
 }
 
 pub(super) async fn db_txn_get<K: AsRef<[u8]> + Send, V>(
