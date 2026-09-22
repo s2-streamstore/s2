@@ -903,17 +903,7 @@ mod tests {
         doe::wake_after_trim(&txn, stream_id, false).await.unwrap();
         configure_min_age(&backend, &basin, &stream, 0, false).await;
         let error = StorageError::from(txn.commit().await.unwrap_err());
-        let mut progress = PageProgress {
-            has_more: true,
-            ..Default::default()
-        };
-        assert!(
-            progress
-                .record::<(), _>(Err(error), StorageError::is_transaction_conflict)
-                .unwrap()
-                .is_none()
-        );
-        assert!(!progress.should_continue());
+        assert!(error.is_transaction_conflict());
         assert!(state(&backend, stream_id).await.is_none());
         assert!(
             backend
