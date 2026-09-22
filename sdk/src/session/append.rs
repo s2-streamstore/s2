@@ -59,7 +59,8 @@ pub enum AppendSessionError {
     /// The server returned an invalid append acknowledgement.
     #[error("invalid append acknowledgement: {0}")]
     InvalidAck(String),
-    /// The final attempt failed definitively, but an earlier attempt may have taken effect.
+    /// The final attempt failed definitively, but an earlier attempt may have taken effect,
+    /// so the entire append operation is indeterminate.
     #[error(
         "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
     )]

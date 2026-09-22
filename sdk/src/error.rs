@@ -332,7 +332,8 @@ pub enum AppendError {
     /// The append condition did not match.
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailed),
-    /// The final attempt failed definitively, but an earlier attempt may have taken effect.
+    /// The final attempt failed definitively, but an earlier attempt may have taken effect,
+    /// so the entire append operation is indeterminate.
     #[error(
         "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
     )]
