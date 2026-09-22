@@ -466,12 +466,13 @@ impl Streamer {
                     self.append_terminal_trim(reply_tx);
                 } else if self.config_seq != expected_config_seq {
                     // The worker may have observed a configuration commit before
-                    // its notification reached this actor (or vice versa).
-                    let _ = reply_tx.send(Ok(self.doe_retry_at(TimestampSecs::ZERO)));
+                    // its notification reached this actor (or vice versa). Do not
+                    // defer using an age that may have just been decreased.
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::RetryAt(TimestampSecs::after(
+                        doe::RETRY_INTERVAL,
+                    ))));
                 } else if self.config.delete_on_empty.min_age().is_none() {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
-                } else if self.next_assignable_pos() != self.stable_pos {
-                    let _ = reply_tx.send(Ok(self.doe_retry_at(TimestampSecs::ZERO)));
                 } else {
                     let db = self.db.clone();
                     let stream_id = self.stream_id;
@@ -510,27 +511,34 @@ impl Streamer {
             self.append_terminal_trim(reply_tx);
             return;
         }
+        if self.config_seq != config_seq_snapshot {
+            let _ = reply_tx.send(Ok(TerminalTrimOutcome::RetryAt(TimestampSecs::after(
+                doe::RETRY_INTERVAL,
+            ))));
+            return;
+        }
         let Some(min_age) = self.config.delete_on_empty.min_age() else {
             let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
             return;
         };
-        let outcome = if self.stable_pos != stable_pos_snapshot
-            || self.next_assignable_pos() != stable_pos_snapshot
-            || self.config_seq != config_seq_snapshot
-        {
-            self.doe_retry_at(TimestampSecs::ZERO)
-        } else {
-            let old_enough = TimestampSecs::now()
-                .checked_sub_duration(min_age)
-                .is_some_and(|cutoff| self.last_tail_write_timestamp <= cutoff);
-            match records {
-                RecordPresence::Empty if old_enough => {
+        let outcome = match records {
+            // Appends cannot remove an observed record, so these bounds remain
+            // useful even when the tail advances. The scheduler's revision check
+            // protects against a trim removing the record before we finish.
+            RecordPresence::ExpiresAt(at) => self.doe_retry_at(at),
+            RecordPresence::Unbounded => TerminalTrimOutcome::Parked,
+            RecordPresence::Empty => {
+                let old_enough = TimestampSecs::now()
+                    .checked_sub_duration(min_age)
+                    .is_some_and(|cutoff| self.last_tail_write_timestamp <= cutoff);
+                if self.stable_pos == stable_pos_snapshot
+                    && self.next_assignable_pos() == stable_pos_snapshot
+                    && old_enough
+                {
                     self.append_terminal_trim(reply_tx);
                     return;
                 }
-                RecordPresence::Empty => self.doe_retry_at(TimestampSecs::ZERO),
-                RecordPresence::ExpiresAt(at) => self.doe_retry_at(at),
-                RecordPresence::Unbounded => TerminalTrimOutcome::Parked,
+                self.doe_retry_at(TimestampSecs::ZERO)
             }
         };
         let _ = reply_tx.send(Ok(outcome));
@@ -1450,6 +1458,19 @@ mod tests {
         }
     }
 
+    async fn make_pending_append_durable(streamer: &mut Streamer) {
+        let submitted = streamer
+            .db_writes_pending
+            .pop_front()
+            .unwrap()
+            .await
+            .unwrap();
+        let seq = submitted.db_seq;
+        streamer.inflight_appends.push_back(submitted);
+        streamer.db.flush().await.unwrap();
+        streamer.on_db_durable_seq_advanced(seq);
+    }
+
     async fn test_streamer() -> Streamer {
         test_streamer_with_settings(Default::default()).await
     }
@@ -1667,6 +1688,8 @@ mod tests {
     async fn delete_on_empty_terminal_trim_skips_pending_append() {
         let mut streamer = test_streamer().await;
         streamer.config.delete_on_empty.min_age = Duration::from_secs(60);
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
         let (append_tx, mut append_rx) = oneshot::channel();
         streamer.handle_append(append_input(b"live"), None, append_tx, AppendType::Regular);
         assert_eq!(streamer.db_writes_pending.len(), 1);
@@ -1683,12 +1706,119 @@ mod tests {
             },
             trim_tx,
         );
-
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected empty-stream check result");
+        };
+        assert_eq!(records.as_ref().unwrap(), &RecordPresence::Empty);
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        );
         assert!(matches!(
             trim_rx.await.expect("terminal trim reply").unwrap(),
             TerminalTrimOutcome::RetryAt(_)
         ));
         assert_eq!(streamer.db_writes_pending.len(), 1);
+        streamer.db.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::pending_before_scan(false, false)]
+    #[case::pending_after_scan(true, false)]
+    #[case::durable_after_scan(true, true)]
+    #[tokio::test]
+    async fn delete_on_empty_uses_nonempty_observation_despite_appends(
+        #[case] append_after_scan: bool,
+        #[case] durable: bool,
+        #[values(false, true)] infinite: bool,
+    ) {
+        let mut streamer = test_streamer().await;
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(60);
+        streamer.config.retention_policy = if infinite {
+            RetentionPolicy::Infinite()
+        } else {
+            RetentionPolicy::Age(Duration::from_secs(3600))
+        };
+        let (seed_tx, seed_rx) = oneshot::channel();
+        streamer.handle_append(
+            append_input(b"observed record"),
+            None,
+            seed_tx,
+            AppendType::Regular,
+        );
+        make_pending_append_durable(&mut streamer).await;
+        seed_rx.await.unwrap().unwrap();
+
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+        let (append_tx, append_rx) = oneshot::channel();
+        // Keep the sender until the selected point in the asynchronous check.
+        let mut append_tx = Some(append_tx);
+        if !append_after_scan {
+            streamer.handle_append(
+                append_input(b"pending before scan"),
+                None,
+                append_tx.take().unwrap(),
+                AppendType::Regular,
+            );
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_stream_creation_seq: streamer.stream_creation_seq,
+                expected_config_seq: streamer.config_seq,
+            },
+            reply_tx,
+        );
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected record check even with a pending append");
+        };
+        let expected = if infinite {
+            assert_eq!(records.as_ref().unwrap(), &RecordPresence::Unbounded);
+            TerminalTrimOutcome::Parked
+        } else {
+            let RecordPresence::ExpiresAt(at) = *records.as_ref().unwrap() else {
+                panic!("expected the stored record expiration");
+            };
+            assert!(at > TimestampSecs::after(Duration::from_secs(3500)));
+            TerminalTrimOutcome::RetryAt(at)
+        };
+        if append_after_scan {
+            streamer.handle_append(
+                append_input(b"arrived after scan"),
+                None,
+                append_tx.take().unwrap(),
+                AppendType::Regular,
+            );
+        }
+        if durable {
+            make_pending_append_durable(&mut streamer).await;
+            append_rx.await.unwrap().unwrap();
+        }
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        );
+        assert_eq!(reply_rx.await.unwrap().unwrap(), expected);
+        assert_eq!(streamer.db_writes_pending.len(), usize::from(!durable));
+        assert_ne!(streamer.trim_point.state.end, SeqNum::MAX);
+        streamer.db.close().await.unwrap();
     }
 
     #[rstest::rstest]
@@ -1724,16 +1854,7 @@ mod tests {
             AppendType::Regular,
         );
         if durable {
-            let submitted = streamer
-                .db_writes_pending
-                .pop_front()
-                .unwrap()
-                .await
-                .unwrap();
-            let seq = submitted.db_seq;
-            streamer.inflight_appends.push_back(submitted);
-            streamer.db.flush().await.unwrap();
-            streamer.on_db_durable_seq_advanced(seq);
+            make_pending_append_durable(&mut streamer).await;
             append_rx.await.unwrap().unwrap();
         }
         streamer.handle_doe_check_result(
@@ -1760,8 +1881,10 @@ mod tests {
         #[case] worker_seq: u64,
     ) {
         let mut streamer = test_streamer().await;
-        streamer.config.delete_on_empty.min_age = Duration::from_secs(1);
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(365 * 24 * 3600);
+        streamer.last_tail_write_timestamp = TimestampSecs::now();
         streamer.config_seq = actor_seq;
+        let earliest_retry = TimestampSecs::after(doe::RETRY_INTERVAL);
         let (reply_tx, reply_rx) = oneshot::channel();
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
@@ -1770,10 +1893,50 @@ mod tests {
             },
             reply_tx,
         );
-        assert!(matches!(
-            reply_rx.await.unwrap().unwrap(),
-            TerminalTrimOutcome::RetryAt(_)
-        ));
+        let TerminalTrimOutcome::RetryAt(at) = reply_rx.await.unwrap().unwrap() else {
+            panic!("expected a bounded retry for mismatched configuration");
+        };
+        assert!(at >= earliest_retry && at <= TimestampSecs::after(doe::RETRY_INTERVAL));
+        assert!(streamer.db_writes_pending.is_empty());
+        streamer.db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_on_empty_bounds_retry_when_config_changes_during_scan() {
+        let mut streamer = test_streamer().await;
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(365 * 24 * 3600);
+        streamer.last_tail_write_timestamp = TimestampSecs::now();
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_stream_creation_seq: 0,
+                expected_config_seq: 0,
+            },
+            reply_tx,
+        );
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected record check");
+        };
+        streamer.config_seq += 1;
+        let earliest_retry = TimestampSecs::after(doe::RETRY_INTERVAL);
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        );
+        let TerminalTrimOutcome::RetryAt(at) = reply_rx.await.unwrap().unwrap() else {
+            panic!("expected a bounded retry for mismatched configuration");
+        };
+        assert!(at >= earliest_retry && at <= TimestampSecs::after(doe::RETRY_INTERVAL));
         assert!(streamer.db_writes_pending.is_empty());
         streamer.db.close().await.unwrap();
     }

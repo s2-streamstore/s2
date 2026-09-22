@@ -16,7 +16,7 @@ use crate::{
             stream_doe_state::{Check, State},
             timestamp::TimestampSecs,
         },
-        store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
+        store::{db_snapshot_get_with, db_txn_commit_durable, db_txn_get, db_txn_get_with},
         streamer::{TerminalTrimCondition, TerminalTrimOutcome},
     },
     stream_id::StreamId,
@@ -111,37 +111,36 @@ impl Backend {
         &self,
         pending: PendingCheck,
     ) -> Result<Option<CheckSnapshot>, StorageError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        let state = db_txn_get_with(
-            &txn,
+        // Observation needs a consistent view, but no transaction read set. The
+        // completion transaction validates this revision after the actor's scan.
+        let snapshot = self.db.snapshot().await?;
+        let state = db_snapshot_get_with(
+            &snapshot,
             kv::stream_doe_state::ser_key(pending.stream_id),
             |entry| Ok((kv::stream_doe_state::deser_value(entry.value)?, entry.seq)),
         )
         .await?;
-        let Some((State::Scheduled(check), revision)) =
+        let Some((State::Scheduled(_), revision)) =
             state.filter(|(state, _)| *state == State::Scheduled(pending.check))
         else {
-            // Unique ticket IDs keep stale work from removing a replacement.
-            txn.delete(kv::stream_doe_check::ser_key(
-                pending.stream_id,
-                pending.check,
-            ))?;
-            db_txn_commit_durable(txn).await?;
+            drop(snapshot);
+            self.discard_doe_check(pending, state).await?;
             return Ok(None);
         };
-        let mapping = db_txn_get_with(
-            &txn,
+        let mapping = db_snapshot_get_with(
+            &snapshot,
             kv::stream_id_mapping::ser_key(pending.stream_id),
             |entry| Ok((kv::stream_id_mapping::deser_value(entry.value)?, entry.seq)),
         )
         .await?;
         if let Some(((basin, stream), creation_seq)) = mapping
             && revision >= creation_seq
-            && let Some((meta, config_seq)) =
-                db_txn_get_with(&txn, kv::stream_meta::ser_key(&basin, &stream), |entry| {
-                    Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
-                })
-                .await?
+            && let Some((meta, config_seq)) = db_snapshot_get_with(
+                &snapshot,
+                kv::stream_meta::ser_key(&basin, &stream),
+                |entry| Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq)),
+            )
+            .await?
             && meta.deleted_at.is_none()
             && meta.config.delete_on_empty.min_age().is_some()
         {
@@ -153,9 +152,41 @@ impl Backend {
                 stream,
             }));
         }
-        doe::replace(&txn, pending.stream_id, Some(State::Scheduled(check)), None)?;
-        db_txn_commit_durable(txn).await?;
+        drop(snapshot);
+        self.discard_doe_check(pending, state).await?;
         Ok(None)
+    }
+
+    /// Obsolete work needs a transaction only when it is actually discarded.
+    /// Revalidate the snapshot so cleanup cannot erase a concurrent wake.
+    async fn discard_doe_check(
+        &self,
+        pending: PendingCheck,
+        observed: Option<(State, u64)>,
+    ) -> Result<(), StorageError> {
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let current = db_txn_get_with(
+            &txn,
+            kv::stream_doe_state::ser_key(pending.stream_id),
+            |entry| Ok((kv::stream_doe_state::deser_value(entry.value)?, entry.seq)),
+        )
+        .await?;
+        if current != observed {
+            return Ok(());
+        }
+        match current {
+            Some((State::Scheduled(check), _)) if check == pending.check => {
+                doe::replace(&txn, pending.stream_id, Some(State::Scheduled(check)), None)?;
+            }
+            _ => {
+                txn.delete(kv::stream_doe_check::ser_key(
+                    pending.stream_id,
+                    pending.check,
+                ))?;
+            }
+        }
+        db_txn_commit_durable(txn).await?;
+        Ok(())
     }
 
     async fn finish_doe_check(
@@ -656,9 +687,16 @@ mod tests {
             create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
         let stream_id = StreamId::new(&basin, &stream);
         append(&backend, &basin, &stream, record()).await;
+        if trim {
+            configure_retention(&backend, &basin, &stream, 3600).await;
+        }
         let pending = due(&backend, stream_id).await;
         let snapshot = backend.observe_doe_check(pending).await.unwrap().unwrap();
         if trim {
+            // The worker may already have observed the infinite-retention
+            // record and decided to park. Subsequent appends do not invalidate
+            // that observation, but removing the blocker must invalidate it.
+            append(&backend, &basin, &stream, record()).await;
             append(
                 &backend,
                 &basin,
@@ -684,6 +722,46 @@ mod tests {
             .unwrap();
         assert_eq!(state(&backend, stream_id).await, woken);
         assert_eq!(scheduled(&backend, stream_id).await, pending.check);
+        backend.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn obsolete_check_cleanup_preserves_wake_after_snapshot() {
+        let backend = test_backend().await;
+        let (basin, stream) =
+            create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
+        let stream_id = StreamId::new(&basin, &stream);
+        let pending = due(&backend, stream_id).await;
+        let observed = state(&backend, stream_id).await;
+        configure_min_age(&backend, &basin, &stream, 120, false).await;
+        let woken = state(&backend, stream_id).await;
+        assert!(woken.unwrap().1 > observed.unwrap().1);
+        assert_eq!(scheduled(&backend, stream_id).await, pending.check);
+        backend.discard_doe_check(pending, observed).await.unwrap();
+        assert_eq!(state(&backend, stream_id).await, woken);
+        assert_eq!(scheduled(&backend, stream_id).await, pending.check);
+        backend.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn observation_discards_deleted_stream_schedule() {
+        let backend = test_backend().await;
+        let (basin, stream) =
+            create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
+        let stream_id = StreamId::new(&basin, &stream);
+        let pending = due(&backend, stream_id).await;
+        backend.delete_stream(basin, stream).await.unwrap();
+        assert!(state(&backend, stream_id).await.is_some());
+        assert!(backend.observe_doe_check(pending).await.unwrap().is_none());
+        assert!(state(&backend, stream_id).await.is_none());
+        assert!(
+            backend
+                .list_pending_stream_doe(TimestampSecs::MAX)
+                .await
+                .unwrap()
+                .values
+                .is_empty()
+        );
         backend.close().await.unwrap();
     }
 
