@@ -176,14 +176,8 @@ impl PendingAppends {
         self.queue.push_back(sender);
     }
 
-    pub fn reject(
-        &mut self,
-        ticket: Ticket,
-        err: AppendErrorInternal,
-        durability_dependency: RangeTo<SeqNum>,
-        stable_pos: StreamPosition,
-    ) {
-        if let Some(sender) = ticket.reject(err, durability_dependency, stable_pos) {
+    pub fn reject(&mut self, ticket: Ticket, err: AppendErrorInternal, stable_pos: StreamPosition) {
+        if let Some(sender) = ticket.reject(err, stable_pos) {
             let dd = sender.durability_dependency;
             let insert_pos = self
                 .queue
@@ -245,9 +239,9 @@ impl Ticket {
     fn reject(
         self,
         append_err: AppendErrorInternal,
-        mut durability_dependency: RangeTo<SeqNum>,
         stable_pos: StreamPosition,
     ) -> Option<BlockedReplySender> {
+        let mut durability_dependency = append_err.durability_dependency();
         if let Some(mut session) = self.session {
             let session = session.deref_mut();
             assert!(!session.poisoned, "thanks to typestate");

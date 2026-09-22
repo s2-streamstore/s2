@@ -44,7 +44,7 @@ use crate::{
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
             DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
-            StreamDeletionPendingError, StreamerMissingInActionError,
+            StreamerMissingInActionError,
         },
         kv,
     },
@@ -410,7 +410,13 @@ impl Streamer {
             return;
         };
         let sequenced_records = if self.trim_point.state.end == SeqNum::MAX {
-            Err(StreamDeletionPendingError.into())
+            Err(AppendErrorInternal::StreamDeletionPending {
+                // Terminal retries turn this rejection into a successful DELETE.
+                durability_dependency: match append_type {
+                    AppendType::Regular => ..0,
+                    AppendType::Terminal => self.trim_point.applied_point,
+                },
+            })
         } else {
             self.sequence_records(input)
         };
@@ -450,16 +456,7 @@ impl Streamer {
                 self.last_tail_write_timestamp = kv::timestamp::TimestampSecs::now();
             }
             Err(e) => {
-                let durability_dependency = match (&e, append_type) {
-                    // This rejection becomes a successful DELETE reply, so it
-                    // must wait for the original terminal append to be durable.
-                    (AppendErrorInternal::StreamDeletionPending(_), AppendType::Terminal) => {
-                        self.trim_point.applied_point
-                    }
-                    _ => e.durability_dependency(),
-                };
-                self.pending_appends
-                    .reject(ticket, e, durability_dependency, self.stable_pos);
+                self.pending_appends.reject(ticket, e, self.stable_pos);
             }
         }
     }
@@ -547,7 +544,7 @@ impl Streamer {
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
                 Ok(Ok(_)) => Ok(TerminalTrimOutcome::DeletionPending),
-                Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => {
+                Ok(Err(AppendErrorInternal::StreamDeletionPending { .. })) => {
                     Ok(TerminalTrimOutcome::DeletionPending)
                 }
                 Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
@@ -1612,7 +1609,7 @@ mod tests {
         streamer.handle_append(append_input(b"late"), None, tx, AppendType::Regular);
         assert!(matches!(
             rx.await.unwrap(),
-            Err(AppendErrorInternal::StreamDeletionPending(_))
+            Err(AppendErrorInternal::StreamDeletionPending { .. })
         ));
         assert_eq!(streamer.db_writes_pending.len(), 1);
         tokio::task::yield_now().await;
