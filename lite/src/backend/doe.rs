@@ -35,8 +35,55 @@ pub(super) async fn state(
 /// Request a check without adding a second ticket. Even when keeping an earlier
 /// ticket, rewrite the state to advance its commit sequence: an in-flight worker
 /// must not park or postpone the stream after a concurrent trim/configuration wake.
-/// The caller must have read `previous` in this serializable transaction.
-pub(super) fn schedule(
+pub(super) async fn schedule(
+    txn: &DbTransaction,
+    stream_id: StreamId,
+    at: TimestampSecs,
+) -> Result<(), StorageError> {
+    let previous = state(txn, stream_id).await?;
+    schedule_observed(txn, stream_id, previous, at)?;
+    Ok(())
+}
+
+/// Most trims need only the state row. A full trim also restores scheduling for
+/// older enabled streams whose last legacy deadline was already consumed.
+pub(super) async fn wake_after_trim(
+    txn: &DbTransaction,
+    stream_id: StreamId,
+    has_remaining_records: bool,
+) -> Result<(), StorageError> {
+    let previous = state(txn, stream_id).await?;
+    if previous.is_none() {
+        if has_remaining_records {
+            return Ok(());
+        }
+        let Some((basin, stream)) = db_txn_get(
+            txn,
+            kv::stream_id_mapping::ser_key(stream_id),
+            kv::stream_id_mapping::deser_value,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        let Some(meta) = db_txn_get(
+            txn,
+            kv::stream_meta::ser_key(&basin, &stream),
+            kv::stream_meta::deser_value,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        if meta.deleted_at.is_some() || meta.config.delete_on_empty.min_age().is_none() {
+            return Ok(());
+        }
+    }
+    schedule_observed(txn, stream_id, previous, TimestampSecs::now())?;
+    Ok(())
+}
+
+fn schedule_observed(
     txn: &DbTransaction,
     stream_id: StreamId,
     previous: Option<State>,

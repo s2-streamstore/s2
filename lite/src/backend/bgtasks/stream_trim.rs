@@ -8,11 +8,12 @@ use slatedb::{
 };
 use tracing::instrument;
 
+use super::PageProgress;
 use crate::{
     backend::{
         Backend, doe,
         error::StorageError,
-        kv::{self, timestamp::TimestampSecs},
+        kv,
         store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
     },
     stream_id::StreamId,
@@ -36,6 +37,10 @@ impl Backend {
         if page.values.is_empty() {
             return Ok(page.has_more);
         }
+        let mut progress = PageProgress {
+            has_more: page.has_more,
+            ..Default::default()
+        };
         let mut processed = stream::iter(page.values)
             .map(|pending| {
                 let backend = self.clone();
@@ -43,9 +48,9 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            result?;
+            progress.record(result, StorageError::is_transaction_conflict)?;
         }
-        Ok(page.has_more)
+        Ok(progress.should_continue())
     }
 
     async fn list_stream_trim_pending(&self) -> Result<Page<PendingTrim>, StorageError> {
@@ -74,12 +79,13 @@ impl Backend {
     }
 
     async fn process_trim(&self, pending: PendingTrim) -> Result<(), StorageError> {
-        self.delete_records(pending).await?;
-        self.finalize_trim(pending).await
+        let has_remaining_records = self.delete_records(pending).await?;
+        self.finalize_trim(pending, has_remaining_records).await
     }
 
+    /// Return whether records remain beyond the trim point.
     #[instrument(ret, err, skip(self))]
-    async fn delete_records(&self, pending: PendingTrim) -> Result<(), StorageError> {
+    async fn delete_records(&self, pending: PendingTrim) -> Result<bool, StorageError> {
         let prefix = kv::stream_record_timestamp::ser_key_prefix(pending.stream_id);
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
@@ -91,6 +97,7 @@ impl Backend {
             .await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0;
+        let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, pending.stream_id);
@@ -98,6 +105,7 @@ impl Backend {
             // A stale job may see records from the recreated stream; stop before
             // deleting records committed after the trim marker it observed.
             if pos.seq_num >= pending.trim_point.end.get() || kv.seq > pending.marker_seq {
+                has_remaining_records = true;
                 break;
             }
             batch.delete(kv.key);
@@ -112,11 +120,15 @@ impl Backend {
         if !batch.is_empty() {
             self.db.write(batch).await?.await_durable().await?;
         }
-        Ok(())
+        Ok(has_remaining_records)
     }
 
-    #[instrument(ret, err, skip(self))]
-    async fn finalize_trim(&self, pending: PendingTrim) -> Result<(), StorageError> {
+    #[instrument(skip(self))]
+    async fn finalize_trim(
+        &self,
+        pending: PendingTrim,
+        has_remaining_records: bool,
+    ) -> Result<(), StorageError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
         let current_seq = db_txn_get_with(&txn, &trim_point_key, |entry| Ok(entry.seq)).await?;
@@ -141,16 +153,10 @@ impl Backend {
             txn.delete(kv::stream_tail_position::ser_key(pending.stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(pending.stream_id))?;
             doe::clear(&txn, pending.stream_id).await?;
-        } else if let Some(previous) = doe::state(&txn, pending.stream_id).await? {
+        } else {
             // A partial trim may remove the infinite-retention record that
-            // parked DOE while leaving finite-retention records behind. Wake
-            // existing state; creation, DOE changes, and migration initialize it.
-            doe::schedule(
-                &txn,
-                pending.stream_id,
-                Some(previous),
-                TimestampSecs::now(),
-            )?;
+            // parked DOE while leaving finite-retention records behind.
+            doe::wake_after_trim(&txn, pending.stream_id, has_remaining_records).await?;
         }
         db_txn_commit_durable(txn).await?;
         Ok(())

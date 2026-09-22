@@ -328,8 +328,7 @@ impl Backend {
                 } else {
                     kv::timestamp::TimestampSecs::now()
                 };
-                let previous = doe::state(&txn, stream_id).await?;
-                doe::schedule(&txn, stream_id, previous, at)?;
+                doe::schedule(&txn, stream_id, at).await?;
             }
             None if prior_doe_min_age.is_some() => doe::clear(&txn, stream_id).await?,
             _ => (),

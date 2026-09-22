@@ -9,6 +9,35 @@ mod basin_deletion;
 mod stream_doe;
 mod stream_trim;
 
+/// Finish independent work in a page after a conflict, but wait for the next
+/// tick before rereading it. Retrying a contended full page immediately can spin.
+#[derive(Default)]
+struct PageProgress {
+    has_more: bool,
+    conflicted: bool,
+}
+
+impl PageProgress {
+    fn record<T, E>(
+        &mut self,
+        result: Result<T, E>,
+        is_conflict: fn(&E) -> bool,
+    ) -> Result<Option<T>, E> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(err) if is_conflict(&err) => {
+                self.conflicted = true;
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn should_continue(&self) -> bool {
+        self.has_more && !self.conflicted
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BgtaskTrigger {
     BasinDeletion,
@@ -171,5 +200,75 @@ mod tests {
         run_tick("test", &tick, &backend).await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn conflict_finishes_page_without_immediate_retry() {
+        use futures::{StreamExt, stream};
+
+        use crate::backend::error::{
+            DeleteStreamError, StreamDeleteOnEmptyError, TransactionConflictError,
+        };
+
+        let backend = test_backend().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let tick = {
+            let calls = calls.clone();
+            let completed = completed.clone();
+            move |_backend: &Backend| {
+                let calls = calls.clone();
+                let completed = completed.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let mut progress = PageProgress {
+                        has_more: true,
+                        ..Default::default()
+                    };
+                    let mut results = stream::iter(0..3)
+                        .map(|i| async move {
+                            if i == 0 {
+                                Err(StreamDeleteOnEmptyError::DeleteStream(
+                                    DeleteStreamError::TransactionConflict(
+                                        TransactionConflictError,
+                                    ),
+                                ))
+                            } else {
+                                tokio::task::yield_now().await;
+                                Ok(())
+                            }
+                        })
+                        .buffer_unordered(2);
+                    while let Some(result) = results.next().await {
+                        if progress
+                            .record(result, StreamDeleteOnEmptyError::is_transaction_conflict)?
+                            .is_some()
+                        {
+                            completed.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    Ok::<_, StreamDeleteOnEmptyError>(progress.should_continue())
+                }
+            }
+        };
+        run_tick("test", &tick, &backend).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        backend.close().await.unwrap();
+    }
+
+    #[test]
+    fn page_preserves_non_conflict_errors() {
+        use crate::backend::error::StorageError;
+
+        let mut progress = PageProgress {
+            has_more: true,
+            ..Default::default()
+        };
+        let error = StorageError::InvariantViolation("broken state".into());
+        assert!(matches!(
+            progress.record::<(), _>(Err(error), StorageError::is_transaction_conflict),
+            Err(StorageError::InvariantViolation(_))
+        ));
     }
 }

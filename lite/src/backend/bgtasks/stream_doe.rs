@@ -3,10 +3,11 @@ use futures::{StreamExt, stream};
 use indexmap::IndexMap;
 use s2_common::{basin::BasinName, resources::Page, stream::StreamName};
 use slatedb::{
-    IsolationLevel,
+    IsolationLevel, WriteBatch,
     config::{DurabilityLevel, ScanOptions},
 };
 
+use super::PageProgress;
 use crate::{
     backend::{
         Backend, doe,
@@ -43,8 +44,9 @@ impl Backend {
     pub(super) async fn tick_stream_doe(self) -> Result<bool, StreamDeleteOnEmptyError> {
         // Drain legacy keys regardless of their old deadlines. Their timestamps
         // and values have no role in the new scheduler or deletion eligibility.
-        let migrating = self.migrate_stream_doe().await?;
+        let mut progress = self.migrate_stream_doe().await?;
         let page = self.list_pending_stream_doe(TimestampSecs::now()).await?;
+        progress.has_more |= page.has_more;
         let mut processed = stream::iter(page.values)
             .map(|pending| {
                 let backend = self.clone();
@@ -52,9 +54,9 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            result?;
+            progress.record(result, StreamDeleteOnEmptyError::is_transaction_conflict)?;
         }
-        Ok(migrating || page.has_more)
+        Ok(progress.should_continue())
     }
 
     async fn list_pending_stream_doe(
@@ -240,7 +242,7 @@ impl Backend {
         Ok(())
     }
 
-    async fn migrate_stream_doe(&self) -> Result<bool, StorageError> {
+    async fn migrate_stream_doe(&self) -> Result<PageProgress, StorageError> {
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             ..Default::default()
@@ -262,16 +264,51 @@ impl Backend {
                 break;
             }
         }
-        let mut migrations = stream::iter(pending)
-            .map(|(stream_id, keys)| self.migrate_doe_deadlines(stream_id, keys))
-            .buffer_unordered(CONCURRENCY);
-        while let Some(result) = migrations.next().await {
-            result?;
+        let mut progress = PageProgress {
+            has_more: count == PENDING_LIST_LIMIT,
+            ..Default::default()
+        };
+        if pending.is_empty() {
+            return Ok(progress);
         }
-        Ok(count == PENDING_LIST_LIMIT)
+        let snapshot = self.db.snapshot().await?;
+        let mut migrations = stream::iter(pending)
+            .map(|(stream_id, keys)| self.migrate_doe_deadlines(&snapshot, stream_id, keys))
+            .buffer_unordered(CONCURRENCY);
+        let mut cleanup = WriteBatch::new();
+        while let Some(result) = migrations.next().await {
+            if let Some(keys) = progress.record(result, StorageError::is_transaction_conflict)? {
+                for key in keys {
+                    cleanup.delete(key);
+                }
+            }
+        }
+        if !cleanup.is_empty() {
+            // Later enablement/recreation installs its own schedule. Only
+            // legacy keys are removed; new state and its revision stay intact.
+            // Durability also covers any commits observed by the snapshot.
+            self.db.write(cleanup).await?.await_durable().await?;
+        }
+        Ok(progress)
     }
 
     async fn migrate_doe_deadlines(
+        &self,
+        snapshot: &slatedb::DbSnapshot,
+        stream_id: StreamId,
+        keys: Vec<Bytes>,
+    ) -> Result<Vec<Bytes>, StorageError> {
+        if needs_doe_migration(snapshot, stream_id).await? {
+            // Initialization and removal remain atomic. Recheck all eligibility
+            // in the transaction after the snapshot.
+            self.initialize_doe_from_deadlines(stream_id, keys).await?;
+            Ok(Vec::new())
+        } else {
+            Ok(keys)
+        }
+    }
+
+    async fn initialize_doe_from_deadlines(
         &self,
         stream_id: StreamId,
         keys: Vec<Bytes>,
@@ -310,6 +347,43 @@ impl Backend {
         db_txn_commit_durable(txn).await?;
         Ok(())
     }
+}
+
+async fn needs_doe_migration(
+    snapshot: &slatedb::DbSnapshot,
+    stream_id: StreamId,
+) -> Result<bool, StorageError> {
+    let Some(((basin, stream), creation_seq)) = db_snapshot_get_with(
+        snapshot,
+        kv::stream_id_mapping::ser_key(stream_id),
+        |entry| Ok((kv::stream_id_mapping::deser_value(entry.value)?, entry.seq)),
+    )
+    .await?
+    else {
+        return Ok(false);
+    };
+    let Some(meta) = db_snapshot_get_with(
+        snapshot,
+        kv::stream_meta::ser_key(&basin, &stream),
+        |entry| kv::stream_meta::deser_value(entry.value),
+    )
+    .await?
+    else {
+        return Ok(false);
+    };
+    if meta.deleted_at.is_some() || meta.config.delete_on_empty.min_age().is_none() {
+        return Ok(false);
+    }
+    let state_seq = db_snapshot_get_with(
+        snapshot,
+        kv::stream_doe_state::ser_key(stream_id),
+        |entry| {
+            kv::stream_doe_state::deser_value(entry.value)?;
+            Ok(entry.seq)
+        },
+    )
+    .await?;
+    Ok(state_seq.is_none_or(|seq| seq < creation_seq))
 }
 
 #[cfg(test)]
@@ -373,8 +447,9 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        let previous = doe::state(&txn, stream_id).await.unwrap();
-        doe::schedule(&txn, stream_id, previous, TimestampSecs::ZERO).unwrap();
+        doe::schedule(&txn, stream_id, TimestampSecs::ZERO)
+            .await
+            .unwrap();
         db_txn_commit_durable(txn).await.unwrap();
         PendingCheck {
             stream_id,
@@ -680,9 +755,10 @@ mod tests {
     #[case::disabled_before_cleanup(60, false)]
     #[case::legacy_only(60, true)]
     #[tokio::test]
-    async fn trim_does_not_initialize_missing_doe_state(
+    async fn trim_initializes_missing_state_only_for_enabled_empty_streams(
         #[case] min_age: u64,
         #[case] legacy_only: bool,
+        #[values(false, true)] full_trim: bool,
     ) {
         let backend = test_backend().await;
         let (basin, stream) =
@@ -693,7 +769,7 @@ mod tests {
             &backend,
             &basin,
             &stream,
-            Record::Command(CommandRecord::Trim(1)),
+            Record::Command(CommandRecord::Trim(if full_trim { u64::MAX } else { 1 })),
         )
         .await;
         if legacy_only {
@@ -712,6 +788,113 @@ mod tests {
         assert!(state(&backend, stream_id).await.is_none());
 
         backend.clone().tick_stream_trim().await.unwrap();
+        let after_trim = state(&backend, stream_id).await;
+        if legacy_only && full_trim {
+            assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        } else {
+            assert!(after_trim.is_none());
+            assert!(
+                backend
+                    .list_pending_stream_doe(TimestampSecs::MAX)
+                    .await
+                    .unwrap()
+                    .values
+                    .is_empty()
+            );
+        }
+
+        // Migration preserves a full trim's wake or initializes missing state.
+        if legacy_only {
+            backend.migrate_stream_doe().await.unwrap();
+            if full_trim {
+                assert_eq!(state(&backend, stream_id).await, after_trim);
+            }
+        } else {
+            configure_min_age(&backend, &basin, &stream, 60, false).await;
+        }
+        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        backend.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_trim_restores_doe_without_any_legacy_deadline() {
+        let backend = test_backend().await;
+        let (basin, stream) = create_stream(&backend, config(1, RetentionPolicy::Infinite())).await;
+        let stream_id = StreamId::new(&basin, &stream);
+        append(&backend, &basin, &stream, record()).await;
+        // Before upgrade, an infinite-retention stream normally loses its last
+        // deadline when it fires while the stream is nonempty.
+        let txn = backend
+            .db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        doe::clear(&txn, stream_id).await.unwrap();
+        db_txn_commit_durable(txn).await.unwrap();
+        backend.migrate_stream_doe().await.unwrap();
+        assert!(state(&backend, stream_id).await.is_none());
+
+        append(
+            &backend,
+            &basin,
+            &stream,
+            Record::Command(CommandRecord::Trim(u64::MAX)),
+        )
+        .await;
+        backend.clone().tick_stream_trim().await.unwrap();
+        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        backend.clone().tick_stream_doe().await.unwrap();
+        let meta = backend
+            .db_get(
+                kv::stream_meta::ser_key(&basin, &stream),
+                kv::stream_meta::deser_value,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(meta.deleted_at.is_some());
+        assert!(state(&backend, stream_id).await.is_none());
+        backend.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn trim_wake_conflicts_with_concurrent_disablement(
+        #[values(false, true)] missing_state: bool,
+    ) {
+        let backend = test_backend().await;
+        let (basin, stream) =
+            create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
+        let stream_id = StreamId::new(&basin, &stream);
+        if missing_state {
+            let txn = backend
+                .db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            doe::clear(&txn, stream_id).await.unwrap();
+            db_txn_commit_durable(txn).await.unwrap();
+        }
+        let txn = backend
+            .db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        doe::wake_after_trim(&txn, stream_id, false).await.unwrap();
+        configure_min_age(&backend, &basin, &stream, 0, false).await;
+        let error = StorageError::from(txn.commit().await.unwrap_err());
+        let mut progress = PageProgress {
+            has_more: true,
+            ..Default::default()
+        };
+        assert!(
+            progress
+                .record::<(), _>(Err(error), StorageError::is_transaction_conflict)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!progress.should_continue());
         assert!(state(&backend, stream_id).await.is_none());
         assert!(
             backend
@@ -721,14 +904,6 @@ mod tests {
                 .values
                 .is_empty()
         );
-
-        // Migration or enablement, rather than trim cleanup, establishes state.
-        if legacy_only {
-            backend.migrate_stream_doe().await.unwrap();
-        } else {
-            configure_min_age(&backend, &basin, &stream, 60, false).await;
-        }
-        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
         backend.close().await.unwrap();
     }
 
@@ -842,7 +1017,7 @@ mod tests {
         assert!(backend.db.get(&unique).await.unwrap().is_none());
         let initialized = state(&backend, stream_id).await;
         backend
-            .migrate_doe_deadlines(stream_id, vec![old, unique])
+            .initialize_doe_from_deadlines(stream_id, vec![old, unique])
             .await
             .unwrap();
         assert_eq!(state(&backend, stream_id).await, initialized);
@@ -879,8 +1054,149 @@ mod tests {
             );
         }
         backend.db.write(batch).assert_durable().await;
-        assert!(backend.migrate_stream_doe().await.unwrap());
-        assert!(!backend.migrate_stream_doe().await.unwrap());
+        assert!(
+            backend
+                .migrate_stream_doe()
+                .await
+                .unwrap()
+                .should_continue()
+        );
+        assert!(
+            !backend
+                .migrate_stream_doe()
+                .await
+                .unwrap()
+                .should_continue()
+        );
+        assert_eq!(state(&backend, stream_id).await, before);
+        scheduled(&backend, stream_id).await;
+        backend.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_batches_cleanup_across_streams() {
+        let backend = test_backend().await;
+        let (basin, stream) =
+            create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
+        let scheduled_id = StreamId::new(&basin, &stream);
+        let before = state(&backend, scheduled_id).await;
+        let disabled: StreamName = "disabled".parse().unwrap();
+        let deleted: StreamName = "deleted".parse().unwrap();
+        for (stream, min_age) in [(&disabled, 0), (&deleted, 60)] {
+            backend
+                .provision_stream(
+                    basin.clone(),
+                    stream.clone(),
+                    config(min_age, RetentionPolicy::Infinite()),
+                    ProvisionMode::Ensure,
+                )
+                .await
+                .unwrap();
+        }
+        backend
+            .delete_stream(basin.clone(), deleted.clone())
+            .await
+            .unwrap();
+        let disabled_id = StreamId::new(&basin, &disabled);
+        let deleted_id = StreamId::new(&basin, &deleted);
+        let deleted_state = state(&backend, deleted_id).await;
+        let mut keys = Vec::new();
+        for stream_id in [scheduled_id, disabled_id, deleted_id] {
+            for id in 0..3 {
+                keys.push(legacy(&backend, stream_id, Some(id)).await);
+            }
+        }
+        let before_seq = backend.db.snapshot().await.unwrap().seq();
+        backend.migrate_stream_doe().await.unwrap();
+        assert_eq!(
+            backend.db.snapshot().await.unwrap().seq(),
+            before_seq + 1,
+            "all cleanup-only streams should share one durable batch"
+        );
+        for key in keys {
+            assert!(backend.db.get(key).await.unwrap().is_none());
+        }
+        assert_eq!(state(&backend, scheduled_id).await, before);
+        assert_eq!(state(&backend, deleted_id).await, deleted_state);
+        assert!(state(&backend, disabled_id).await.is_none());
+        backend.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn migration_revalidates_configuration_after_snapshot(#[values(0, 120)] min_age: u64) {
+        let backend = test_backend().await;
+        let (basin, stream) =
+            create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
+        let stream_id = StreamId::new(&basin, &stream);
+        let txn = backend
+            .db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        doe::clear(&txn, stream_id).await.unwrap();
+        db_txn_commit_durable(txn).await.unwrap();
+        let key = legacy(&backend, stream_id, None).await;
+        let snapshot = backend.db.snapshot().await.unwrap();
+        assert!(needs_doe_migration(&snapshot, stream_id).await.unwrap());
+        configure_min_age(&backend, &basin, &stream, min_age, false).await;
+        let configured = state(&backend, stream_id).await;
+        backend
+            .initialize_doe_from_deadlines(stream_id, vec![key.clone()])
+            .await
+            .unwrap();
+        assert_eq!(state(&backend, stream_id).await, configured);
+        assert!(backend.db.get(key).await.unwrap().is_none());
+        backend.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn batched_legacy_cleanup_preserves_later_enablement_or_recreation(
+        #[values(false, true)] recreate: bool,
+    ) {
+        let backend = test_backend().await;
+        let (basin, stream) = create_stream(
+            &backend,
+            config(if recreate { 60 } else { 0 }, RetentionPolicy::Infinite()),
+        )
+        .await;
+        let stream_id = StreamId::new(&basin, &stream);
+        let key = legacy(&backend, stream_id, None).await;
+        let snapshot = backend.db.snapshot().await.unwrap();
+        let cleanup = backend
+            .migrate_doe_deadlines(&snapshot, stream_id, vec![key.clone()])
+            .await
+            .unwrap();
+        assert_eq!(cleanup, vec![key.clone()]);
+        drop(snapshot);
+
+        // Pause after classification, before the page's cleanup batch commits.
+        if recreate {
+            backend
+                .delete_stream(basin.clone(), stream.clone())
+                .await
+                .unwrap();
+            backend.clone().tick_stream_trim().await.unwrap();
+            backend
+                .provision_stream(
+                    basin.clone(),
+                    stream.clone(),
+                    config(60, RetentionPolicy::Infinite()),
+                    ProvisionMode::Ensure,
+                )
+                .await
+                .unwrap();
+        } else {
+            configure_min_age(&backend, &basin, &stream, 60, false).await;
+        }
+        let before = state(&backend, stream_id).await;
+        let mut batch = WriteBatch::new();
+        for key in cleanup {
+            batch.delete(key);
+        }
+        backend.db.write(batch).assert_durable().await;
+        assert!(backend.db.get(key).await.unwrap().is_none());
         assert_eq!(state(&backend, stream_id).await, before);
         scheduled(&backend, stream_id).await;
         backend.close().await.unwrap();
@@ -906,12 +1222,19 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        let previous = doe::state(&wake, stream_id).await.unwrap();
-        doe::schedule(&wake, stream_id, previous, TimestampSecs::now()).unwrap();
+        doe::schedule(&wake, stream_id, TimestampSecs::now())
+            .await
+            .unwrap();
         db_txn_commit_durable(wake).await.unwrap();
         let error = txn.commit().await.unwrap_err();
         assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
         let error = StorageError::from(error);
+        assert!(error.is_transaction_conflict());
+        assert!(StreamDeleteOnEmptyError::Storage(error.clone()).is_transaction_conflict());
+        assert!(
+            StreamDeleteOnEmptyError::DeleteStream(DeleteStreamError::Storage(error.clone()))
+                .is_transaction_conflict()
+        );
         // Scheduling adds transactional reads to configuration commits, but
         // conflicts must retain the API's retryable 409 classification.
         assert!(matches!(
