@@ -333,8 +333,14 @@ pub enum AppendError {
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailed),
     /// The final attempt failed definitively, but an earlier attempt may have taken effect.
-    #[error("append may have taken effect in an earlier attempt; final attempt failed: {0}")]
-    IndefiniteFailure(#[source] Box<Self>),
+    #[error(
+        "append may have taken effect in an earlier attempt; final attempt failed: {ultimate_attempt_error}"
+    )]
+    IndefiniteFailure {
+        /// The definite error returned by the ultimate attempt.
+        #[source]
+        ultimate_attempt_error: Box<Self>,
+    },
 }
 
 impl AppendError {
@@ -343,7 +349,9 @@ impl AppendError {
         match self {
             Self::Request(error) => error.is_retryable(),
             Self::ConditionFailed(_) => false,
-            Self::IndefiniteFailure(error) => error.is_retryable(),
+            Self::IndefiniteFailure {
+                ultimate_attempt_error,
+            } => ultimate_attempt_error.is_retryable(),
         }
     }
 
@@ -352,7 +360,7 @@ impl AppendError {
         match self {
             Self::Request(error) => error.has_no_side_effects(),
             Self::ConditionFailed(_) => true,
-            Self::IndefiniteFailure(_) => false,
+            Self::IndefiniteFailure { .. } => false,
         }
     }
 
@@ -361,7 +369,9 @@ impl AppendError {
         match self {
             Self::Request(error) => Some(error),
             Self::ConditionFailed(_) => None,
-            Self::IndefiniteFailure(error) => error.request_error(),
+            Self::IndefiniteFailure {
+                ultimate_attempt_error,
+            } => ultimate_attempt_error.request_error(),
         }
     }
 }
@@ -370,9 +380,11 @@ impl From<ApiError> for AppendError {
     fn from(error: ApiError) -> Self {
         match error {
             ApiError::AppendConditionFailed(condition) => Self::ConditionFailed(condition.into()),
-            ApiError::IndefiniteFailure(error) => {
-                Self::IndefiniteFailure(Box::new((*error).into()))
-            }
+            ApiError::IndefiniteFailure {
+                ultimate_attempt_error,
+            } => Self::IndefiniteFailure {
+                ultimate_attempt_error: Box::new((*ultimate_attempt_error).into()),
+            },
             other => Self::Request(other.into()),
         }
     }

@@ -667,8 +667,13 @@ pub(crate) enum ApiError {
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
     AppendConditionFailed(AppendConditionFailed),
-    #[error("append may have taken effect in an earlier attempt; final attempt failed: {0}")]
-    IndefiniteFailure(#[source] Box<Self>),
+    #[error(
+        "append may have taken effect in an earlier attempt; final attempt failed: {ultimate_attempt_error}"
+    )]
+    IndefiniteFailure {
+        #[source]
+        ultimate_attempt_error: Box<Self>,
+    },
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
     #[error("{1}")]
@@ -680,7 +685,9 @@ impl ApiError {
         match self {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
-            Self::IndefiniteFailure(err) => err.is_retryable(),
+            Self::IndefiniteFailure {
+                ultimate_attempt_error,
+            } => ultimate_attempt_error.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
             _ => false,
@@ -717,7 +724,9 @@ impl ApiError {
 
     fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
         if prior_uncertainty && self.has_no_side_effects() {
-            Self::IndefiniteFailure(Box::new(self))
+            Self::IndefiniteFailure {
+                ultimate_attempt_error: Box::new(self),
+            }
         } else {
             self
         }
@@ -1726,7 +1735,10 @@ mod tests {
         }
 
         let error = AppendError::from(result.map(|_| ()).unwrap_err());
-        assert_eq!(matches!(error, AppendError::IndefiniteFailure(_)), wrapped);
+        assert_eq!(
+            matches!(error, AppendError::IndefiniteFailure { .. }),
+            wrapped
+        );
         let server = error.request_error().unwrap().server_error().unwrap();
         assert_eq!((server.status, server.code.as_str()), responses[1]);
         assert_eq!(server.message, responses[1].1);
@@ -1768,7 +1780,7 @@ mod tests {
     fn unary_append_wraps_definite_terminal_errors(#[case] error: ApiError, #[case] message: &str) {
         assert!(error.has_no_side_effects());
         let error = AppendError::from(error.with_prior_uncertainty(true));
-        assert!(matches!(error, AppendError::IndefiniteFailure(_)));
+        assert!(matches!(error, AppendError::IndefiniteFailure { .. }));
         assert!(!error.has_no_side_effects());
         assert!(!error.is_retryable());
         let latest = error

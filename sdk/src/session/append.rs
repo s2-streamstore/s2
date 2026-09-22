@@ -60,8 +60,14 @@ pub enum AppendSessionError {
     #[error("invalid append acknowledgement: {0}")]
     InvalidAck(String),
     /// The final attempt failed definitively, but an earlier attempt may have taken effect.
-    #[error("append may have taken effect in an earlier attempt; final attempt failed: {0}")]
-    IndefiniteFailure(#[source] Box<Self>),
+    #[error(
+        "append may have taken effect in an earlier attempt; final attempt failed: {ultimate_attempt_error}"
+    )]
+    IndefiniteFailure {
+        /// The definite error returned by the ultimate attempt.
+        #[source]
+        ultimate_attempt_error: Box<Self>,
+    },
 }
 
 impl AppendSessionError {
@@ -69,7 +75,9 @@ impl AppendSessionError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Append(error) => error.is_retryable(),
-            Self::IndefiniteFailure(error) => error.is_retryable(),
+            Self::IndefiniteFailure {
+                ultimate_attempt_error,
+            } => ultimate_attempt_error.is_retryable(),
             Self::AckTimeout | Self::ServerDisconnected => true,
             Self::StreamClosedEarly
             | Self::SessionClosed
@@ -83,7 +91,7 @@ impl AppendSessionError {
     pub fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Append(error) => error.has_no_side_effects(),
-            Self::IndefiniteFailure(_) => false,
+            Self::IndefiniteFailure { .. } => false,
             Self::SessionClosed | Self::SessionClosing => true,
             Self::AckTimeout
             | Self::ServerDisconnected
@@ -97,7 +105,9 @@ impl AppendSessionError {
     pub fn request_error(&self) -> Option<&RequestError> {
         match self {
             Self::Append(error) => error.request_error(),
-            Self::IndefiniteFailure(error) => error.request_error(),
+            Self::IndefiniteFailure {
+                ultimate_attempt_error,
+            } => ultimate_attempt_error.request_error(),
             Self::AckTimeout
             | Self::ServerDisconnected
             | Self::StreamClosedEarly
@@ -124,7 +134,9 @@ impl AppendSessionError {
 
     fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
         if prior_uncertainty && self.has_no_side_effects() {
-            Self::IndefiniteFailure(Box::new(self))
+            Self::IndefiniteFailure {
+                ultimate_attempt_error: Box::new(self),
+            }
         } else {
             self
         }
@@ -1140,7 +1152,7 @@ mod tests {
         let latest = server_error(status, code);
         let error = latest.clone().with_prior_uncertainty(prior_uncertainty);
         assert_eq!(
-            matches!(error, AppendSessionError::IndefiniteFailure(_)),
+            matches!(error, AppendSessionError::IndefiniteFailure { .. }),
             wrapped
         );
         assert_eq!(error.is_retryable(), latest.is_retryable());
