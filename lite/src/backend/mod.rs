@@ -11,6 +11,9 @@ mod store;
 mod streamer;
 mod streams;
 
+#[cfg(test)]
+mod test_util;
+
 mod append;
 mod kv;
 

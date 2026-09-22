@@ -28,7 +28,7 @@ use s2_storage::record::{
 };
 use slatedb::{
     IterationOrder, WriteBatch,
-    config::{PutOptions, ScanOptions, Ttl, WriteOptions},
+    config::{PutOptions, ScanOptions, Ttl},
 };
 use tokio::{
     sync::{Semaphore, SemaphorePermit, broadcast, mpsc, oneshot},
@@ -44,7 +44,7 @@ use crate::{
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
             DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
-            StreamDeletionPendingError, StreamerMissingInActionError,
+            StreamerMissingInActionError,
         },
         kv,
     },
@@ -210,7 +210,11 @@ pub(super) struct Spawner {
     pub generation_id: StreamerGenerationId,
     pub db: slatedb::Db,
     pub stream_id: StreamId,
+    /// Database commit sequence that created the stream's ID mapping.
+    /// Stable across streamer restarts; changes when the stream is recreated.
+    pub stream_creation_seq: u64,
     pub config: StreamConfig,
+    pub config_seq: u64,
     pub cipher: Option<EncryptionAlgorithm>,
     pub tail_pos: StreamPosition,
     pub last_tail_write_timestamp: kv::timestamp::TimestampSecs,
@@ -230,7 +234,9 @@ impl Spawner {
             generation_id,
             db,
             stream_id,
+            stream_creation_seq,
             config,
+            config_seq,
             cipher,
             tail_pos,
             last_tail_write_timestamp,
@@ -246,8 +252,10 @@ impl Spawner {
         let streamer = Streamer {
             db,
             stream_id,
+            stream_creation_seq,
             msg_tx: msg_tx.clone(),
             config,
+            config_seq,
             last_tail_write_timestamp,
             fencing_token: CommandState {
                 state: fencing_token,
@@ -306,8 +314,10 @@ impl<T> CommandState<T> {
 struct Streamer {
     db: slatedb::Db,
     stream_id: StreamId,
+    stream_creation_seq: u64,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: StreamConfig,
+    config_seq: u64,
     last_tail_write_timestamp: kv::timestamp::TimestampSecs,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
@@ -400,7 +410,10 @@ impl Streamer {
             return;
         };
         let sequenced_records = if self.trim_point.state.end == SeqNum::MAX {
-            Err(StreamDeletionPendingError.into())
+            Err(AppendErrorInternal::StreamDeletionPending {
+                // The terminal trim must be durable before reporting deletion pending.
+                durability_dependency: self.trim_point.applied_point,
+            })
         } else {
             self.sequence_records(input)
         };
@@ -454,8 +467,12 @@ impl Streamer {
             TerminalTrimCondition::Always => {
                 self.append_terminal_trim(reply_tx);
             }
-            TerminalTrimCondition::DeleteOnEmpty { last_write_cutoff } => {
-                if self.last_tail_write_timestamp > last_write_cutoff
+            TerminalTrimCondition::DeleteOnEmpty {
+                last_write_cutoff,
+                expected_stream_creation_seq,
+            } => {
+                if self.stream_creation_seq != expected_stream_creation_seq
+                    || self.last_tail_write_timestamp > last_write_cutoff
                     || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
                     || self.config.delete_on_empty.min_age().is_none()
                 {
@@ -493,7 +510,7 @@ impl Streamer {
             }
             Ok(false) => {
                 if self.trim_point.state.end == SeqNum::MAX {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::DeletionPending));
+                    self.append_terminal_trim(reply_tx);
                 } else if self.stable_pos != stable_pos_snapshot
                     || self.next_assignable_pos() != stable_pos_snapshot
                     || self.last_tail_write_timestamp > last_write_cutoff
@@ -524,7 +541,7 @@ impl Streamer {
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
                 Ok(Ok(_)) => Ok(TerminalTrimOutcome::DeletionPending),
-                Ok(Err(AppendErrorInternal::StreamDeletionPending(_))) => {
+                Ok(Err(AppendErrorInternal::StreamDeletionPending { .. })) => {
                     Ok(TerminalTrimOutcome::DeletionPending)
                 }
                 Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
@@ -543,9 +560,7 @@ impl Streamer {
                 Ok(Err(AppendErrorInternal::MaxSeqNum(_))) => {
                     unreachable!("terminal append is plaintext command record")
                 }
-                Err(_) => Err(DeleteStreamError::StreamerMissingInActionError(
-                    StreamerMissingInActionError,
-                )),
+                Err(_) => Err(RequestDroppedError.into()),
             };
             let _ = reply_tx.send(result);
         });
@@ -684,8 +699,11 @@ impl Streamer {
                         Message::CheckTail { reply_tx } => {
                             let _ = reply_tx.send(self.stable_pos);
                         }
-                        Message::Reconfigure { config } => {
-                            self.config = config;
+                        Message::Reconfigure { seq, config } => {
+                            if seq > self.config_seq {
+                                self.config = config;
+                                self.config_seq = seq;
+                            }
                         }
                         Message::DurabilityStatus(status) => {
                             match status {
@@ -706,7 +724,12 @@ impl Streamer {
                     }
                 }
                 _ = dormancy.as_mut() => {
-                    if self.lease_state.close_if_idle() {
+                    // Cancelled requests can still have writes become durable. Keep
+                    // their assigned positions until a new streamer can recover them.
+                    if self.db_writes_pending.is_empty()
+                        && self.inflight_appends.is_empty()
+                        && self.lease_state.close_if_idle()
+                    {
                         break;
                     }
                 }
@@ -742,6 +765,7 @@ enum Message {
         reply_tx: oneshot::Sender<StreamPosition>,
     },
     Reconfigure {
+        seq: u64,
         config: StreamConfig,
     },
     DurabilityStatus(Result<u64, slatedb::CloseReason>),
@@ -751,11 +775,13 @@ pub(super) enum TerminalTrimCondition {
     Always,
     DeleteOnEmpty {
         last_write_cutoff: kv::timestamp::TimestampSecs,
+        expected_stream_creation_seq: u64,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TerminalTrimOutcome {
+    /// Deletion is durably pending.
     DeletionPending,
     Ineligible,
 }
@@ -837,8 +863,10 @@ impl StreamerClient {
         })
     }
 
-    pub(super) fn advise_reconfig(&self, config: StreamConfig) -> bool {
-        self.msg_tx.send(Message::Reconfigure { config }).is_ok()
+    pub(super) fn advise_reconfig(&self, seq: u64, config: StreamConfig) -> bool {
+        self.msg_tx
+            .send(Message::Reconfigure { seq, config })
+            .is_ok()
     }
 
     async fn terminal_trim(
@@ -854,9 +882,7 @@ impl StreamerClient {
             .map_err(|_| {
                 DeleteStreamError::StreamerMissingInActionError(StreamerMissingInActionError)
             })?;
-        reply_rx.await.map_err(|_| {
-            DeleteStreamError::StreamerMissingInActionError(StreamerMissingInActionError)
-        })?
+        reply_rx.await.map_err(|_| RequestDroppedError)?
     }
 }
 
@@ -1019,50 +1045,47 @@ async fn db_submit_append(
     }: DbSubmitAppendOptions,
 ) -> Result<InFlightAppend, slatedb::Error> {
     let ttl = match retention {
-        RetentionPolicy::Age(age) => Ttl::ExpireAfter(age.as_millis() as u64),
+        RetentionPolicy::Age(age) => Ttl::ExpireAfterMillis(age.as_millis() as u64),
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
     };
     let ttl_put_opts = PutOptions { ttl };
     let mut wb = WriteBatch::new();
     for (position, record) in records.iter().map(|msr| msr.parts()) {
-        wb.put_with_options(
+        wb.put_bytes_with_options(
             kv::stream_record_data::ser_key(stream_id, position),
             kv::stream_record_data::ser_value(record),
             &ttl_put_opts,
         );
-        wb.put_with_options(
+        wb.put_bytes_with_options(
             kv::stream_record_timestamp::ser_key(stream_id, position),
             kv::stream_record_timestamp::ser_value(),
             &ttl_put_opts,
         );
     }
     if let Some(fencing_token) = fencing_token {
-        wb.put(
+        wb.put_bytes(
             kv::stream_fencing_token::ser_key(stream_id),
             kv::stream_fencing_token::ser_value(&fencing_token),
         );
     }
     if let Some(trim_point) = trim_point.and_then(|tp| NonZeroSeqNum::new(tp.end)) {
-        wb.put(
+        wb.put_bytes(
             kv::stream_trim_point::ser_key(stream_id),
             kv::stream_trim_point::ser_value(..trim_point),
         );
     }
     if let Some(doe_deadline) = doe_deadline {
-        wb.put(
-            kv::stream_doe_deadline::ser_key(doe_deadline.deadline, stream_id),
+        wb.put_bytes(
+            kv::stream_doe_deadline::new_key(doe_deadline.deadline, stream_id),
             kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
-    wb.put(
+    wb.put_bytes(
         kv::stream_tail_position::ser_key(stream_id),
         kv::stream_tail_position::ser_value(next_pos(&records)),
     );
-    let write_opts = WriteOptions {
-        await_durable: false,
-        ..Default::default()
-    };
-    let write_handle = db.write_with_options(wb, &write_opts).await?;
+    // The durability notifier tracks this sequence and acknowledges the append after flush.
+    let write_handle = db.write(wb).await?;
     Ok(InFlightAppend {
         db_seq: write_handle.seqnum(),
         records,
@@ -1410,8 +1433,13 @@ mod tests {
     }
 
     async fn test_streamer() -> Streamer {
+        test_streamer_with_settings(Default::default()).await
+    }
+
+    async fn test_streamer_with_settings(settings: slatedb::config::Settings) -> Streamer {
         let object_store = Arc::new(InMemory::new());
         let db = slatedb::Db::builder("/test", object_store)
+            .with_settings(settings)
             .build()
             .await
             .expect("db");
@@ -1421,8 +1449,10 @@ mod tests {
         Streamer {
             db: db.clone(),
             stream_id: [3u8; StreamId::LEN].into(),
+            stream_creation_seq: 0,
             msg_tx,
             config: StreamConfig::default(),
+            config_seq: 0,
             last_tail_write_timestamp: kv::timestamp::TimestampSecs::ZERO,
             fencing_token: CommandState {
                 state: FencingToken::default(),
@@ -1443,6 +1473,62 @@ mod tests {
             durability_notifier: DurabilityNotifier::spawn(&db),
             bgtask_trigger_tx,
         }
+    }
+
+    #[tokio::test]
+    async fn stale_config_notifications_cannot_restore_old_retention() {
+        let mut streamer = test_streamer().await;
+        let db = streamer.db.clone();
+        let stream_id = streamer.stream_id;
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx.clone();
+        streamer.config.retention_policy = RetentionPolicy::Age(Duration::from_secs(1));
+        let task = tokio::spawn(streamer.run(msg_rx));
+        msg_tx
+            .send(Message::Reconfigure {
+                seq: 20,
+                config: StreamConfig {
+                    retention_policy: RetentionPolicy::Infinite(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let old = StreamConfig {
+            retention_policy: RetentionPolicy::Age(Duration::from_secs(1)),
+            ..Default::default()
+        };
+        msg_tx
+            .send(Message::Reconfigure {
+                seq: 10,
+                config: old,
+            })
+            .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        msg_tx
+            .send(Message::Append {
+                input: append_input(b"must not expire"),
+                session: None,
+                reply_tx,
+                append_type: AppendType::Regular,
+            })
+            .unwrap();
+        let ack = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let entry = db
+            .get_key_value(kv::stream_record_data::ser_key(stream_id, ack.start))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            entry.expire_ts.is_none(),
+            "late config notification restored stale retention"
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        db.close().await.unwrap();
     }
 
     #[test]
@@ -1489,34 +1575,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_during_terminal_trim_returns_stream_deletion_pending() {
-        let mut streamer = test_streamer().await;
-        streamer.trim_point = CommandState {
-            state: ..SeqNum::MAX,
-            applied_point: ..1,
-        };
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let run_handle = tokio::spawn(streamer.run(msg_rx));
+    async fn terminal_trim_and_rejections_wait_for_durability() {
+        let mut streamer = test_streamer_with_settings(slatedb::config::Settings {
+            flush_interval: None,
+            ..Default::default()
+        })
+        .await;
+        let mut replies = Vec::new();
+        for _ in 0..2 {
+            let (tx, rx) = oneshot::channel();
+            streamer.handle_terminal_trim(TerminalTrimCondition::Always, tx);
+            replies.push(rx);
+        }
+        // An empty-stream check can also finish after another deletion request starts.
+        let (tx, rx) = oneshot::channel();
+        streamer.handle_doe_check_result(
+            StreamPosition::MIN,
+            kv::timestamp::TimestampSecs::MAX,
+            Ok(false),
+            tx,
+        );
+        replies.push(rx);
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        msg_tx
-            .send(Message::Append {
-                input: append_input(b"late"),
-                session: None,
-                reply_tx,
-                append_type: AppendType::Regular,
-            })
-            .expect("streamer should accept append message");
+        let (tx, mut append_reply) = oneshot::channel();
+        streamer.handle_append(append_input(b"late"), None, tx, AppendType::Regular);
+        assert_eq!(streamer.db_writes_pending.len(), 1);
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            append_reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        for reply in &mut replies {
+            assert!(
+                matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "stream deletion must wait even when the original trim has not been submitted"
+            );
+        }
 
-        let err = reply_rx
+        let submitted = streamer
+            .db_writes_pending
+            .pop_front()
+            .unwrap()
             .await
-            .expect("streamer should reply")
-            .expect_err("append should be rejected");
-        let AppendErrorInternal::StreamDeletionPending(_) = err else {
-            panic!("expected stream deletion pending");
-        };
-
-        run_handle.abort();
+            .unwrap();
+        let db_seq = submitted.db_seq;
+        streamer.inflight_appends.push_back(submitted);
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            append_reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        for reply in &mut replies {
+            assert!(
+                matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "a committed but unflushed trim must not acknowledge stream deletion"
+            );
+        }
+        streamer.db.flush().await.unwrap();
+        streamer.on_db_durable_seq_advanced(db_seq);
+        assert!(matches!(
+            append_reply.await.unwrap(),
+            Err(AppendErrorInternal::StreamDeletionPending { .. })
+        ));
+        for reply in replies {
+            assert_eq!(
+                reply.await.unwrap().unwrap(),
+                TerminalTrimOutcome::DeletionPending
+            );
+        }
+        streamer.db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1534,6 +1661,7 @@ mod tests {
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
                 last_write_cutoff: kv::timestamp::TimestampSecs::MAX,
+                expected_stream_creation_seq: 0,
             },
             trim_tx,
         );
@@ -1674,5 +1802,51 @@ mod tests {
         }
         assert_eq!(streamer.stable_pos.seq_num, 4);
         assert!(streamer.inflight_appends.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_append_delays_dormancy_until_writes_are_durable() {
+        let mut streamer = test_streamer_with_settings(slatedb::config::Settings {
+            flush_interval: None,
+            ..Default::default()
+        })
+        .await;
+        let db = streamer.db.clone();
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_append(
+            append_input(b"cancelled"),
+            None,
+            reply_tx,
+            AppendType::Regular,
+        );
+        let task = tokio::spawn(streamer.run(msg_rx));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while db.snapshot().await.unwrap().seq() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(reply_rx);
+        tokio::time::sleep(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
+        assert_eq!(
+            db.status().durable_seq,
+            0,
+            "the write must still be unflushed"
+        );
+        assert!(
+            !task.is_finished(),
+            "dormancy abandoned an unflushed append"
+        );
+
+        db.flush().await.unwrap();
+        tokio::time::timeout(DORMANT_TIMEOUT + Duration::from_secs(1), task)
+            .await
+            .expect("durable writes should allow normal dormancy")
+            .unwrap();
+        db.close().await.unwrap();
     }
 }

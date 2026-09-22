@@ -173,6 +173,7 @@ mod test {
     #[case::slash("aws/us-east-1".to_owned())]
     #[case::space("aws:us east-1".to_owned())]
     #[case::multibyte("aws:é".to_owned())]
+    #[case::nul("aws:us\0east-1".to_owned())]
     fn validate_name_err(#[case] location: String) {
         location
             .parse::<LocationName>()

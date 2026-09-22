@@ -565,6 +565,95 @@ fn append_from_stdin() {
 
 #[test]
 #[serial]
+fn append_with_stream_config() {
+    let basin = unique_name("test-cli-csoa-cfg");
+    s2().args([
+        "create-basin",
+        &basin,
+        "--retention-policy",
+        "7d",
+        "--create-stream-on-append",
+    ])
+    .assert()
+    .success();
+    wait_for_basin(&basin);
+
+    let stream = unique_name("test-csoa-new");
+    let uri = format!("s2://{basin}/{stream}");
+    s2().args([
+        "append",
+        &uri,
+        "--format",
+        "text",
+        "--input",
+        "-",
+        "--retention-policy",
+        "1h",
+        "--delete-on-empty-min-age",
+        "5m",
+    ])
+    .write_stdin("first record\n")
+    .assert()
+    .success();
+
+    s2().args(["get-stream-config", &uri])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("1h")
+                .and(predicate::str::contains("5m"))
+                .and(predicate::str::contains("7days").not()),
+        );
+
+    s2().args([
+        "append",
+        &uri,
+        "--format",
+        "text",
+        "--input",
+        "-",
+        "--retention-policy",
+        "2h",
+    ])
+    .write_stdin("second record\n")
+    .assert()
+    .success();
+
+    s2().args(["get-stream-config", &uri])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1h").and(predicate::str::contains("2h").not()));
+
+    cleanup_stream(&basin, &stream);
+    cleanup_basin(&basin);
+}
+
+#[test]
+#[serial]
+fn read_with_stream_config() {
+    let basin = unique_name("test-cli-csor-cfg");
+    s2().args(["create-basin", &basin, "--create-stream-on-read"])
+        .assert()
+        .success();
+    wait_for_basin(&basin);
+
+    let stream = unique_name("test-csor-new");
+    let uri = format!("s2://{basin}/{stream}");
+    s2().args(["read", &uri, "--count", "1", "--retention-policy", "1h"])
+        .assert()
+        .failure();
+
+    s2().args(["get-stream-config", &uri])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1h"));
+
+    cleanup_stream(&basin, &stream);
+    cleanup_basin(&basin);
+}
+
+#[test]
+#[serial]
 fn tail_stream() {
     let basin = ensure_test_basin("test-cli-data");
     let stream = unique_name("test-data-tail");

@@ -3,6 +3,7 @@ use std::{pin::Pin, task::Poll, time::Duration};
 use futures::StreamExt;
 use s2_common::{
     basin::BasinName,
+    config::OptionalStreamConfig,
     encryption::EncryptionSpec,
     read_extent::{ReadLimit, ReadUntil},
     record::{Record, SequencedRecord},
@@ -83,7 +84,12 @@ pub async fn try_open_read_session_with_encryption(
     ReadError,
 > {
     let read_session = backend
-        .open_for_read(basin, stream, encryption_key_for_spec(encryption))
+        .open_for_read(
+            basin,
+            stream,
+            encryption_key_for_spec(encryption),
+            OptionalStreamConfig::default(),
+        )
         .await?
         .read(start, end)
         .await?;

@@ -24,9 +24,10 @@ use crate::{
     frame_signal::FrameSignal,
     reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoffBuilder,
+    session::StreamHeaders,
     types::{
-        AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, EncryptionKey, MeteredBytes,
-        ONE_MIB, StreamName, StreamPosition, ValidationError,
+        AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, MeteredBytes, ONE_MIB,
+        StreamConfig, StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -154,6 +155,7 @@ impl Future for BatchSubmitTicket {
 pub struct AppendSessionConfig {
     max_unacked_bytes: u32,
     max_unacked_batches: Option<u32>,
+    stream_config: Option<StreamConfig>,
 }
 
 impl Default for AppendSessionConfig {
@@ -161,6 +163,7 @@ impl Default for AppendSessionConfig {
         Self {
             max_unacked_bytes: 5 * ONE_MIB,
             max_unacked_batches: None,
+            stream_config: None,
         }
     }
 }
@@ -194,6 +197,23 @@ impl AppendSessionConfig {
             max_unacked_batches: Some(max_unacked_batches.get()),
             ..self
         }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on append.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    ///
+    /// Defaults to `None`.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
+            ..self
+        }
+    }
+
+    pub(crate) fn stream_config(&self) -> Option<&StreamConfig> {
+        self.stream_config.as_ref()
     }
 }
 
@@ -231,7 +251,7 @@ impl AppendSession {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        encryption: Option<EncryptionKey>,
+        headers: StreamHeaders,
         config: AppendSessionConfig,
     ) -> Self {
         let buffer_size = config
@@ -245,7 +265,7 @@ impl AppendSession {
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
-            encryption,
+            headers,
             cmd_rx,
             retry_builder,
             buffer_size,
@@ -356,11 +376,7 @@ pub(crate) struct AppendSessionInternal {
 }
 
 impl AppendSessionInternal {
-    pub(crate) fn new(
-        client: BasinClient,
-        stream: StreamName,
-        encryption: Option<EncryptionKey>,
-    ) -> Self {
+    pub(crate) fn new(client: BasinClient, stream: StreamName, headers: StreamHeaders) -> Self {
         let buffer_size = DEFAULT_CHANNEL_BUFFER_SIZE;
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
         let retry_builder = retry_builder(&client.config.retry);
@@ -368,7 +384,7 @@ impl AppendSessionInternal {
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
-            encryption,
+            headers,
             cmd_rx,
             retry_builder,
             buffer_size,
@@ -473,7 +489,7 @@ impl AppendPermits {
 async fn run_session_with_retry(
     client: BasinClient,
     stream: StreamName,
-    encryption: Option<EncryptionKey>,
+    headers: StreamHeaders,
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
@@ -503,7 +519,7 @@ async fn run_session_with_retry(
         let result = run_session(
             &client,
             &stream,
-            encryption.as_ref(),
+            &headers,
             &mut state,
             buffer_size,
             &frame_signal,
@@ -604,7 +620,7 @@ enum SessionOutcome {
 async fn run_session(
     client: &BasinClient,
     stream: &StreamName,
-    encryption: Option<&EncryptionKey>,
+    headers: &StreamHeaders,
     state: &mut SessionState,
     buffer_size: usize,
     frame_signal: &Option<FrameSignal>,
@@ -618,7 +634,7 @@ async fn run_session(
     let (input_tx, mut acks) = connect(
         client,
         stream,
-        encryption,
+        headers,
         buffer_size,
         frame_signal.clone(),
         reconnect.clone(),
@@ -888,7 +904,7 @@ async fn drain_for_reconnect(
 async fn connect(
     client: &BasinClient,
     stream: &StreamName,
-    encryption: Option<&EncryptionKey>,
+    headers: &StreamHeaders,
     buffer_size: usize,
     frame_signal: Option<FrameSignal>,
     reconnect: ReconnectAdvice,
@@ -899,7 +915,8 @@ async fn connect(
             .append_session(
                 stream,
                 ReceiverStream::new(input_rx).map(|i| i.into()),
-                encryption,
+                headers.encryption.as_ref(),
+                headers.stream_config.as_ref(),
                 frame_signal,
                 reconnect,
             )

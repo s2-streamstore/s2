@@ -11,7 +11,11 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, bgtasks::BgtaskTrigger, store::db_txn_get};
+use super::{
+    Backend,
+    bgtasks::BgtaskTrigger,
+    store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
+};
 use crate::backend::{
     error::{
         BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, DeleteBasinError,
@@ -63,6 +67,8 @@ impl Backend {
         Ok(Page::new(basins, has_more))
     }
 
+    /// Any outcome asserting the basin exists — `Created`, `Updated`, `Noop`,
+    /// or `BasinAlreadyExists` — is readable at `DurabilityLevel::Remote`.
     pub async fn provision_basin(
         &self,
         basin: BasinName,
@@ -73,7 +79,12 @@ impl Backend {
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
-        let existing_meta = db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?;
+        // A transaction can see metadata that has not been flushed yet.
+        let (existing_meta, existing_seq) = db_txn_get_with(&txn, &meta_key, |entry| {
+            Ok((kv::basin_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        .unzip();
         if let Some(existing_meta) = &existing_meta
             && existing_meta.deleted_at.is_some()
         {
@@ -85,7 +96,7 @@ impl Backend {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
-                return if new_creation_idempotency_key.is_some()
+                let result = if new_creation_idempotency_key.is_some()
                     && existing.creation_idempotency_key == new_creation_idempotency_key
                 {
                     Ok(ProvisionResult::Noop(BasinInfo {
@@ -97,6 +108,10 @@ impl Backend {
                 } else {
                     Err(BasinAlreadyExistsError { basin }.into())
                 };
+                drop(txn);
+                self.await_durable_seq(existing_seq.expect("existing meta was read"))
+                    .await?;
+                return result;
             }
             (Some(existing), ProvisionMode::Ensure) => {
                 let meta = kv::basin_meta::BasinMeta {
@@ -130,11 +145,15 @@ impl Backend {
             }),
         };
 
-        if !matches!(&outcome, ProvisionResult::Noop(_)) {
+        if matches!(&outcome, ProvisionResult::Noop(_)) {
+            drop(txn);
+            self.await_durable_seq(existing_seq.expect("noop implies existing meta"))
+                .await?;
+        } else {
             let meta = outcome.inner();
             txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
 
-            txn.commit().await?;
+            db_txn_commit_durable(txn).await?;
         }
 
         Ok(outcome.map(|meta| BasinInfo {
@@ -179,7 +198,7 @@ impl Backend {
 
         txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
 
-        txn.commit().await?;
+        db_txn_commit_durable(txn).await?;
 
         Ok(meta.config)
     }
@@ -187,7 +206,11 @@ impl Backend {
     pub async fn delete_basin(&self, basin: BasinName) -> Result<(), DeleteBasinError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let meta_key = kv::basin_meta::ser_key(&basin);
-        let Some(mut meta) = db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await? else {
+        let Some((mut meta, seq)) = db_txn_get_with(&txn, &meta_key, |entry| {
+            Ok((kv::basin_meta::deser_value(entry.value)?, entry.seq))
+        })
+        .await?
+        else {
             return Err(BasinNotFoundError { basin }.into());
         };
         if meta.deleted_at.is_none() {
@@ -197,9 +220,13 @@ impl Backend {
                 kv::basin_deletion_pending::ser_key(&basin),
                 kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
             )?;
-            txn.commit().await?;
-            self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
+            db_txn_commit_durable(txn).await?;
+        } else {
+            // A retry may observe the marker before the first delete has flushed.
+            drop(txn);
+            self.await_durable_seq(seq).await?;
         }
+        self.bgtask_trigger(BgtaskTrigger::BasinDeletion);
         Ok(())
     }
 }

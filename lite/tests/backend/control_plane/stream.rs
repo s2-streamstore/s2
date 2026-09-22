@@ -24,6 +24,34 @@ use s2_lite::backend::error::{
 use super::common::*;
 
 #[tokio::test]
+async fn test_provision_stream_acknowledges_only_durable_metadata() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = test_basin_name("durable-stream");
+    let stream = test_stream_name("durable");
+    assert_waits_for_flush(
+        &db,
+        backend.provision_basin(basin.clone(), BasinConfig::default(), ProvisionMode::Ensure),
+    )
+    .await
+    .unwrap();
+
+    let result = assert_waits_for_flush(
+        &db,
+        backend.provision_stream(
+            basin.clone(),
+            stream.clone(),
+            OptionalStreamConfig::default(),
+            ProvisionMode::Ensure,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, ProvisionResult::Created(_)));
+    backend.get_stream_config(basin, stream).await.unwrap();
+    backend.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_create_stream_honors_basin_defaults() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("stream-defaults");
@@ -670,84 +698,101 @@ async fn test_reconfigure_stream_clears_fields_to_basin_defaults() {
     assert_eq!(fetched, updated);
 }
 
+#[rstest::rstest]
+#[case::patch(false, false)]
+#[case::ensure(true, false)]
+#[case::cancelled_patch(false, true)]
+#[case::cancelled_ensure(true, true)]
 #[tokio::test]
-async fn test_reconfigure_stream_updates_active_streamer() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "stream-reconfigure-active",
-        "stream",
-        OptionalStreamConfig::default(),
+async fn test_stream_config_updates_active_streamer(#[case] ensure: bool, #[case] cancel: bool) {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = assert_waits_for_flush(
+        &db,
+        create_test_basin(&backend, "config-delivery", BasinConfig::default()),
     )
     .await;
-
-    append_payloads(&backend, &basin_name, &stream_name, &[b"seed"]).await;
-
-    let ts_reconfig = TimestampingReconfiguration {
-        mode: Maybe::from(Some(TimestampingMode::ClientRequire)),
-        uncapped: Maybe::default(),
-    };
-    let reconfig = StreamReconfiguration {
-        timestamping: Maybe::from(Some(ts_reconfig)),
-        ..Default::default()
-    };
-
-    backend
-        .reconfigure_stream(basin_name.clone(), stream_name.clone(), reconfig)
-        .await
-        .expect("Failed to reconfigure stream");
-
-    check_tail(&backend, basin_name.clone(), stream_name.clone())
-        .await
-        .expect("Failed to check tail");
-
-    let input = AppendInput {
-        records: create_test_record_batch(vec![Bytes::from_static(b"missing timestamp")]),
-        match_seq_num: None,
-        fencing_token: None,
-    };
-    let result = append(&backend, basin_name, stream_name, input, None).await;
-    assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
-}
-
-#[tokio::test]
-async fn test_provision_stream_ensure_updates_active_streamer() {
-    let (backend, basin_name, stream_name) = setup_backend_with_stream(
-        "stream-ensure-active",
-        "stream",
-        OptionalStreamConfig::default(),
+    let stream = assert_waits_for_flush(
+        &db,
+        create_test_stream(
+            &backend,
+            &basin,
+            "stream",
+            OptionalStreamConfig {
+                timestamping: OptionalTimestampingConfig {
+                    mode: Some(TimestampingMode::ClientRequire),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
     )
     .await;
-
-    append_payloads(&backend, &basin_name, &stream_name, &[b"seed"]).await;
-
-    let config = OptionalStreamConfig {
-        timestamping: OptionalTimestampingConfig {
-            mode: Some(TimestampingMode::ClientRequire),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    backend
-        .provision_stream(
-            basin_name.clone(),
-            stream_name.clone(),
-            config,
-            ProvisionMode::Ensure,
-        )
+    let _active_streamer = backend
+        .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
         .await
-        .expect("Ensure should succeed for an existing stream");
+        .unwrap();
 
-    check_tail(&backend, basin_name.clone(), stream_name.clone())
-        .await
-        .expect("Failed to check tail");
+    let mut update = Box::pin(async {
+        if ensure {
+            backend
+                .provision_stream(
+                    basin.clone(),
+                    stream.clone(),
+                    OptionalStreamConfig {
+                        timestamping: OptionalTimestampingConfig {
+                            mode: Some(TimestampingMode::Arrival),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    ProvisionMode::Ensure,
+                )
+                .await
+                .unwrap();
+        } else {
+            backend
+                .reconfigure_stream(
+                    basin.clone(),
+                    stream.clone(),
+                    StreamReconfiguration {
+                        timestamping: Maybe::from(Some(TimestampingReconfiguration {
+                            mode: Maybe::from(Some(TimestampingMode::Arrival)),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    });
+    assert_pending_until_committed(&db, &mut update).await;
+    if cancel {
+        drop(update);
+        db.flush().await.unwrap();
+    } else {
+        db.flush().await.unwrap();
+        update.await;
+    }
 
-    let input = AppendInput {
-        records: create_test_record_batch(vec![Bytes::from_static(b"missing timestamp")]),
-        match_seq_num: None,
-        fencing_token: None,
+    // Application is asynchronous; retry until the active streamer accepts arrival timestamps.
+    let append_after_update = async {
+        loop {
+            let input = AppendInput {
+                records: create_test_record_batch(vec![Bytes::from_static(b"no timestamp")]),
+                match_seq_num: None,
+                fencing_token: None,
+            };
+            match append(&backend, basin.clone(), stream.clone(), input, None).await {
+                Err(AppendError::TimestampMissing(_)) => tokio::task::yield_now().await,
+                result => break result,
+            }
+        }
     };
-    let result = append(&backend, basin_name, stream_name, input, None).await;
-    assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
+    assert_waits_for_flush(&db, append_after_update)
+        .await
+        .unwrap();
+    backend.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -777,6 +822,38 @@ async fn test_create_stream_fails_when_basin_deleting() {
         result,
         Err(ProvisionStreamError::BasinDeletionPending(_))
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_delete_stream_retry_waits_for_durable_metadata() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = assert_waits_for_flush(
+        &db,
+        create_test_basin(&backend, "durable-delete", BasinConfig::default()),
+    )
+    .await;
+    let stream = assert_waits_for_flush(
+        &db,
+        create_test_stream(&backend, &basin, "durable-delete", Default::default()),
+    )
+    .await;
+
+    let mut first = Box::pin(backend.delete_stream(basin.clone(), stream.clone()));
+    // Stream deletion first persists the terminal trim, then the metadata marker.
+    assert_pending_until_committed(&db, &mut first).await;
+    db.flush().await.unwrap();
+    assert_pending_until_committed(&db, &mut first).await;
+    drop(first);
+
+    let retry = backend.delete_stream(basin, stream);
+    tokio::pin!(retry);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut retry)
+            .await
+            .is_err()
+    );
+    assert_waits_for_flush(&db, retry).await.unwrap();
+    backend.close().await.unwrap();
 }
 
 #[tokio::test]

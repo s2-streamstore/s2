@@ -16,6 +16,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::{
+    HeaderMap,
     header::HeaderValue,
     uri::{Authority, Scheme},
 };
@@ -25,11 +26,12 @@ use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::ValidationError;
 /// Access token ID.
 ///
-/// **Note:** It must be unique to the account and between 1 and 96 bytes in length.
+/// **Note:** It must be unique to the account and between 1 and 96 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::access::AccessTokenId;
-/// See [`ListAccessTokensInput::prefix`].
+/// See [`ListAccessTokensInput::prefix`]. It must not contain NUL bytes.
 pub use s2_common::access::AccessTokenIdPrefix;
-/// See [`ListAccessTokensInput::start_after`].
+/// See [`ListAccessTokensInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::access::AccessTokenIdStartAfter;
 /// Basin name.
 ///
@@ -47,11 +49,12 @@ pub use s2_common::basin::BasinNameStartAfter;
 pub use s2_common::location::LocationName;
 /// Stream name.
 ///
-/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
+/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::stream::StreamName;
-/// See [`ListStreamsInput::prefix`].
+/// See [`ListStreamsInput::prefix`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNamePrefix;
-/// See [`ListStreamsInput::start_after`].
+/// See [`ListStreamsInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNameStartAfter;
 pub use s2_common::{
     caps::RECORD_BATCH_MAX,
@@ -509,6 +512,7 @@ pub struct S2Config {
     pub(crate) retry: RetryConfig,
     pub(crate) compression: Compression,
     pub(crate) user_agent: HeaderValue,
+    pub(crate) default_headers: HeaderMap,
     pub(crate) insecure_skip_cert_verification: bool,
     pub(crate) rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
@@ -526,6 +530,7 @@ impl S2Config {
             user_agent: concat!("s2-sdk-rust/", env!("CARGO_PKG_VERSION"))
                 .parse()
                 .expect("valid user agent"),
+            default_headers: HeaderMap::new(),
             insecure_skip_cert_verification: false,
             rustls_crypto_provider: default_rustls_crypto_provider(),
         }
@@ -543,6 +548,54 @@ impl S2Config {
     /// Set the S2 endpoints to connect to.
     pub fn with_endpoints(self, endpoints: S2Endpoints) -> Self {
         Self { endpoints, ..self }
+    }
+
+    /// Set additional HTTP headers to send with every request.
+    ///
+    /// These headers apply to account, basin, and stream operations, including
+    /// retries and streaming requests. SDK-generated headers, such as
+    /// authorization and basin routing, take precedence over these defaults.
+    /// Calling this method again replaces the previous set of default headers.
+    ///
+    /// `Accept-Encoding` defaults are used only when [`Compression::None`] is
+    /// configured; otherwise the SDK sets the header to the configured
+    /// compression algorithm.
+    ///
+    /// Headers are sent to all configured S2 endpoints. Use
+    /// [`HeaderValue::set_sensitive`] for values that should be redacted in debug
+    /// output. Do not use these defaults for per-request identifiers, since the
+    /// same values are reused across requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `default_headers` contains `Content-Type`,
+    /// `Content-Encoding`, `Content-Length`, or `Transfer-Encoding`.
+    /// The SDK controls request format and body framing.
+    /// Use [`Self::with_compression`] to configure request body encoding.
+    #[cfg(feature = "_hidden")]
+    #[doc(hidden)]
+    pub fn with_default_headers(self, default_headers: HeaderMap) -> Result<Self, ValidationError> {
+        if default_headers.contains_key(http::header::CONTENT_ENCODING) {
+            return Err(ValidationError(
+                "Content-Encoding cannot be set in default headers; use S2Config::with_compression instead"
+                    .into(),
+            ));
+        }
+        for name in [
+            http::header::CONTENT_TYPE,
+            http::header::CONTENT_LENGTH,
+            http::header::TRANSFER_ENCODING,
+        ] {
+            if default_headers.contains_key(&name) {
+                return Err(ValidationError(format!(
+                    "{name} cannot be set in default headers; the SDK controls request format and body framing"
+                )));
+            }
+        }
+        Ok(Self {
+            default_headers,
+            ..self
+        })
     }
 
     /// Set the timeout for establishing a connection to the server.
@@ -3360,6 +3413,16 @@ pub struct AppendInput {
     /// If unspecified, no matching is performed. If specified and mismatched,
     /// the append fails. A stream defaults to `""` as its fencing token.
     pub fencing_token: Option<FencingToken>,
+    /// Stream configuration to apply if the stream is created on append.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    ///
+    /// Only used by [`append`](crate::S2Stream::append). Append sessions send the header once
+    /// at connect; see
+    /// [`AppendSessionConfig::with_stream_config`](crate::append_session::AppendSessionConfig::with_stream_config)
+    /// and [`ProducerConfig::with_stream_config`](crate::producer::ProducerConfig::with_stream_config).
+    pub stream_config: Option<StreamConfig>,
 }
 
 impl AppendInput {
@@ -3369,6 +3432,15 @@ impl AppendInput {
             records,
             match_seq_num: None,
             fencing_token: None,
+            stream_config: None,
+        }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on append.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
+            ..self
         }
     }
 
@@ -3625,6 +3697,11 @@ pub struct ReadInput {
     ///
     /// Defaults to `false`.
     pub ignore_command_records: bool,
+    /// Stream configuration to apply if the stream is created on read.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    pub stream_config: Option<StreamConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -3689,6 +3766,14 @@ impl ReadInput {
     pub fn with_ignore_command_records(self, ignore_command_records: bool) -> Self {
         Self {
             ignore_command_records,
+            ..self
+        }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on read.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
             ..self
         }
     }
@@ -3985,6 +4070,53 @@ mod tests {
         assert_eq!(cfg.connection_timeout, Duration::from_secs(3));
         assert_eq!(cfg.request_timeout, Duration::from_secs(5));
         assert!(!cfg.insecure_skip_cert_verification);
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[rstest]
+    #[case::matching_compression("content-encoding", "gzip", Compression::Gzip)]
+    #[case::mixed_case("Content-Encoding", "identity", Compression::None)]
+    #[case::empty_value("content-encoding", "", Compression::None)]
+    fn default_headers_reject_content_encoding(
+        #[case] name: &str,
+        #[case] value: &str,
+        #[case] compression: Compression,
+    ) {
+        let headers = HeaderMap::from_iter([(
+            name.parse::<http::header::HeaderName>().unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        )]);
+        let error = S2Config::new("token")
+            .with_compression(compression)
+            .with_default_headers(headers)
+            .unwrap_err();
+        assert!(error.0.contains("Content-Encoding"));
+        assert!(error.0.contains("with_compression"));
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[rstest]
+    #[case::content_type_s2s("content-type", "s2s/proto")]
+    #[case::content_type_protobuf("content-type", "application/protobuf")]
+    #[case::content_type_json("content-type", "application/json")]
+    #[case::content_type_mixed_case("Content-Type", "s2s/proto")]
+    #[case::content_type_empty("content-type", "")]
+    #[case::content_length("content-length", "123")]
+    #[case::content_length_mixed_case("Content-Length", "0")]
+    #[case::content_length_empty("content-length", "")]
+    #[case::transfer_encoding("transfer-encoding", "chunked")]
+    #[case::transfer_encoding_mixed_case("Transfer-Encoding", "chunked")]
+    #[case::transfer_encoding_empty("transfer-encoding", "")]
+    fn default_headers_reject_framing_headers(#[case] name: &str, #[case] value: &str) {
+        let headers = HeaderMap::from_iter([(
+            name.parse::<http::header::HeaderName>().unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        )]);
+        let error = S2Config::new("token")
+            .with_default_headers(headers)
+            .unwrap_err();
+        assert!(error.0.contains(&name.to_ascii_lowercase()));
+        assert!(error.0.contains("framing"));
     }
 
     // -- StorageClass --

@@ -4,6 +4,7 @@ use futures::{Stream, StreamExt as _};
 use s2_common::{
     basin::BasinName,
     caps,
+    config::OptionalStreamConfig,
     encryption::{EncryptionKey, EncryptionSpec},
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
     record::{Metered, MeteredSize as _, SeqNum, StreamPosition, Timestamp},
@@ -15,7 +16,7 @@ use s2_storage::record::{
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
 
-use super::{Backend, StreamHandle};
+use super::{Backend, StreamHandle, core::AutoCreateOn};
 use crate::{
     backend::{
         error::{
@@ -28,6 +29,7 @@ use crate::{
 };
 
 impl Backend {
+    /// Open a stream for a check tail.
     pub async fn open_for_check_tail(
         &self,
         basin: &BasinName,
@@ -36,22 +38,29 @@ impl Backend {
         self.stream_handle_with_auto_create::<CheckTailError>(
             basin,
             stream,
-            |config| config.create_stream_on_read,
+            AutoCreateOn::Read,
+            OptionalStreamConfig::default(),
             |_| Ok(EncryptionSpec::Plain),
         )
         .await
     }
 
+    /// Open a stream for a read or read session.
+    ///
+    /// `stream_config` is applied if the stream is created on read. Unset fields inherit the
+    /// basin's default stream configuration. Ignored if the stream already exists.
     pub async fn open_for_read(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         encryption_key: Option<EncryptionKey>,
+        stream_config: OptionalStreamConfig,
     ) -> Result<StreamHandle, ReadError> {
         self.stream_handle_with_auto_create::<ReadError>(
             basin,
             stream,
-            |config| config.create_stream_on_read,
+            AutoCreateOn::Read,
+            stream_config,
             |cipher| Ok(EncryptionSpec::resolve(cipher, encryption_key)?),
         )
         .await
@@ -97,6 +106,10 @@ async fn read_session(
     start: ReadStart,
     end: ReadEnd,
 ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError> {
+    // An exhausted limit completes even when the requested start is unwritten.
+    if end.limit.remaining(0, 0) == EvaluatedReadLimit::Exhausted {
+        return Ok(futures::stream::empty().left_stream());
+    }
     let stream_id = client.stream_id();
     let tail = client.check_tail().await?;
     let mut state = ReadSessionState {
@@ -240,7 +253,7 @@ async fn read_session(
             }
         }
     };
-    Ok(session)
+    Ok(session.right_stream())
 }
 
 async fn read_start_seq_num(
@@ -267,13 +280,9 @@ async fn read_start_seq_num(
             return Err(UnwrittenError(tail).into());
         }
     }
-    if let ReadPosition::SeqNum(start_seq_num) = read_pos
-        && start_seq_num == tail.seq_num
-        && !end.may_follow()
-    {
-        return Err(UnwrittenError(tail).into());
-    }
-    Ok(match read_pos {
+    // Resolve to a sequence number before deciding whether the read starts at the tail, so a
+    // timestamp start that resolves to the tail is treated like a sequence number start there.
+    let start_seq_num = match read_pos {
         ReadPosition::SeqNum(start_seq_num) => start_seq_num,
         ReadPosition::Timestamp(start_timestamp) => {
             resolve_timestamp(db, stream_id, start_timestamp)
@@ -281,7 +290,11 @@ async fn read_start_seq_num(
                 .unwrap_or(tail)
                 .seq_num
         }
-    })
+    };
+    if start_seq_num == tail.seq_num && !end.may_follow() {
+        return Err(UnwrittenError(tail).into());
+    }
+    Ok(start_seq_num)
 }
 
 async fn resolve_timestamp(
@@ -421,7 +434,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        backend::{FOLLOWER_MAX_LAG, kv, streamer::DORMANT_TIMEOUT},
+        backend::{
+            FOLLOWER_MAX_LAG, kv, streamer::DORMANT_TIMEOUT, test_util::DbWriteTestExt as _,
+        },
         stream_id::StreamId,
     };
 
@@ -496,8 +511,8 @@ mod tests {
                 ),
                 kv::stream_record_timestamp::ser_value(),
             )
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
         backend
             .db
             .put(
@@ -510,8 +525,8 @@ mod tests {
                 ),
                 kv::stream_record_timestamp::ser_value(),
             )
-            .await
-            .unwrap();
+            .assert_durable()
+            .await;
 
         // Should find record in stream_a
         let result = resolve_timestamp(&backend.db, stream_a, 500).await.unwrap();
@@ -562,7 +577,7 @@ mod tests {
 
         let input = append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
         let ack = backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(input)
@@ -573,7 +588,7 @@ mod tests {
         let stream_id = StreamId::new(&basin, &stream);
         let mut batch = WriteBatch::new();
         batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
-        backend.db.write(batch).await.unwrap();
+        backend.db.write(batch).assert_durable().await;
 
         let start = ReadStart {
             from: ReadFrom::SeqNum(0),
@@ -585,7 +600,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -642,7 +657,7 @@ mod tests {
         };
 
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -716,7 +731,7 @@ mod tests {
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(initial_input)
@@ -736,7 +751,7 @@ mod tests {
         };
 
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -776,7 +791,7 @@ mod tests {
         let follow_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(follow_input)
@@ -881,7 +896,7 @@ mod tests {
             wait: Some(wait),
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -906,7 +921,7 @@ mod tests {
                 Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap(),
             );
             let ack = backend
-                .open_for_append(&basin, &stream, None)
+                .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
                 .await
                 .unwrap()
                 .append(input)
@@ -915,7 +930,7 @@ mod tests {
             delete_batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
         }
 
-        backend.db.write(delete_batch).await.unwrap();
+        backend.db.write(delete_batch).assert_durable().await;
 
         tokio::time::advance(wait + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
@@ -960,7 +975,7 @@ mod tests {
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(initial_input)
@@ -977,7 +992,7 @@ mod tests {
             wait: None,
         };
         let session = backend
-            .open_for_read(&basin, &stream, None)
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .read(start, end)
@@ -1007,7 +1022,7 @@ mod tests {
         let follow_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap());
         backend
-            .open_for_append(&basin, &stream, None)
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
             .append(follow_input)

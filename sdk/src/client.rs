@@ -304,9 +304,8 @@ impl RequestBuilder {
     }
 
     pub fn headers(mut self, headers: &HeaderMap) -> Self {
-        for (key, value) in headers {
-            self.headers.insert(key.clone(), value.clone());
-        }
+        // An owned HeaderMap replaces each key's existing values while preserving duplicates.
+        self.headers.extend(headers.clone());
         self
     }
 
@@ -574,11 +573,7 @@ fn build_http_request(
     let mut builder = http::Request::builder().method(method).uri(uri.clone());
 
     if let Some(req_headers) = builder.headers_mut() {
-        for (key, value) in headers {
-            if let Some(key) = key {
-                req_headers.insert(key, value);
-            }
-        }
+        *req_headers = headers;
         if let Some(encoding) = content_encoding {
             req_headers.insert(CONTENT_ENCODING, encoding);
         }
@@ -1014,6 +1009,37 @@ mod tests {
 
     fn test_pool() -> Pool<HttpConnector> {
         Pool::new(HttpConnector::new())
+    }
+
+    #[test]
+    fn default_headers_preserve_multiple_values_and_sensitive_flags_on_wire_request() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", HeaderValue::from_static("first"));
+        let mut second = HeaderValue::from_static("second");
+        second.set_sensitive(true);
+        headers.append("x-tag", second);
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("wrong-encoding"));
+
+        let request = RequestBuilder::get("http://example.test".parse().unwrap())
+            .header("x-tag", "replaced")
+            .headers(&headers)
+            .build()
+            .unwrap();
+        let cloned = request.try_clone().unwrap();
+        let http = build_http_request(
+            cloned.method,
+            &cloned.uri,
+            cloned.headers,
+            cloned.body.into_http_body(),
+            Some(HeaderValue::from_static("gzip")),
+        )
+        .unwrap();
+        let values = http.headers().get_all("x-tag").iter().collect::<Vec<_>>();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], "first");
+        assert_eq!(values[1], "second");
+        assert!(values[1].is_sensitive());
+        assert_eq!(http.headers()[CONTENT_ENCODING], "gzip");
     }
 
     #[test]

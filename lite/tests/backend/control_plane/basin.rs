@@ -17,6 +17,80 @@ use s2_lite::backend::error::{
 use super::common::*;
 
 #[tokio::test]
+async fn test_provision_basin_acknowledges_only_durable_metadata() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = test_basin_name("durable");
+    let result = assert_waits_for_flush(
+        &db,
+        backend.provision_basin(basin.clone(), BasinConfig::default(), ProvisionMode::Ensure),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, ProvisionResult::Created(_)));
+    assert_eq!(
+        backend.get_basin_config(basin).await.unwrap(),
+        BasinConfig::default()
+    );
+    backend.close().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::ensure(ProvisionMode::Ensure, false)]
+#[case::idempotent_create(ProvisionMode::CreateOnly {
+    request_token: Some("original".parse().unwrap()),
+}, false)]
+#[case::create_without_token(ProvisionMode::CreateOnly {
+    request_token: None,
+}, true)]
+#[case::create_with_different_token(ProvisionMode::CreateOnly {
+    request_token: Some("different".parse().unwrap()),
+}, true)]
+#[tokio::test]
+async fn test_basin_retries_acknowledge_only_durable_metadata(
+    #[case] retry_mode: ProvisionMode,
+    #[case] expect_already_exists: bool,
+) {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = test_basin_name("durable-retry");
+    let creation = backend.provision_basin(
+        basin.clone(),
+        BasinConfig::default(),
+        ProvisionMode::CreateOnly {
+            request_token: Some("original".parse().unwrap()),
+        },
+    );
+    tokio::pin!(creation);
+    assert_pending_until_committed(&db, &mut creation).await;
+    assert!(matches!(
+        backend.get_basin_config(basin.clone()).await,
+        Err(GetBasinConfigError::BasinNotFound(_))
+    ));
+
+    let retry = assert_waits_for_flush(
+        &db,
+        backend.provision_basin(basin.clone(), BasinConfig::default(), retry_mode),
+    )
+    .await;
+    if expect_already_exists {
+        assert!(matches!(
+            retry,
+            Err(ProvisionBasinError::BasinAlreadyExists(_))
+        ));
+    } else {
+        assert!(matches!(retry, Ok(ProvisionResult::Noop(_))));
+    }
+    assert!(matches!(
+        creation.await.unwrap(),
+        ProvisionResult::Created(_)
+    ));
+    assert_eq!(
+        backend.get_basin_config(basin).await.unwrap(),
+        BasinConfig::default()
+    );
+    backend.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_create_basin_idempotency_respects_request_token() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("basin-idempotency");
@@ -365,6 +439,30 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     );
     assert!(fetched.create_stream_on_append);
     assert!(fetched.create_stream_on_read);
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_delete_basin_retry_waits_for_durable_metadata() {
+    let (backend, db) = create_backend_without_auto_flush().await;
+    let basin = assert_waits_for_flush(
+        &db,
+        create_test_basin(&backend, "durable-delete", BasinConfig::default()),
+    )
+    .await;
+
+    let mut first = Box::pin(backend.delete_basin(basin.clone()));
+    assert_pending_until_committed(&db, &mut first).await;
+    drop(first);
+
+    let retry = backend.delete_basin(basin);
+    tokio::pin!(retry);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut retry)
+            .await
+            .is_err()
+    );
+    assert_waits_for_flush(&db, retry).await.unwrap();
+    backend.close().await.unwrap();
 }
 
 #[tokio::test]

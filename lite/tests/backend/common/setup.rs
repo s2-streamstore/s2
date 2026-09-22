@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{fmt::Debug, future::Future, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
@@ -20,12 +20,16 @@ const TEST_AEGIS256_KEY: [u8; 32] = [0x42; 32];
 const TEST_AES256_GCM_KEY: [u8; 32] = [0x24; 32];
 
 pub async fn create_in_memory_db() -> Db {
+    create_in_memory_db_with_flush_interval(Some(Duration::from_millis(5))).await
+}
+
+async fn create_in_memory_db_with_flush_interval(flush_interval: Option<Duration>) -> Db {
     let object_store = Arc::new(InMemory::new());
     let db_path = format!("/tmp/test_{}", Uuid::new_v4());
 
     Db::builder(db_path, object_store)
         .with_settings(Settings {
-            flush_interval: Some(Duration::from_millis(5)),
+            flush_interval,
             ..Default::default()
         })
         .build()
@@ -36,6 +40,50 @@ pub async fn create_in_memory_db() -> Db {
 pub async fn create_backend() -> Backend {
     let db = create_in_memory_db().await;
     Backend::new(db, ByteSize::mib(10))
+}
+
+pub async fn create_backend_without_auto_flush() -> (Backend, Db) {
+    let db = create_in_memory_db_with_flush_interval(None).await;
+    (Backend::new(db.clone(), ByteSize::mib(10)), db)
+}
+
+/// Poll an operation until the database has a committed, unflushed write.
+/// The database must have automatic flushing disabled and no unrelated writers.
+pub async fn assert_pending_until_committed<T: Debug>(
+    db: &Db,
+    operation: &mut (impl Future<Output = T> + Unpin),
+) -> u64 {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            biased;
+            result = operation => panic!("metadata acknowledged before flush: {result:?}"),
+            seq = async {
+                loop {
+                    let seq = db.snapshot().await.unwrap().seq();
+                    if seq > db.status().durable_seq {
+                        return seq;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            } => seq,
+        }
+    })
+    .await
+    .expect("metadata should be committed in memory before flushing")
+}
+
+pub async fn assert_waits_for_flush<T: Debug>(db: &Db, operation: impl Future<Output = T>) -> T {
+    tokio::pin!(operation);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let seq = assert_pending_until_committed(db, &mut operation).await;
+        assert!(futures::poll!(&mut operation).is_pending());
+        db.flush().await.unwrap();
+        let result = operation.await;
+        assert!(db.status().durable_seq >= seq);
+        result
+    })
+    .await
+    .expect("metadata write should finish after an explicit flush")
 }
 
 pub fn test_basin_name(suffix: &str) -> BasinName {
@@ -237,7 +285,12 @@ pub async fn append_payloads_with_encryption(
         fencing_token: None,
     };
     backend
-        .open_for_append(basin, stream, encryption_key_for_spec(encryption))
+        .open_for_append(
+            basin,
+            stream,
+            encryption_key_for_spec(encryption),
+            OptionalStreamConfig::default(),
+        )
         .await
         .expect("Failed to open append handle")
         .append(input)
@@ -257,7 +310,7 @@ pub async fn append_timestamped_payloads(
         fencing_token: None,
     };
     backend
-        .open_for_append(basin, stream, None)
+        .open_for_append(basin, stream, None, OptionalStreamConfig::default())
         .await
         .expect("Failed to open append handle")
         .append(input)
