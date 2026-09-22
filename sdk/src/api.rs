@@ -667,6 +667,8 @@ pub(crate) enum ApiError {
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
     AppendConditionFailed(AppendConditionFailed),
+    #[error("append may have taken effect in an earlier attempt; final attempt failed: {0}")]
+    IndefiniteFailure(#[source] Box<Self>),
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
     #[error("{1}")]
@@ -678,6 +680,7 @@ impl ApiError {
         match self {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
+            Self::IndefiniteFailure(err) => err.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
             _ => false,
@@ -705,9 +708,18 @@ impl ApiError {
                 server_error_has_no_side_effects(*status, &err_resp.code)
             }
             Self::Client(err) => err.has_no_side_effects(),
+            Self::AppendConditionFailed(_) | Self::MalformedAccessToken(_) => true,
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
             _ => false,
+        }
+    }
+
+    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
+        if prior_uncertainty && self.has_no_side_effects() {
+            Self::IndefiniteFailure(Box::new(self))
+        } else {
+            self
         }
     }
 }
@@ -1035,7 +1047,7 @@ impl<'a> RequestBuilder<'a> {
         let mut retry_backoff: Option<RetryBackoff> = self
             .retry_enabled
             .then(|| self.client.retry_builder.build());
-        let mut first_indefinite_error = None;
+        let mut prior_uncertainty = false;
 
         loop {
             if let Some(ref signal) = self.frame_signal {
@@ -1113,12 +1125,11 @@ impl<'a> RequestBuilder<'a> {
                     num_retries_remaining = retry_backoff.as_ref().map(|b| b.remaining()).unwrap_or(0),
                     "retrying request"
                 );
-                if first_indefinite_error.is_none()
-                    && self.append_retry_policy.is_some()
+                if self.append_retry_policy.is_some()
                     && !err.has_no_side_effects()
                     && self.frame_signal.as_ref().is_none_or(|s| s.is_signalled())
                 {
-                    first_indefinite_error = Some(err);
+                    prior_uncertainty = true;
                 }
                 tokio::time::sleep(backoff).await;
             } else {
@@ -1129,7 +1140,7 @@ impl<'a> RequestBuilder<'a> {
                     retries_exhausted = retry_backoff.as_ref().is_none_or(|b| b.is_exhausted()),
                     "not retrying request"
                 );
-                return Err(first_indefinite_error.unwrap_or(err));
+                return Err(err.with_prior_uncertainty(prior_uncertainty));
             }
         }
     }
@@ -1291,6 +1302,7 @@ fn provision_result_from_parts<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     #[cfg(feature = "_hidden")]
     use std::sync::Mutex;
     #[cfg(feature = "_hidden")]
@@ -1302,6 +1314,7 @@ mod tests {
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use super::*;
+    use crate::error::AppendError;
 
     #[cfg(feature = "_hidden")]
     #[derive(Default)]
@@ -1625,9 +1638,9 @@ mod tests {
     }
 
     #[cfg(feature = "_hidden")]
-    #[derive(Default)]
     struct AppendRetryExecutor {
         attempts: AtomicUsize,
+        responses: [(StatusCode, &'static str); 2],
     }
 
     #[cfg(feature = "_hidden")]
@@ -1637,11 +1650,7 @@ mod tests {
             &self,
             _request: client::Request,
         ) -> Result<UnaryResponse, client::HttpError> {
-            let (status, code) = match self.attempts.fetch_add(1, Ordering::Relaxed) {
-                0 => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
-                1 => (StatusCode::FORBIDDEN, "permission_denied"),
-                _ => panic!("unexpected retry after a terminal error"),
-            };
+            let (status, code) = self.responses[self.attempts.fetch_add(1, Ordering::Relaxed)];
             Ok(UnaryResponse::new_for_test(
                 status,
                 serde_json::json!({"code": code, "message": code}).to_string(),
@@ -1657,16 +1666,44 @@ mod tests {
     }
 
     #[cfg(feature = "_hidden")]
+    #[rstest::rstest]
+    #[case::indefinite_then_definite(
+        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::FORBIDDEN, "permission_denied")],
+        true, 2
+    )]
+    #[case::both_indefinite(
+        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::INTERNAL_SERVER_ERROR, "internal")],
+        false, 1
+    )]
+    #[case::both_definite(
+        [(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), (StatusCode::FORBIDDEN, "permission_denied")],
+        false, 2
+    )]
+    #[case::retry_succeeds(
+        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::OK, "")],
+        false, 2
+    )]
+    #[case::retryable_terminal_error(
+        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::TOO_MANY_REQUESTS, "rate_limited")],
+        true, 1
+    )]
     #[tokio::test]
-    async fn unary_append_returns_first_indefinite_error() {
-        let executor = Arc::new(AppendRetryExecutor::default());
+    async fn unary_append_preserves_uncertainty_and_latest_error(
+        #[case] responses: [(StatusCode, &'static str); 2],
+        #[case] wrapped: bool,
+        #[case] max_retries: u32,
+    ) {
+        let executor = Arc::new(AppendRetryExecutor {
+            attempts: AtomicUsize::new(0),
+            responses,
+        });
         let mut client =
             BaseClient::init_with_connector(&S2Config::new("token"), HttpConnector::new()).unwrap();
         client.client = executor.clone();
         client.retry_builder = RetryBackoffBuilder::default()
             .with_min_base_delay(Duration::ZERO)
             .with_max_base_delay(Duration::ZERO)
-            .with_max_retries(2);
+            .with_max_retries(max_retries);
         let request = client
             .post(
                 "http://example.test/v1/streams/test/records"
@@ -1676,21 +1713,71 @@ mod tests {
             .build()
             .unwrap();
 
-        let error = client
+        let result = client
             .request(request)
             .with_append_retry_policy(AppendRetryPolicy::All)
             .send()
-            .await
-            .map(|_| ())
-            .unwrap_err();
+            .await;
 
         assert_eq!(executor.attempts.load(Ordering::Relaxed), 2);
+        if responses[1].0.is_success() {
+            assert!(result.is_ok());
+            return;
+        }
+
+        let error = AppendError::from(result.map(|_| ()).unwrap_err());
+        assert_eq!(matches!(error, AppendError::IndefiniteFailure(_)), wrapped);
+        let server = error.request_error().unwrap().server_error().unwrap();
+        assert_eq!((server.status, server.code.as_str()), responses[1]);
+        assert_eq!(server.message, responses[1].1);
+        assert_eq!(error.is_retryable(), server.is_retryable());
+        assert_eq!(
+            error.has_no_side_effects(),
+            !wrapped && server.has_no_side_effects()
+        );
+        if wrapped {
+            let latest = error
+                .source()
+                .unwrap()
+                .downcast_ref::<Box<AppendError>>()
+                .unwrap();
+            assert!(latest.has_no_side_effects());
+            assert_eq!(
+                latest.request_error().unwrap().server_error().unwrap().code,
+                responses[1].1
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "append may have taken effect in an earlier attempt; final attempt failed: {latest}"
+                )
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::condition_failed(
+        ApiError::AppendConditionFailed(AppendConditionFailed::SeqNumMismatch(42)),
+        "sequence number mismatch, expected: 42"
+    )]
+    #[case::malformed_access_token(
+        ApiError::MalformedAccessToken("invalid header".to_owned()),
+        "malformed access token: invalid header"
+    )]
+    #[test]
+    fn unary_append_wraps_definite_terminal_errors(#[case] error: ApiError, #[case] message: &str) {
+        assert!(error.has_no_side_effects());
+        let error = AppendError::from(error.with_prior_uncertainty(true));
+        assert!(matches!(error, AppendError::IndefiniteFailure(_)));
         assert!(!error.has_no_side_effects());
-        assert!(matches!(
-            error,
-            ApiError::Server(StatusCode::SERVICE_UNAVAILABLE, body)
-                if body.code == "unavailable" && body.message == "unavailable"
-        ));
+        assert!(!error.is_retryable());
+        let latest = error
+            .source()
+            .unwrap()
+            .downcast_ref::<Box<AppendError>>()
+            .unwrap();
+        assert!(latest.has_no_side_effects());
+        assert_eq!(latest.to_string(), message);
     }
 
     fn server_error(status: StatusCode, code: &str) -> ApiError {
