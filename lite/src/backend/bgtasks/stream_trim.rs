@@ -605,7 +605,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Pause the DELETE after it submits terminal trim, before it marks metadata.
+        // Pause stream deletion after it submits terminal trim, before it marks metadata.
         let mut deletion = Box::pin(backend.delete_stream(basin.clone(), stream.clone()));
         assert!(futures::poll!(&mut deletion).is_pending());
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -627,7 +627,7 @@ mod tests {
         .await
         .unwrap();
         // A crash here leaves a durable terminal trim with unmarked metadata.
-        // Both Ensure and PATCH must reject updates that the pending trim would erase.
+        // Provisioning and reconfiguration must reject updates that the pending trim would erase.
         assert!(matches!(
             backend
                 .provision_stream(
@@ -677,7 +677,7 @@ mod tests {
             .unwrap();
         assert!(
             meta.deleted_at.is_none(),
-            "the old DELETE must not mark the replacement"
+            "the old deletion request must not mark the replacement"
         );
 
         let record: AppendRecord = AppendRecordParts {

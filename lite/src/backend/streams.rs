@@ -384,14 +384,14 @@ impl Backend {
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        // A delayed DELETE may resume after the trim worker has deleted the old
+        // A delayed deletion request may resume after the trim worker has deleted the old
         // stream and the name has been reused. Only mark metadata when this
         // transaction also sees a terminal trim marker.
         if !has_terminal_trim(&txn, StreamId::new(&basin, &stream)).await? {
             let read_seq = txn.seqnum();
             drop(txn);
             // The trim worker may have removed the marker without flushing yet.
-            // Wait for that removal to become durable before acknowledging DELETE.
+            // Wait for that removal to become durable before acknowledging deletion.
             self.await_durable_seq(read_seq).await?;
             return Ok(());
         }

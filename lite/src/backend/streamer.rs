@@ -411,7 +411,7 @@ impl Streamer {
         };
         let sequenced_records = if self.trim_point.state.end == SeqNum::MAX {
             Err(AppendErrorInternal::StreamDeletionPending {
-                // Terminal retries turn this rejection into a successful DELETE.
+                // Terminal retries treat this rejection as successful stream deletion.
                 durability_dependency: match append_type {
                     AppendType::Regular => ..0,
                     AppendType::Terminal => self.trim_point.applied_point,
@@ -1594,7 +1594,7 @@ mod tests {
             streamer.handle_terminal_trim(TerminalTrimCondition::Always, tx);
             replies.push(rx);
         }
-        // An empty-stream check can also finish after another DELETE starts.
+        // An empty-stream check can also finish after another deletion request starts.
         let (tx, rx) = oneshot::channel();
         streamer.handle_doe_check_result(
             StreamPosition::MIN,
@@ -1616,7 +1616,7 @@ mod tests {
         for reply in &mut replies {
             assert!(
                 matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
-                "DELETE must wait even when the original trim has not been submitted"
+                "stream deletion must wait even when the original trim has not been submitted"
             );
         }
 
@@ -1632,7 +1632,7 @@ mod tests {
         for reply in &mut replies {
             assert!(
                 matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
-                "a committed but unflushed trim must not acknowledge DELETE"
+                "a committed but unflushed trim must not acknowledge stream deletion"
             );
         }
         streamer.db.flush().await.unwrap();
