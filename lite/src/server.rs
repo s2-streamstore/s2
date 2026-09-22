@@ -467,9 +467,10 @@ impl WalS3Overrides {
         mut builder: object_store::aws::AmazonS3Builder,
     ) -> object_store::aws::AmazonS3Builder {
         if let Some(endpoint) = &self.endpoint {
+            // Override the S3-specific endpoint inherited from the main store.
             builder = builder
                 .with_allow_http(endpoint.starts_with("http://"))
-                .with_endpoint(endpoint);
+                .with_config(object_store::aws::AmazonS3ConfigKey::S3Endpoint, endpoint);
         }
         if let Some(region) = self.region {
             builder = builder.with_region(region);
@@ -609,6 +610,15 @@ mod tests {
 
     #[tokio::test]
     async fn wal_s3_inherits_main_settings_and_applies_explicit_overrides() {
+        check_wal_s3_overrides(false).await;
+    }
+
+    #[tokio::test]
+    async fn wal_s3_endpoint_overrides_main_s3_endpoint() {
+        check_wal_s3_overrides(true).await;
+    }
+
+    async fn check_wal_s3_overrides(main_s3_endpoint: bool) {
         use std::sync::{Arc, Mutex};
 
         use axum::{
@@ -619,7 +629,7 @@ mod tests {
         };
         use slatedb::object_store::{
             ObjectStoreExt, StaticCredentialProvider,
-            aws::{AmazonS3Builder, AwsCredential},
+            aws::{AmazonS3Builder, AmazonS3ConfigKey, AwsCredential},
             path::Path,
         };
 
@@ -652,11 +662,18 @@ mod tests {
             let main_builder = AmazonS3Builder::new()
                 .with_bucket_name("main-bucket")
                 .with_region("us-east-1")
-                .with_endpoint(if override_endpoint {
-                    "http://127.0.0.1:1"
-                } else {
-                    &endpoint
-                })
+                .with_config(
+                    if main_s3_endpoint {
+                        AmazonS3ConfigKey::S3Endpoint
+                    } else {
+                        AmazonS3ConfigKey::Endpoint
+                    },
+                    if override_endpoint {
+                        "http://127.0.0.1:1"
+                    } else {
+                        &endpoint
+                    },
+                )
                 .with_allow_http(true)
                 .with_credentials(Arc::new(StaticCredentialProvider::new(AwsCredential {
                     key_id: "main-key".into(),
