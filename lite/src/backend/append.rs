@@ -206,7 +206,8 @@ impl PendingAppends {
         }
     }
 
-    pub fn on_durability_failed(self, err: StorageError) {
+    pub fn on_durability_failed(self, err: slatedb::Error) {
+        let err = StorageError::from(err);
         for sender in self.queue {
             sender.unblock(Err(err.clone()));
         }
