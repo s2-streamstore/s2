@@ -128,8 +128,11 @@ impl Backend {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
         let current_seq = db_txn_get_with(&txn, &trim_point_key, |entry| Ok(entry.seq)).await?;
-        // A stream recreated under the same name can have the same trim point,
-        // but its marker has a different commit sequence.
+        // A tick can exit on error while its submitted cleanup is still running.
+        // The next durable scan can capture the old marker before cleanup becomes
+        // durable. Cleanup removes the old marker and metadata before name reuse,
+        // but this scanned work can remain queued across recreation. The recreated
+        // stream's marker may have the same trim point, so compare commit sequences.
         if current_seq != Some(pending.marker_seq) {
             return Ok(());
         }
