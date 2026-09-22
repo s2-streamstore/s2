@@ -411,7 +411,8 @@ impl Streamer {
         };
         let sequenced_records = if self.trim_point.state.end == SeqNum::MAX {
             Err(AppendErrorInternal::StreamDeletionPending {
-                // Terminal retries treat this rejection as successful stream deletion.
+                // Deletion requests interpret this error as "deletion durably pending",
+                // so delay their replies until the existing terminal trim is durable.
                 durability_dependency: match append_type {
                     AppendType::Regular => ..0,
                     AppendType::Terminal => self.trim_point.applied_point,
