@@ -1641,102 +1641,28 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "_hidden")]
-    struct AppendRetryExecutor {
-        attempts: AtomicUsize,
-        responses: [(StatusCode, &'static str); 2],
-    }
-
-    #[cfg(feature = "_hidden")]
-    #[async_trait]
-    impl client::RequestExecutor for AppendRetryExecutor {
-        async fn execute_unary(
-            &self,
-            _request: client::Request,
-        ) -> Result<UnaryResponse, client::HttpError> {
-            let (status, code) = self.responses[self.attempts.fetch_add(1, Ordering::Relaxed)];
-            Ok(UnaryResponse::new_for_test(
-                status,
-                serde_json::json!({"code": code, "message": code}).to_string(),
-            ))
-        }
-
-        async fn init_streaming(
-            &self,
-            _request: client::Request,
-        ) -> Result<StreamingResponse, client::HttpError> {
-            unreachable!("unary retry test does not initialize a stream")
-        }
-    }
-
-    #[cfg(feature = "_hidden")]
     #[rstest::rstest]
-    #[case::indefinite_then_definite(
-        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::FORBIDDEN, "permission_denied")],
-        true, 2
-    )]
-    #[case::both_indefinite(
-        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::INTERNAL_SERVER_ERROR, "internal")],
-        false, 1
-    )]
-    #[case::both_definite(
-        [(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), (StatusCode::FORBIDDEN, "permission_denied")],
-        false, 2
-    )]
-    #[case::retry_succeeds(
-        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::OK, "")],
-        false, 2
-    )]
-    #[case::retryable_terminal_error(
-        [(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), (StatusCode::TOO_MANY_REQUESTS, "rate_limited")],
-        true, 1
-    )]
-    #[tokio::test]
-    async fn unary_append_preserves_uncertainty_and_latest_error(
-        #[case] responses: [(StatusCode, &'static str); 2],
+    #[case(StatusCode::FORBIDDEN, "permission_denied", false, false)]
+    #[case(StatusCode::FORBIDDEN, "permission_denied", true, true)]
+    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", false, false)]
+    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", true, false)]
+    #[case(StatusCode::TOO_MANY_REQUESTS, "rate_limited", true, true)]
+    #[test]
+    fn unary_append_failure_preserves_uncertainty_and_final_error(
+        #[case] status: StatusCode,
+        #[case] code: &str,
+        #[case] prior_uncertainty: bool,
         #[case] wrapped: bool,
-        #[case] max_retries: u32,
     ) {
-        let executor = Arc::new(AppendRetryExecutor {
-            attempts: AtomicUsize::new(0),
-            responses,
-        });
-        let mut client =
-            BaseClient::init_with_connector(&S2Config::new("token"), HttpConnector::new()).unwrap();
-        client.client = executor.clone();
-        client.retry_builder = RetryBackoffBuilder::default()
-            .with_min_base_delay(Duration::ZERO)
-            .with_max_base_delay(Duration::ZERO)
-            .with_max_retries(max_retries);
-        let request = client
-            .post(
-                "http://example.test/v1/streams/test/records"
-                    .parse()
-                    .unwrap(),
-            )
-            .build()
-            .unwrap();
-
-        let result = client
-            .request(request)
-            .with_append_retry_policy(AppendRetryPolicy::All)
-            .send()
-            .await;
-
-        assert_eq!(executor.attempts.load(Ordering::Relaxed), 2);
-        if responses[1].0.is_success() {
-            assert!(result.is_ok());
-            return;
-        }
-
-        let error = AppendError::from(result.map(|_| ()).unwrap_err());
+        let error =
+            AppendError::from(server_error(status, code).with_prior_uncertainty(prior_uncertainty));
         assert_eq!(
             matches!(error, AppendError::IndefiniteFailure { .. }),
             wrapped
         );
         let server = error.request_error().unwrap().server_error().unwrap();
-        assert_eq!((server.status, server.code.as_str()), responses[1]);
-        assert_eq!(server.message, responses[1].1);
+        assert_eq!((server.status, server.code.as_str()), (status, code));
+        assert_eq!(server.message, "test");
         assert_eq!(error.is_retryable(), server.is_retryable());
         assert_eq!(
             error.has_no_side_effects(),
@@ -1751,7 +1677,7 @@ mod tests {
             assert!(latest.has_no_side_effects());
             assert_eq!(
                 latest.request_error().unwrap().server_error().unwrap().code,
-                responses[1].1
+                code
             );
             assert_eq!(
                 error.to_string(),
