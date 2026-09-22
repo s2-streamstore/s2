@@ -108,10 +108,8 @@ pub(super) enum AppendErrorInternal {
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
     RequestDroppedError(#[from] RequestDroppedError),
-    #[error("stream deletion pending")]
-    StreamDeletionPending {
-        durability_dependency: RangeTo<SeqNum>,
-    },
+    #[error(transparent)]
+    StreamDeletionPending(#[from] StreamDeletionPendingError),
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -123,9 +121,6 @@ pub(super) enum AppendErrorInternal {
 impl AppendErrorInternal {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         match self {
-            Self::StreamDeletionPending {
-                durability_dependency,
-            } => *durability_dependency,
             Self::ConditionFailed(e) => e.durability_dependency(),
             Self::MaxSeqNum(e) => e.durability_dependency(),
             _ => ..0,
@@ -197,9 +192,7 @@ impl From<AppendErrorInternal> for AppendError {
                 AppendError::StreamerMissingInActionError(e)
             }
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
-            AppendErrorInternal::StreamDeletionPending { .. } => {
-                AppendError::StreamDeletionPending(StreamDeletionPendingError)
-            }
+            AppendErrorInternal::StreamDeletionPending(e) => AppendError::StreamDeletionPending(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
             AppendErrorInternal::MaxSeqNum(e) => AppendError::MaxSeqNum(e),
