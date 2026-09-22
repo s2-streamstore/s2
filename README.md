@@ -223,9 +223,8 @@ s2 lite --bucket my-bucket --wal-bucket my-wal-bucket
 ```
 
 > [!WARNING]
-> Choose the WAL location when creating the database and keep it the same on every restart.
-> Changing it does not migrate WAL data, and the server starts without an error; acknowledged
-> records that were only in the previous WAL location become unreadable.
+> Changing the WAL location does not migrate WAL data, and the server starts without an error;
+> acknowledged records that were only in the previous WAL location become unreadable.
 
 ### Monitoring
 
