@@ -202,31 +202,25 @@ The main database still uses `--bucket` or `--local-root`; `--path` applies to b
 stores. The WAL options are also available as `S2LITE_WAL_BUCKET` and
 `S2LITE_WAL_LOCAL_ROOT`.
 
-To use a different bucket with the same endpoint, region and credentials, add
-`--wal-bucket` to your existing configuration:
+For example, keep the WAL on the local filesystem while storing the LSM in a
+remote S3 bucket:
+
+```bash
+s2 lite --bucket my-lsm-bucket --wal-local-root /data/wal --path my-database
+```
+
+The bucket uses the usual AWS credentials, profile or instance role. The local
+WAL store has fsync enabled.
+
+To use a separate WAL bucket instead, add `--wal-bucket`:
 
 ```bash
 s2 lite --bucket my-lsm-bucket --wal-bucket my-wal-bucket --path my-database
 ```
 
-No WAL-specific environment variables are required. Both buckets use the usual
-AWS configuration, including a custom MinIO endpoint. To connect the WAL to a
-different server, set only the values that differ. For example, keep the WAL on
-local MinIO while storing the LSM in S3:
-
-```bash
-export AWS_REGION=us-east-1
-# The main S3 store uses the usual AWS credentials/profile/instance role.
-export S2LITE_WAL_AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000
-export S2LITE_WAL_AWS_ACCESS_KEY_ID=your-minio-access-key
-export S2LITE_WAL_AWS_SECRET_ACCESS_KEY=your-minio-secret-key
-
-s2 lite --bucket my-lsm-bucket --wal-bucket my-wal-bucket --path my-database
-```
-
-For a remote MinIO main store, set its endpoint and credentials using the usual
-`AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables.
-The following optional overrides apply only to the WAL bucket:
+Both buckets use the same AWS configuration by default. To use a different
+endpoint, region or credentials for the WAL bucket, set only the overrides
+that differ:
 
 | Variable | Purpose |
 | --- | --- |
@@ -235,15 +229,8 @@ The following optional overrides apply only to the WAL bucket:
 | `S2LITE_WAL_AWS_ACCESS_KEY_ID` / `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` | Overrides the shared credentials; both must be supplied together. If omitted, uses the same credentials/profile/instance role as the main store. |
 | `S2LITE_WAL_AWS_SESSION_TOKEN` | Optional token for the WAL-specific key pair. The main store's token is not inherited when a WAL key pair is supplied. |
 
-A filesystem WAL is also supported, with fsync enabled:
-
-```bash
-s2 lite --bucket my-lsm-bucket --wal-local-root /data/wal --path my-database
-```
-
 The default WAL flush interval follows the WAL store type: 50 ms for an S3 bucket,
-5 ms for a local filesystem. `SL8_FLUSH_INTERVAL` overrides it as usual; for a
-local MinIO benchmark, set it explicitly (for example, `SL8_FLUSH_INTERVAL=1ms`).
+5 ms for a local filesystem. `SL8_FLUSH_INTERVAL` overrides this default.
 
 Configure separate stores when creating a database and use the same locations
 on every restart. These options do not migrate existing WAL data. Acknowledged
