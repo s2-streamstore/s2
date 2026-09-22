@@ -3,7 +3,7 @@ use std::ops::RangeTo;
 use futures::{StreamExt, stream};
 use s2_common::{record::NonZeroSeqNum, resources::Page};
 use slatedb::{
-    DbTransaction, IsolationLevel, WriteBatch,
+    IsolationLevel, WriteBatch,
     config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
@@ -141,43 +141,20 @@ impl Backend {
             txn.delete(kv::stream_tail_position::ser_key(pending.stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(pending.stream_id))?;
             doe::clear(&txn, pending.stream_id).await?;
-        } else {
+        } else if let Some(previous) = doe::state(&txn, pending.stream_id).await? {
             // A partial trim may remove the infinite-retention record that
-            // parked DOE while leaving finite-retention records behind.
-            wake_doe_on_trim(&txn, pending.stream_id).await?;
+            // parked DOE while leaving finite-retention records behind. Wake
+            // existing state; creation, DOE changes, and migration initialize it.
+            doe::schedule(
+                &txn,
+                pending.stream_id,
+                Some(previous),
+                TimestampSecs::now(),
+            )?;
         }
         db_txn_commit_durable(txn).await?;
         Ok(())
     }
-}
-
-async fn wake_doe_on_trim(txn: &DbTransaction, stream_id: StreamId) -> Result<(), StorageError> {
-    let Some((basin, stream)) = db_txn_get(
-        txn,
-        kv::stream_id_mapping::ser_key(stream_id),
-        kv::stream_id_mapping::deser_value,
-    )
-    .await?
-    else {
-        return Ok(());
-    };
-    let Some(meta) = db_txn_get(
-        txn,
-        &kv::stream_meta::ser_key(&basin, &stream),
-        kv::stream_meta::deser_value,
-    )
-    .await?
-    else {
-        return Ok(());
-    };
-    if meta.deleted_at.is_some() {
-        return Ok(());
-    }
-    if meta.config.delete_on_empty.min_age().is_none() {
-        return Ok(());
-    }
-    doe::schedule(txn, stream_id, TimestampSecs::now()).await?;
-    Ok(())
 }
 
 #[cfg(test)]

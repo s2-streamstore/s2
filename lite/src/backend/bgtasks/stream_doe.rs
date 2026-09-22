@@ -207,18 +207,18 @@ impl Backend {
             // same ticket. Consuming or postponing it here would lose that wake.
             return Ok(());
         }
-        let config_seq = db_txn_get_with(
-            &txn,
-            kv::stream_meta::ser_key(&snapshot.basin, &snapshot.stream),
-            |entry| Ok(entry.seq),
-        )
-        .await?;
         // Successful deletion marks metadata and advances its sequence. Deferred
         // outcomes must still belong to the configuration that was inspected.
-        if config_seq != Some(snapshot.config_seq)
-            && outcome != TerminalTrimOutcome::DeletionPending
-        {
-            return Ok(());
+        if outcome != TerminalTrimOutcome::DeletionPending {
+            let config_seq = db_txn_get_with(
+                &txn,
+                kv::stream_meta::ser_key(&snapshot.basin, &snapshot.stream),
+                |entry| Ok(entry.seq),
+            )
+            .await?;
+            if config_seq != Some(snapshot.config_seq) {
+                return Ok(());
+            }
         }
         let next = match outcome {
             TerminalTrimOutcome::RetryAt(at) => Some(State::Scheduled(Check {
@@ -373,9 +373,8 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        doe::schedule(&txn, stream_id, TimestampSecs::ZERO)
-            .await
-            .unwrap();
+        let previous = doe::state(&txn, stream_id).await.unwrap();
+        doe::schedule(&txn, stream_id, previous, TimestampSecs::ZERO).unwrap();
         db_txn_commit_durable(txn).await.unwrap();
         PendingCheck {
             stream_id,
@@ -677,6 +676,63 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::disabled(0, false)]
+    #[case::disabled_before_cleanup(60, false)]
+    #[case::legacy_only(60, true)]
+    #[tokio::test]
+    async fn trim_does_not_initialize_missing_doe_state(
+        #[case] min_age: u64,
+        #[case] legacy_only: bool,
+    ) {
+        let backend = test_backend().await;
+        let (basin, stream) =
+            create_stream(&backend, config(min_age, RetentionPolicy::Infinite())).await;
+        let stream_id = StreamId::new(&basin, &stream);
+        append(&backend, &basin, &stream, record()).await;
+        append(
+            &backend,
+            &basin,
+            &stream,
+            Record::Command(CommandRecord::Trim(1)),
+        )
+        .await;
+        if legacy_only {
+            // Model an enabled stream that has not migrated yet.
+            let txn = backend
+                .db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            doe::clear(&txn, stream_id).await.unwrap();
+            db_txn_commit_durable(txn).await.unwrap();
+            legacy(&backend, stream_id, None).await;
+        } else if min_age != 0 {
+            configure_min_age(&backend, &basin, &stream, 0, false).await;
+        }
+        assert!(state(&backend, stream_id).await.is_none());
+
+        backend.clone().tick_stream_trim().await.unwrap();
+        assert!(state(&backend, stream_id).await.is_none());
+        assert!(
+            backend
+                .list_pending_stream_doe(TimestampSecs::MAX)
+                .await
+                .unwrap()
+                .values
+                .is_empty()
+        );
+
+        // Migration or enablement, rather than trim cleanup, establishes state.
+        if legacy_only {
+            backend.migrate_stream_doe().await.unwrap();
+        } else {
+            configure_min_age(&backend, &basin, &stream, 60, false).await;
+        }
+        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        backend.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
     #[tokio::test]
     async fn event_retaining_same_ticket_invalidates_inflight_result(
         #[values(false, true)] trim: bool,
@@ -850,9 +906,8 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        doe::schedule(&wake, stream_id, TimestampSecs::now())
-            .await
-            .unwrap();
+        let previous = doe::state(&wake, stream_id).await.unwrap();
+        doe::schedule(&wake, stream_id, previous, TimestampSecs::now()).unwrap();
         db_txn_commit_durable(wake).await.unwrap();
         let error = txn.commit().await.unwrap_err();
         assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
@@ -936,8 +991,11 @@ mod tests {
         backend.close().await.unwrap();
     }
 
+    #[rstest::rstest]
     #[tokio::test]
-    async fn stale_work_cannot_delete_or_reschedule_recreated_stream() {
+    async fn stale_work_cannot_delete_or_reschedule_recreated_stream(
+        #[values(false, true)] deletion_pending: bool,
+    ) {
         let backend = test_backend().await;
         let configuration = config(60, RetentionPolicy::Infinite());
         let (basin, stream) = create_stream(&backend, configuration.clone()).await;
@@ -973,8 +1031,13 @@ mod tests {
                 .unwrap(),
             TerminalTrimOutcome::Obsolete
         );
+        let outcome = if deletion_pending {
+            TerminalTrimOutcome::DeletionPending
+        } else {
+            TerminalTrimOutcome::Parked
+        };
         backend
-            .finish_doe_check(pending, snapshot, TerminalTrimOutcome::Parked)
+            .finish_doe_check(pending, snapshot, outcome)
             .await
             .unwrap();
         backend.process_stream_doe(pending).await.unwrap();

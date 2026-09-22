@@ -35,12 +35,13 @@ pub(super) async fn state(
 /// Request a check without adding a second ticket. Even when keeping an earlier
 /// ticket, rewrite the state to advance its commit sequence: an in-flight worker
 /// must not park or postpone the stream after a concurrent trim/configuration wake.
-pub(super) async fn schedule(
+/// The caller must have read `previous` in this serializable transaction.
+pub(super) fn schedule(
     txn: &DbTransaction,
     stream_id: StreamId,
+    previous: Option<State>,
     at: TimestampSecs,
-) -> Result<(), StorageError> {
-    let previous = state(txn, stream_id).await?;
+) -> Result<(), slatedb::Error> {
     let next = match previous {
         Some(State::Scheduled(check)) if check.at <= at => State::Scheduled(check),
         _ => State::Scheduled(Check {
@@ -48,8 +49,7 @@ pub(super) async fn schedule(
             id: rand::random(),
         }),
     };
-    replace(txn, stream_id, previous, Some(next))?;
-    Ok(())
+    replace(txn, stream_id, previous, Some(next))
 }
 
 pub(super) async fn clear(txn: &DbTransaction, stream_id: StreamId) -> Result<(), StorageError> {
