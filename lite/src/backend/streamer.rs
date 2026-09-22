@@ -47,7 +47,7 @@ use crate::{
             DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
             StreamerMissingInActionError,
         },
-        kv::{self, timestamp::TimestampSecs},
+        kv,
     },
     metrics,
     stream_id::StreamId,
@@ -468,9 +468,9 @@ impl Streamer {
                     // The worker may have observed a configuration commit before
                     // its notification reached this actor (or vice versa). Do not
                     // defer using an age that may have just been decreased.
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::RetryAt(TimestampSecs::after(
-                        doe::RETRY_INTERVAL,
-                    ))));
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::RetryAt(
+                        kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL),
+                    )));
                 } else if self.config.delete_on_empty.min_age().is_none() {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
                 } else {
@@ -512,9 +512,9 @@ impl Streamer {
             return;
         }
         if self.config_seq != config_seq_snapshot {
-            let _ = reply_tx.send(Ok(TerminalTrimOutcome::RetryAt(TimestampSecs::after(
-                doe::RETRY_INTERVAL,
-            ))));
+            let _ = reply_tx.send(Ok(TerminalTrimOutcome::RetryAt(
+                kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL),
+            )));
             return;
         }
         let Some(min_age) = self.config.delete_on_empty.min_age() else {
@@ -528,7 +528,7 @@ impl Streamer {
             RecordPresence::ExpiresAt(at) => self.doe_retry_at(at),
             RecordPresence::Unbounded => TerminalTrimOutcome::Parked,
             RecordPresence::Empty => {
-                let old_enough = TimestampSecs::now()
+                let old_enough = kv::timestamp::TimestampSecs::now()
                     .checked_sub_duration(min_age)
                     .is_some_and(|cutoff| self.last_tail_write_timestamp <= cutoff);
                 if self.stable_pos == stable_pos_snapshot
@@ -538,18 +538,18 @@ impl Streamer {
                     self.append_terminal_trim(reply_tx);
                     return;
                 }
-                self.doe_retry_at(TimestampSecs::ZERO)
+                self.doe_retry_at(kv::timestamp::TimestampSecs::ZERO)
             }
         };
         let _ = reply_tx.send(Ok(outcome));
     }
 
-    fn doe_retry_at(&self, earliest_empty: TimestampSecs) -> TerminalTrimOutcome {
+    fn doe_retry_at(&self, earliest_empty: kv::timestamp::TimestampSecs) -> TerminalTrimOutcome {
         let age_at = self
             .last_tail_write_timestamp
             .saturating_add_duration(self.config.delete_on_empty.min_age().unwrap_or_default());
         TerminalTrimOutcome::RetryAt(
-            TimestampSecs::after(doe::RETRY_INTERVAL)
+            kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL)
                 .max(age_at)
                 .max(earliest_empty),
         )
@@ -794,7 +794,7 @@ pub(super) enum TerminalTrimCondition {
 pub(super) enum TerminalTrimOutcome {
     /// Deletion is durably pending.
     DeletionPending,
-    RetryAt(TimestampSecs),
+    RetryAt(kv::timestamp::TimestampSecs),
     Parked,
     /// DOE is disabled or this request belongs to an earlier incarnation.
     Obsolete,
@@ -988,7 +988,7 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordPresence {
     Empty,
-    ExpiresAt(TimestampSecs),
+    ExpiresAt(kv::timestamp::TimestampSecs),
     Unbounded,
 }
 
@@ -1010,9 +1010,9 @@ async fn stream_record_presence(
                 // One live record bounds when the stream can become empty.
                 // Use its stored TTL, since retention changes are not retroactive.
                 // Round up so the check does not run just before expiration.
-                return Ok(RecordPresence::ExpiresAt(TimestampSecs::from_millis(
-                    expire_ts.saturating_add(999),
-                )));
+                return Ok(RecordPresence::ExpiresAt(
+                    kv::timestamp::TimestampSecs::from_millis(expire_ts.saturating_add(999)),
+                ));
             }
             _ => (),
         }
@@ -1794,7 +1794,7 @@ mod tests {
             let RecordPresence::ExpiresAt(at) = *records.as_ref().unwrap() else {
                 panic!("expected the stored record expiration");
             };
-            assert!(at > TimestampSecs::after(Duration::from_secs(3500)));
+            assert!(at > kv::timestamp::TimestampSecs::after(Duration::from_secs(3500)));
             TerminalTrimOutcome::RetryAt(at)
         };
         if append_after_scan {
@@ -1882,9 +1882,9 @@ mod tests {
     ) {
         let mut streamer = test_streamer().await;
         streamer.config.delete_on_empty.min_age = Duration::from_secs(365 * 24 * 3600);
-        streamer.last_tail_write_timestamp = TimestampSecs::now();
+        streamer.last_tail_write_timestamp = kv::timestamp::TimestampSecs::now();
         streamer.config_seq = actor_seq;
-        let earliest_retry = TimestampSecs::after(doe::RETRY_INTERVAL);
+        let earliest_retry = kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL);
         let (reply_tx, reply_rx) = oneshot::channel();
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
@@ -1896,7 +1896,9 @@ mod tests {
         let TerminalTrimOutcome::RetryAt(at) = reply_rx.await.unwrap().unwrap() else {
             panic!("expected a bounded retry for mismatched configuration");
         };
-        assert!(at >= earliest_retry && at <= TimestampSecs::after(doe::RETRY_INTERVAL));
+        assert!(
+            at >= earliest_retry && at <= kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL)
+        );
         assert!(streamer.db_writes_pending.is_empty());
         streamer.db.close().await.unwrap();
     }
@@ -1905,7 +1907,7 @@ mod tests {
     async fn delete_on_empty_bounds_retry_when_config_changes_during_scan() {
         let mut streamer = test_streamer().await;
         streamer.config.delete_on_empty.min_age = Duration::from_secs(365 * 24 * 3600);
-        streamer.last_tail_write_timestamp = TimestampSecs::now();
+        streamer.last_tail_write_timestamp = kv::timestamp::TimestampSecs::now();
         let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
         streamer.msg_tx = msg_tx;
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1926,7 +1928,7 @@ mod tests {
             panic!("expected record check");
         };
         streamer.config_seq += 1;
-        let earliest_retry = TimestampSecs::after(doe::RETRY_INTERVAL);
+        let earliest_retry = kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL);
         streamer.handle_doe_check_result(
             stable_pos_snapshot,
             config_seq_snapshot,
@@ -1936,7 +1938,9 @@ mod tests {
         let TerminalTrimOutcome::RetryAt(at) = reply_rx.await.unwrap().unwrap() else {
             panic!("expected a bounded retry for mismatched configuration");
         };
-        assert!(at >= earliest_retry && at <= TimestampSecs::after(doe::RETRY_INTERVAL));
+        assert!(
+            at >= earliest_retry && at <= kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL)
+        );
         assert!(streamer.db_writes_pending.is_empty());
         streamer.db.close().await.unwrap();
     }

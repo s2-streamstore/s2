@@ -9,12 +9,12 @@ mod basin_deletion;
 mod stream_doe;
 mod stream_trim;
 
-/// Keep draining the backlog while work completes. A page where every item
-/// conflicts waits for the next tick instead of retrying in a tight loop.
+/// Keep draining the backlog while at least one item succeeds. A page where
+/// every item conflicts waits for the next tick instead of retrying in a tight loop.
 #[derive(Default)]
 struct PageProgress {
     has_more: bool,
-    completed: bool,
+    any_succeeded: bool,
 }
 
 impl PageProgress {
@@ -25,7 +25,7 @@ impl PageProgress {
     ) -> Result<Option<T>, E> {
         match result {
             Ok(value) => {
-                self.completed = true;
+                self.any_succeeded = true;
                 Ok(Some(value))
             }
             Err(err) if is_conflict(&err) => Ok(None),
@@ -34,7 +34,7 @@ impl PageProgress {
     }
 
     fn should_continue(&self) -> bool {
-        self.has_more && self.completed
+        self.has_more && self.any_succeeded
     }
 }
 

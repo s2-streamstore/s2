@@ -5,15 +5,7 @@ use std::time::Duration;
 
 use slatedb::DbTransaction;
 
-use super::{
-    error::StorageError,
-    kv::{
-        self,
-        stream_doe_state::{Check, State},
-        timestamp::TimestampSecs,
-    },
-    store::db_txn_get,
-};
+use super::{error::StorageError, kv, store::db_txn_get};
 use crate::stream_id::StreamId;
 
 /// Bound polling on active streams, while allowing known expirations to defer
@@ -23,7 +15,7 @@ pub(super) const RETRY_INTERVAL: Duration = Duration::from_secs(600);
 pub(super) async fn state(
     txn: &DbTransaction,
     stream_id: StreamId,
-) -> Result<Option<State>, StorageError> {
+) -> Result<Option<kv::stream_doe_state::State>, StorageError> {
     db_txn_get(
         txn,
         kv::stream_doe_state::ser_key(stream_id),
@@ -38,7 +30,7 @@ pub(super) async fn state(
 pub(super) async fn schedule(
     txn: &DbTransaction,
     stream_id: StreamId,
-    at: TimestampSecs,
+    at: kv::timestamp::TimestampSecs,
 ) -> Result<(), StorageError> {
     let previous = state(txn, stream_id).await?;
     schedule_observed(txn, stream_id, previous, at)?;
@@ -79,19 +71,26 @@ pub(super) async fn wake_after_trim(
             return Ok(());
         }
     }
-    schedule_observed(txn, stream_id, previous, TimestampSecs::now())?;
+    schedule_observed(
+        txn,
+        stream_id,
+        previous,
+        kv::timestamp::TimestampSecs::now(),
+    )?;
     Ok(())
 }
 
 fn schedule_observed(
     txn: &DbTransaction,
     stream_id: StreamId,
-    previous: Option<State>,
-    at: TimestampSecs,
+    previous: Option<kv::stream_doe_state::State>,
+    at: kv::timestamp::TimestampSecs,
 ) -> Result<(), slatedb::Error> {
     let next = match previous {
-        Some(State::Scheduled(check)) if check.at <= at => State::Scheduled(check),
-        _ => State::Scheduled(Check {
+        Some(kv::stream_doe_state::State::Scheduled(check)) if check.at <= at => {
+            kv::stream_doe_state::State::Scheduled(check)
+        }
+        _ => kv::stream_doe_state::State::Scheduled(kv::stream_doe_state::Check {
             at,
             id: rand::random(),
         }),
@@ -109,14 +108,14 @@ pub(super) async fn clear(txn: &DbTransaction, stream_id: StreamId) -> Result<()
 pub(super) fn replace(
     txn: &DbTransaction,
     stream_id: StreamId,
-    previous: Option<State>,
-    next: Option<State>,
+    previous: Option<kv::stream_doe_state::State>,
+    next: Option<kv::stream_doe_state::State>,
 ) -> Result<(), slatedb::Error> {
     if previous != next {
-        if let Some(State::Scheduled(check)) = previous {
+        if let Some(kv::stream_doe_state::State::Scheduled(check)) = previous {
             txn.delete(kv::stream_doe_check::ser_key(stream_id, check))?;
         }
-        if let Some(State::Scheduled(check)) = next {
+        if let Some(kv::stream_doe_state::State::Scheduled(check)) = next {
             txn.put(kv::stream_doe_check::ser_key(stream_id, check), [])?;
         }
     }

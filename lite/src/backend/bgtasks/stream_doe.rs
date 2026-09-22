@@ -12,11 +12,7 @@ use crate::{
     backend::{
         Backend, doe,
         error::{DeleteStreamError, StorageError, StreamDeleteOnEmptyError},
-        kv::{
-            self,
-            stream_doe_state::{Check, State},
-            timestamp::TimestampSecs,
-        },
+        kv,
         store::{db_snapshot_get_with, db_txn_commit_durable, db_txn_get, db_txn_get_with},
         streamer::{TerminalTrimCondition, TerminalTrimOutcome},
     },
@@ -29,7 +25,7 @@ const CONCURRENCY: usize = 4;
 #[derive(Clone, Copy, Debug)]
 struct PendingCheck {
     stream_id: StreamId,
-    check: Check,
+    check: kv::stream_doe_state::Check,
 }
 
 struct CheckSnapshot {
@@ -45,7 +41,9 @@ impl Backend {
         // Drain legacy keys regardless of their old deadlines. Their timestamps
         // and values have no role in the new scheduler or deletion eligibility.
         let mut progress = self.migrate_stream_doe().await?;
-        let page = self.list_pending_stream_doe(TimestampSecs::now()).await?;
+        let page = self
+            .list_pending_stream_doe(kv::timestamp::TimestampSecs::now())
+            .await?;
         progress.has_more |= page.has_more;
         let mut processed = stream::iter(page.values)
             .map(|pending| {
@@ -61,7 +59,7 @@ impl Backend {
 
     async fn list_pending_stream_doe(
         &self,
-        now: TimestampSecs,
+        now: kv::timestamp::TimestampSecs,
     ) -> Result<Page<PendingCheck>, StorageError> {
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
@@ -122,8 +120,8 @@ impl Backend {
             |entry| Ok((kv::stream_doe_state::deser_value(entry.value)?, entry.seq)),
         )
         .await?;
-        let Some((State::Scheduled(_), revision)) =
-            state.filter(|(state, _)| *state == State::Scheduled(pending.check))
+        let Some((kv::stream_doe_state::State::Scheduled(_), revision)) = state
+            .filter(|(state, _)| *state == kv::stream_doe_state::State::Scheduled(pending.check))
         else {
             drop(snapshot);
             self.discard_doe_check(pending, state).await?;
@@ -164,7 +162,7 @@ impl Backend {
     async fn discard_doe_check(
         &self,
         pending: PendingCheck,
-        observed: Option<(State, u64)>,
+        observed: Option<(kv::stream_doe_state::State, u64)>,
     ) -> Result<(), StorageError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let current = db_txn_get_with(
@@ -177,8 +175,13 @@ impl Backend {
             return Ok(());
         }
         match current {
-            Some((State::Scheduled(check), _)) if check == pending.check => {
-                doe::replace(&txn, pending.stream_id, Some(State::Scheduled(check)), None)?;
+            Some((kv::stream_doe_state::State::Scheduled(check), _)) if check == pending.check => {
+                doe::replace(
+                    &txn,
+                    pending.stream_id,
+                    Some(kv::stream_doe_state::State::Scheduled(check)),
+                    None,
+                )?;
             }
             _ => {
                 txn.delete(kv::stream_doe_check::ser_key(
@@ -204,7 +207,12 @@ impl Backend {
             |entry| Ok((kv::stream_doe_state::deser_value(entry.value)?, entry.seq)),
         )
         .await?;
-        if state != Some((State::Scheduled(pending.check), snapshot.revision)) {
+        if state
+            != Some((
+                kv::stream_doe_state::State::Scheduled(pending.check),
+                snapshot.revision,
+            ))
+        {
             // A trim/configuration event owns the next check, even if it kept the
             // same ticket. Consuming or postponing it here would lose that wake.
             return Ok(());
@@ -223,11 +231,13 @@ impl Backend {
             }
         }
         let next = match outcome {
-            TerminalTrimOutcome::RetryAt(at) => Some(State::Scheduled(Check {
-                at,
-                id: rand::random(),
-            })),
-            TerminalTrimOutcome::Parked => Some(State::Parked),
+            TerminalTrimOutcome::RetryAt(at) => Some(kv::stream_doe_state::State::Scheduled(
+                kv::stream_doe_state::Check {
+                    at,
+                    id: rand::random(),
+                },
+            )),
+            TerminalTrimOutcome::Parked => Some(kv::stream_doe_state::State::Parked),
             TerminalTrimOutcome::DeletionPending | TerminalTrimOutcome::Obsolete => None,
         };
         // Consuming the old check and installing its successor is one durable
@@ -235,7 +245,7 @@ impl Backend {
         doe::replace(
             &txn,
             pending.stream_id,
-            Some(State::Scheduled(pending.check)),
+            Some(kv::stream_doe_state::State::Scheduled(pending.check)),
             next,
         )?;
         db_txn_commit_durable(txn).await?;
@@ -333,8 +343,8 @@ impl Backend {
             })
             .await?;
             if state.is_none_or(|(_, seq)| seq < creation_seq) {
-                let next = State::Scheduled(Check {
-                    at: TimestampSecs::now(),
+                let next = kv::stream_doe_state::State::Scheduled(kv::stream_doe_state::Check {
+                    at: kv::timestamp::TimestampSecs::now(),
                     id: rand::random(),
                 });
                 doe::replace(&txn, stream_id, state.map(|(state, _)| state), Some(next))?;
@@ -418,7 +428,10 @@ mod tests {
         config
     }
 
-    async fn state(backend: &Backend, stream_id: StreamId) -> Option<(State, u64)> {
+    async fn state(
+        backend: &Backend,
+        stream_id: StreamId,
+    ) -> Option<(kv::stream_doe_state::State, u64)> {
         backend
             .db_get_with(kv::stream_doe_state::ser_key(stream_id), |entry| {
                 Ok((kv::stream_doe_state::deser_value(entry.value)?, entry.seq))
@@ -427,12 +440,14 @@ mod tests {
             .unwrap()
     }
 
-    async fn scheduled(backend: &Backend, stream_id: StreamId) -> Check {
-        let Some((State::Scheduled(check), _)) = state(backend, stream_id).await else {
+    async fn scheduled(backend: &Backend, stream_id: StreamId) -> kv::stream_doe_state::Check {
+        let Some((kv::stream_doe_state::State::Scheduled(check), _)) =
+            state(backend, stream_id).await
+        else {
             panic!("expected a scheduled check");
         };
         let checks = backend
-            .list_pending_stream_doe(TimestampSecs::MAX)
+            .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
             .await
             .unwrap();
         assert_eq!(checks.values.len(), 1);
@@ -447,7 +462,7 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        doe::schedule(&txn, stream_id, TimestampSecs::ZERO)
+        doe::schedule(&txn, stream_id, kv::timestamp::TimestampSecs::ZERO)
             .await
             .unwrap();
         db_txn_commit_durable(txn).await.unwrap();
@@ -543,7 +558,8 @@ mod tests {
     }
 
     async fn legacy(backend: &Backend, stream_id: StreamId, id: Option<u128>) -> Bytes {
-        let key = kv::stream_doe_deadline::ser_key(TimestampSecs::MAX, stream_id, id);
+        let key =
+            kv::stream_doe_deadline::ser_key(kv::timestamp::TimestampSecs::MAX, stream_id, id);
         // Migration must not interpret the old min_age, even for future keys.
         backend.db.put(&key, [0xff]).assert_durable().await;
         key
@@ -552,16 +568,16 @@ mod tests {
     #[tokio::test]
     async fn creation_schedules_once_and_appends_do_not_write_schedules() {
         let backend = test_backend().await;
-        let before = TimestampSecs::after(Duration::from_secs(60));
+        let before = kv::timestamp::TimestampSecs::after(Duration::from_secs(60));
         let (basin, stream) =
             create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
         let stream_id = StreamId::new(&basin, &stream);
         let check = scheduled(&backend, stream_id).await;
         assert!(check.at >= before);
-        assert!(check.at <= TimestampSecs::after(Duration::from_secs(60)));
+        assert!(check.at <= kv::timestamp::TimestampSecs::after(Duration::from_secs(60)));
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::now())
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::now())
                 .await
                 .unwrap()
                 .values
@@ -598,7 +614,7 @@ mod tests {
         )
         .await;
         let stream_id = StreamId::new(&basin, &stream);
-        let lower_bound = TimestampSecs::after(Duration::from_secs(3600));
+        let lower_bound = kv::timestamp::TimestampSecs::after(Duration::from_secs(3600));
         append(&backend, &basin, &stream, record()).await;
         let original = state(&backend, stream_id).await;
         configure_retention(&backend, &basin, &stream, new_age).await;
@@ -646,7 +662,7 @@ mod tests {
         assert!(state(&backend, stream_id).await.is_none());
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::MAX)
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                 .await
                 .unwrap()
                 .values
@@ -686,22 +702,22 @@ mod tests {
             assert!(state(&backend, stream_id).await.is_none());
             assert!(
                 backend
-                    .list_pending_stream_doe(TimestampSecs::MAX)
+                    .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                     .await
                     .unwrap()
                     .values
                     .is_empty()
             );
             configure_min_age(&backend, &basin, &stream, 60, via_ensure).await;
-            assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+            assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
         } else if age == 60 {
             assert_eq!(state(&backend, stream_id).await, original);
         } else {
-            assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+            assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
             backend.clone().tick_stream_doe().await.unwrap();
             assert!(
                 scheduled(&backend, stream_id).await.at
-                    >= TimestampSecs::now()
+                    >= kv::timestamp::TimestampSecs::now()
                         .saturating_add_duration(Duration::from_secs(age.saturating_sub(1)))
             );
             assert!(backend.get_stream_config(basin, stream).await.is_ok());
@@ -721,10 +737,13 @@ mod tests {
             .await
             .unwrap();
         let parked = state(&backend, stream_id).await;
-        assert!(matches!(parked, Some((State::Parked, _))));
+        assert!(matches!(
+            parked,
+            Some((kv::stream_doe_state::State::Parked, _))
+        ));
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::MAX)
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                 .await
                 .unwrap()
                 .values
@@ -741,11 +760,11 @@ mod tests {
         )
         .await;
         backend.clone().tick_stream_trim().await.unwrap();
-        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
         backend.clone().tick_stream_doe().await.unwrap();
         assert!(
             scheduled(&backend, stream_id).await.at
-                > TimestampSecs::after(Duration::from_secs(3500))
+                > kv::timestamp::TimestampSecs::after(Duration::from_secs(3500))
         );
         backend.close().await.unwrap();
     }
@@ -790,12 +809,12 @@ mod tests {
         backend.clone().tick_stream_trim().await.unwrap();
         let after_trim = state(&backend, stream_id).await;
         if legacy_only && full_trim {
-            assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+            assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
         } else {
             assert!(after_trim.is_none());
             assert!(
                 backend
-                    .list_pending_stream_doe(TimestampSecs::MAX)
+                    .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                     .await
                     .unwrap()
                     .values
@@ -812,7 +831,7 @@ mod tests {
         } else {
             configure_min_age(&backend, &basin, &stream, 60, false).await;
         }
-        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
         backend.close().await.unwrap();
     }
 
@@ -842,7 +861,7 @@ mod tests {
         )
         .await;
         backend.clone().tick_stream_trim().await.unwrap();
-        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
         tokio::time::sleep(Duration::from_millis(1100)).await;
         backend.clone().tick_stream_doe().await.unwrap();
         let meta = backend
@@ -898,7 +917,7 @@ mod tests {
         assert!(state(&backend, stream_id).await.is_none());
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::MAX)
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                 .await
                 .unwrap()
                 .values
@@ -945,7 +964,7 @@ mod tests {
         let outcome = if park {
             TerminalTrimOutcome::Parked
         } else {
-            TerminalTrimOutcome::RetryAt(TimestampSecs::MAX)
+            TerminalTrimOutcome::RetryAt(kv::timestamp::TimestampSecs::MAX)
         };
         backend
             .finish_doe_check(pending, snapshot, outcome)
@@ -987,7 +1006,7 @@ mod tests {
         assert!(state(&backend, stream_id).await.is_none());
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::MAX)
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                 .await
                 .unwrap()
                 .values
@@ -1012,7 +1031,7 @@ mod tests {
         let old = legacy(&backend, stream_id, None).await;
         let unique = legacy(&backend, stream_id, Some(42)).await;
         backend.migrate_stream_doe().await.unwrap();
-        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
         assert!(backend.db.get(&old).await.unwrap().is_none());
         assert!(backend.db.get(&unique).await.unwrap().is_none());
         let initialized = state(&backend, stream_id).await;
@@ -1024,13 +1043,16 @@ mod tests {
         append(&backend, &basin, &stream, record()).await;
         backend.clone().tick_stream_doe().await.unwrap();
         let parked = state(&backend, stream_id).await;
-        assert!(matches!(parked, Some((State::Parked, _))));
+        assert!(matches!(
+            parked,
+            Some((kv::stream_doe_state::State::Parked, _))
+        ));
         legacy(&backend, stream_id, Some(43)).await;
         backend.migrate_stream_doe().await.unwrap();
         assert_eq!(state(&backend, stream_id).await, parked);
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::MAX)
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                 .await
                 .unwrap()
                 .values
@@ -1049,7 +1071,11 @@ mod tests {
         let mut batch = slatedb::WriteBatch::new();
         for id in 0..=PENDING_LIST_LIMIT {
             batch.put(
-                kv::stream_doe_deadline::ser_key(TimestampSecs::MAX, stream_id, Some(id as u128)),
+                kv::stream_doe_deadline::ser_key(
+                    kv::timestamp::TimestampSecs::MAX,
+                    stream_id,
+                    Some(id as u128),
+                ),
                 [],
             );
         }
@@ -1215,14 +1241,20 @@ mod tests {
             .await
             .unwrap();
         let previous = doe::state(&txn, stream_id).await.unwrap();
-        doe::replace(&txn, stream_id, previous, Some(State::Parked)).unwrap();
+        doe::replace(
+            &txn,
+            stream_id,
+            previous,
+            Some(kv::stream_doe_state::State::Parked),
+        )
+        .unwrap();
         // The same ticket is retained, but the scheduler revision changes.
         let wake = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        doe::schedule(&wake, stream_id, TimestampSecs::now())
+        doe::schedule(&wake, stream_id, kv::timestamp::TimestampSecs::now())
             .await
             .unwrap();
         db_txn_commit_durable(wake).await.unwrap();
@@ -1262,7 +1294,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             state(&backend, stream_id).await,
-            Some((State::Parked, _))
+            Some((kv::stream_doe_state::State::Parked, _))
         ));
         append(
             &backend,
@@ -1272,9 +1304,9 @@ mod tests {
         )
         .await;
         backend.clone().tick_stream_trim().await.unwrap();
-        assert!(scheduled(&backend, stream_id).await.at <= TimestampSecs::now());
+        assert!(scheduled(&backend, stream_id).await.at <= kv::timestamp::TimestampSecs::now());
         backend.clone().tick_stream_doe().await.unwrap();
-        assert!(scheduled(&backend, stream_id).await.at > TimestampSecs::now());
+        assert!(scheduled(&backend, stream_id).await.at > kv::timestamp::TimestampSecs::now());
         let meta = backend
             .db_get(
                 kv::stream_meta::ser_key(&basin, &stream),
@@ -1305,7 +1337,7 @@ mod tests {
         assert!(state(&backend, stream_id).await.is_none());
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::MAX)
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                 .await
                 .unwrap()
                 .values
@@ -1401,7 +1433,10 @@ mod tests {
             .await
             .unwrap();
         let before = state(&backend, stream_id).await;
-        assert!(matches!(before, Some((State::Parked, _))));
+        assert!(matches!(
+            before,
+            Some((kv::stream_doe_state::State::Parked, _))
+        ));
         backend.close().await.unwrap();
         let db = slatedb::Db::builder("/restart", store)
             .build()
@@ -1411,7 +1446,7 @@ mod tests {
         assert_eq!(state(&backend, stream_id).await, before);
         assert!(
             backend
-                .list_pending_stream_doe(TimestampSecs::MAX)
+                .list_pending_stream_doe(kv::timestamp::TimestampSecs::MAX)
                 .await
                 .unwrap()
                 .values
