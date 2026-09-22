@@ -1,3 +1,4 @@
+{{- $walMode := include "s2-lite.walStorage.mode" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -63,15 +64,32 @@ spec:
           - {{ .Values.objectStorage.path | quote }}
           {{- end }}
           {{- end }}
+          {{- if eq $walMode "bucket" }}
+          - --wal-bucket
+          - {{ .Values.walStorage.bucket | quote }}
+          {{- else if eq $walMode "volume" }}
+          - --wal-local-root
+          - {{ .Values.walStorage.persistentVolume.mountPath | quote }}
+          {{- end }}
         ports:
         - name: http
           containerPort: {{ .Values.service.targetPort }}
           protocol: TCP
-        {{- if or (and .Values.objectStorage.enabled .Values.objectStorage.endpoint) .Values.env }}
+        {{- $walEndpoint := and (eq $walMode "bucket") .Values.walStorage.endpoint }}
+        {{- $walRegion := and (eq $walMode "bucket") .Values.walStorage.region }}
+        {{- if or (and .Values.objectStorage.enabled .Values.objectStorage.endpoint) $walEndpoint $walRegion .Values.env }}
         env:
         {{- if and .Values.objectStorage.enabled .Values.objectStorage.endpoint }}
         - name: AWS_ENDPOINT_URL_S3
           value: {{ .Values.objectStorage.endpoint | quote }}
+        {{- end }}
+        {{- if $walEndpoint }}
+        - name: S2LITE_WAL_AWS_ENDPOINT_URL_S3
+          value: {{ .Values.walStorage.endpoint | quote }}
+        {{- end }}
+        {{- if $walRegion }}
+        - name: S2LITE_WAL_AWS_REGION
+          value: {{ .Values.walStorage.region | quote }}
         {{- end }}
         {{- with .Values.env }}
         {{- toYaml . | nindent 8 }}
@@ -108,13 +126,26 @@ spec:
         {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
-        {{- with .Values.volumeMounts }}
+        {{- if or (eq $walMode "volume") .Values.volumeMounts }}
         volumeMounts:
+        {{- if eq $walMode "volume" }}
+        - name: wal
+          mountPath: {{ .Values.walStorage.persistentVolume.mountPath | quote }}
+        {{- end }}
+        {{- with .Values.volumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.volumes }}
+        {{- end }}
+      {{- if or (eq $walMode "volume") .Values.volumes }}
       volumes:
+      {{- if eq $walMode "volume" }}
+      - name: wal
+        persistentVolumeClaim:
+          claimName: {{ include "s2-lite.walStorage.claimName" . }}
+      {{- end }}
+      {{- with .Values.volumes }}
       {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

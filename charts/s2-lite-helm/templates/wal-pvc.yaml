@@ -1,0 +1,21 @@
+{{- if and (eq (include "s2-lite.walStorage.mode" .) "volume") (not .Values.walStorage.persistentVolume.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "s2-lite.walStorage.claimName" . }}
+  labels:
+    {{- include "s2-lite.labels" . | nindent 4 }}
+  {{- with .Values.walStorage.persistentVolume.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.walStorage.persistentVolume.accessModes | nindent 4 }}
+  {{- if .Values.walStorage.persistentVolume.storageClass }}
+  storageClassName: {{ .Values.walStorage.persistentVolume.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.walStorage.persistentVolume.size | quote }}
+{{- end }}

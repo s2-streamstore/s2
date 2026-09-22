@@ -19,6 +19,12 @@ s2-lite is now running with the following configuration:
   {{- if .Values.objectStorage.endpoint }}
   - Endpoint: {{ .Values.objectStorage.endpoint }}
   {{- end }}
+  {{- $walMode := include "s2-lite.walStorage.mode" . }}
+  {{- if eq $walMode "bucket" }}
+  - WAL: S3-compatible ({{ .Values.walStorage.bucket }})
+  {{- else if eq $walMode "volume" }}
+  - WAL: Persistent volume ({{ include "s2-lite.walStorage.claimName" . }} at {{ .Values.walStorage.persistentVolume.mountPath }})
+  {{- end }}
 {{- else }}
   - Storage: In-memory (data lost on pod restart)
 {{- end }}

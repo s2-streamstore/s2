@@ -119,6 +119,47 @@ objectStorage:
   endpoint: ""
 
 # ------------------------------------------------------------------------------
+# WAL Storage Configuration
+#
+# By default, the write-ahead log (WAL) is stored in the main bucket.
+# Optionally place it in a separate S3 bucket or on a persistent volume to
+# isolate WAL latency from memtable flushes and compaction.
+# Requires objectStorage.enabled. Configure at most one of bucket or
+# persistentVolume.
+#
+# WARNING: Choose the WAL location when creating the database and keep it the
+# same on every upgrade. Changing it does not migrate WAL data, and the server
+# starts without an error; acknowledged records that were only in the previous
+# WAL location become unreadable.
+# ------------------------------------------------------------------------------
+
+walStorage:
+  # S3 bucket name for the WAL (--wal-bucket).
+  # Uses the same AWS configuration as objectStorage.bucket unless overridden.
+  bucket: ""
+  # S3-compatible endpoint URL for the WAL bucket (leave empty to share objectStorage.endpoint)
+  endpoint: ""
+  # AWS region for the WAL bucket (leave empty to share the main region)
+  region: ""
+  # To use different credentials for the WAL bucket, set S2LITE_WAL_AWS_ACCESS_KEY_ID
+  # and S2LITE_WAL_AWS_SECRET_ACCESS_KEY via env (e.g. from a secret).
+
+  # Persistent volume for the WAL (--wal-local-root).
+  # A persistent volume is required: an emptyDir loses acknowledged records when
+  # the pod is rescheduled.
+  persistentVolume:
+    enabled: false
+    mountPath: /data/wal
+    size: 10Gi
+    # Leave empty to use the cluster default StorageClass
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    # Use an existing PersistentVolumeClaim instead of creating one
+    existingClaim: ""
+    annotations: {}
+
+# ------------------------------------------------------------------------------
 # Observability
 # ------------------------------------------------------------------------------
 

@@ -66,3 +66,26 @@ Create the image name
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
+
+{{/*
+WAL storage mode: "bucket", "volume", or "" when the WAL shares the main bucket.
+Validates the walStorage values.
+*/}}
+{{- define "s2-lite.walStorage.mode" -}}
+{{- $bucket := .Values.walStorage.bucket }}
+{{- $volume := .Values.walStorage.persistentVolume.enabled }}
+{{- if and $bucket $volume }}
+{{- fail "walStorage.bucket and walStorage.persistentVolume.enabled are mutually exclusive" }}
+{{- end }}
+{{- if and (or $bucket $volume) (not .Values.objectStorage.enabled) }}
+{{- fail "walStorage requires objectStorage.enabled" }}
+{{- end }}
+{{- if $bucket }}bucket{{- else if $volume }}volume{{- end }}
+{{- end }}
+
+{{/*
+Name of the WAL PersistentVolumeClaim
+*/}}
+{{- define "s2-lite.walStorage.claimName" -}}
+{{- default (printf "%s-wal" (include "s2-lite.fullname" .)) .Values.walStorage.persistentVolume.existingClaim }}
+{{- end }}

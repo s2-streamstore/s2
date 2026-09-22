@@ -310,6 +310,48 @@ jobs:
             exit 1
           fi
 
+      - name: Test with WAL bucket
+        run: |
+          helm template test-release charts/s2-lite-helm \
+            --set objectStorage.enabled=true \
+            --set objectStorage.bucket=test-bucket \
+            --set walStorage.bucket=test-wal-bucket \
+            --set walStorage.endpoint=http://minio:9000 \
+            --set walStorage.region=us-east-1 \
+            --dry-run > /dev/null
+
+      - name: Test with WAL persistent volume
+        run: |
+          helm template test-release charts/s2-lite-helm \
+            --set objectStorage.enabled=true \
+            --set objectStorage.bucket=test-bucket \
+            --set walStorage.persistentVolume.enabled=true \
+            --dry-run | grep -q "kind: PersistentVolumeClaim"
+          helm template test-release charts/s2-lite-helm \
+            --set objectStorage.enabled=true \
+            --set objectStorage.bucket=test-bucket \
+            --set walStorage.persistentVolume.enabled=true \
+            --set walStorage.persistentVolume.existingClaim=my-wal \
+            --dry-run | grep -q "claimName: my-wal"
+
+      - name: Test invalid walStorage combinations fail
+        run: |
+          if helm template test-release charts/s2-lite-helm \
+            --set walStorage.bucket=test-wal-bucket \
+            --dry-run 2>&1; then
+            echo "Expected failure but got success"
+            exit 1
+          fi
+          if helm template test-release charts/s2-lite-helm \
+            --set objectStorage.enabled=true \
+            --set objectStorage.bucket=test-bucket \
+            --set walStorage.bucket=test-wal-bucket \
+            --set walStorage.persistentVolume.enabled=true \
+            --dry-run 2>&1; then
+            echo "Expected failure but got success"
+            exit 1
+          fi
+
   build-server:
     name: Build s2-lite
     needs: rust-dependency-cooldown
