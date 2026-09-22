@@ -5,6 +5,7 @@ pub mod error;
 mod basins;
 pub mod bgtasks;
 mod core;
+mod doe;
 mod durability_notifier;
 mod read;
 mod store;

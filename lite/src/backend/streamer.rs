@@ -40,27 +40,20 @@ use crate::{
     backend::{
         append,
         bgtasks::BgtaskTrigger,
+        doe,
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
             DeleteStreamError, MaxSeqNumError, RequestDroppedError, StorageError,
             StreamerMissingInActionError,
         },
-        kv,
+        kv::{self, timestamp::TimestampSecs},
     },
     metrics,
     stream_id::StreamId,
 };
 
 pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
-// Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
-const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
-
-pub(super) fn doe_arm_delay(base_delay: Duration, min_age: Duration) -> Duration {
-    base_delay
-        .saturating_add(min_age)
-        .saturating_add(DOE_DEADLINE_REFRESH_PERIOD)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct StreamerGenerationId(u64);
@@ -80,7 +73,6 @@ struct InFlightAppend {
 
 struct DbSubmitAppendOptions {
     retention: RetentionPolicy,
-    doe_deadline: Option<kv::stream_doe_deadline::Entry>,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
 }
@@ -265,7 +257,6 @@ impl Spawner {
                 state: trim_point,
                 applied_point: ..tail_pos.seq_num,
             },
-            last_doe_deadline_at: None,
             db_writes_pending: VecDeque::new(),
             db_durability_subscription: 0,
             inflight_appends: VecDeque::new(),
@@ -321,7 +312,6 @@ struct Streamer {
     last_tail_write_timestamp: kv::timestamp::TimestampSecs,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
-    last_doe_deadline_at: Option<Instant>,
     db_writes_pending: VecDeque<BoxFuture<'static, Result<InFlightAppend, slatedb::Error>>>,
     db_durability_subscription: u64,
     inflight_appends: VecDeque<InFlightAppend>,
@@ -435,7 +425,6 @@ impl Streamer {
                 let seq_num_range = first_pos.seq_num..next_pos.seq_num;
                 let opts = DbSubmitAppendOptions {
                     retention: self.config.retention_policy,
-                    doe_deadline: self.doe_deadline_maybe(),
                     fencing_token: self
                         .fencing_token
                         .is_applied_in(&seq_num_range)
@@ -468,31 +457,37 @@ impl Streamer {
                 self.append_terminal_trim(reply_tx);
             }
             TerminalTrimCondition::DeleteOnEmpty {
-                last_write_cutoff,
                 expected_stream_creation_seq,
+                expected_config_seq,
             } => {
-                if self.stream_creation_seq != expected_stream_creation_seq
-                    || self.last_tail_write_timestamp > last_write_cutoff
-                    || self.next_assignable_pos().seq_num != self.stable_pos.seq_num
-                    || self.config.delete_on_empty.min_age().is_none()
-                {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
-                    return;
-                }
-
-                let db = self.db.clone();
-                let stream_id = self.stream_id;
-                let stable_pos_snapshot = self.stable_pos;
-                let msg_tx = self.msg_tx.clone();
-                tokio::spawn(async move {
-                    let has_records = stream_has_records(&db, stream_id).await;
-                    let _ = msg_tx.send(Message::DeleteOnEmptyCheckResult {
-                        stable_pos_snapshot,
-                        last_write_cutoff,
-                        has_records,
-                        reply_tx,
+                if self.stream_creation_seq != expected_stream_creation_seq {
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
+                } else if self.trim_point.state.end == SeqNum::MAX {
+                    self.append_terminal_trim(reply_tx);
+                } else if self.config_seq != expected_config_seq {
+                    // The worker may have observed a configuration commit before
+                    // its notification reached this actor (or vice versa).
+                    let _ = reply_tx.send(Ok(self.doe_retry_at(TimestampSecs::ZERO)));
+                } else if self.config.delete_on_empty.min_age().is_none() {
+                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
+                } else if self.next_assignable_pos() != self.stable_pos {
+                    let _ = reply_tx.send(Ok(self.doe_retry_at(TimestampSecs::ZERO)));
+                } else {
+                    let db = self.db.clone();
+                    let stream_id = self.stream_id;
+                    let stable_pos_snapshot = self.stable_pos;
+                    let config_seq_snapshot = self.config_seq;
+                    let msg_tx = self.msg_tx.clone();
+                    tokio::spawn(async move {
+                        let records = stream_record_presence(&db, stream_id).await;
+                        let _ = msg_tx.send(Message::DeleteOnEmptyCheckResult {
+                            stable_pos_snapshot,
+                            config_seq_snapshot,
+                            records,
+                            reply_tx,
+                        });
                     });
-                });
+                }
             }
         }
     }
@@ -500,31 +495,56 @@ impl Streamer {
     fn handle_doe_check_result(
         &mut self,
         stable_pos_snapshot: StreamPosition,
-        last_write_cutoff: kv::timestamp::TimestampSecs,
-        has_records: Result<bool, StorageError>,
+        config_seq_snapshot: u64,
+        records: Result<RecordPresence, StorageError>,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     ) {
-        match has_records {
-            Ok(true) => {
-                let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
-            }
-            Ok(false) => {
-                if self.trim_point.state.end == SeqNum::MAX {
-                    self.append_terminal_trim(reply_tx);
-                } else if self.stable_pos != stable_pos_snapshot
-                    || self.next_assignable_pos() != stable_pos_snapshot
-                    || self.last_tail_write_timestamp > last_write_cutoff
-                    || self.config.delete_on_empty.min_age().is_none()
-                {
-                    let _ = reply_tx.send(Ok(TerminalTrimOutcome::Ineligible));
-                } else {
-                    self.append_terminal_trim(reply_tx);
-                }
-            }
+        let records = match records {
+            Ok(records) => records,
             Err(err) => {
                 let _ = reply_tx.send(Err(err.into()));
+                return;
             }
+        };
+        if self.trim_point.state.end == SeqNum::MAX {
+            self.append_terminal_trim(reply_tx);
+            return;
         }
+        let Some(min_age) = self.config.delete_on_empty.min_age() else {
+            let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
+            return;
+        };
+        let outcome = if self.stable_pos != stable_pos_snapshot
+            || self.next_assignable_pos() != stable_pos_snapshot
+            || self.config_seq != config_seq_snapshot
+        {
+            self.doe_retry_at(TimestampSecs::ZERO)
+        } else {
+            let old_enough = TimestampSecs::now()
+                .checked_sub_duration(min_age)
+                .is_some_and(|cutoff| self.last_tail_write_timestamp <= cutoff);
+            match records {
+                RecordPresence::Empty if old_enough => {
+                    self.append_terminal_trim(reply_tx);
+                    return;
+                }
+                RecordPresence::Empty => self.doe_retry_at(TimestampSecs::ZERO),
+                RecordPresence::ExpiresAt(at) => self.doe_retry_at(at),
+                RecordPresence::Unbounded => TerminalTrimOutcome::Parked,
+            }
+        };
+        let _ = reply_tx.send(Ok(outcome));
+    }
+
+    fn doe_retry_at(&self, earliest_empty: TimestampSecs) -> TerminalTrimOutcome {
+        let age_at = self
+            .last_tail_write_timestamp
+            .saturating_add_duration(self.config.delete_on_empty.min_age().unwrap_or_default());
+        TerminalTrimOutcome::RetryAt(
+            TimestampSecs::after(doe::RETRY_INTERVAL)
+                .max(age_at)
+                .max(earliest_empty),
+        )
     }
 
     fn append_terminal_trim(
@@ -564,23 +584,6 @@ impl Streamer {
             };
             let _ = reply_tx.send(result);
         });
-    }
-
-    fn doe_deadline_maybe(&mut self) -> Option<kv::stream_doe_deadline::Entry> {
-        let retention_age = self.config.retention_policy.age()?;
-        let min_age = self.config.delete_on_empty.min_age()?;
-        let now = Instant::now();
-        if self
-            .last_doe_deadline_at
-            .is_none_or(|t| now.duration_since(t) >= DOE_DEADLINE_REFRESH_PERIOD)
-        {
-            self.last_doe_deadline_at = Some(now);
-            let deadline =
-                kv::timestamp::TimestampSecs::after(doe_arm_delay(retention_age, min_age));
-            Some(kv::stream_doe_deadline::Entry { deadline, min_age })
-        } else {
-            None
-        }
     }
 
     fn subscribe_durability(&mut self) {
@@ -674,14 +677,14 @@ impl Streamer {
                         }
                         Message::DeleteOnEmptyCheckResult {
                             stable_pos_snapshot,
-                            last_write_cutoff,
-                            has_records,
+                            config_seq_snapshot,
+                            records,
                             reply_tx,
                         } => {
                             self.handle_doe_check_result(
                                 stable_pos_snapshot,
-                                last_write_cutoff,
-                                has_records,
+                                config_seq_snapshot,
+                                records,
                                 reply_tx,
                             );
                         }
@@ -751,8 +754,8 @@ enum Message {
     },
     DeleteOnEmptyCheckResult {
         stable_pos_snapshot: StreamPosition,
-        last_write_cutoff: kv::timestamp::TimestampSecs,
-        has_records: Result<bool, StorageError>,
+        config_seq_snapshot: u64,
+        records: Result<RecordPresence, StorageError>,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     },
     Follow {
@@ -774,8 +777,8 @@ enum Message {
 pub(super) enum TerminalTrimCondition {
     Always,
     DeleteOnEmpty {
-        last_write_cutoff: kv::timestamp::TimestampSecs,
         expected_stream_creation_seq: u64,
+        expected_config_seq: u64,
     },
 }
 
@@ -783,7 +786,10 @@ pub(super) enum TerminalTrimCondition {
 pub(super) enum TerminalTrimOutcome {
     /// Deletion is durably pending.
     DeletionPending,
-    Ineligible,
+    RetryAt(TimestampSecs),
+    Parked,
+    /// DOE is disabled or this request belongs to an earlier incarnation.
+    Obsolete,
 }
 
 #[derive(Debug, Clone)]
@@ -971,7 +977,17 @@ pub fn next_pos(records: &[Metered<StoredSequencedRecord>]) -> StreamPosition {
     }
 }
 
-async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<bool, StorageError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordPresence {
+    Empty,
+    ExpiresAt(TimestampSecs),
+    Unbounded,
+}
+
+async fn stream_record_presence(
+    db: &slatedb::Db,
+    stream_id: StreamId,
+) -> Result<RecordPresence, StorageError> {
     let prefix = kv::stream_record_timestamp::ser_key_prefix(stream_id);
     let scan_opts = ScanOptions::default().with_order(IterationOrder::Descending);
     let mut it = db.scan_prefix_with_options(prefix, .., &scan_opts).await?;
@@ -980,11 +996,20 @@ async fn stream_has_records(db: &slatedb::Db, stream_id: StreamId) -> Result<boo
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0);
     while let Some(kv) = it.next().await? {
-        if kv.expire_ts.is_none_or(|expire_ts| expire_ts > now_millis) {
-            return Ok(true);
+        match kv.expire_ts {
+            None => return Ok(RecordPresence::Unbounded),
+            Some(expire_ts) if expire_ts > now_millis => {
+                // One live record bounds when the stream can become empty.
+                // Use its stored TTL, since retention changes are not retroactive.
+                // Round up so the check does not run just before expiration.
+                return Ok(RecordPresence::ExpiresAt(TimestampSecs::from_millis(
+                    expire_ts.saturating_add(999),
+                )));
+            }
+            _ => (),
         }
     }
-    Ok(false)
+    Ok(RecordPresence::Empty)
 }
 
 fn sequenced_records(
@@ -1039,7 +1064,6 @@ async fn db_submit_append(
     records: Vec<Metered<StoredSequencedRecord>>,
     DbSubmitAppendOptions {
         retention,
-        doe_deadline,
         fencing_token,
         trim_point,
     }: DbSubmitAppendOptions,
@@ -1072,12 +1096,6 @@ async fn db_submit_append(
         wb.put_bytes(
             kv::stream_trim_point::ser_key(stream_id),
             kv::stream_trim_point::ser_value(..trim_point),
-        );
-    }
-    if let Some(doe_deadline) = doe_deadline {
-        wb.put_bytes(
-            kv::stream_doe_deadline::new_key(doe_deadline.deadline, stream_id),
-            kv::stream_doe_deadline::ser_value(doe_deadline.min_age),
         );
     }
     wb.put_bytes(
@@ -1462,7 +1480,6 @@ mod tests {
                 state: ..SeqNum::MIN,
                 applied_point: ..SeqNum::MIN,
             },
-            last_doe_deadline_at: None,
             db_writes_pending: VecDeque::new(),
             db_durability_subscription: 0,
             inflight_appends: VecDeque::new(),
@@ -1591,8 +1608,8 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         streamer.handle_doe_check_result(
             StreamPosition::MIN,
-            kv::timestamp::TimestampSecs::MAX,
-            Ok(false),
+            streamer.config_seq,
+            Ok(RecordPresence::Empty),
             tx,
         );
         replies.push(rx);
@@ -1649,6 +1666,7 @@ mod tests {
     #[tokio::test]
     async fn delete_on_empty_terminal_trim_skips_pending_append() {
         let mut streamer = test_streamer().await;
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(60);
         let (append_tx, mut append_rx) = oneshot::channel();
         streamer.handle_append(append_input(b"live"), None, append_tx, AppendType::Regular);
         assert_eq!(streamer.db_writes_pending.len(), 1);
@@ -1660,17 +1678,177 @@ mod tests {
         let (trim_tx, trim_rx) = oneshot::channel();
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
-                last_write_cutoff: kv::timestamp::TimestampSecs::MAX,
+                expected_config_seq: 0,
                 expected_stream_creation_seq: 0,
             },
             trim_tx,
         );
 
-        assert_eq!(
+        assert!(matches!(
             trim_rx.await.expect("terminal trim reply").unwrap(),
-            TerminalTrimOutcome::Ineligible
-        );
+            TerminalTrimOutcome::RetryAt(_)
+        ));
         assert_eq!(streamer.db_writes_pending.len(), 1);
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_on_empty_rechecks_append_after_scan(#[values(false, true)] durable: bool) {
+        let mut streamer = test_streamer().await;
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(1);
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_stream_creation_seq: 0,
+                expected_config_seq: 0,
+            },
+            reply_tx,
+        );
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected empty-stream check result");
+        };
+        assert_eq!(records.as_ref().unwrap(), &RecordPresence::Empty);
+        let (append_tx, append_rx) = oneshot::channel();
+        streamer.handle_append(
+            append_input(b"arrived during scan"),
+            None,
+            append_tx,
+            AppendType::Regular,
+        );
+        if durable {
+            let submitted = streamer
+                .db_writes_pending
+                .pop_front()
+                .unwrap()
+                .await
+                .unwrap();
+            let seq = submitted.db_seq;
+            streamer.inflight_appends.push_back(submitted);
+            streamer.db.flush().await.unwrap();
+            streamer.on_db_durable_seq_advanced(seq);
+            append_rx.await.unwrap().unwrap();
+        }
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        );
+        assert!(matches!(
+            reply_rx.await.unwrap().unwrap(),
+            TerminalTrimOutcome::RetryAt(_)
+        ));
+        assert_eq!(streamer.db_writes_pending.len(), usize::from(!durable));
+        assert_ne!(streamer.trim_point.state.end, SeqNum::MAX);
+        streamer.db.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::actor_behind(0, 1)]
+    #[case::worker_behind(1, 0)]
+    #[tokio::test]
+    async fn delete_on_empty_requires_matching_config_revision(
+        #[case] actor_seq: u64,
+        #[case] worker_seq: u64,
+    ) {
+        let mut streamer = test_streamer().await;
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(1);
+        streamer.config_seq = actor_seq;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_stream_creation_seq: 0,
+                expected_config_seq: worker_seq,
+            },
+            reply_tx,
+        );
+        assert!(matches!(
+            reply_rx.await.unwrap().unwrap(),
+            TerminalTrimOutcome::RetryAt(_)
+        ));
+        assert!(streamer.db_writes_pending.is_empty());
+        streamer.db.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::increased(600, false)]
+    #[case::increased_but_elapsed(90, true)]
+    #[case::unchanged(60, true)]
+    #[case::decreased(30, true)]
+    #[case::disabled(0, false)]
+    #[case::unrepresentable_cutoff(u64::MAX, false)]
+    #[tokio::test]
+    async fn delete_on_empty_rechecks_min_age_after_empty_check(
+        #[case] min_age_secs: u64,
+        #[case] eligible: bool,
+    ) {
+        let mut streamer = test_streamer().await;
+        let now = kv::timestamp::TimestampSecs::now();
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(60);
+        streamer.last_tail_write_timestamp =
+            now.checked_sub_duration(Duration::from_secs(120)).unwrap();
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_config_seq: streamer.config_seq,
+                expected_stream_creation_seq: streamer.stream_creation_seq,
+            },
+            reply_tx,
+        );
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected empty-stream check result");
+        };
+        assert_eq!(records.as_ref().unwrap(), &RecordPresence::Empty);
+
+        // Reconfiguration can be processed while the database scan is in flight.
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(min_age_secs);
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        );
+        assert_eq!(streamer.db_writes_pending.len(), usize::from(eligible));
+        let outcome = if eligible {
+            let submitted = streamer
+                .db_writes_pending
+                .pop_front()
+                .unwrap()
+                .await
+                .unwrap();
+            let db_seq = submitted.db_seq;
+            streamer.inflight_appends.push_back(submitted);
+            streamer.db.flush().await.unwrap();
+            streamer.on_db_durable_seq_advanced(db_seq);
+            TerminalTrimOutcome::DeletionPending
+        } else {
+            let outcome = reply_rx.await.unwrap().unwrap();
+            if min_age_secs == 0 {
+                assert_eq!(outcome, TerminalTrimOutcome::Obsolete);
+            } else {
+                assert!(matches!(outcome, TerminalTrimOutcome::RetryAt(at) if at > now));
+            }
+            streamer.db.close().await.unwrap();
+            return;
+        };
+        assert_eq!(reply_rx.await.unwrap().unwrap(), outcome);
+        streamer.db.close().await.unwrap();
     }
 
     #[tokio::test]

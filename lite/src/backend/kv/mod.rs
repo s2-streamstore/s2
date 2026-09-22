@@ -1,6 +1,8 @@
 pub mod basin_deletion_pending;
 pub mod basin_meta;
+pub mod stream_doe_check;
 pub mod stream_doe_deadline;
+pub mod stream_doe_state;
 pub mod stream_fencing_token;
 pub mod stream_id_mapping;
 pub mod stream_meta;
@@ -49,6 +51,8 @@ pub enum KeyType {
     StreamRecordData = 6,
     StreamRecordTimestamp = 7,
     StreamDeleteOnEmptyDeadline = 10,
+    StreamDeleteOnEmptyState = 11,
+    StreamDeleteOnEmptyCheck = 12,
 }
 
 #[derive(Debug, Clone)]
@@ -89,10 +93,15 @@ pub enum Key {
     /// Key: StreamID Timestamp SeqNum
     /// Value: empty
     StreamRecordTimestamp(StreamId, StreamPosition),
-    /// (SDOED) per-schedule, immutable, deletable once processed
+    /// (SDOED) legacy schedule, consumed only to initialize the new DOE state
     /// Key: TimestampSecs StreamID ScheduleID (u128, absent in legacy keys)
     /// Value: MinAge seconds (u64)
     StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId, Option<u128>),
+    /// Per-stream DOE state. Its commit sequence is the scheduler revision and
+    /// must be at least the current ID mapping's creation sequence.
+    StreamDeleteOnEmptyState(StreamId),
+    /// Time-ordered index of scheduled states; the value is empty.
+    StreamDeleteOnEmptyCheck(StreamId, stream_doe_state::Check),
 }
 
 impl From<Key> for Bytes {
@@ -111,6 +120,10 @@ impl From<Key> for Bytes {
             }
             Key::StreamDeleteOnEmptyDeadline(deadline, stream_id, schedule_id) => {
                 stream_doe_deadline::ser_key(deadline, stream_id, schedule_id)
+            }
+            Key::StreamDeleteOnEmptyState(stream_id) => stream_doe_state::ser_key(stream_id),
+            Key::StreamDeleteOnEmptyCheck(stream_id, check) => {
+                stream_doe_check::ser_key(stream_id, check)
             }
         }
     }
@@ -152,6 +165,11 @@ impl TryFrom<Bytes> for Key {
                     Key::StreamDeleteOnEmptyDeadline(deadline, stream_id, schedule_id)
                 })
             }
+            KeyType::StreamDeleteOnEmptyState => {
+                stream_doe_state::deser_key(bytes).map(Key::StreamDeleteOnEmptyState)
+            }
+            KeyType::StreamDeleteOnEmptyCheck => stream_doe_check::deser_key(bytes)
+                .map(|(stream_id, check)| Key::StreamDeleteOnEmptyCheck(stream_id, check)),
         }
     }
 }

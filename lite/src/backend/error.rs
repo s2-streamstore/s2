@@ -317,7 +317,7 @@ impl From<kv::DeserializationError> for ListStreamsError {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProvisionStreamError {
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
@@ -334,10 +334,17 @@ pub enum ProvisionStreamError {
 
 impl From<slatedb::Error> for ProvisionStreamError {
     fn from(err: slatedb::Error) -> Self {
-        if err.kind() == slatedb::ErrorKind::Transaction {
+        Self::from(StorageError::from(err))
+    }
+}
+
+impl From<StorageError> for ProvisionStreamError {
+    fn from(err: StorageError) -> Self {
+        if matches!(&err, StorageError::Database(err) if err.kind() == slatedb::ErrorKind::Transaction)
+        {
             Self::TransactionConflict(TransactionConflictError)
         } else {
-            Self::Storage(err.into())
+            Self::Storage(err)
         }
     }
 }
@@ -474,7 +481,7 @@ impl From<slatedb::Error> for ReconfigureBasinError {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ReconfigureStreamError {
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
@@ -491,10 +498,17 @@ pub enum ReconfigureStreamError {
 
 impl From<slatedb::Error> for ReconfigureStreamError {
     fn from(err: slatedb::Error) -> Self {
-        if err.kind() == slatedb::ErrorKind::Transaction {
+        Self::from(StorageError::from(err))
+    }
+}
+
+impl From<StorageError> for ReconfigureStreamError {
+    fn from(err: StorageError) -> Self {
+        if matches!(&err, StorageError::Database(err) if err.kind() == slatedb::ErrorKind::Transaction)
+        {
             Self::TransactionConflict(TransactionConflictError)
         } else {
-            Self::Storage(err.into())
+            Self::Storage(err)
         }
     }
 }

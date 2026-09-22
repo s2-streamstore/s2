@@ -1,4 +1,4 @@
-use std::{ops::RangeTo, time::Duration};
+use std::ops::RangeTo;
 
 use futures::{StreamExt, stream};
 use s2_common::{record::NonZeroSeqNum, resources::Page};
@@ -10,11 +10,10 @@ use tracing::instrument;
 
 use crate::{
     backend::{
-        Backend,
+        Backend, doe,
         error::StorageError,
         kv::{self, timestamp::TimestampSecs},
         store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
-        streamer::doe_arm_delay,
     },
     stream_id::StreamId,
 };
@@ -75,13 +74,12 @@ impl Backend {
     }
 
     async fn process_trim(&self, pending: PendingTrim) -> Result<(), StorageError> {
-        let has_remaining_records = self.delete_records(pending).await?;
-        self.finalize_trim(pending, has_remaining_records).await
+        self.delete_records(pending).await?;
+        self.finalize_trim(pending).await
     }
 
-    /// Return whether records remain beyond the trim point.
     #[instrument(ret, err, skip(self))]
-    async fn delete_records(&self, pending: PendingTrim) -> Result<bool, StorageError> {
+    async fn delete_records(&self, pending: PendingTrim) -> Result<(), StorageError> {
         let prefix = kv::stream_record_timestamp::ser_key_prefix(pending.stream_id);
         let scan_opts = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
@@ -93,7 +91,6 @@ impl Backend {
             .await?;
         let mut batch = WriteBatch::new();
         let mut batch_size = 0;
-        let mut has_remaining_records = false;
         while let Some(kv) = it.next().await? {
             let (deser_stream_id, pos) = kv::stream_record_timestamp::deser_key(kv.key.clone())?;
             debug_assert_eq!(deser_stream_id, pending.stream_id);
@@ -101,7 +98,6 @@ impl Backend {
             // A stale job may see records from the recreated stream; stop before
             // deleting records committed after the trim marker it observed.
             if pos.seq_num >= pending.trim_point.end.get() || kv.seq > pending.marker_seq {
-                has_remaining_records = true;
                 break;
             }
             batch.delete(kv.key);
@@ -116,15 +112,11 @@ impl Backend {
         if !batch.is_empty() {
             self.db.write(batch).await?.await_durable().await?;
         }
-        Ok(has_remaining_records)
+        Ok(())
     }
 
     #[instrument(ret, err, skip(self))]
-    async fn finalize_trim(
-        &self,
-        pending: PendingTrim,
-        has_remaining_records: bool,
-    ) -> Result<(), StorageError> {
+    async fn finalize_trim(&self, pending: PendingTrim) -> Result<(), StorageError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
         let current_seq = db_txn_get_with(&txn, &trim_point_key, |entry| Ok(entry.seq)).await?;
@@ -148,18 +140,18 @@ impl Backend {
             }
             txn.delete(kv::stream_tail_position::ser_key(pending.stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(pending.stream_id))?;
-        } else if !has_remaining_records {
-            arm_doe_on_full_trim(&txn, pending.stream_id).await?;
+            doe::clear(&txn, pending.stream_id).await?;
+        } else {
+            // A partial trim may remove the infinite-retention record that
+            // parked DOE while leaving finite-retention records behind.
+            wake_doe_on_trim(&txn, pending.stream_id).await?;
         }
         db_txn_commit_durable(txn).await?;
         Ok(())
     }
 }
 
-async fn arm_doe_on_full_trim(
-    txn: &DbTransaction,
-    stream_id: StreamId,
-) -> Result<(), StorageError> {
+async fn wake_doe_on_trim(txn: &DbTransaction, stream_id: StreamId) -> Result<(), StorageError> {
     let Some((basin, stream)) = db_txn_get(
         txn,
         kv::stream_id_mapping::ser_key(stream_id),
@@ -181,14 +173,10 @@ async fn arm_doe_on_full_trim(
     if meta.deleted_at.is_some() {
         return Ok(());
     }
-    let Some(min_age) = meta.config.delete_on_empty.min_age() else {
+    if meta.config.delete_on_empty.min_age().is_none() {
         return Ok(());
-    };
-    let deadline = TimestampSecs::after(doe_arm_delay(Duration::ZERO, min_age));
-    txn.put(
-        kv::stream_doe_deadline::new_key(deadline, stream_id),
-        kv::stream_doe_deadline::ser_value(min_age),
-    )?;
+    }
+    doe::schedule(txn, stream_id, TimestampSecs::now()).await?;
     Ok(())
 }
 

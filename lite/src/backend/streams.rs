@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use s2_common::{
     basin::BasinName,
     config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
@@ -14,9 +16,9 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend,
+    Backend, doe,
     store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
-    streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
+    streamer::{TerminalTrimCondition, TerminalTrimOutcome},
 };
 use crate::{
     backend::{
@@ -212,23 +214,15 @@ impl Backend {
                 )?;
             }
 
-            if let Some(min_age) = meta.config.delete_on_empty.min_age()
-                && (matches!(&outcome, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
-            {
-                txn.put(
-                    kv::stream_doe_deadline::new_key(
-                        kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                            meta.config.retention_policy.age().unwrap_or_default(),
-                            min_age,
-                        )),
-                        stream_id,
-                    ),
-                    kv::stream_doe_deadline::ser_value(min_age),
-                )?;
-            }
-
-            self.commit_stream_config(txn, basin.clone(), stream.clone(), meta.config.clone())
-                .await?;
+            self.commit_stream_config(
+                txn,
+                basin.clone(),
+                stream.clone(),
+                meta.config.clone(),
+                prior_doe_min_age,
+                matches!(&outcome, ProvisionResult::Created(_)),
+            )
+            .await?;
         }
 
         Ok(outcome.map(|meta| StreamInfo {
@@ -304,24 +298,15 @@ impl Backend {
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
-        let stream_id = StreamId::new(&basin, &stream);
-        if let Some(min_age) = meta.config.delete_on_empty.min_age()
-            && prior_doe_min_age.is_none()
-        {
-            txn.put(
-                kv::stream_doe_deadline::new_key(
-                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                        meta.config.retention_policy.age().unwrap_or_default(),
-                        min_age,
-                    )),
-                    stream_id,
-                ),
-                kv::stream_doe_deadline::ser_value(min_age),
-            )?;
-        }
-
-        self.commit_stream_config(txn, basin, stream, meta.config.clone())
-            .await?;
+        self.commit_stream_config(
+            txn,
+            basin,
+            stream,
+            meta.config.clone(),
+            prior_doe_min_age,
+            false,
+        )
+        .await?;
 
         Ok(meta.config)
     }
@@ -332,7 +317,23 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         config: StreamConfig,
-    ) -> Result<(), slatedb::Error> {
+        prior_doe_min_age: Option<Duration>,
+        created: bool,
+    ) -> Result<(), StorageError> {
+        let stream_id = StreamId::new(&basin, &stream);
+        match config.delete_on_empty.min_age() {
+            Some(min_age) if created || prior_doe_min_age != Some(min_age) => {
+                let at = if created {
+                    kv::timestamp::TimestampSecs::after(min_age)
+                } else {
+                    kv::timestamp::TimestampSecs::now()
+                };
+                doe::schedule(&txn, stream_id, at).await?;
+            }
+            None if prior_doe_min_age.is_some() => doe::clear(&txn, stream_id).await?,
+            _ => (),
+        }
+
         let backend = self.clone();
         // Once a commit starts, cancellation must not discard its notification.
         tokio::spawn(async move {
@@ -340,7 +341,7 @@ impl Backend {
                 .await?
                 .expect("stream metadata was written");
             backend.advise_stream_config(&basin, &stream, seq, config);
-            Ok(())
+            Ok::<_, StorageError>(())
         })
         .await
         .expect("stream config commit task panicked")
@@ -354,6 +355,7 @@ impl Backend {
     ) -> Result<(), DeleteStreamError> {
         self.delete_stream_with_condition(basin, stream, TerminalTrimCondition::Always)
             .await
+            .map(|_| ())
     }
 
     pub(super) async fn delete_stream_with_condition(
@@ -361,7 +363,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         condition: TerminalTrimCondition,
-    ) -> Result<(), DeleteStreamError> {
+    ) -> Result<TerminalTrimOutcome, DeleteStreamError> {
         let outcome = match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => client.terminal_trim(condition).await?,
             Err(StreamerError::Storage(e)) => {
@@ -372,10 +374,10 @@ impl Backend {
             }
             Err(StreamerError::StreamDeletionPending(_)) => TerminalTrimOutcome::DeletionPending,
         };
-        match outcome {
-            TerminalTrimOutcome::DeletionPending => self.mark_stream_deleted(basin, stream).await,
-            TerminalTrimOutcome::Ineligible => Ok(()),
+        if outcome == TerminalTrimOutcome::DeletionPending {
+            self.mark_stream_deleted(basin, stream).await?;
         }
+        Ok(outcome)
     }
 
     async fn mark_stream_deleted(
