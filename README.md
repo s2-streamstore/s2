@@ -209,9 +209,6 @@ remote S3 bucket:
 s2 lite --bucket my-lsm-bucket --wal-local-root /data/wal --path my-database
 ```
 
-The bucket uses the usual AWS credentials, profile or instance role. The local
-WAL store has fsync enabled.
-
 To use a separate WAL bucket instead, add `--wal-bucket`:
 
 ```bash
@@ -228,15 +225,6 @@ that differ:
 | `S2LITE_WAL_AWS_REGION` | Overrides the shared AWS region. |
 | `S2LITE_WAL_AWS_ACCESS_KEY_ID` / `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` | Overrides the shared credentials; both must be supplied together. If omitted, uses the same credentials/profile/instance role as the main store. |
 | `S2LITE_WAL_AWS_SESSION_TOKEN` | Optional token for the WAL-specific key pair. The main store's token is not inherited when a WAL key pair is supplied. |
-
-The default WAL flush interval follows the WAL store type: 50 ms for an S3 bucket,
-5 ms for a local filesystem. `SL8_FLUSH_INTERVAL` overrides this default.
-
-Configure separate stores when creating a database and use the same locations
-on every restart. These options do not migrate existing WAL data. Acknowledged
-records depend on the WAL store until they are flushed into the main store, so
-the WAL store's durability and availability matter. Separate buckets on the same
-disk still share I/O; use separate storage resources to isolate that contention.
 
 ### Monitoring
 
