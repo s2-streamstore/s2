@@ -222,10 +222,6 @@ s2 lite --bucket my-bucket --wal-local-root /data/wal
 s2 lite --bucket my-bucket --wal-bucket my-wal-bucket
 ```
 
-> [!WARNING]
-> Changing the WAL location does not migrate WAL data, and the server starts without an error;
-> acknowledged records that were only in the previous WAL location become unreadable.
-
 ### Monitoring
 
 `/health` will return 200 on success for readiness and liveness checks
