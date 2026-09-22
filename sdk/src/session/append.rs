@@ -61,12 +61,12 @@ pub enum AppendSessionError {
     InvalidAck(String),
     /// The final attempt failed definitively, but an earlier attempt may have taken effect.
     #[error(
-        "append may have taken effect in an earlier attempt; final attempt failed: {ultimate_attempt_error}"
+        "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
     )]
     IndefiniteFailure {
-        /// The definite error returned by the ultimate attempt.
+        /// The definite error returned by the final attempt.
         #[source]
-        ultimate_attempt_error: Box<Self>,
+        final_attempt_error: Box<Self>,
     },
 }
 
@@ -76,8 +76,8 @@ impl AppendSessionError {
         match self {
             Self::Append(error) => error.is_retryable(),
             Self::IndefiniteFailure {
-                ultimate_attempt_error,
-            } => ultimate_attempt_error.is_retryable(),
+                final_attempt_error,
+            } => final_attempt_error.is_retryable(),
             Self::AckTimeout | Self::ServerDisconnected => true,
             Self::StreamClosedEarly
             | Self::SessionClosed
@@ -106,8 +106,8 @@ impl AppendSessionError {
         match self {
             Self::Append(error) => error.request_error(),
             Self::IndefiniteFailure {
-                ultimate_attempt_error,
-            } => ultimate_attempt_error.request_error(),
+                final_attempt_error,
+            } => final_attempt_error.request_error(),
             Self::AckTimeout
             | Self::ServerDisconnected
             | Self::StreamClosedEarly
@@ -135,7 +135,7 @@ impl AppendSessionError {
     fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
         if prior_uncertainty && self.has_no_side_effects() {
             Self::IndefiniteFailure {
-                ultimate_attempt_error: Box::new(self),
+                final_attempt_error: Box::new(self),
             }
         } else {
             self

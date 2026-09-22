@@ -668,11 +668,11 @@ pub(crate) enum ApiError {
     #[error("append condition check failed")]
     AppendConditionFailed(AppendConditionFailed),
     #[error(
-        "append may have taken effect in an earlier attempt; final attempt failed: {ultimate_attempt_error}"
+        "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
     )]
     IndefiniteFailure {
         #[source]
-        ultimate_attempt_error: Box<Self>,
+        final_attempt_error: Box<Self>,
     },
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
@@ -686,8 +686,8 @@ impl ApiError {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
             Self::IndefiniteFailure {
-                ultimate_attempt_error,
-            } => ultimate_attempt_error.is_retryable(),
+                final_attempt_error,
+            } => final_attempt_error.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
             _ => false,
@@ -725,7 +725,7 @@ impl ApiError {
     fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
         if prior_uncertainty && self.has_no_side_effects() {
             Self::IndefiniteFailure {
-                ultimate_attempt_error: Box::new(self),
+                final_attempt_error: Box::new(self),
             }
         } else {
             self

@@ -334,12 +334,12 @@ pub enum AppendError {
     ConditionFailed(#[from] AppendConditionFailed),
     /// The final attempt failed definitively, but an earlier attempt may have taken effect.
     #[error(
-        "append may have taken effect in an earlier attempt; final attempt failed: {ultimate_attempt_error}"
+        "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
     )]
     IndefiniteFailure {
-        /// The definite error returned by the ultimate attempt.
+        /// The definite error returned by the final attempt.
         #[source]
-        ultimate_attempt_error: Box<Self>,
+        final_attempt_error: Box<Self>,
     },
 }
 
@@ -350,8 +350,8 @@ impl AppendError {
             Self::Request(error) => error.is_retryable(),
             Self::ConditionFailed(_) => false,
             Self::IndefiniteFailure {
-                ultimate_attempt_error,
-            } => ultimate_attempt_error.is_retryable(),
+                final_attempt_error,
+            } => final_attempt_error.is_retryable(),
         }
     }
 
@@ -370,8 +370,8 @@ impl AppendError {
             Self::Request(error) => Some(error),
             Self::ConditionFailed(_) => None,
             Self::IndefiniteFailure {
-                ultimate_attempt_error,
-            } => ultimate_attempt_error.request_error(),
+                final_attempt_error,
+            } => final_attempt_error.request_error(),
         }
     }
 }
@@ -381,9 +381,9 @@ impl From<ApiError> for AppendError {
         match error {
             ApiError::AppendConditionFailed(condition) => Self::ConditionFailed(condition.into()),
             ApiError::IndefiniteFailure {
-                ultimate_attempt_error,
+                final_attempt_error,
             } => Self::IndefiniteFailure {
-                ultimate_attempt_error: Box::new((*ultimate_attempt_error).into()),
+                final_attempt_error: Box::new((*final_attempt_error).into()),
             },
             other => Self::Request(other.into()),
         }
