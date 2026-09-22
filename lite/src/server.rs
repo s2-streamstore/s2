@@ -213,7 +213,11 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     };
     let wal_object_store = match &wal_store_type {
         Some(wal_store_type) => {
-            Some(init_object_store(wal_store_type, Some(WalS3Overrides::from_env()?)).await?)
+            let s3_overrides = match wal_store_type {
+                StoreType::S3Bucket(_) => Some(WalS3Overrides::from_env()?),
+                StoreType::LocalFileSystem(_) | StoreType::InMemory => None,
+            };
+            Some(init_object_store(wal_store_type, s3_overrides).await?)
         }
         None => None,
     };
