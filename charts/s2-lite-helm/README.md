@@ -56,40 +56,25 @@ Supports AWS S3, MinIO, Tigris, Cloudflare R2, and other S3-compatible services.
 
 ### Separate WAL storage
 
-By default the write-ahead log (WAL) lives in the main bucket. Placing it in a
-separate store isolates WAL latency from memtable flushes and compaction. See
-[Separate WAL storage](../../README.md#separate-wal-storage) for details.
-Requires `objectStorage.enabled`.
+The write-ahead log can live on a persistent volume or in a separate bucket
+(see [Storage](../../README.md#storage)). Requires `objectStorage.enabled`.
 
-**WAL on a persistent volume:**
 ```bash
+# WAL on a persistent volume
 helm install my-s2-lite s2/s2-lite-helm \
   --set objectStorage.enabled=true \
   --set objectStorage.bucket=my-bucket \
-  --set walStorage.persistentVolume.enabled=true \
-  --set walStorage.persistentVolume.size=10Gi
-```
+  --set walStorage.persistentVolume.enabled=true
 
-The chart creates a `PersistentVolumeClaim` and mounts it at
-`walStorage.persistentVolume.mountPath`. Set `existingClaim` to use your own.
-
-**WAL in a separate bucket:**
-```bash
+# WAL in a separate bucket
 helm install my-s2-lite s2/s2-lite-helm \
   --set objectStorage.enabled=true \
   --set objectStorage.bucket=my-bucket \
   --set walStorage.bucket=my-wal-bucket
 ```
 
-The WAL bucket shares the main bucket's AWS configuration. Set
-`walStorage.endpoint` or `walStorage.region` to override them, and use `env`
-to supply `S2LITE_WAL_AWS_ACCESS_KEY_ID` / `S2LITE_WAL_AWS_SECRET_ACCESS_KEY`
-for different credentials.
-
-> **Warning:** Choose the WAL location when creating the database and keep it
-> the same on every upgrade. Changing `walStorage` does not migrate WAL data,
-> and the server starts without an error; acknowledged records that were only
-> in the previous WAL location become unreadable.
+Keep the WAL location the same across upgrades; changing it does not migrate
+WAL data and the server starts without an error.
 
 ### TLS Configuration
 
@@ -142,12 +127,8 @@ Common configurations:
 | `objectStorage.bucket` | S3 bucket name | `""` |
 | `objectStorage.path` | Path prefix within bucket | `""` |
 | `walStorage.bucket` | Separate S3 bucket for the WAL | `""` |
-| `walStorage.endpoint` | Endpoint override for the WAL bucket | `""` |
-| `walStorage.region` | Region override for the WAL bucket | `""` |
 | `walStorage.persistentVolume.enabled` | Store the WAL on a persistent volume | `false` |
 | `walStorage.persistentVolume.size` | WAL volume size | `10Gi` |
-| `walStorage.persistentVolume.storageClass` | WAL volume StorageClass | `""` |
-| `walStorage.persistentVolume.existingClaim` | Use an existing PVC for the WAL | `""` |
 | `metrics.serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
 
 ## Examples

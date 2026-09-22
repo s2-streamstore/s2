@@ -5,15 +5,11 @@ metadata:
   name: {{ include "s2-lite.walStorage.claimName" . }}
   labels:
     {{- include "s2-lite.labels" . | nindent 4 }}
-  {{- with .Values.walStorage.persistentVolume.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
 spec:
   accessModes:
-    {{- toYaml .Values.walStorage.persistentVolume.accessModes | nindent 4 }}
-  {{- if .Values.walStorage.persistentVolume.storageClass }}
-  storageClassName: {{ .Values.walStorage.persistentVolume.storageClass | quote }}
+    - ReadWriteOnce
+  {{- with .Values.walStorage.persistentVolume.storageClass }}
+  storageClassName: {{ . | quote }}
   {{- end }}
   resources:
     requests:

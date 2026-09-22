@@ -75,21 +75,19 @@ spec:
         - name: http
           containerPort: {{ .Values.service.targetPort }}
           protocol: TCP
-        {{- $walEndpoint := and (eq $walMode "bucket") .Values.walStorage.endpoint }}
-        {{- $walRegion := and (eq $walMode "bucket") .Values.walStorage.region }}
-        {{- if or (and .Values.objectStorage.enabled .Values.objectStorage.endpoint) $walEndpoint $walRegion .Values.env }}
+        {{- if or (and .Values.objectStorage.enabled .Values.objectStorage.endpoint) .Values.walStorage.endpoint .Values.walStorage.region .Values.env }}
         env:
         {{- if and .Values.objectStorage.enabled .Values.objectStorage.endpoint }}
         - name: AWS_ENDPOINT_URL_S3
           value: {{ .Values.objectStorage.endpoint | quote }}
         {{- end }}
-        {{- if $walEndpoint }}
+        {{- with .Values.walStorage.endpoint }}
         - name: S2LITE_WAL_AWS_ENDPOINT_URL_S3
-          value: {{ .Values.walStorage.endpoint | quote }}
+          value: {{ . | quote }}
         {{- end }}
-        {{- if $walRegion }}
+        {{- with .Values.walStorage.region }}
         - name: S2LITE_WAL_AWS_REGION
-          value: {{ .Values.walStorage.region | quote }}
+          value: {{ . | quote }}
         {{- end }}
         {{- with .Values.env }}
         {{- toYaml . | nindent 8 }}

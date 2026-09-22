@@ -194,37 +194,38 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite-helm/README.md) for installation instructions and configuration options.
 
-### Separate WAL storage
+### Storage
 
-By default, Lite stores the write-ahead log (WAL), LSM data and metadata together.
-Use `--wal-bucket` or `--wal-local-root` to place the WAL in a separate store.
-The main database still uses `--bucket` or `--local-root`; `--path` applies to both
-stores. The WAL options are also available as `S2LITE_WAL_BUCKET` and
-`S2LITE_WAL_LOCAL_ROOT`.
+Lite persists to an S3-compatible bucket or a local directory, or runs in-memory when neither is given.
+The write-ahead log (WAL) shares the main store by default; it can be placed in a separate bucket or
+directory to isolate WAL latency from flushes and compaction. `--path` applies to both stores.
 
-For example, keep the WAL on the local filesystem while storing the LSM in a
-remote S3 bucket:
+| Setting | Main store | WAL store |
+| --- | --- | --- |
+| S3 bucket | `--bucket` | `--wal-bucket` / `S2LITE_WAL_BUCKET` |
+| Local directory | `--local-root` | `--wal-local-root` / `S2LITE_WAL_LOCAL_ROOT` |
+| S3 endpoint | `AWS_ENDPOINT_URL_S3` | `S2LITE_WAL_AWS_ENDPOINT_URL_S3` |
+| AWS region | `AWS_REGION` | `S2LITE_WAL_AWS_REGION` |
+| Static credentials | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | `S2LITE_WAL_AWS_ACCESS_KEY_ID` + `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` |
+| Session token | `AWS_SESSION_TOKEN` | `S2LITE_WAL_AWS_SESSION_TOKEN` |
+
+Without static credentials, the standard AWS credential chain (profile, instance role, etc.) is used.
+The WAL bucket inherits the main store's S3 settings; each `S2LITE_WAL_AWS_*` variable overrides just
+that setting, except that a WAL key pair replaces the main credentials (and session token) as a set.
+A WAL store requires a persistent main store.
 
 ```bash
-s2 lite --bucket my-lsm-bucket --wal-local-root /data/wal --path my-database
+# LSM in S3, WAL on local disk
+s2 lite --bucket my-bucket --wal-local-root /data/wal
+
+# LSM and WAL in separate buckets
+s2 lite --bucket my-bucket --wal-bucket my-wal-bucket
 ```
 
-To use a separate WAL bucket instead, add `--wal-bucket`:
-
-```bash
-s2 lite --bucket my-lsm-bucket --wal-bucket my-wal-bucket --path my-database
-```
-
-Both buckets use the same AWS configuration by default. To use a different
-endpoint, region or credentials for the WAL bucket, set only the overrides
-that differ:
-
-| Variable | Purpose |
-| --- | --- |
-| `S2LITE_WAL_AWS_ENDPOINT_URL_S3` | Overrides the shared S3 endpoint. HTTP endpoints are supported. |
-| `S2LITE_WAL_AWS_REGION` | Overrides the shared AWS region. |
-| `S2LITE_WAL_AWS_ACCESS_KEY_ID` / `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` | Overrides the shared credentials; both must be supplied together. If omitted, uses the same credentials/profile/instance role as the main store. |
-| `S2LITE_WAL_AWS_SESSION_TOKEN` | Optional token for the WAL-specific key pair. The main store's token is not inherited when a WAL key pair is supplied. |
+> [!WARNING]
+> Choose the WAL location when creating the database and keep it the same on every restart.
+> Changing it does not migrate WAL data, and the server starts without an error; acknowledged
+> records that were only in the previous WAL location become unreadable.
 
 ### Monitoring
 
