@@ -219,3 +219,14 @@ helm upgrade my-s2-lite s2/s2-lite-helm --version 0.1.0
 helm uninstall my-s2-lite
 ```
 
+This deletes any `PersistentVolumeClaim` the chart created, and with it the data on the
+volume. To keep the claim, annotate it before uninstalling:
+
+```yaml
+persistentVolume:
+  annotations:
+    helm.sh/resource-policy: keep
+```
+
+Claims supplied via `existingClaim` are never deleted by the chart.
+

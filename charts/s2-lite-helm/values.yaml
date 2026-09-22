@@ -127,6 +127,8 @@ persistentVolume:
   storageClass: ""
   # Use an existing PersistentVolumeClaim instead of creating one
   existingClaim: ""
+  # helm uninstall deletes the created claim; add helm.sh/resource-policy: keep to retain it
+  annotations: {}
 
 # ------------------------------------------------------------------------------
 # WAL Storage Configuration
@@ -154,6 +156,7 @@ walStorage:
     size: 10Gi
     storageClass: ""
     existingClaim: ""
+    annotations: {}
 
 # ------------------------------------------------------------------------------
 # Observability

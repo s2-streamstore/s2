@@ -7,6 +7,10 @@ metadata:
   name: {{ include "s2-lite.claimName" (dict "root" $ "name" $name "volume" $volume) }}
   labels:
     {{- include "s2-lite.labels" $ | nindent 4 }}
+  {{- with $volume.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   accessModes:
     - ReadWriteOnce
