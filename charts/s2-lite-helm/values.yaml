@@ -102,7 +102,8 @@ ingress:
 # Storage Configuration
 #
 # By default, s2-lite runs in-memory (great for dev/testing).
-# For persistent data, enable objectStorage with an S3-compatible bucket.
+# For persistent data, enable objectStorage with an S3-compatible bucket or
+# persistentVolume for a local disk. Enable at most one.
 # ------------------------------------------------------------------------------
 
 objectStorage:
@@ -118,32 +119,40 @@ objectStorage:
   #   R2: "https://<account>.r2.cloudflarestorage.com"
   endpoint: ""
 
+# Persistent volume for the database (--local-root)
+persistentVolume:
+  enabled: false
+  mountPath: /data
+  size: 10Gi
+  storageClass: ""
+  # Use an existing PersistentVolumeClaim instead of creating one
+  existingClaim: ""
+
 # ------------------------------------------------------------------------------
 # WAL Storage Configuration
 #
-# By default the write-ahead log (WAL) is stored in the main bucket. Place it in
-# a separate bucket or on a persistent volume to isolate WAL latency from
-# flushes and compaction. Requires objectStorage.enabled; set at most one of
-# bucket or persistentVolume.enabled.
+# By default the write-ahead log (WAL) is stored with the database. Place it in
+# a separate bucket or on its own persistent volume to isolate WAL latency from
+# flushes and compaction. Requires objectStorage or persistentVolume; set at
+# most one of bucket or persistentVolume.enabled.
 #
 # Keep the WAL location the same across upgrades: changing it does not migrate
 # WAL data and the server starts without an error.
 # ------------------------------------------------------------------------------
 
 walStorage:
-  # S3 bucket for the WAL (--wal-bucket). Shares the main bucket's AWS
+  # S3 bucket for the WAL (--wal-bucket). Shares objectStorage's AWS
   # configuration unless overridden below. For different credentials, set
   # S2LITE_WAL_AWS_ACCESS_KEY_ID / S2LITE_WAL_AWS_SECRET_ACCESS_KEY via env.
   bucket: ""
   endpoint: ""
   region: ""
-  # Persistent volume for the WAL (--wal-local-root).
+  # Persistent volume for the WAL (--wal-local-root)
   persistentVolume:
     enabled: false
-    mountPath: /data/wal
+    mountPath: /wal
     size: 10Gi
     storageClass: ""
-    # Use an existing PersistentVolumeClaim instead of creating one
     existingClaim: ""
 
 # ------------------------------------------------------------------------------

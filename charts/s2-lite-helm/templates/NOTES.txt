@@ -11,7 +11,9 @@ s2-lite is now running with the following configuration:
 
   - Replicas: {{ .Values.replicaCount }}
   - Image: {{ include "s2-lite.image" . }}
-{{- if and .Values.objectStorage.enabled .Values.objectStorage.bucket }}
+{{- $storageMode := include "s2-lite.storage.mode" . }}
+{{- $walMode := include "s2-lite.walStorage.mode" . }}
+{{- if eq $storageMode "bucket" }}
   - Storage: S3-compatible ({{ .Values.objectStorage.bucket }})
   {{- if .Values.objectStorage.path }}
   - Path: {{ .Values.objectStorage.path }}
@@ -19,14 +21,15 @@ s2-lite is now running with the following configuration:
   {{- if .Values.objectStorage.endpoint }}
   - Endpoint: {{ .Values.objectStorage.endpoint }}
   {{- end }}
-  {{- $walMode := include "s2-lite.walStorage.mode" . }}
-  {{- if eq $walMode "bucket" }}
-  - WAL: S3-compatible ({{ .Values.walStorage.bucket }})
-  {{- else if eq $walMode "volume" }}
-  - WAL: Persistent volume ({{ include "s2-lite.walStorage.claimName" . }} at {{ .Values.walStorage.persistentVolume.mountPath }})
-  {{- end }}
+{{- else if eq $storageMode "volume" }}
+  - Storage: Persistent volume ({{ include "s2-lite.claimName" (dict "root" . "name" "data" "volume" .Values.persistentVolume) }} at {{ .Values.persistentVolume.mountPath }})
 {{- else }}
   - Storage: In-memory (data lost on pod restart)
+{{- end }}
+{{- if eq $walMode "bucket" }}
+  - WAL: S3-compatible ({{ .Values.walStorage.bucket }})
+{{- else if eq $walMode "volume" }}
+  - WAL: Persistent volume ({{ include "s2-lite.claimName" (dict "root" . "name" "wal" "volume" .Values.walStorage.persistentVolume) }} at {{ .Values.walStorage.persistentVolume.mountPath }})
 {{- end }}
 
 Get the application URL by running these commands:

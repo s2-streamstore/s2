@@ -54,10 +54,22 @@ helm install my-s2-lite s2/s2-lite-helm \
 
 Supports AWS S3, MinIO, Tigris, Cloudflare R2, and other S3-compatible services.
 
+### Persistent volume
+
+```bash
+helm install my-s2-lite s2/s2-lite-helm \
+  --set persistentVolume.enabled=true \
+  --set persistentVolume.size=20Gi
+```
+
+Stores the database on a `PersistentVolumeClaim` instead of a bucket. Set
+`persistentVolume.existingClaim` to use your own claim.
+
 ### Separate WAL storage
 
-The write-ahead log can live on a persistent volume or in a separate bucket
-(see [Storage](../../README.md#storage)). Requires `objectStorage.enabled`.
+The write-ahead log can live in a separate bucket or on its own persistent
+volume (see [Storage](../../README.md#storage)). Requires `objectStorage` or
+`persistentVolume`.
 
 ```bash
 # WAL on a persistent volume
@@ -126,6 +138,8 @@ Common configurations:
 | `objectStorage.enabled` | Enable S3-compatible storage | `false` |
 | `objectStorage.bucket` | S3 bucket name | `""` |
 | `objectStorage.path` | Path prefix within bucket | `""` |
+| `persistentVolume.enabled` | Store the database on a persistent volume | `false` |
+| `persistentVolume.size` | Volume size | `10Gi` |
 | `walStorage.bucket` | Separate S3 bucket for the WAL | `""` |
 | `walStorage.persistentVolume.enabled` | Store the WAL on a persistent volume | `false` |
 | `walStorage.persistentVolume.size` | WAL volume size | `10Gi` |

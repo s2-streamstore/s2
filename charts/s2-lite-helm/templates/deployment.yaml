@@ -1,4 +1,6 @@
+{{- $storageMode := include "s2-lite.storage.mode" . }}
 {{- $walMode := include "s2-lite.walStorage.mode" . }}
+{{- $volumes := include "s2-lite.persistentVolumes" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,16 +55,16 @@ spec:
           {{- fail "tls.enabled is true but neither tls.cert/tls.key nor tls.selfSigned are configured" }}
           {{- end }}
           {{- end }}
-          {{- if .Values.objectStorage.enabled }}
-          {{- if not .Values.objectStorage.bucket }}
-          {{- fail "objectStorage.enabled is true but objectStorage.bucket is not set" }}
-          {{- end }}
+          {{- if eq $storageMode "bucket" }}
           - --bucket
           - {{ .Values.objectStorage.bucket | quote }}
-          {{- if .Values.objectStorage.path }}
+          {{- with .Values.objectStorage.path }}
           - --path
-          - {{ .Values.objectStorage.path | quote }}
+          - {{ . | quote }}
           {{- end }}
+          {{- else if eq $storageMode "volume" }}
+          - --local-root
+          - {{ .Values.persistentVolume.mountPath | quote }}
           {{- end }}
           {{- if eq $walMode "bucket" }}
           - --wal-bucket
@@ -124,22 +126,22 @@ spec:
         {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
-        {{- if or (eq $walMode "volume") .Values.volumeMounts }}
+        {{- if or $volumes .Values.volumeMounts }}
         volumeMounts:
-        {{- if eq $walMode "volume" }}
-        - name: wal
-          mountPath: {{ .Values.walStorage.persistentVolume.mountPath | quote }}
+        {{- range $name, $volume := $volumes }}
+        - name: {{ $name }}
+          mountPath: {{ $volume.mountPath | quote }}
         {{- end }}
         {{- with .Values.volumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
-      {{- if or (eq $walMode "volume") .Values.volumes }}
+      {{- if or $volumes .Values.volumes }}
       volumes:
-      {{- if eq $walMode "volume" }}
-      - name: wal
+      {{- range $name, $volume := $volumes }}
+      - name: {{ $name }}
         persistentVolumeClaim:
-          claimName: {{ include "s2-lite.walStorage.claimName" . }}
+          claimName: {{ include "s2-lite.claimName" (dict "root" $ "name" $name "volume" $volume) }}
       {{- end }}
       {{- with .Values.volumes }}
       {{- toYaml . | nindent 6 }}

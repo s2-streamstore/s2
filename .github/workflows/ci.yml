@@ -310,17 +310,16 @@ jobs:
             exit 1
           fi
 
-      - name: Test with WAL storage
+      - name: Test with persistent volume and WAL storage
         run: |
           helm template test-release charts/s2-lite-helm \
-            --set objectStorage.enabled=true \
-            --set objectStorage.bucket=test-bucket \
-            --set walStorage.bucket=test-wal-bucket \
+            --set persistentVolume.enabled=true \
+            --set walStorage.persistentVolume.enabled=true \
             --dry-run > /dev/null
           helm template test-release charts/s2-lite-helm \
             --set objectStorage.enabled=true \
             --set objectStorage.bucket=test-bucket \
-            --set walStorage.persistentVolume.enabled=true \
+            --set walStorage.bucket=test-wal-bucket \
             --dry-run > /dev/null
 
   build-server:
