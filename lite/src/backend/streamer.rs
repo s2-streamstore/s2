@@ -1685,14 +1685,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::pending_before_scan(false, false, false)]
-    #[case::pending_after_scan(true, false, true)]
-    #[case::durable_after_scan(true, true, false)]
+    #[case::pending_before_scan(false, false)]
+    #[case::pending_after_scan(true, false)]
+    #[case::durable_after_scan(true, true)]
     #[tokio::test]
     async fn delete_on_empty_uses_nonempty_observation_despite_appends(
         #[case] append_after_scan: bool,
         #[case] durable: bool,
-        #[case] infinite: bool,
+        #[values(false, true)] infinite: bool,
     ) {
         let mut streamer = test_streamer().await;
         streamer.config.delete_on_empty.min_age = Duration::from_secs(60);
@@ -1844,17 +1844,24 @@ mod tests {
         streamer.db.close().await.unwrap();
     }
 
+    #[rstest::rstest]
+    #[case::actor_behind(0, 1)]
+    #[case::worker_behind(1, 0)]
     #[tokio::test]
-    async fn delete_on_empty_bounds_retry_for_stale_config() {
+    async fn delete_on_empty_bounds_retry_for_stale_config(
+        #[case] actor_seq: u64,
+        #[case] worker_seq: u64,
+    ) {
         let mut streamer = test_streamer().await;
         streamer.config.delete_on_empty.min_age = Duration::from_secs(365 * 24 * 3600);
         streamer.last_tail_write_timestamp = kv::timestamp::TimestampSecs::now();
+        streamer.config_seq = actor_seq;
         let earliest_retry = kv::timestamp::TimestampSecs::after(doe::RETRY_INTERVAL);
         let (reply_tx, reply_rx) = oneshot::channel();
         streamer.handle_terminal_trim(
             TerminalTrimCondition::DeleteOnEmpty {
                 expected_stream_creation_seq: 0,
-                expected_config_seq: 1,
+                expected_config_seq: worker_seq,
             },
             reply_tx,
         );

@@ -72,4 +72,11 @@ mod tests {
             prop_assert_eq!(Bytes::from(super::super::Key::try_from(key.clone()).unwrap()), key);
         }
     }
+
+    #[test]
+    fn reject_truncated_or_unknown_state() {
+        for bytes in [&[][..], &[0, 1], &[1], &[2]] {
+            assert!(deser_value(Bytes::copy_from_slice(bytes)).is_err());
+        }
+    }
 }

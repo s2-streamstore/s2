@@ -675,6 +675,7 @@ mod tests {
     #[case::decrease(30)]
     #[case::unchanged(60)]
     #[case::disable(0)]
+    #[case::unrepresentable_cutoff(u64::MAX)]
     #[tokio::test]
     async fn configuration_coalesces_or_removes_the_schedule(
         #[case] age: u64,
@@ -758,16 +759,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::disabled_before_cleanup(false)]
-    #[case::legacy_only(true)]
+    #[case::disabled(0, false)]
+    #[case::disabled_before_cleanup(60, false)]
+    #[case::legacy_only(60, true)]
     #[tokio::test]
     async fn trim_initializes_missing_state_only_for_enabled_empty_streams(
+        #[case] min_age: u64,
         #[case] legacy_only: bool,
         #[values(false, true)] full_trim: bool,
     ) {
         let backend = test_backend().await;
         let (basin, stream) =
-            create_stream(&backend, config(60, RetentionPolicy::Infinite())).await;
+            create_stream(&backend, config(min_age, RetentionPolicy::Infinite())).await;
         let stream_id = StreamId::new(&basin, &stream);
         append(&backend, &basin, &stream, record()).await;
         append(
@@ -787,7 +790,7 @@ mod tests {
             doe::clear(&txn, stream_id).await.unwrap();
             db_txn_commit_durable(txn).await.unwrap();
             legacy(&backend, stream_id, None).await;
-        } else {
+        } else if min_age != 0 {
             configure_min_age(&backend, &basin, &stream, 0, false).await;
         }
         assert!(state(&backend, stream_id).await.is_none());
@@ -901,9 +904,12 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::parked(TerminalTrimOutcome::Parked)]
+    #[case::deferred(TerminalTrimOutcome::RetryAt(kv::timestamp::TimestampSecs::MAX))]
     #[tokio::test]
     async fn event_retaining_same_ticket_invalidates_inflight_result(
         #[values(false, true)] trim: bool,
+        #[case] outcome: TerminalTrimOutcome,
     ) {
         let backend = test_backend().await;
         let (basin, stream) =
@@ -935,7 +941,7 @@ mod tests {
         let woken = state(&backend, stream_id).await;
         assert!(woken.unwrap().1 > snapshot.revision);
         backend
-            .finish_doe_check(pending, snapshot, TerminalTrimOutcome::Parked)
+            .finish_doe_check(pending, snapshot, outcome)
             .await
             .unwrap();
         assert_eq!(state(&backend, stream_id).await, woken);
@@ -1189,8 +1195,13 @@ mod tests {
         backend.close().await.unwrap();
     }
 
+    #[rstest::rstest]
+    #[case::deletion_pending(TerminalTrimOutcome::DeletionPending)]
+    #[case::parked(TerminalTrimOutcome::Parked)]
     #[tokio::test]
-    async fn stale_work_cannot_delete_or_reschedule_recreated_stream() {
+    async fn stale_work_cannot_delete_or_reschedule_recreated_stream(
+        #[case] outcome: TerminalTrimOutcome,
+    ) {
         let backend = test_backend().await;
         let configuration = config(60, RetentionPolicy::Infinite());
         let (basin, stream) = create_stream(&backend, configuration.clone()).await;
@@ -1227,7 +1238,7 @@ mod tests {
             TerminalTrimOutcome::Obsolete
         );
         backend
-            .finish_doe_check(pending, snapshot, TerminalTrimOutcome::DeletionPending)
+            .finish_doe_check(pending, snapshot, outcome)
             .await
             .unwrap();
         backend.process_stream_doe(pending).await.unwrap();
