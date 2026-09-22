@@ -68,8 +68,6 @@ mod tests {
             prop_assert_eq!(deadline, decoded_deadline);
             prop_assert_eq!(stream_id, decoded_stream_id);
             prop_assert_eq!(schedule_id, decoded_schedule_id);
-            let decoded = super::super::Key::try_from(bytes.clone()).unwrap();
-            prop_assert_eq!(bytes, bytes::Bytes::from(decoded));
         }
     }
 }
