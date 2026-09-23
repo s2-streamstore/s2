@@ -19,7 +19,7 @@ use crate::{
     stream_id::StreamId,
 };
 
-const PENDING_LIST_LIMIT: usize = 128;
+const PENDING_LIST_LIMIT: usize = 10_000;
 const CONCURRENCY: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
