@@ -87,7 +87,7 @@
       "type": "object",
       "properties": {
         "storage_class": {
-          "description": "Storage class for recent writes.",
+          "description": "[Storage class](https://s2.dev/docs/storage-classes) for recent writes.",
           "type": [
             "string",
             "null"

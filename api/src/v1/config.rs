@@ -278,7 +278,7 @@ impl From<s2_common::encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamConfig {
-    /// Storage class for recent writes.
+    /// [Storage class](https://s2.dev/docs/storage-classes) for recent writes.
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     pub storage_class: Option<CompactString>,
     /// Retention policy for the stream.
@@ -393,7 +393,7 @@ impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamReconfiguration {
-    /// Storage class for recent writes.
+    /// [Storage class](https://s2.dev/docs/storage-classes) for recent writes.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     pub storage_class: Maybe<Option<CompactString>>,

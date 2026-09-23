@@ -10,11 +10,11 @@ pub struct LocationInfo {
     pub name: LocationName,
     /// Location represents a private placement, limited by account.
     pub is_private: bool,
-    /// Storage classes available to the account in this location.
+    /// [Storage classes](https://s2.dev/docs/storage-classes) available to the account in this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<Vec<String>>))]
     pub storage_classes: Option<Vec<CompactString>>,
-    /// Default storage class for this location.
+    /// Default [storage class](https://s2.dev/docs/storage-classes) for this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     pub default_storage_class: Option<CompactString>,

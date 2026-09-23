@@ -51,7 +51,7 @@ pub struct BasinConfig {
 #[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StreamConfig {
-    /// Storage class for recent writes.
+    /// [Storage class](https://s2.dev/docs/storage-classes) for recent writes.
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub storage_class: Option<CompactString>,

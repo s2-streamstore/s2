@@ -893,7 +893,7 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
 #[non_exhaustive]
 /// Configuration for a stream.
 pub struct StreamConfig {
-    /// Storage class for the stream.
+    /// [Storage class](https://s2.dev/docs/storage-classes) for the stream.
     pub storage_class: Option<CompactString>,
     /// Retention policy for records in the stream.
     ///
@@ -1683,9 +1683,9 @@ pub struct LocationInfo {
     pub name: LocationName,
     /// Location represents a private placement, limited by account.
     pub is_private: bool,
-    /// Storage classes available to the account in this location.
+    /// [Storage classes](https://s2.dev/docs/storage-classes) available to the account in this location.
     pub storage_classes: Option<Vec<CompactString>>,
-    /// Default storage class for this location.
+    /// Default [storage class](https://s2.dev/docs/storage-classes) for this location.
     pub default_storage_class: Option<CompactString>,
 }
 
