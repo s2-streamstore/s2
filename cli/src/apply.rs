@@ -6,25 +6,16 @@ use colored::Colorize;
 use miette::IntoDiagnostic;
 use s2_common::{
     basin::BasinName,
-    config::{
-        BasinConfig, OptionalStreamConfig, RetentionPolicy, StorageClass, StreamConfig,
-        TimestampingMode,
-    },
+    config::{RetentionPolicy, TimestampingMode},
     encryption::EncryptionAlgorithm,
     stream::StreamName,
 };
-use s2_sdk::error::{ErrorCode, RequestError};
+use s2_sdk::{
+    error::{ErrorCode, RequestError},
+    types::BasinConfig,
+};
 
-fn basin_config_from_sdk(config: s2_sdk::types::BasinConfig) -> miette::Result<BasinConfig> {
-    let config = s2_api::v1::config::BasinConfig::from(config);
-    config.try_into().into_diagnostic()
-}
-
-fn stream_config_from_sdk(config: s2_sdk::types::StreamConfig) -> miette::Result<StreamConfig> {
-    let config = s2_api::v1::config::StreamConfig::from(config);
-    let config: OptionalStreamConfig = config.try_into().into_diagnostic()?;
-    Ok(config.into())
-}
+use crate::types::ResolvedStreamConfig;
 
 fn basin_config_to_sdk(config: s2_resource_spec::BasinConfig) -> s2_sdk::types::BasinConfig {
     let mut sdk_config = s2_sdk::types::BasinConfig::new();
@@ -47,7 +38,7 @@ fn basin_config_to_sdk(config: s2_resource_spec::BasinConfig) -> s2_sdk::types::
 fn stream_config_to_sdk(config: s2_resource_spec::StreamConfig) -> s2_sdk::types::StreamConfig {
     let mut sdk_config = s2_sdk::types::StreamConfig::new();
     if let Some(storage_class) = config.storage_class {
-        sdk_config = sdk_config.with_storage_class(storage_class_to_sdk(storage_class));
+        sdk_config = sdk_config.with_storage_class(storage_class);
     }
     if let Some(retention_policy) = config.retention_policy {
         sdk_config = sdk_config.with_retention_policy(retention_policy_to_sdk(retention_policy));
@@ -59,13 +50,6 @@ fn stream_config_to_sdk(config: s2_resource_spec::StreamConfig) -> s2_sdk::types
         sdk_config = sdk_config.with_delete_on_empty(delete_on_empty);
     }
     sdk_config
-}
-
-fn storage_class_to_sdk(storage_class: s2_resource_spec::StorageClass) -> &'static str {
-    match storage_class {
-        s2_resource_spec::StorageClass::Standard => "standard",
-        s2_resource_spec::StorageClass::Express => "express",
-    }
 }
 
 fn retention_policy_to_sdk(
@@ -245,13 +229,6 @@ fn is_not_found_error(error: &RequestError) -> bool {
         .is_some_and(|code| matches!(code, ErrorCode::BasinNotFound | ErrorCode::StreamNotFound))
 }
 
-fn format_storage_class(sc: StorageClass) -> &'static str {
-    match sc {
-        StorageClass::Standard => "standard",
-        StorageClass::Express => "express",
-    }
-}
-
 fn format_retention_policy(rp: RetentionPolicy) -> String {
     match rp {
         RetentionPolicy::Age(age) => humantime::format_duration(age).to_string(),
@@ -278,7 +255,10 @@ fn default_stream_config_field(field: &'static str) -> &'static str {
     }
 }
 
-fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<FieldDiff> {
+fn diff_basin_config(
+    existing: &BasinConfig,
+    desired: &BasinConfig,
+) -> miette::Result<Vec<FieldDiff>> {
     let mut diffs = Vec::new();
 
     if existing.stream_cipher != desired.stream_cipher {
@@ -313,8 +293,24 @@ fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<Field
         });
     }
 
-    let existing_dsc: StreamConfig = existing.default_stream_config.clone().into();
-    let desired_dsc: StreamConfig = desired.default_stream_config.clone().into();
+    let existing_dsc = ResolvedStreamConfig::resolve(
+        existing
+            .default_stream_config
+            .clone()
+            .unwrap_or_default()
+            .into(),
+        Default::default(),
+    )
+    .into_diagnostic()?;
+    let desired_dsc = ResolvedStreamConfig::resolve(
+        desired
+            .default_stream_config
+            .clone()
+            .unwrap_or_default()
+            .into(),
+        Default::default(),
+    )
+    .into_diagnostic()?;
     for sd in diff_stream_configs(&existing_dsc, &desired_dsc) {
         diffs.push(FieldDiff {
             field: default_stream_config_field(sd.field),
@@ -323,17 +319,20 @@ fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<Field
         });
     }
 
-    diffs
+    Ok(diffs)
 }
 
-fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<FieldDiff> {
+fn diff_stream_configs(
+    existing: &ResolvedStreamConfig,
+    desired: &ResolvedStreamConfig,
+) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
     if existing.storage_class != desired.storage_class {
         diffs.push(FieldDiff {
             field: "storage_class",
-            old: format_storage_class(existing.storage_class).to_string(),
-            new: format_storage_class(desired.storage_class).to_string(),
+            old: existing.storage_class.clone(),
+            new: desired.storage_class.clone(),
         });
     }
 
@@ -416,7 +415,7 @@ fn spec_stream_fields(spec: &s2_resource_spec::StreamConfig) -> Vec<FieldDiff> {
         fields.push(FieldDiff {
             field: "storage_class",
             old: String::new(),
-            new: format_storage_class(sc.clone().into()).to_string(),
+            new: sc.clone(),
         });
     }
     if let Some(ref rp) = spec.retention_policy {
@@ -514,15 +513,14 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
         let desired_basin_config = basin_spec
             .config
             .clone()
-            .map(BasinConfig::from)
+            .map(basin_config_to_sdk)
             .unwrap_or_default();
         let desired_basin_default_stream_config =
             desired_basin_config.default_stream_config.clone();
 
         let basin_action = match s2.get_basin_config(basin_spec.name.clone()).await {
             Ok(existing) => {
-                let existing = basin_config_from_sdk(existing)?;
-                let diffs = diff_basin_config(&existing, &desired_basin_config);
+                let diffs = diff_basin_config(&existing, &desired_basin_config)?;
                 if diffs.is_empty() {
                     ResourceAction::Unchanged
                 } else {
@@ -556,13 +554,22 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
                 .await
             {
                 Ok(existing) => {
-                    let existing = stream_config_from_sdk(existing)?;
-                    let desired_stream_config = stream_spec
-                        .config
-                        .clone()
-                        .map(OptionalStreamConfig::from)
-                        .unwrap_or_default()
-                        .merge(desired_basin_default_stream_config.clone());
+                    let existing =
+                        ResolvedStreamConfig::resolve(existing.into(), Default::default())
+                            .into_diagnostic()?;
+                    let desired_stream_config = ResolvedStreamConfig::resolve(
+                        stream_spec
+                            .config
+                            .clone()
+                            .map(stream_config_to_sdk)
+                            .unwrap_or_default()
+                            .into(),
+                        desired_basin_default_stream_config
+                            .clone()
+                            .unwrap_or_default()
+                            .into(),
+                    )
+                    .into_diagnostic()?;
                     let diffs = diff_stream_configs(&existing, &desired_stream_config);
                     if diffs.is_empty() {
                         ResourceAction::Unchanged

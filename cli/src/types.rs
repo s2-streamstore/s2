@@ -201,6 +201,45 @@ impl StreamConfig {
     }
 }
 
+pub struct ResolvedStreamConfig {
+    pub storage_class: String,
+    pub retention_policy: s2_common::config::RetentionPolicy,
+    pub timestamping: s2_common::config::TimestampingConfig,
+    pub delete_on_empty: s2_common::config::DeleteOnEmptyConfig,
+}
+
+impl ResolvedStreamConfig {
+    pub fn resolve(
+        config: s2_api::v1::config::StreamConfig,
+        basin_defaults: s2_api::v1::config::StreamConfig,
+    ) -> Result<Self, s2_common::ValidationError> {
+        let defaults = s2_common::config::StreamConfig::default();
+        let timestamping = s2_common::config::OptionalTimestampingConfig::from(
+            config.timestamping.unwrap_or_default(),
+        )
+        .merge(basin_defaults.timestamping.unwrap_or_default().into());
+
+        Ok(Self {
+            storage_class: config
+                .storage_class
+                .or(basin_defaults.storage_class)
+                .unwrap_or_else(|| defaults.storage_class.to_string()),
+            retention_policy: config
+                .retention_policy
+                .or(basin_defaults.retention_policy)
+                .map(TryInto::try_into)
+                .transpose()?
+                .unwrap_or(defaults.retention_policy),
+            timestamping,
+            delete_on_empty: config
+                .delete_on_empty
+                .or(basin_defaults.delete_on_empty)
+                .map(Into::into)
+                .unwrap_or_default(),
+        })
+    }
+}
+
 pub use sdk::types::LocationName;
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]

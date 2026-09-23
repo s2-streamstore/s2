@@ -52,7 +52,7 @@ pub struct BasinConfig {
 pub struct StreamConfig {
     /// Storage class for recent writes.
     #[serde(default)]
-    pub storage_class: Option<StorageClass>,
+    pub storage_class: Option<String>,
     /// Retention policy for the stream. If unspecified, the default is to retain records for 7
     /// days.
     #[serde(default)]
@@ -63,36 +63,6 @@ pub struct StreamConfig {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmpty>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StorageClass {
-    Standard,
-    Express,
-}
-
-impl schemars::JsonSchema for StorageClass {
-    fn schema_name() -> Cow<'static, str> {
-        "StorageClass".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "description": "Storage class for recent writes.",
-            "enum": ["standard", "express"]
-        })
-    }
-}
-
-impl From<StorageClass> for s2_common::config::StorageClass {
-    fn from(s: StorageClass) -> Self {
-        match s {
-            StorageClass::Standard => Self::Standard,
-            StorageClass::Express => Self::Express,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -256,14 +226,20 @@ impl schemars::JsonSchema for HumanDuration {
     }
 }
 
-impl From<BasinConfig> for s2_common::config::BasinConfig {
-    fn from(s: BasinConfig) -> Self {
-        Self {
-            default_stream_config: s.default_stream_config.map(Into::into).unwrap_or_default(),
+impl TryFrom<BasinConfig> for s2_common::config::BasinConfig {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(s: BasinConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            default_stream_config: s
+                .default_stream_config
+                .map(TryInto::try_into)
+                .transpose()?
+                .unwrap_or_default(),
             stream_cipher: s.stream_cipher.map(Into::into),
             create_stream_on_append: s.create_stream_on_append.unwrap_or_default(),
             create_stream_on_read: s.create_stream_on_read.unwrap_or_default(),
-        }
+        })
     }
 }
 
@@ -284,14 +260,23 @@ impl From<DeleteOnEmpty> for s2_common::config::OptionalDeleteOnEmptyConfig {
     }
 }
 
-impl From<StreamConfig> for s2_common::config::OptionalStreamConfig {
-    fn from(s: StreamConfig) -> Self {
-        Self {
-            storage_class: s.storage_class.map(Into::into),
+impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(s: StreamConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            storage_class: s
+                .storage_class
+                .map(|name| {
+                    name.parse().map_err(|_| {
+                        s2_common::ValidationError(format!("invalid storage class: {name}"))
+                    })
+                })
+                .transpose()?,
             retention_policy: s.retention_policy.map(|rp| rp.0),
             timestamping: s.timestamping.map(Into::into).unwrap_or_default(),
             delete_on_empty: s.delete_on_empty.map(Into::into).unwrap_or_default(),
-        }
+        })
     }
 }
 
@@ -351,8 +336,9 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
 }
 
 fn validate_stream_config(config: &StreamConfig, context: &str, errors: &mut Vec<String>) {
-    let config = s2_common::config::OptionalStreamConfig::from(config.clone());
-    if let Err(err) = config.validate() {
+    if let Some(retention_policy) = config.retention_policy
+        && let Err(err) = retention_policy.0.validate()
+    {
         errors.push(format!("{context}: {err}"));
     }
 }
@@ -459,7 +445,7 @@ mod tests {
         assert_eq!(config.create_stream_on_read, Some(false));
 
         let dsc = config.default_stream_config.as_ref().unwrap();
-        assert!(matches!(dsc.storage_class, Some(StorageClass::Express)));
+        assert_eq!(dsc.storage_class.as_deref(), Some("express"));
         assert!(matches!(
             dsc.retention_policy.as_ref().map(|r| &r.0),
             Some(s2_common::config::RetentionPolicy::Age(_))
@@ -479,7 +465,7 @@ mod tests {
         let stream = &basin.streams[0];
         assert_eq!(stream.name.as_ref(), "events");
         let sc = stream.config.as_ref().unwrap();
-        assert!(matches!(sc.storage_class, Some(StorageClass::Standard)));
+        assert_eq!(sc.storage_class.as_deref(), Some("standard"));
         assert!(matches!(
             sc.retention_policy.as_ref().map(|r| &r.0),
             Some(s2_common::config::RetentionPolicy::Infinite())
@@ -494,7 +480,7 @@ mod tests {
             create_stream_on_append: Some(true),
             create_stream_on_read: None,
         };
-        let config = s2_common::config::BasinConfig::from(spec);
+        let config = s2_common::config::BasinConfig::try_from(spec).unwrap();
         assert!(config.create_stream_on_append);
         assert!(!config.create_stream_on_read);
         assert_eq!(
@@ -604,14 +590,14 @@ mod tests {
     #[test]
     fn stream_config_conversion() {
         let spec = StreamConfig {
-            storage_class: Some(StorageClass::Standard),
+            storage_class: Some("standard".into()),
             retention_policy: Some(RetentionPolicy(
                 s2_common::config::RetentionPolicy::Infinite(),
             )),
             timestamping: None,
             delete_on_empty: None,
         };
-        let config = s2_common::config::OptionalStreamConfig::from(spec);
+        let config = s2_common::config::OptionalStreamConfig::try_from(spec).unwrap();
         assert_eq!(
             config.storage_class,
             Some(s2_common::config::StorageClass::Standard)
