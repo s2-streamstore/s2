@@ -6,7 +6,7 @@ use colored::Colorize;
 use miette::IntoDiagnostic;
 use s2_common::{
     basin::BasinName,
-    config::{RetentionPolicy, TimestampingMode},
+    config::{RetentionPolicy, StreamConfig, TimestampingMode},
     encryption::EncryptionAlgorithm,
     stream::StreamName,
 };
@@ -15,7 +15,7 @@ use s2_sdk::{
     types::BasinConfig,
 };
 
-use crate::types::ResolvedStreamConfig;
+use crate::types::resolve_stream_config;
 
 fn basin_config_to_sdk(config: s2_resource_spec::BasinConfig) -> s2_sdk::types::BasinConfig {
     let mut sdk_config = s2_sdk::types::BasinConfig::new();
@@ -293,7 +293,7 @@ fn diff_basin_config(
         });
     }
 
-    let existing_dsc = ResolvedStreamConfig::resolve(
+    let existing_dsc = resolve_stream_config(
         existing
             .default_stream_config
             .clone()
@@ -302,7 +302,7 @@ fn diff_basin_config(
         Default::default(),
     )
     .into_diagnostic()?;
-    let desired_dsc = ResolvedStreamConfig::resolve(
+    let desired_dsc = resolve_stream_config(
         desired
             .default_stream_config
             .clone()
@@ -322,10 +322,7 @@ fn diff_basin_config(
     Ok(diffs)
 }
 
-fn diff_stream_configs(
-    existing: &ResolvedStreamConfig,
-    desired: &ResolvedStreamConfig,
-) -> Vec<FieldDiff> {
+fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
     if existing.storage_class != desired.storage_class {
@@ -554,10 +551,9 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
                 .await
             {
                 Ok(existing) => {
-                    let existing =
-                        ResolvedStreamConfig::resolve(existing.into(), Default::default())
-                            .into_diagnostic()?;
-                    let desired_stream_config = ResolvedStreamConfig::resolve(
+                    let existing = resolve_stream_config(existing.into(), Default::default())
+                        .into_diagnostic()?;
+                    let desired_stream_config = resolve_stream_config(
                         stream_spec
                             .config
                             .clone()

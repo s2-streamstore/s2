@@ -155,7 +155,7 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::{
         basin::BasinName,
-        config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass, StreamConfig},
+        config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StreamConfig},
         encryption::EncryptionAlgorithm,
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     };
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn value_roundtrip_stream_meta() {
         let config = OptionalStreamConfig {
-            storage_class: Some(StorageClass::Express),
+            storage_class: Some("express".into()),
             delete_on_empty: OptionalDeleteOnEmptyConfig {
                 min_age: Some(Duration::ZERO),
             },
