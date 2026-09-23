@@ -40,7 +40,9 @@ use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
     PartialEq,
     Eq,
     Hash,
+    enumset::EnumSetType,
 )]
+#[enumset(no_super_impls)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[repr(u8)]
 pub enum StorageClass {

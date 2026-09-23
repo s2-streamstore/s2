@@ -1711,9 +1711,9 @@ pub struct LocationInfo {
     pub name: LocationName,
     /// Location represents a private placement, limited by account.
     pub is_private: bool,
-    /// Available storage-class names, including future classes. `None` on older servers.
+    /// Storage classes available to the account in this location.
     pub storage_classes: Option<Vec<String>>,
-    /// Configured default storage class, or `None` on older servers.
+    /// Default storage class for this location.
     pub default_storage_class: Option<String>,
 }
 
