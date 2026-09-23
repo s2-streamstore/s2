@@ -70,7 +70,7 @@ async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let config = BasinConfig::new()
         .with_default_stream_config(
             StreamConfig::new()
-                .with_storage_class(StorageClass::Express)
+                .with_storage_class("express")
                 .with_delete_on_empty(
                     DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(60)),
                 ),
@@ -85,7 +85,7 @@ async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         retrieved_config,
         BasinConfig {
             default_stream_config: Some(StreamConfig {
-                storage_class: Some(StorageClass::Express),
+                storage_class: Some(ref storage_class),
                 delete_on_empty: Some(DeleteOnEmptyConfig {
                     min_age_secs: 60,
                     ..
@@ -94,7 +94,7 @@ async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             }),
             create_stream_on_read: true,
             ..
-        }
+        } if storage_class == "express"
     );
 
     s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
@@ -114,9 +114,7 @@ async fn reconfigure_basin() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let new_config = BasinReconfiguration::new()
-        .with_default_stream_config(
-            StreamReconfiguration::new().with_storage_class(StorageClass::Standard),
-        )
+        .with_default_stream_config(StreamReconfiguration::new().with_storage_class("standard"))
         .with_create_stream_on_append(false);
 
     let updated_config = s2
@@ -127,12 +125,12 @@ async fn reconfigure_basin() -> Result<(), Box<dyn std::error::Error>> {
         updated_config,
         BasinConfig {
             default_stream_config: Some(StreamConfig {
-                storage_class: Some(StorageClass::Standard),
+                storage_class: Some(ref storage_class),
                 ..
             }),
             create_stream_on_append: false,
             ..
-        }
+        } if storage_class == "standard"
     );
 
     s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
@@ -339,7 +337,7 @@ async fn get_basin_config() -> Result<(), Box<dyn std::error::Error>> {
     let basin_name = unique_basin_name();
 
     let config = BasinConfig::new()
-        .with_default_stream_config(StreamConfig::new().with_storage_class(StorageClass::Express));
+        .with_default_stream_config(StreamConfig::new().with_storage_class("express"));
 
     s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(config))
         .await?;
@@ -349,9 +347,9 @@ async fn get_basin_config() -> Result<(), Box<dyn std::error::Error>> {
     assert_matches!(
         retrieved_config.default_stream_config,
         Some(StreamConfig {
-            storage_class: Some(StorageClass::Express),
+            storage_class: Some(ref storage_class),
             ..
-        })
+        }) if storage_class == "express"
     );
 
     s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;

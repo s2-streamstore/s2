@@ -14,7 +14,7 @@ use crate::{
     },
     types::{
         BasinConfig, Interval, LocationName, Operation, PermittedOperationGroups,
-        S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig,
+        S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, StreamConfig,
     },
 };
 
@@ -848,7 +848,7 @@ pub struct BenchArgs {
 
     /// Storage class for the test stream. Uses basin default if not specified.
     #[arg(short = 'c', long)]
-    pub storage_class: Option<StorageClass>,
+    pub storage_class: Option<String>,
 
     /// Total metered record size in bytes (includes headers and overhead).
     #[arg(

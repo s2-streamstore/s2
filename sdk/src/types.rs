@@ -734,33 +734,6 @@ impl<T> Page<T> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Storage class for recent appends.
-pub enum StorageClass {
-    /// Standard storage class that offers append latencies under `500ms`.
-    Standard,
-    /// Express storage class that offers append latencies under `50ms`.
-    Express,
-}
-
-impl From<api::config::StorageClass> for StorageClass {
-    fn from(value: api::config::StorageClass) -> Self {
-        match value {
-            api::config::StorageClass::Standard => StorageClass::Standard,
-            api::config::StorageClass::Express => StorageClass::Express,
-        }
-    }
-}
-
-impl From<StorageClass> for api::config::StorageClass {
-    fn from(value: StorageClass) -> Self {
-        match value {
-            StorageClass::Standard => api::config::StorageClass::Standard,
-            StorageClass::Express => api::config::StorageClass::Express,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Retention policy for records in a stream.
 pub enum RetentionPolicy {
     /// Age in seconds. Records older than this age are automatically trimmed.
@@ -920,9 +893,7 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
 /// Configuration for a stream.
 pub struct StreamConfig {
     /// Storage class for the stream.
-    ///
-    /// Defaults to [`Express`](StorageClass::Express).
-    pub storage_class: Option<StorageClass>,
+    pub storage_class: Option<String>,
     /// Retention policy for records in the stream.
     ///
     /// Defaults to `7 days` of retention.
@@ -944,9 +915,9 @@ impl StreamConfig {
     }
 
     /// Set the storage class for the stream.
-    pub fn with_storage_class(self, storage_class: StorageClass) -> Self {
+    pub fn with_storage_class(self, storage_class: impl Into<String>) -> Self {
         Self {
-            storage_class: Some(storage_class),
+            storage_class: Some(storage_class.into()),
             ..self
         }
     }
@@ -979,7 +950,7 @@ impl StreamConfig {
 impl From<api::config::StreamConfig> for StreamConfig {
     fn from(value: api::config::StreamConfig) -> Self {
         Self {
-            storage_class: value.storage_class.map(Into::into),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
@@ -990,7 +961,7 @@ impl From<api::config::StreamConfig> for StreamConfig {
 impl From<StreamConfig> for api::config::StreamConfig {
     fn from(value: StreamConfig) -> Self {
         Self {
-            storage_class: value.storage_class.map(Into::into),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
@@ -1468,7 +1439,7 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
 /// Reconfiguration for [`StreamConfig`].
 pub struct StreamReconfiguration {
     /// Override for the existing [`storage_class`](StreamConfig::storage_class).
-    pub storage_class: Maybe<Option<StorageClass>>,
+    pub storage_class: Maybe<Option<String>>,
     /// Override for the existing [`retention_policy`](StreamConfig::retention_policy).
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     /// Override for the existing [`timestamping`](StreamConfig::timestamping).
@@ -1484,9 +1455,9 @@ impl StreamReconfiguration {
     }
 
     /// Set the override for the existing [`storage_class`](StreamConfig::storage_class).
-    pub fn with_storage_class(self, storage_class: StorageClass) -> Self {
+    pub fn with_storage_class(self, storage_class: impl Into<String>) -> Self {
         Self {
-            storage_class: Maybe::Specified(Some(storage_class)),
+            storage_class: Maybe::Specified(Some(storage_class.into())),
             ..self
         }
     }
@@ -1519,7 +1490,7 @@ impl StreamReconfiguration {
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
     fn from(value: StreamReconfiguration) -> Self {
         Self {
-            storage_class: value.storage_class.map(|m| m.map(Into::into)),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
@@ -4125,17 +4096,6 @@ mod tests {
         assert!(error.0.contains("framing"));
     }
 
-    // -- StorageClass --
-
-    #[rstest]
-    #[case::standard(StorageClass::Standard)]
-    #[case::express(StorageClass::Express)]
-    fn storage_class_roundtrip(#[case] sdk: StorageClass) {
-        let api: api::config::StorageClass = sdk.into();
-        let back: StorageClass = api.into();
-        assert_eq!(back, sdk);
-    }
-
     // -- RetentionPolicy --
 
     #[rstest]
@@ -4197,7 +4157,7 @@ mod tests {
     #[test]
     fn stream_config_builder_and_roundtrip() {
         let sdk = StreamConfig::new()
-            .with_storage_class(StorageClass::Express)
+            .with_storage_class("express")
             .with_retention_policy(RetentionPolicy::Age(86400))
             .with_timestamping(TimestampingConfig {
                 mode: Some(TimestampingMode::ClientPrefer),
@@ -4214,9 +4174,7 @@ mod tests {
     #[test]
     fn basin_config_builder_and_roundtrip() {
         let sdk = BasinConfig::new()
-            .with_default_stream_config(
-                StreamConfig::new().with_storage_class(StorageClass::Standard),
-            )
+            .with_default_stream_config(StreamConfig::new().with_storage_class("standard"))
             .with_create_stream_on_append(true)
             .with_create_stream_on_read(false);
         let api: api::config::BasinConfig = sdk.clone().into();

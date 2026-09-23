@@ -852,7 +852,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         .with_mode(TimestampingMode::ClientRequire)
                         .with_uncapped(true),
                 );
-            stream_config.storage_class = args.storage_class.map(Into::into);
+            stream_config.storage_class = args.storage_class;
 
             let s2 = S2::new(sdk_config.clone().with_retry(
                 RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),

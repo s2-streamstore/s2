@@ -334,7 +334,7 @@ impl From<s2_common::config::StreamConfig> for StreamConfigView {
         let s2_common::config::TimestampingConfig { mode, uncapped } = timestamping;
 
         Self {
-            storage_class: wire_name(s2_api::v1::config::StorageClass::from(storage_class)),
+            storage_class: storage_class.to_string(),
             retention_policy: match retention_policy {
                 s2_common::config::RetentionPolicy::Age(age) => compact_duration(age),
                 s2_common::config::RetentionPolicy::Infinite() => "infinite".to_owned(),

@@ -174,7 +174,7 @@ pub struct BasinConfig {
 pub struct StreamConfig {
     #[arg(long)]
     /// Storage class for a stream.
-    pub storage_class: Option<StorageClass>,
+    pub storage_class: Option<String>,
     #[arg(long, help("Example: 1d, 1w, 1y"))]
     /// Retention policy for a stream.
     pub retention_policy: Option<RetentionPolicy>,
@@ -202,13 +202,6 @@ impl StreamConfig {
 }
 
 pub use sdk::types::LocationName;
-
-#[derive(ValueEnum, Debug, Clone, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StorageClass {
-    Standard,
-    Express,
-}
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -302,7 +295,7 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
     fn from(config: StreamConfig) -> Self {
         let mut stream_config = sdk::types::StreamConfig::new();
         if let Some(storage_class) = config.storage_class {
-            stream_config = stream_config.with_storage_class(storage_class.into());
+            stream_config = stream_config.with_storage_class(storage_class);
         }
         if let Some(retention_policy) = config.retention_policy {
             stream_config = stream_config.with_retention_policy(retention_policy.into());
@@ -314,24 +307,6 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
             stream_config = stream_config.with_delete_on_empty(delete_on_empty.into());
         }
         stream_config
-    }
-}
-
-impl From<StorageClass> for sdk::types::StorageClass {
-    fn from(class: StorageClass) -> Self {
-        match class {
-            StorageClass::Standard => sdk::types::StorageClass::Standard,
-            StorageClass::Express => sdk::types::StorageClass::Express,
-        }
-    }
-}
-
-impl From<sdk::types::StorageClass> for StorageClass {
-    fn from(class: sdk::types::StorageClass) -> Self {
-        match class {
-            sdk::types::StorageClass::Standard => StorageClass::Standard,
-            sdk::types::StorageClass::Express => StorageClass::Express,
-        }
     }
 }
 
@@ -414,7 +389,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
 impl From<sdk::types::StreamConfig> for StreamConfig {
     fn from(config: sdk::types::StreamConfig) -> Self {
         StreamConfig {
-            storage_class: config.storage_class.map(Into::into),
+            storage_class: config.storage_class,
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),
@@ -426,7 +401,7 @@ impl From<StreamConfig> for sdk::types::StreamReconfiguration {
     fn from(config: StreamConfig) -> Self {
         let mut reconfig = sdk::types::StreamReconfiguration::new();
         if let Some(storage_class) = config.storage_class {
-            reconfig = reconfig.with_storage_class(storage_class.into());
+            reconfig = reconfig.with_storage_class(storage_class);
         }
         if let Some(retention_policy) = config.retention_policy {
             reconfig = reconfig.with_retention_policy(retention_policy.into());
