@@ -9,10 +9,10 @@ pub struct LocationInfo {
     pub name: LocationName,
     /// Location represents a private placement, limited by account.
     pub is_private: bool,
-    /// Storage classes available to the account in this location. Names may include future classes.
+    /// Storage classes available to the account in this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_classes: Option<Vec<String>>,
-    /// Configured default storage class. Does not grant access to a restricted class.
+    /// Default storage class for this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_storage_class: Option<String>,
 }
