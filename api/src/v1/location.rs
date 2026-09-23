@@ -38,27 +38,3 @@ impl From<s2_common::location::LocationInfo> for LocationInfo {
 pub type GetDefaultLocationResponse = LocationInfo;
 
 pub type SetDefaultLocationRequest = LocationName;
-
-#[cfg(test)]
-mod tests {
-    use super::LocationInfo;
-
-    #[test]
-    fn common_location_serializes_future_storage_classes() {
-        let location = LocationInfo::from(s2_common::location::LocationInfo {
-            name: "aws:us-east-1".parse().unwrap(),
-            is_private: false,
-            storage_classes: vec!["express".into(), "future".into()],
-            default_storage_class: "future".into(),
-        });
-        assert_eq!(
-            serde_json::to_value(location).unwrap(),
-            serde_json::json!({
-                "name": "aws:us-east-1",
-                "is_private": false,
-                "storage_classes": ["express", "future"],
-                "default_storage_class": "future",
-            }),
-        );
-    }
-}

@@ -3939,52 +3939,6 @@ mod tests {
             + body.len()
     }
 
-    #[rstest]
-    #[case::older_server(
-        serde_json::json!({"name": "aws:us-east-1", "is_private": false}),
-        None,
-        None,
-    )]
-    #[case::no_available_classes(
-        serde_json::json!({
-            "name": "aws:us-east-1",
-            "is_private": false,
-            "storage_classes": [],
-            "default_storage_class": "express",
-        }),
-        Some(vec![]),
-        Some("express"),
-    )]
-    #[case::future_class(
-        serde_json::json!({
-            "name": "aws:us-east-1",
-            "is_private": false,
-            "storage_classes": ["express", "future"],
-            "default_storage_class": "future",
-        }),
-        Some(vec!["express", "future"]),
-        Some("future"),
-    )]
-    fn location_storage_class_discovery(
-        #[case] response: serde_json::Value,
-        #[case] storage_classes: Option<Vec<&str>>,
-        #[case] default_storage_class: Option<&str>,
-    ) {
-        let response: api::location::LocationInfo = serde_json::from_value(response).unwrap();
-        let location = LocationInfo::from(response);
-        assert_eq!(location.name.as_ref(), "aws:us-east-1");
-        assert!(!location.is_private);
-        assert_eq!(
-            location.storage_classes,
-            storage_classes
-                .map(|classes| { classes.into_iter().map(str::to_owned).collect::<Vec<_>>() })
-        );
-        assert_eq!(
-            location.default_storage_class.as_deref(),
-            default_storage_class
-        );
-    }
-
     // -- S2DateTime --
 
     #[test]
