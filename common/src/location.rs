@@ -146,6 +146,8 @@ impl From<LocationName> for CompactString {
 pub struct LocationInfo {
     pub name: LocationName,
     pub is_private: bool,
+    pub storage_classes: Vec<String>,
+    pub default_storage_class: String,
 }
 
 #[cfg(test)]
