@@ -17,6 +17,7 @@ use super::{
     Backend, doe,
     store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
     streamer::{TerminalTrimCondition, TerminalTrimOutcome},
+    timestamp::TimestampSecs,
 };
 use crate::{
     backend::{
@@ -308,15 +309,10 @@ impl Backend {
         let stream_id = StreamId::new(&basin, &stream);
         match (prior_doe, config.delete_on_empty.min_age()) {
             (None, Some(min_age)) => {
-                doe::schedule(
-                    &txn,
-                    stream_id,
-                    kv::timestamp::TimestampSecs::after(min_age),
-                )
-                .await?;
+                doe::schedule(&txn, stream_id, TimestampSecs::after(min_age)).await?;
             }
             (Some(prior), Some(min_age)) if prior.min_age != min_age => {
-                doe::schedule(&txn, stream_id, kv::timestamp::TimestampSecs::now()).await?;
+                doe::schedule(&txn, stream_id, TimestampSecs::now()).await?;
             }
             (Some(prior), None) if prior.min_age().is_some() => {
                 doe::clear(&txn, stream_id).await?;

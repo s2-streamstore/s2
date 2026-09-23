@@ -27,6 +27,7 @@ use super::{
     kv,
     store::db_snapshot_get_with,
     streamer::{GuardedStreamerClient, StreamerClient, StreamerGenerationId},
+    timestamp::TimestampSecs,
 };
 use crate::{backend::bgtasks::BgtaskTrigger, stream_id::StreamId};
 
@@ -130,7 +131,7 @@ impl Backend {
                 |entry| {
                     Ok((
                         kv::stream_tail_position::deser_value(entry.value)?,
-                        kv::timestamp::TimestampSecs::from_millis(entry.create_ts),
+                        TimestampSecs::from_millis(entry.create_ts),
                     ))
                 }
             ),
@@ -156,7 +157,7 @@ impl Backend {
         };
 
         let (tail_pos, last_tail_write_timestamp) =
-            persisted_tail.unwrap_or((StreamPosition::MIN, kv::timestamp::TimestampSecs::ZERO));
+            persisted_tail.unwrap_or((StreamPosition::MIN, TimestampSecs::ZERO));
 
         if meta.deleted_at.is_some() || trim_point == Some(..NonZeroSeqNum::MAX) {
             return Err(StreamDeletionPendingError.into());

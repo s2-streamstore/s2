@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
-use crate::stream_id::StreamId;
+use super::{DeserializationError, KeyType, check_exact_size};
+use crate::{backend::timestamp::TimestampSecs, stream_id::StreamId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Check {

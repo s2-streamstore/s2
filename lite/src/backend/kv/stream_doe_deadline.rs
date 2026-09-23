@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use super::{DeserializationError, KeyType, check_exact_size, timestamp::TimestampSecs};
-use crate::stream_id::StreamId;
+use super::{DeserializationError, KeyType, check_exact_size};
+use crate::{backend::timestamp::TimestampSecs, stream_id::StreamId};
 
 const LEGACY_KEY_LEN: usize = 1 + 4 + StreamId::LEN;
 const KEY_LEN: usize = LEGACY_KEY_LEN + 16;
@@ -50,7 +50,7 @@ mod tests {
     use proptest::prelude::*;
 
     use crate::{
-        backend::kv::{stream_doe_deadline, timestamp::TimestampSecs},
+        backend::{kv::stream_doe_deadline, timestamp::TimestampSecs},
         stream_id::StreamId,
     };
 

@@ -10,7 +10,6 @@ pub mod stream_record_data;
 pub mod stream_record_timestamp;
 pub mod stream_tail_position;
 pub mod stream_trim_point;
-pub mod timestamp;
 
 use std::{ops::Range, str::FromStr};
 
@@ -21,7 +20,7 @@ use s2_common::{
 use strum::FromRepr;
 use thiserror::Error;
 
-use crate::stream_id::StreamId;
+use crate::{backend::timestamp::TimestampSecs, stream_id::StreamId};
 
 #[derive(Debug, Clone, Error)]
 pub enum DeserializationError {
@@ -96,7 +95,7 @@ pub enum Key {
     /// (SDOED) legacy schedule, consumed only to initialize the new DOE state
     /// Key: TimestampSecs StreamID ScheduleID (u128, absent in legacy keys)
     /// Value: MinAge seconds (u64)
-    StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId, Option<u128>),
+    StreamDeleteOnEmptyDeadline(TimestampSecs, StreamId, Option<u128>),
     /// (SDOES) per-stream, updatable, optional
     /// Key: StreamID
     /// Value: Tag (u8: 0 = parked, 1 = scheduled).

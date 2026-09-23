@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use slatedb::DbTransaction;
 
-use super::{error::StorageError, kv, store::db_txn_get};
+use super::{error::StorageError, kv, store::db_txn_get, timestamp::TimestampSecs};
 use crate::stream_id::StreamId;
 
 /// Bound polling on active streams, while allowing known expirations to defer
@@ -30,7 +30,7 @@ pub(super) async fn state(
 pub(super) async fn schedule(
     txn: &DbTransaction,
     stream_id: StreamId,
-    at: kv::timestamp::TimestampSecs,
+    at: TimestampSecs,
 ) -> Result<(), StorageError> {
     let previous = state(txn, stream_id).await?;
     schedule_observed(txn, stream_id, previous, at)?;
@@ -71,12 +71,7 @@ pub(super) async fn wake_after_trim(
             return Ok(());
         }
     }
-    schedule_observed(
-        txn,
-        stream_id,
-        previous,
-        kv::timestamp::TimestampSecs::now(),
-    )?;
+    schedule_observed(txn, stream_id, previous, TimestampSecs::now())?;
     Ok(())
 }
 
@@ -84,7 +79,7 @@ fn schedule_observed(
     txn: &DbTransaction,
     stream_id: StreamId,
     previous: Option<kv::stream_doe_state::State>,
-    at: kv::timestamp::TimestampSecs,
+    at: TimestampSecs,
 ) -> Result<(), slatedb::Error> {
     let next = match previous {
         Some(kv::stream_doe_state::State::Scheduled(check)) if check.at <= at => {

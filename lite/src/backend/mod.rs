@@ -11,6 +11,7 @@ mod read;
 mod store;
 mod streamer;
 mod streams;
+mod timestamp;
 
 #[cfg(test)]
 mod test_util;

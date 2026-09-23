@@ -2,11 +2,8 @@ use std::ops::Range;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use super::{
-    DeserializationError, KeyType, check_exact_size, stream_doe_state::Check,
-    timestamp::TimestampSecs,
-};
-use crate::stream_id::StreamId;
+use super::{DeserializationError, KeyType, check_exact_size, stream_doe_state::Check};
+use crate::{backend::timestamp::TimestampSecs, stream_id::StreamId};
 
 const KEY_LEN: usize = 1 + 4 + StreamId::LEN + 16;
 
