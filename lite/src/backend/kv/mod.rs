@@ -101,8 +101,8 @@ pub enum Key {
     /// Key: StreamID
     /// Value: Tag (u8: 0 = parked, 1 = scheduled).
     /// Scheduled values append TimestampSecs (u32) CheckID (u128).
-    /// The commit sequence is the scheduler revision and must be at least the
-    /// current ID mapping's creation sequence.
+    /// Uses the entry's SlateDB sequence as its revision.
+    /// State older than the current stream-ID mapping is stale.
     StreamDeleteOnEmptyState(StreamId),
     /// (SDOEC) per-check, immutable, deletable, time-ordered index of scheduled states
     /// Key: TimestampSecs (u32) StreamID CheckID (u128)
