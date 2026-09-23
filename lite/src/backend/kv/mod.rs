@@ -97,10 +97,16 @@ pub enum Key {
     /// Key: TimestampSecs StreamID ScheduleID (u128, absent in legacy keys)
     /// Value: MinAge seconds (u64)
     StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId, Option<u128>),
-    /// Per-stream DOE state. Its commit sequence is the scheduler revision and
-    /// must be at least the current ID mapping's creation sequence.
+    /// (SDOES) per-stream, updatable, optional
+    /// Key: StreamID
+    /// Value: Tag (u8: 0 = parked, 1 = scheduled).
+    /// Scheduled values append TimestampSecs (u32) CheckID (u128).
+    /// The commit sequence is the scheduler revision and must be at least the
+    /// current ID mapping's creation sequence.
     StreamDeleteOnEmptyState(StreamId),
-    /// Time-ordered index of scheduled states; the value is empty.
+    /// (SDOEC) per-check, immutable, deletable, time-ordered index of scheduled states
+    /// Key: TimestampSecs (u32) StreamID CheckID (u128)
+    /// Value: empty
     StreamDeleteOnEmptyCheck(StreamId, stream_doe_state::Check),
 }
 
