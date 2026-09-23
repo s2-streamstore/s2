@@ -1,11 +1,12 @@
 use std::{str::FromStr, time::Duration};
 
+use compact_str::{CompactString, ToCompactString};
 use http::{HeaderName, HeaderValue};
 use s2_common::{http::ParseableHeader, maybe::Maybe};
 use serde::{Deserialize, Serialize};
 
 fn parse_storage_class(
-    name: String,
+    name: CompactString,
 ) -> Result<s2_common::config::StorageClass, s2_common::ValidationError> {
     name.parse()
         .map_err(|_| s2_common::ValidationError(format!("invalid storage class: {name}")))
@@ -278,7 +279,8 @@ impl From<s2_common::encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamConfig {
     /// Storage class for recent writes.
-    pub storage_class: Option<String>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub storage_class: Option<CompactString>,
     /// Retention policy for the stream.
     /// If unspecified, the default is to retain records for 7 days.
     pub retention_policy: Option<RetentionPolicy>,
@@ -299,7 +301,7 @@ impl StreamConfig {
         } = config;
 
         let config = StreamConfig {
-            storage_class: storage_class.map(|class| class.to_string()),
+            storage_class: storage_class.map(|class| class.to_compact_string()),
             retention_policy: retention_policy.map(Into::into),
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
@@ -328,7 +330,7 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
         } = value;
 
         Self {
-            storage_class: Some(storage_class.to_string()),
+            storage_class: Some(storage_class.to_compact_string()),
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
@@ -394,7 +396,7 @@ pub struct StreamReconfiguration {
     /// Storage class for recent writes.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    pub storage_class: Maybe<Option<String>>,
+    pub storage_class: Maybe<Option<CompactString>>,
     /// Retention policy for the stream.
     /// If unspecified, the default is to retain records for 7 days.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
@@ -440,7 +442,7 @@ impl From<s2_common::config::StreamReconfiguration> for StreamReconfiguration {
         } = value;
 
         Self {
-            storage_class: storage_class.map_opt(|class| class.to_string()),
+            storage_class: storage_class.map_opt(|class| class.to_compact_string()),
             retention_policy: retention_policy.map_opt(Into::into),
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
@@ -623,7 +625,7 @@ mod tests {
         )
             .prop_map(
                 |(storage_class, retention_policy, timestamping, delete_on_empty)| StreamConfig {
-                    storage_class: storage_class.map(|class| class.to_string()),
+                    storage_class: storage_class.map(|class| class.to_compact_string()),
                     retention_policy,
                     timestamping,
                     delete_on_empty,
@@ -675,7 +677,7 @@ mod tests {
             .prop_map(
                 |(storage_class, retention_policy, timestamping, delete_on_empty)| {
                     StreamReconfiguration {
-                        storage_class: storage_class.map_opt(|class| class.to_string()),
+                        storage_class: storage_class.map_opt(|class| class.to_compact_string()),
                         retention_policy,
                         timestamping,
                         delete_on_empty,

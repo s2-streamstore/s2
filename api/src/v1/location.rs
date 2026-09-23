@@ -1,3 +1,4 @@
+use compact_str::CompactString;
 use s2_common::{self, location::LocationName};
 use serde::{Deserialize, Serialize};
 
@@ -11,10 +12,12 @@ pub struct LocationInfo {
     pub is_private: bool,
     /// Storage classes available to the account in this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_classes: Option<Vec<String>>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Vec<String>>))]
+    pub storage_classes: Option<Vec<CompactString>>,
     /// Default storage class for this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_storage_class: Option<String>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub default_storage_class: Option<CompactString>,
 }
 
 impl From<s2_common::location::LocationInfo> for LocationInfo {

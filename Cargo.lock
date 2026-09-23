@@ -5049,6 +5049,7 @@ dependencies = [
  "clap",
  "color-print",
  "colored",
+ "compact_str",
  "config",
  "dirs",
  "fs2",
@@ -5172,6 +5173,7 @@ dependencies = [
 name = "s2-resource-spec"
 version = "0.2.2"
 dependencies = [
+ "compact_str",
  "humantime",
  "s2-common",
  "schemars 1.2.2",
@@ -5188,6 +5190,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
+ "compact_str",
  "futures-core",
  "futures-util",
  "h2",

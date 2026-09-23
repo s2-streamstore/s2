@@ -331,8 +331,8 @@ fn diff_stream_configs(
     if existing.storage_class != desired.storage_class {
         diffs.push(FieldDiff {
             field: "storage_class",
-            old: existing.storage_class.clone(),
-            new: desired.storage_class.clone(),
+            old: existing.storage_class.to_string(),
+            new: desired.storage_class.to_string(),
         });
     }
 
@@ -415,7 +415,7 @@ fn spec_stream_fields(spec: &s2_resource_spec::StreamConfig) -> Vec<FieldDiff> {
         fields.push(FieldDiff {
             field: "storage_class",
             old: String::new(),
-            new: sc.clone(),
+            new: sc.to_string(),
         });
     }
     if let Some(ref rp) = spec.retention_policy {

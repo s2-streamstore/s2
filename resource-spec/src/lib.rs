@@ -2,6 +2,7 @@
 
 use std::{borrow::Cow, time::Duration};
 
+use compact_str::CompactString;
 use s2_common::{basin::BasinName, stream::StreamName};
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +53,8 @@ pub struct BasinConfig {
 pub struct StreamConfig {
     /// Storage class for recent writes.
     #[serde(default)]
-    pub storage_class: Option<String>,
+    #[schemars(with = "Option<String>")]
+    pub storage_class: Option<CompactString>,
     /// Retention policy for the stream. If unspecified, the default is to retain records for 7
     /// days.
     #[serde(default)]

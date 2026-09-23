@@ -25,6 +25,7 @@ async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 h2 = "0.4"

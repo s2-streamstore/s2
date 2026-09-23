@@ -15,6 +15,7 @@ use std::{
 #[cfg(feature = "_hidden")]
 use async_trait::async_trait;
 use bytes::Bytes;
+use compact_str::CompactString;
 use http::{
     HeaderMap,
     header::HeaderValue,
@@ -893,7 +894,7 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
 /// Configuration for a stream.
 pub struct StreamConfig {
     /// Storage class for the stream.
-    pub storage_class: Option<String>,
+    pub storage_class: Option<CompactString>,
     /// Retention policy for records in the stream.
     ///
     /// Defaults to `7 days` of retention.
@@ -915,7 +916,7 @@ impl StreamConfig {
     }
 
     /// Set the storage class for the stream.
-    pub fn with_storage_class(self, storage_class: impl Into<String>) -> Self {
+    pub fn with_storage_class(self, storage_class: impl Into<CompactString>) -> Self {
         Self {
             storage_class: Some(storage_class.into()),
             ..self
@@ -1439,7 +1440,7 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
 /// Reconfiguration for [`StreamConfig`].
 pub struct StreamReconfiguration {
     /// Override for the existing [`storage_class`](StreamConfig::storage_class).
-    pub storage_class: Maybe<Option<String>>,
+    pub storage_class: Maybe<Option<CompactString>>,
     /// Override for the existing [`retention_policy`](StreamConfig::retention_policy).
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     /// Override for the existing [`timestamping`](StreamConfig::timestamping).
@@ -1455,7 +1456,7 @@ impl StreamReconfiguration {
     }
 
     /// Set the override for the existing [`storage_class`](StreamConfig::storage_class).
-    pub fn with_storage_class(self, storage_class: impl Into<String>) -> Self {
+    pub fn with_storage_class(self, storage_class: impl Into<CompactString>) -> Self {
         Self {
             storage_class: Maybe::Specified(Some(storage_class.into())),
             ..self
@@ -1683,9 +1684,9 @@ pub struct LocationInfo {
     /// Location represents a private placement, limited by account.
     pub is_private: bool,
     /// Storage classes available to the account in this location.
-    pub storage_classes: Option<Vec<String>>,
+    pub storage_classes: Option<Vec<CompactString>>,
     /// Default storage class for this location.
-    pub default_storage_class: Option<String>,
+    pub default_storage_class: Option<CompactString>,
 }
 
 impl From<api::location::LocationInfo> for LocationInfo {

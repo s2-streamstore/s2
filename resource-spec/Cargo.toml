@@ -9,6 +9,7 @@ homepage.workspace = true
 keywords = ["s2", "durable", "streams", "config", "schema"]
 
 [dependencies]
+compact_str = { workspace = true, features = ["serde"] }
 humantime = { workspace = true }
 s2-common = { workspace = true }
 schemars = { workspace = true }

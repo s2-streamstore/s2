@@ -21,6 +21,7 @@ bytes = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 color-print = { workspace = true }
 colored = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
 config = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
