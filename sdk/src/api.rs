@@ -46,7 +46,7 @@ use crate::{
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
     reconnect::ReconnectAdvice,
-    retry::{RetryBackoff, RetryBackoffBuilder},
+    retry::{AppendRetryError, RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
         Compression, EncryptionKey, LocationName, RetryConfig, S2Config, S2Endpoints, StreamName,
@@ -667,6 +667,13 @@ pub(crate) enum ApiError {
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
     AppendConditionFailed(AppendConditionFailed),
+    #[error(
+        "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
+    )]
+    IndefiniteFailure {
+        #[source]
+        final_attempt_error: Box<Self>,
+    },
     #[error("read from an unwritten position")]
     ReadUnwritten(TailResponse),
     #[error("{1}")]
@@ -678,6 +685,9 @@ impl ApiError {
         match self {
             Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
             Self::Client(err) => err.is_retryable(),
+            Self::IndefiniteFailure {
+                final_attempt_error,
+            } => final_attempt_error.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
             _ => false,
@@ -698,16 +708,25 @@ impl ApiError {
             Self::Server(StatusCode::UNAUTHORIZED, response) if response.code == "authn"
         )
     }
+}
 
-    pub fn has_no_side_effects(&self) -> bool {
+impl AppendRetryError for ApiError {
+    fn has_no_side_effects(&self) -> bool {
         match self {
             Self::Server(status, err_resp) => {
                 server_error_has_no_side_effects(*status, &err_resp.code)
             }
             Self::Client(err) => err.has_no_side_effects(),
+            Self::AppendConditionFailed(_) | Self::MalformedAccessToken(_) => true,
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
             _ => false,
+        }
+    }
+
+    fn into_indefinite_failure(self) -> Self {
+        Self::IndefiniteFailure {
+            final_attempt_error: Box::new(self),
         }
     }
 }
@@ -1035,6 +1054,7 @@ impl<'a> RequestBuilder<'a> {
         let mut retry_backoff: Option<RetryBackoff> = self
             .retry_enabled
             .then(|| self.client.retry_builder.build());
+        let mut prior_uncertainty = false;
 
         loop {
             if let Some(ref signal) = self.frame_signal {
@@ -1112,6 +1132,11 @@ impl<'a> RequestBuilder<'a> {
                     num_retries_remaining = retry_backoff.as_ref().map(|b| b.remaining()).unwrap_or(0),
                     "retrying request"
                 );
+                if self.append_retry_policy.is_some()
+                    && err.attempt_may_have_side_effects(self.frame_signal.as_ref())
+                {
+                    prior_uncertainty = true;
+                }
                 tokio::time::sleep(backoff).await;
             } else {
                 debug!(
@@ -1121,7 +1146,7 @@ impl<'a> RequestBuilder<'a> {
                     retries_exhausted = retry_backoff.as_ref().is_none_or(|b| b.is_exhausted()),
                     "not retrying request"
                 );
-                return Err(err);
+                return Err(err.with_prior_uncertainty(prior_uncertainty));
             }
         }
     }
@@ -1135,9 +1160,7 @@ fn is_safe_to_retry(
 ) -> bool {
     let policy_compliant = match policy {
         None | Some(AppendRetryPolicy::All) => true,
-        Some(AppendRetryPolicy::NoSideEffects) => {
-            !frame_signal.is_none_or(|s| s.is_signalled()) || err.has_no_side_effects()
-        }
+        Some(AppendRetryPolicy::NoSideEffects) => !err.attempt_may_have_side_effects(frame_signal),
     };
     policy_compliant
         && (err.is_retryable()
@@ -1283,6 +1306,7 @@ fn provision_result_from_parts<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     #[cfg(feature = "_hidden")]
     use std::sync::Mutex;
     #[cfg(feature = "_hidden")]
@@ -1294,6 +1318,7 @@ mod tests {
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use super::*;
+    use crate::error::AppendError;
 
     #[cfg(feature = "_hidden")]
     #[derive(Default)]
@@ -1614,6 +1639,78 @@ mod tests {
         ) -> Result<StreamingResponse, client::HttpError> {
             unreachable!("unary retry test does not initialize a stream")
         }
+    }
+
+    #[rstest::rstest]
+    #[case(StatusCode::FORBIDDEN, "permission_denied", false, false)]
+    #[case(StatusCode::FORBIDDEN, "permission_denied", true, true)]
+    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", false, false)]
+    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", true, false)]
+    #[case(StatusCode::TOO_MANY_REQUESTS, "rate_limited", true, true)]
+    #[test]
+    fn unary_append_failure_preserves_uncertainty_and_final_error(
+        #[case] status: StatusCode,
+        #[case] code: &str,
+        #[case] prior_uncertainty: bool,
+        #[case] wrapped: bool,
+    ) {
+        let error =
+            AppendError::from(server_error(status, code).with_prior_uncertainty(prior_uncertainty));
+        assert_eq!(
+            matches!(error, AppendError::IndefiniteFailure { .. }),
+            wrapped
+        );
+        let server = error.request_error().unwrap().server_error().unwrap();
+        assert_eq!((server.status, server.code.as_str()), (status, code));
+        assert_eq!(server.message, "test");
+        assert_eq!(error.is_retryable(), server.is_retryable());
+        assert_eq!(
+            error.has_no_side_effects(),
+            !wrapped && server.has_no_side_effects()
+        );
+        if wrapped {
+            let latest = error
+                .source()
+                .unwrap()
+                .downcast_ref::<Box<AppendError>>()
+                .unwrap();
+            assert!(latest.has_no_side_effects());
+            assert_eq!(
+                latest.request_error().unwrap().server_error().unwrap().code,
+                code
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "append may have taken effect in an earlier attempt; final attempt failed: {latest}"
+                )
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::condition_failed(
+        ApiError::AppendConditionFailed(AppendConditionFailed::SeqNumMismatch(42)),
+        "sequence number mismatch, expected: 42"
+    )]
+    #[case::malformed_access_token(
+        ApiError::MalformedAccessToken("invalid header".to_owned()),
+        "malformed access token: invalid header"
+    )]
+    #[test]
+    fn unary_append_wraps_definite_terminal_errors(#[case] error: ApiError, #[case] message: &str) {
+        assert!(error.has_no_side_effects());
+        let error = AppendError::from(error.with_prior_uncertainty(true));
+        assert!(matches!(error, AppendError::IndefiniteFailure { .. }));
+        assert!(!error.has_no_side_effects());
+        assert!(!error.is_retryable());
+        let latest = error
+            .source()
+            .unwrap()
+            .downcast_ref::<Box<AppendError>>()
+            .unwrap();
+        assert!(latest.has_no_side_effects());
+        assert_eq!(latest.to_string(), message);
     }
 
     fn server_error(status: StatusCode, code: &str) -> ApiError {
