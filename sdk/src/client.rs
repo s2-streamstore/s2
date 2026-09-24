@@ -1131,7 +1131,7 @@ mod tests {
                 .supported_schemes()
         );
     }
-  
+
     #[tokio::test]
     async fn checkout_within_capacity() {
         let pool = test_pool();
