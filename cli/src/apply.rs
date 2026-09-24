@@ -328,8 +328,16 @@ fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<F
     if existing.storage_class != desired.storage_class {
         diffs.push(FieldDiff {
             field: "storage_class",
-            old: existing.storage_class.to_string(),
-            new: desired.storage_class.to_string(),
+            old: existing
+                .storage_class
+                .as_deref()
+                .unwrap_or("unspecified")
+                .to_owned(),
+            new: desired
+                .storage_class
+                .as_deref()
+                .unwrap_or("server default")
+                .to_owned(),
         });
     }
 

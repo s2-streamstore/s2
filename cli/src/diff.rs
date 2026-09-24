@@ -294,7 +294,7 @@ fn resource_kind(resource: &DiffResource) -> DiffResourceKind {
     }
 }
 
-/// Presentation of an effective (fully resolved) stream configuration.
+/// Presentation of a stream configuration for comparison.
 ///
 /// - Field names and nesting mirror the API wire format so that `--output json` paths line up with
 ///   API responses.
@@ -302,7 +302,7 @@ fn resource_kind(resource: &DiffResource) -> DiffResourceKind {
 ///   duration.
 #[derive(Serialize)]
 struct StreamConfigView {
-    storage_class: CompactString,
+    storage_class: Option<CompactString>,
     retention_policy: String,
     timestamping: TimestampingConfigView,
     delete_on_empty: DeleteOnEmptyConfigView,
@@ -738,7 +738,7 @@ mod tests {
         assert_eq!(
             view,
             json!({
-                "storage_class": "express",
+                "storage_class": null,
                 "retention_policy": "2d",
                 "timestamping": {"mode": "client-prefer", "uncapped": false},
                 "delete_on_empty": {"min_age": "1h"}
@@ -770,7 +770,7 @@ mod tests {
     fn omitted_and_explicit_defaults_render_identically() {
         let omitted = serde_json::from_value(json!({})).expect("empty config deserializes");
         let explicit = serde_json::from_value(json!({
-            "storage_class": "express",
+            "storage_class": null,
             "retention_policy": {"age": 604800},
             "timestamping": {"mode": "client-prefer", "uncapped": false},
             "delete_on_empty": {"min_age_secs": 0}
@@ -799,7 +799,7 @@ mod tests {
             view,
             json!({
                 "default_stream_config": {
-                    "storage_class": "express",
+                    "storage_class": null,
                     "retention_policy": "7d",
                     "timestamping": {"mode": "client-prefer", "uncapped": false},
                     "delete_on_empty": {"min_age": "0s"}

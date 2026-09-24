@@ -150,7 +150,7 @@ fn requested_stream_config() -> OptionalStreamConfig {
 
 fn expected_merged_stream_config() -> StreamConfig {
     StreamConfig {
-        storage_class: "standard".into(),
+        storage_class: Some("standard".into()),
         retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
         timestamping: Default::default(),
         delete_on_empty: DeleteOnEmptyConfig {

@@ -861,7 +861,7 @@ mod tests {
 
     fn expected_auto_created_config() -> StreamConfig {
         StreamConfig {
-            storage_class: "standard".into(),
+            storage_class: Some("standard".into()),
             retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
             timestamping: Default::default(),
             delete_on_empty: DeleteOnEmptyConfig {

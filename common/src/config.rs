@@ -2,8 +2,9 @@
 //!
 //! Stream configuration uses three representations:
 //!
-//! - Resolved (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`): concrete values,
-//!   produced by merging optional configs with defaults using `merge()`.
+//! - Merged (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`): values produced by
+//!   merging optional configs with defaults using `merge()`. Storage class remains unspecified when
+//!   neither the stream nor basin supplies one.
 //!
 //! - Optional (`OptionalStreamConfig`, `OptionalTimestampingConfig`,
 //!   `OptionalDeleteOnEmptyConfig`): partial configuration layers, where `None` means "not set at
@@ -17,8 +18,8 @@
 //! applies the inner reconfiguration to the existing value, while `Specified(None)`
 //! clears it to the default.
 //!
-//! `merge()` resolves optional configs into resolved configs with precedence:
-//! stream-level → basin-level → system default (via `Option::or` chaining).
+//! `merge()` applies configuration layers with precedence:
+//! stream-level → basin-level → field default. Storage class has no shared default.
 //!
 //! Basin config also carries basin-level knobs like `stream_cipher`,
 //! `create_stream_on_append`, and `create_stream_on_read`.
@@ -28,8 +29,6 @@ use std::time::Duration;
 use compact_str::CompactString;
 
 use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
-
-pub const DEFAULT_STORAGE_CLASS: CompactString = CompactString::const_new("express");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPolicy {
@@ -88,23 +87,12 @@ impl DeleteOnEmptyConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamConfig {
-    pub storage_class: CompactString,
+    pub storage_class: Option<CompactString>,
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
-}
-
-impl Default for StreamConfig {
-    fn default() -> Self {
-        Self {
-            storage_class: DEFAULT_STORAGE_CLASS,
-            retention_policy: Default::default(),
-            timestamping: Default::default(),
-            delete_on_empty: Default::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -249,10 +237,7 @@ impl OptionalStreamConfig {
     }
 
     pub fn merge(self, basin_defaults: Self) -> StreamConfig {
-        let storage_class = self
-            .storage_class
-            .or(basin_defaults.storage_class)
-            .unwrap_or(DEFAULT_STORAGE_CLASS);
+        let storage_class = self.storage_class.or(basin_defaults.storage_class);
 
         let retention_policy = self
             .retention_policy
@@ -282,7 +267,7 @@ impl From<OptionalStreamConfig> for StreamConfig {
         } = value;
 
         Self {
-            storage_class: storage_class.unwrap_or(DEFAULT_STORAGE_CLASS),
+            storage_class,
             retention_policy: retention_policy.unwrap_or_default(),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
@@ -300,7 +285,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
         } = value;
 
         Self {
-            storage_class: Some(storage_class),
+            storage_class,
             retention_policy: Some(retention_policy),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),

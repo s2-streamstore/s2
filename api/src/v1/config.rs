@@ -323,7 +323,7 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
         } = value;
 
         Self {
-            storage_class: Some(storage_class),
+            storage_class,
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
@@ -800,7 +800,7 @@ mod tests {
 
             prop_assert_eq!(
                 merged.storage_class,
-                stream.storage_class.or(basin.storage_class).unwrap_or(s2_common::config::DEFAULT_STORAGE_CLASS)
+                stream.storage_class.or(basin.storage_class)
             );
             prop_assert_eq!(
                 merged.retention_policy,

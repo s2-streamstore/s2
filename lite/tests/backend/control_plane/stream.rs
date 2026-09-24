@@ -97,7 +97,7 @@ async fn test_create_stream_honors_basin_defaults() {
         .get_stream_config(basin_name, stream_name)
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(config.storage_class, "standard");
+    assert_eq!(config.storage_class.as_deref(), Some("standard"));
     assert_eq!(config.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(config.timestamping.mode, TimestampingMode::ClientRequire);
 }
@@ -261,7 +261,7 @@ async fn test_create_stream_idempotency_and_request_token() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stored stream config");
-    assert_eq!(stored_config.storage_class, "express");
+    assert_eq!(stored_config.storage_class.as_deref(), Some("express"));
 
     let idempotent = backend
         .provision_stream(
@@ -374,7 +374,7 @@ async fn test_provision_stream_ensure_preserves_idempotency_key() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(stored_config.storage_class, "express");
+    assert_eq!(stored_config.storage_class, None);
     assert_eq!(stored_config.timestamping.mode, TimestampingMode::Arrival);
 
     backend
@@ -595,7 +595,7 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .await
         .expect("Failed to reconfigure stream");
 
-    assert_eq!(updated.storage_class, "express");
+    assert_eq!(updated.storage_class.as_deref(), Some("express"));
     assert_eq!(updated.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(updated.timestamping.mode, TimestampingMode::Arrival);
     assert!(updated.timestamping.uncapped);
@@ -604,7 +604,7 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .get_stream_config(basin_name, stream_name)
         .await
         .expect("Failed to fetch stream config after reconfigure");
-    assert_eq!(fetched.storage_class, "express");
+    assert_eq!(fetched.storage_class.as_deref(), Some("express"));
     assert_eq!(fetched.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(fetched.timestamping.mode, TimestampingMode::Arrival);
     assert!(fetched.timestamping.uncapped);
@@ -683,7 +683,7 @@ async fn test_reconfigure_stream_clears_fields_to_basin_defaults() {
         .await
         .expect("Failed to reconfigure stream");
 
-    assert_eq!(updated.storage_class, "standard");
+    assert_eq!(updated.storage_class.as_deref(), Some("standard"));
     assert_eq!(updated.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(updated.timestamping.mode, TimestampingMode::Arrival);
     assert!(updated.timestamping.uncapped);
