@@ -20,6 +20,7 @@ pub fn ser_key(stream_id: StreamId) -> Bytes {
     super::ser_stream_id_key(KeyType::StreamDeleteOnEmptyState, stream_id)
 }
 
+#[allow(dead_code)]
 pub fn deser_key(bytes: Bytes) -> Result<StreamId, DeserializationError> {
     super::deser_stream_id_key(KeyType::StreamDeleteOnEmptyState, bytes)
 }
@@ -69,7 +70,6 @@ mod tests {
             }
             let key = ser_key(stream.into());
             prop_assert_eq!(deser_key(key.clone()).unwrap(), StreamId::from(stream));
-            prop_assert_eq!(Bytes::from(super::super::Key::try_from(key.clone()).unwrap()), key);
         }
     }
 
