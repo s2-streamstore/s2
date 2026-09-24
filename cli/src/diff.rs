@@ -3,7 +3,10 @@
 use colored::Colorize;
 use compact_str::CompactString;
 use s2_api::v1::access::AccessTokenInfo as ApiAccessTokenInfo;
-use s2_common::access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet};
+use s2_common::{
+    access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet},
+    config::StreamConfig,
+};
 use s2_sdk::types::AccessTokenId;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -12,7 +15,7 @@ use crate::{
     cli::{DiffArgs, DiffOutput, DiffResourceKind},
     error::CliError,
     ops,
-    types::{DiffResource, ResolvedStreamConfig, S2BasinAndStreamUri, S2BasinUri},
+    types::{DiffResource, S2BasinAndStreamUri, S2BasinUri, resolve_stream_config},
 };
 
 #[derive(Debug, Serialize)]
@@ -316,9 +319,9 @@ struct DeleteOnEmptyConfigView {
     min_age: String,
 }
 
-impl From<ResolvedStreamConfig> for StreamConfigView {
-    fn from(config: ResolvedStreamConfig) -> Self {
-        let ResolvedStreamConfig {
+impl From<StreamConfig> for StreamConfigView {
+    fn from(config: StreamConfig) -> Self {
+        let StreamConfig {
             storage_class,
             retention_policy,
             timestamping,
@@ -364,7 +367,7 @@ impl TryFrom<s2_api::v1::config::BasinConfig> for BasinConfigView {
         } = config;
 
         Ok(Self {
-            default_stream_config: ResolvedStreamConfig::resolve(
+            default_stream_config: resolve_stream_config(
                 default_stream_config.unwrap_or_default(),
                 Default::default(),
             )?
@@ -471,7 +474,7 @@ fn basin_stream_defaults_view(config: s2_api::v1::config::BasinConfig) -> Result
 }
 
 fn stream_view(config: s2_api::v1::config::StreamConfig) -> Result<Value, CliError> {
-    let config = ResolvedStreamConfig::resolve(config, Default::default())?;
+    let config = resolve_stream_config(config, Default::default())?;
     Ok(serde_json::to_value(StreamConfigView::from(config))?)
 }
 

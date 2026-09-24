@@ -1,16 +1,9 @@
 use std::{str::FromStr, time::Duration};
 
-use compact_str::{CompactString, ToCompactString};
+use compact_str::CompactString;
 use http::{HeaderName, HeaderValue};
 use s2_common::{http::ParseableHeader, maybe::Maybe};
 use serde::{Deserialize, Serialize};
-
-fn parse_storage_class(
-    name: CompactString,
-) -> Result<s2_common::config::StorageClass, s2_common::ValidationError> {
-    name.parse()
-        .map_err(|_| s2_common::ValidationError(format!("invalid storage class: {name}")))
-}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,7 +294,7 @@ impl StreamConfig {
         } = config;
 
         let config = StreamConfig {
-            storage_class: storage_class.map(|class| class.to_compact_string()),
+            storage_class,
             retention_policy: retention_policy.map(Into::into),
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
@@ -330,7 +323,7 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
         } = value;
 
         Self {
-            storage_class: Some(storage_class.to_compact_string()),
+            storage_class: Some(storage_class),
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
@@ -379,7 +372,7 @@ impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
         };
 
         let config = Self {
-            storage_class: storage_class.map(parse_storage_class).transpose()?,
+            storage_class,
             retention_policy,
             timestamping: timestamping.map(Into::into).unwrap_or_default(),
             delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
@@ -424,7 +417,7 @@ impl TryFrom<StreamReconfiguration> for s2_common::config::StreamReconfiguration
         } = value;
 
         Ok(Self {
-            storage_class: storage_class.try_map_opt(parse_storage_class)?,
+            storage_class,
             retention_policy: retention_policy.try_map_opt(TryInto::try_into)?,
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
@@ -442,7 +435,7 @@ impl From<s2_common::config::StreamReconfiguration> for StreamReconfiguration {
         } = value;
 
         Self {
-            storage_class: storage_class.map_opt(|class| class.to_compact_string()),
+            storage_class,
             retention_policy: retention_policy.map_opt(Into::into),
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
@@ -574,12 +567,11 @@ impl From<s2_common::config::BasinReconfiguration> for BasinReconfiguration {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use s2_common::config::StorageClass;
 
     use super::*;
 
-    fn gen_storage_class() -> impl Strategy<Value = StorageClass> {
-        prop_oneof![Just(StorageClass::Standard), Just(StorageClass::Express)]
+    fn gen_storage_class() -> impl Strategy<Value = CompactString> {
+        "[a-z][a-z0-9-]{0,30}".prop_map(CompactString::from)
     }
 
     fn gen_timestamping_mode() -> impl Strategy<Value = TimestampingMode> {
@@ -625,7 +617,7 @@ mod tests {
         )
             .prop_map(
                 |(storage_class, retention_policy, timestamping, delete_on_empty)| StreamConfig {
-                    storage_class: storage_class.map(|class| class.to_compact_string()),
+                    storage_class,
                     retention_policy,
                     timestamping,
                     delete_on_empty,
@@ -677,7 +669,7 @@ mod tests {
             .prop_map(
                 |(storage_class, retention_policy, timestamping, delete_on_empty)| {
                     StreamReconfiguration {
-                        storage_class: storage_class.map_opt(|class| class.to_compact_string()),
+                        storage_class,
                         retention_policy,
                         timestamping,
                         delete_on_empty,
@@ -808,7 +800,7 @@ mod tests {
 
             prop_assert_eq!(
                 merged.storage_class,
-                stream.storage_class.or(basin.storage_class).unwrap_or_default()
+                stream.storage_class.or(basin.storage_class).unwrap_or(s2_common::config::DEFAULT_STORAGE_CLASS)
             );
             prop_assert_eq!(
                 merged.retention_policy,
@@ -864,7 +856,7 @@ mod tests {
             new_rp_secs in 1u64..u64::MAX,
         ) {
             let reconfig = s2_common::config::StreamReconfiguration {
-                storage_class: Maybe::Specified(Some(new_sc)),
+                storage_class: Maybe::Specified(Some(new_sc.clone())),
                 retention_policy: Maybe::Specified(Some(
                     s2_common::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs))
                 )),
@@ -966,7 +958,7 @@ mod tests {
 
             let reconfig = s2_common::config::BasinReconfiguration {
                 default_stream_config: Maybe::Specified(Some(s2_common::config::StreamReconfiguration {
-                    storage_class: Maybe::Specified(Some(new_sc)),
+                    storage_class: Maybe::Specified(Some(new_sc.clone())),
                     ..Default::default()
                 })),
                 stream_cipher: Maybe::Specified(Some(new_algorithm.into())),
