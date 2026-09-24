@@ -25,11 +25,31 @@
 
 use std::time::Duration;
 
-use compact_str::CompactString;
-
 use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
 
-pub const DEFAULT_STORAGE_CLASS: CompactString = CompactString::const_new("express");
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    strum::Display,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+    strum::FromRepr,
+    strum::EnumString,
+    PartialEq,
+    Eq,
+    Hash,
+)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[repr(u8)]
+pub enum StorageClass {
+    #[strum(serialize = "standard")]
+    Standard = 1,
+    #[default]
+    #[strum(serialize = "express")]
+    Express = 2,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPolicy {
@@ -88,23 +108,12 @@ impl DeleteOnEmptyConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamConfig {
-    pub storage_class: CompactString,
+    pub storage_class: StorageClass,
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
-}
-
-impl Default for StreamConfig {
-    fn default() -> Self {
-        Self {
-            storage_class: DEFAULT_STORAGE_CLASS,
-            retention_policy: Default::default(),
-            timestamping: Default::default(),
-            delete_on_empty: Default::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -120,7 +129,7 @@ pub struct DeleteOnEmptyReconfiguration {
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamReconfiguration {
-    pub storage_class: Maybe<Option<CompactString>>,
+    pub storage_class: Maybe<Option<StorageClass>>,
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
@@ -208,7 +217,7 @@ impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalStreamConfig {
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<StorageClass>,
     pub retention_policy: Option<RetentionPolicy>,
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,
@@ -252,7 +261,7 @@ impl OptionalStreamConfig {
         let storage_class = self
             .storage_class
             .or(basin_defaults.storage_class)
-            .unwrap_or(DEFAULT_STORAGE_CLASS);
+            .unwrap_or_default();
 
         let retention_policy = self
             .retention_policy
@@ -282,7 +291,7 @@ impl From<OptionalStreamConfig> for StreamConfig {
         } = value;
 
         Self {
-            storage_class: storage_class.unwrap_or(DEFAULT_STORAGE_CLASS),
+            storage_class: storage_class.unwrap_or_default(),
             retention_policy: retention_policy.unwrap_or_default(),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),

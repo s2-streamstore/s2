@@ -5,7 +5,8 @@ use s2_common::{
     config::{
         BasinConfig, BasinReconfiguration, DeleteOnEmptyReconfiguration,
         OptionalDeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
-        RetentionPolicy, StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
+        RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
+        TimestampingReconfiguration,
     },
     encryption::EncryptionAlgorithm,
     maybe::Maybe,
@@ -57,7 +58,7 @@ async fn test_create_stream_honors_basin_defaults() {
 
     let basin_config = BasinConfig {
         default_stream_config: OptionalStreamConfig {
-            storage_class: Some("standard".into()),
+            storage_class: Some(StorageClass::Standard),
             retention_policy: Some(RetentionPolicy::Infinite()),
             timestamping: OptionalTimestampingConfig {
                 mode: Some(TimestampingMode::ClientRequire),
@@ -97,7 +98,7 @@ async fn test_create_stream_honors_basin_defaults() {
         .get_stream_config(basin_name, stream_name)
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(config.storage_class, "standard");
+    assert_eq!(config.storage_class, StorageClass::Standard);
     assert_eq!(config.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(config.timestamping.mode, TimestampingMode::ClientRequire);
 }
@@ -239,7 +240,7 @@ async fn test_create_stream_idempotency_and_request_token() {
     let stream_name = test_stream_name("stream-idempotency");
 
     let config = OptionalStreamConfig {
-        storage_class: Some("express".into()),
+        storage_class: Some(StorageClass::Express),
         ..Default::default()
     };
 
@@ -261,7 +262,7 @@ async fn test_create_stream_idempotency_and_request_token() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stored stream config");
-    assert_eq!(stored_config.storage_class, "express");
+    assert_eq!(stored_config.storage_class, StorageClass::Express);
 
     let idempotent = backend
         .provision_stream(
@@ -325,7 +326,7 @@ async fn test_provision_stream_ensure_preserves_idempotency_key() {
     let stream_name = test_stream_name("stream-idempotency-key-preserve");
 
     let config = OptionalStreamConfig {
-        storage_class: Some("standard".into()),
+        storage_class: Some(StorageClass::Standard),
         ..Default::default()
     };
     let token: RequestToken = "stream-token-preserve".parse().unwrap();
@@ -374,7 +375,7 @@ async fn test_provision_stream_ensure_preserves_idempotency_key() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(stored_config.storage_class, "express");
+    assert_eq!(stored_config.storage_class, StorageClass::Express);
     assert_eq!(stored_config.timestamping.mode, TimestampingMode::Arrival);
 
     backend
@@ -398,7 +399,7 @@ async fn test_provision_stream_ensure_noops_when_effective_config_matches() {
         "stream-ensure-effective-noop",
         BasinConfig {
             default_stream_config: OptionalStreamConfig {
-                storage_class: Some("express".into()),
+                storage_class: Some(StorageClass::Express),
                 retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(
                     10 * 24 * 60 * 60,
                 ))),
@@ -410,7 +411,7 @@ async fn test_provision_stream_ensure_noops_when_effective_config_matches() {
     .await;
     let stream_name = test_stream_name("stream-ensure-effective-noop");
     let config = OptionalStreamConfig {
-        storage_class: Some("standard".into()),
+        storage_class: Some(StorageClass::Standard),
         retention_policy: Some(RetentionPolicy::Infinite()),
         ..Default::default()
     };
@@ -516,7 +517,7 @@ async fn test_provision_stream_idempotency_ignores_changed_basin_defaults() {
             basin_name.clone(),
             BasinReconfiguration {
                 default_stream_config: Maybe::from(Some(StreamReconfiguration {
-                    storage_class: Maybe::from(Some("standard".into())),
+                    storage_class: Maybe::from(Some(StorageClass::Standard)),
                     ..Default::default()
                 })),
                 ..Default::default()
@@ -544,7 +545,7 @@ async fn test_reconfigure_stream_updates_selected_fields() {
     let basin_name = test_basin_name("stream-reconfigure");
 
     let mut basin_config = BasinConfig::default();
-    basin_config.default_stream_config.storage_class = Some("standard".into());
+    basin_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
         .provision_basin(
@@ -584,7 +585,7 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         uncapped: Maybe::from(Some(true)),
     };
     let mut stream_reconfig = StreamReconfiguration {
-        storage_class: Maybe::from(Some("express".into())),
+        storage_class: Maybe::from(Some(StorageClass::Express)),
         retention_policy: Maybe::from(Some(RetentionPolicy::Infinite())),
         ..Default::default()
     };
@@ -595,7 +596,7 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .await
         .expect("Failed to reconfigure stream");
 
-    assert_eq!(updated.storage_class, "express");
+    assert_eq!(updated.storage_class, StorageClass::Express);
     assert_eq!(updated.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(updated.timestamping.mode, TimestampingMode::Arrival);
     assert!(updated.timestamping.uncapped);
@@ -604,7 +605,7 @@ async fn test_reconfigure_stream_updates_selected_fields() {
         .get_stream_config(basin_name, stream_name)
         .await
         .expect("Failed to fetch stream config after reconfigure");
-    assert_eq!(fetched.storage_class, "express");
+    assert_eq!(fetched.storage_class, StorageClass::Express);
     assert_eq!(fetched.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(fetched.timestamping.mode, TimestampingMode::Arrival);
     assert!(fetched.timestamping.uncapped);
@@ -617,7 +618,7 @@ async fn test_reconfigure_stream_clears_fields_to_basin_defaults() {
 
     let basin_config = BasinConfig {
         default_stream_config: OptionalStreamConfig {
-            storage_class: Some("standard".into()),
+            storage_class: Some(StorageClass::Standard),
             retention_policy: Some(RetentionPolicy::Infinite()),
             timestamping: OptionalTimestampingConfig {
                 mode: Some(TimestampingMode::Arrival),
@@ -643,7 +644,7 @@ async fn test_reconfigure_stream_clears_fields_to_basin_defaults() {
 
     let stream_name = test_stream_name("stream-reconfigure-clear-defaults");
     let stream_config = OptionalStreamConfig {
-        storage_class: Some("express".into()),
+        storage_class: Some(StorageClass::Express),
         retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(60))),
         timestamping: OptionalTimestampingConfig {
             mode: Some(TimestampingMode::ClientRequire),
@@ -683,7 +684,7 @@ async fn test_reconfigure_stream_clears_fields_to_basin_defaults() {
         .await
         .expect("Failed to reconfigure stream");
 
-    assert_eq!(updated.storage_class, "standard");
+    assert_eq!(updated.storage_class, StorageClass::Standard);
     assert_eq!(updated.retention_policy, RetentionPolicy::Infinite());
     assert_eq!(updated.timestamping.mode, TimestampingMode::Arrival);
     assert!(updated.timestamping.uncapped);

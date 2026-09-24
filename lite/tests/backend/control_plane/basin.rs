@@ -4,7 +4,8 @@ use s2_common::{
     basin::{BasinNamePrefix, BasinNameStartAfter, ListBasinsRequest},
     config::{
         BasinConfig, BasinReconfiguration, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-        RetentionPolicy, StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
+        RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
+        TimestampingReconfiguration,
     },
     maybe::Maybe,
     resources::{ProvisionMode, ProvisionResult, RequestToken},
@@ -240,7 +241,7 @@ async fn test_provision_basin_ensure_updates_config() {
     let mut updated_config = initial_config.clone();
     updated_config.create_stream_on_append = true;
     updated_config.create_stream_on_read = true;
-    updated_config.default_stream_config.storage_class = Some("standard".into());
+    updated_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
         .provision_basin(
@@ -259,7 +260,7 @@ async fn test_provision_basin_ensure_updates_config() {
     assert!(stored_config.create_stream_on_read);
     assert_eq!(
         stored_config.default_stream_config.storage_class,
-        Some("standard".into())
+        Some(StorageClass::Standard)
     );
 
     backend
@@ -282,7 +283,7 @@ async fn test_provision_basin_ensure_resets_unspecified_config() {
         create_stream_on_append: true,
         create_stream_on_read: false,
         default_stream_config: OptionalStreamConfig {
-            storage_class: Some("standard".into()),
+            storage_class: Some(StorageClass::Standard),
             retention_policy: Some(RetentionPolicy::Infinite()),
             ..Default::default()
         },
@@ -369,7 +370,7 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("basin-reconfigure");
     let mut initial_config = BasinConfig::default();
-    initial_config.default_stream_config.storage_class = Some("standard".into());
+    initial_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
         .provision_basin(
@@ -387,7 +388,7 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
         ..Default::default()
     };
     let mut stream_reconfig = StreamReconfiguration {
-        storage_class: Maybe::from(Some("express".into())),
+        storage_class: Maybe::from(Some(StorageClass::Express)),
         retention_policy: Maybe::from(Some(RetentionPolicy::Infinite())),
         ..Default::default()
     };
@@ -409,7 +410,7 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     assert!(updated.create_stream_on_read);
     assert_eq!(
         updated.default_stream_config.storage_class,
-        Some("express".into())
+        Some(StorageClass::Express)
     );
     assert_eq!(
         updated.default_stream_config.retention_policy,
@@ -426,7 +427,7 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
         .expect("Failed to fetch basin config after reconfigure");
     assert_eq!(
         fetched.default_stream_config.storage_class,
-        Some("express".into())
+        Some(StorageClass::Express)
     );
     assert_eq!(
         fetched.default_stream_config.retention_policy,
