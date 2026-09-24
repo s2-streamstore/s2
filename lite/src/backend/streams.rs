@@ -1,6 +1,6 @@
 use s2_common::{
     basin::BasinName,
-    config::{OptionalStreamConfig, StreamConfig, StreamReconfiguration},
+    config::{DeleteOnEmptyConfig, OptionalStreamConfig, StreamConfig, StreamReconfiguration},
     record::{NonZeroSeqNum, StreamPosition},
     resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
     stream::{ListStreamsRequest, StreamInfo, StreamName},
@@ -14,9 +14,10 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend,
+    Backend, doe,
     store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
-    streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
+    streamer::{TerminalTrimCondition, TerminalTrimOutcome},
+    timestamp::TimestampSecs,
 };
 use crate::{
     backend::{
@@ -121,8 +122,11 @@ impl Backend {
             ));
         }
 
+        let prior_doe = existing_meta
+            .as_ref()
+            .map(|meta| meta.config.delete_on_empty);
         let basin_defaults = basin_meta.config.default_stream_config;
-        let (outcome, prior_doe_min_age) = match (existing_meta, mode) {
+        let outcome = match (existing_meta, mode) {
             (Some(existing), ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
@@ -154,40 +158,33 @@ impl Backend {
                     deleted_at: None,
                     creation_idempotency_key: existing.creation_idempotency_key,
                 };
-                (
-                    if config_unchanged {
-                        ProvisionResult::Noop(meta)
-                    } else {
-                        ProvisionResult::Updated(meta)
-                    },
-                    existing.config.delete_on_empty.min_age(),
-                )
+                if config_unchanged {
+                    ProvisionResult::Noop(meta)
+                } else {
+                    ProvisionResult::Updated(meta)
+                }
             }
             (None, ProvisionMode::CreateOnly { request_token }) => {
                 let new_creation_idempotency_key = request_token
                     .as_ref()
                     .map(|req_token| creation_idempotency_key(req_token, &config));
-                (
-                    ProvisionResult::Created(kv::stream_meta::StreamMeta {
-                        config: config.merge(basin_defaults),
-                        cipher: basin_meta.config.stream_cipher,
-                        created_at: OffsetDateTime::now_utc(),
-                        deleted_at: None,
-                        creation_idempotency_key: new_creation_idempotency_key,
-                    }),
-                    None,
-                )
+                ProvisionResult::Created(kv::stream_meta::StreamMeta {
+                    config: config.merge(basin_defaults),
+                    cipher: basin_meta.config.stream_cipher,
+                    created_at: OffsetDateTime::now_utc(),
+                    deleted_at: None,
+                    creation_idempotency_key: new_creation_idempotency_key,
+                })
             }
-            (None, ProvisionMode::Ensure) => (
+            (None, ProvisionMode::Ensure) => {
                 ProvisionResult::Created(kv::stream_meta::StreamMeta {
                     config: config.merge(basin_defaults),
                     cipher: basin_meta.config.stream_cipher,
                     created_at: OffsetDateTime::now_utc(),
                     deleted_at: None,
                     creation_idempotency_key: None,
-                }),
-                None,
-            ),
+                })
+            }
         };
 
         if matches!(&outcome, ProvisionResult::Noop(_)) {
@@ -212,23 +209,14 @@ impl Backend {
                 )?;
             }
 
-            if let Some(min_age) = meta.config.delete_on_empty.min_age()
-                && (matches!(&outcome, ProvisionResult::Created(_)) || prior_doe_min_age.is_none())
-            {
-                txn.put(
-                    kv::stream_doe_deadline::new_key(
-                        kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                            meta.config.retention_policy.age().unwrap_or_default(),
-                            min_age,
-                        )),
-                        stream_id,
-                    ),
-                    kv::stream_doe_deadline::ser_value(min_age),
-                )?;
-            }
-
-            self.commit_stream_config(txn, basin.clone(), stream.clone(), meta.config.clone())
-                .await?;
+            self.commit_stream_config(
+                txn,
+                basin.clone(),
+                stream.clone(),
+                meta.config.clone(),
+                prior_doe,
+            )
+            .await?;
         }
 
         Ok(outcome.map(|meta| StreamInfo {
@@ -296,7 +284,7 @@ impl Backend {
             return Err(StreamDeletionPendingError.into());
         }
 
-        let prior_doe_min_age = meta.config.delete_on_empty.min_age();
+        let prior_doe = meta.config.delete_on_empty;
 
         meta.config = OptionalStreamConfig::from(meta.config)
             .reconfigure(reconfig)
@@ -304,23 +292,7 @@ impl Backend {
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 
-        let stream_id = StreamId::new(&basin, &stream);
-        if let Some(min_age) = meta.config.delete_on_empty.min_age()
-            && prior_doe_min_age.is_none()
-        {
-            txn.put(
-                kv::stream_doe_deadline::new_key(
-                    kv::timestamp::TimestampSecs::after(doe_arm_delay(
-                        meta.config.retention_policy.age().unwrap_or_default(),
-                        min_age,
-                    )),
-                    stream_id,
-                ),
-                kv::stream_doe_deadline::ser_value(min_age),
-            )?;
-        }
-
-        self.commit_stream_config(txn, basin, stream, meta.config.clone())
+        self.commit_stream_config(txn, basin, stream, meta.config.clone(), Some(prior_doe))
             .await?;
 
         Ok(meta.config)
@@ -332,7 +304,22 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         config: StreamConfig,
-    ) -> Result<(), slatedb::Error> {
+        prior_doe: Option<DeleteOnEmptyConfig>,
+    ) -> Result<(), StorageError> {
+        let stream_id = StreamId::new(&basin, &stream);
+        match (prior_doe, config.delete_on_empty.min_age()) {
+            (None, Some(min_age)) => {
+                doe::schedule(&txn, stream_id, TimestampSecs::after(min_age)).await?;
+            }
+            (Some(prior), Some(min_age)) if prior.min_age != min_age => {
+                doe::schedule(&txn, stream_id, TimestampSecs::now()).await?;
+            }
+            (Some(prior), None) if prior.min_age().is_some() => {
+                doe::clear(&txn, stream_id).await?;
+            }
+            _ => (),
+        }
+
         let backend = self.clone();
         // Once a commit starts, cancellation must not discard its notification.
         tokio::spawn(async move {
@@ -340,7 +327,7 @@ impl Backend {
                 .await?
                 .expect("stream metadata was written");
             backend.advise_stream_config(&basin, &stream, seq, config);
-            Ok(())
+            Ok::<_, StorageError>(())
         })
         .await
         .expect("stream config commit task panicked")
@@ -354,6 +341,7 @@ impl Backend {
     ) -> Result<(), DeleteStreamError> {
         self.delete_stream_with_condition(basin, stream, TerminalTrimCondition::Always)
             .await
+            .map(|_| ())
     }
 
     pub(super) async fn delete_stream_with_condition(
@@ -361,7 +349,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
         condition: TerminalTrimCondition,
-    ) -> Result<(), DeleteStreamError> {
+    ) -> Result<TerminalTrimOutcome, DeleteStreamError> {
         let outcome = match self.streamer_client_guarded(&basin, &stream).await {
             Ok(client) => client.terminal_trim(condition).await?,
             Err(StreamerError::Storage(e)) => {
@@ -372,10 +360,10 @@ impl Backend {
             }
             Err(StreamerError::StreamDeletionPending(_)) => TerminalTrimOutcome::DeletionPending,
         };
-        match outcome {
-            TerminalTrimOutcome::DeletionPending => self.mark_stream_deleted(basin, stream).await,
-            TerminalTrimOutcome::Ineligible => Ok(()),
+        if outcome == TerminalTrimOutcome::DeletionPending {
+            self.mark_stream_deleted(basin, stream).await?;
         }
+        Ok(outcome)
     }
 
     async fn mark_stream_deleted(

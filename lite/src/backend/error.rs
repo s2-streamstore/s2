@@ -20,6 +20,12 @@ pub enum StorageError {
     Database(Arc<slatedb::Error>),
 }
 
+impl StorageError {
+    pub(super) fn is_transaction_conflict(&self) -> bool {
+        matches!(self, Self::Database(err) if err.kind() == slatedb::ErrorKind::Transaction)
+    }
+}
+
 impl From<slatedb::Error> for StorageError {
     fn from(error: slatedb::Error) -> Self {
         StorageError::Database(Arc::new(error))
@@ -317,7 +323,7 @@ impl From<kv::DeserializationError> for ListStreamsError {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProvisionStreamError {
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
@@ -334,10 +340,16 @@ pub enum ProvisionStreamError {
 
 impl From<slatedb::Error> for ProvisionStreamError {
     fn from(err: slatedb::Error) -> Self {
-        if err.kind() == slatedb::ErrorKind::Transaction {
+        Self::from(StorageError::from(err))
+    }
+}
+
+impl From<StorageError> for ProvisionStreamError {
+    fn from(err: StorageError) -> Self {
+        if err.is_transaction_conflict() {
             Self::TransactionConflict(TransactionConflictError)
         } else {
-            Self::Storage(err.into())
+            Self::Storage(err)
         }
     }
 }
@@ -399,6 +411,18 @@ pub enum StreamDeleteOnEmptyError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     DeleteStream(#[from] DeleteStreamError),
+}
+
+impl StreamDeleteOnEmptyError {
+    pub(super) fn is_transaction_conflict(&self) -> bool {
+        match self {
+            Self::Storage(err) | Self::DeleteStream(DeleteStreamError::Storage(err)) => {
+                err.is_transaction_conflict()
+            }
+            Self::DeleteStream(DeleteStreamError::TransactionConflict(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -474,7 +498,7 @@ impl From<slatedb::Error> for ReconfigureBasinError {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ReconfigureStreamError {
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
@@ -491,10 +515,16 @@ pub enum ReconfigureStreamError {
 
 impl From<slatedb::Error> for ReconfigureStreamError {
     fn from(err: slatedb::Error) -> Self {
-        if err.kind() == slatedb::ErrorKind::Transaction {
+        Self::from(StorageError::from(err))
+    }
+}
+
+impl From<StorageError> for ReconfigureStreamError {
+    fn from(err: StorageError) -> Self {
+        if err.is_transaction_conflict() {
             Self::TransactionConflict(TransactionConflictError)
         } else {
-            Self::Storage(err.into())
+            Self::Storage(err)
         }
     }
 }

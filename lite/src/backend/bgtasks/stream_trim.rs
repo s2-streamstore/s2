@@ -1,20 +1,20 @@
-use std::{ops::RangeTo, time::Duration};
+use std::ops::RangeTo;
 
 use futures::{StreamExt, stream};
 use s2_common::{record::NonZeroSeqNum, resources::Page};
 use slatedb::{
-    DbTransaction, IsolationLevel, WriteBatch,
+    IsolationLevel, WriteBatch,
     config::{DurabilityLevel, ScanOptions},
 };
 use tracing::instrument;
 
+use super::PageProgress;
 use crate::{
     backend::{
-        Backend,
+        Backend, doe,
         error::StorageError,
-        kv::{self, timestamp::TimestampSecs},
+        kv,
         store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
-        streamer::doe_arm_delay,
     },
     stream_id::StreamId,
 };
@@ -37,6 +37,10 @@ impl Backend {
         if page.values.is_empty() {
             return Ok(page.has_more);
         }
+        let mut progress = PageProgress {
+            has_more: page.has_more,
+            ..Default::default()
+        };
         let mut processed = stream::iter(page.values)
             .map(|pending| {
                 let backend = self.clone();
@@ -44,9 +48,9 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            result?;
+            progress.record(result, StorageError::is_transaction_conflict)?;
         }
-        Ok(page.has_more)
+        Ok(progress.should_continue())
     }
 
     async fn list_stream_trim_pending(&self) -> Result<Page<PendingTrim>, StorageError> {
@@ -119,7 +123,7 @@ impl Backend {
         Ok(has_remaining_records)
     }
 
-    #[instrument(ret, err, skip(self))]
+    #[instrument(skip(self))]
     async fn finalize_trim(
         &self,
         pending: PendingTrim,
@@ -148,48 +152,15 @@ impl Backend {
             }
             txn.delete(kv::stream_tail_position::ser_key(pending.stream_id))?;
             txn.delete(kv::stream_fencing_token::ser_key(pending.stream_id))?;
-        } else if !has_remaining_records {
-            arm_doe_on_full_trim(&txn, pending.stream_id).await?;
+            doe::clear(&txn, pending.stream_id).await?;
+        } else {
+            // A partial trim may remove the infinite-retention record that
+            // parked DOE while leaving finite-retention records behind.
+            doe::wake_after_trim(&txn, pending.stream_id, has_remaining_records).await?;
         }
         db_txn_commit_durable(txn).await?;
         Ok(())
     }
-}
-
-async fn arm_doe_on_full_trim(
-    txn: &DbTransaction,
-    stream_id: StreamId,
-) -> Result<(), StorageError> {
-    let Some((basin, stream)) = db_txn_get(
-        txn,
-        kv::stream_id_mapping::ser_key(stream_id),
-        kv::stream_id_mapping::deser_value,
-    )
-    .await?
-    else {
-        return Ok(());
-    };
-    let Some(meta) = db_txn_get(
-        txn,
-        &kv::stream_meta::ser_key(&basin, &stream),
-        kv::stream_meta::deser_value,
-    )
-    .await?
-    else {
-        return Ok(());
-    };
-    if meta.deleted_at.is_some() {
-        return Ok(());
-    }
-    let Some(min_age) = meta.config.delete_on_empty.min_age() else {
-        return Ok(());
-    };
-    let deadline = TimestampSecs::after(doe_arm_delay(Duration::ZERO, min_age));
-    txn.put(
-        kv::stream_doe_deadline::new_key(deadline, stream_id),
-        kv::stream_doe_deadline::ser_value(min_age),
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -9,6 +9,35 @@ mod basin_deletion;
 mod stream_doe;
 mod stream_trim;
 
+/// Keep draining the backlog while at least one item succeeds. A page where
+/// every item conflicts waits for the next tick instead of retrying in a tight loop.
+#[derive(Default)]
+struct PageProgress {
+    has_more: bool,
+    any_succeeded: bool,
+}
+
+impl PageProgress {
+    fn record<T, E>(
+        &mut self,
+        result: Result<T, E>,
+        is_conflict: fn(&E) -> bool,
+    ) -> Result<Option<T>, E> {
+        match result {
+            Ok(value) => {
+                self.any_succeeded = true;
+                Ok(Some(value))
+            }
+            Err(err) if is_conflict(&err) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn should_continue(&self) -> bool {
+        self.has_more && self.any_succeeded
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BgtaskTrigger {
     BasinDeletion,
