@@ -455,7 +455,7 @@ impl Streamer {
     ) {
         match condition {
             TerminalTrimCondition::Always => {
-                self.append_terminal_trim(reply_tx);
+                self.ensure_terminal_trim(reply_tx);
             }
             TerminalTrimCondition::DeleteOnEmpty {
                 expected_stream_creation_seq,
@@ -464,7 +464,7 @@ impl Streamer {
                 if self.stream_creation_seq != expected_stream_creation_seq {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
                 } else if self.trim_point.state.end == SeqNum::MAX {
-                    self.append_terminal_trim(reply_tx);
+                    self.ensure_terminal_trim(reply_tx);
                 } else if self.config_seq != expected_config_seq {
                     // The worker may have observed a configuration commit before
                     // its notification reached this actor (or vice versa). Do not
@@ -509,7 +509,7 @@ impl Streamer {
             }
         };
         if self.trim_point.state.end == SeqNum::MAX {
-            self.append_terminal_trim(reply_tx);
+            self.ensure_terminal_trim(reply_tx);
             return;
         }
         if self.config_seq != config_seq_snapshot {
@@ -536,7 +536,7 @@ impl Streamer {
                     && self.next_assignable_pos() == stable_pos_snapshot
                     && old_enough
                 {
-                    self.append_terminal_trim(reply_tx);
+                    self.ensure_terminal_trim(reply_tx);
                     return;
                 }
                 self.doe_retry_at(TimestampSecs::ZERO)
@@ -556,7 +556,7 @@ impl Streamer {
         )
     }
 
-    fn append_terminal_trim(
+    fn ensure_terminal_trim(
         &mut self,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
     ) {
