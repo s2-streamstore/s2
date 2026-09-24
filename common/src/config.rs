@@ -19,7 +19,7 @@
 //! clears it to the default.
 //!
 //! `merge()` applies configuration layers with precedence:
-//! stream-level → basin-level → field default. Storage class has no shared default.
+//! stream-level → basin-level → field default.
 //!
 //! Basin config also carries basin-level knobs like `stream_cipher`,
 //! `create_stream_on_append`, and `create_stream_on_read`.
