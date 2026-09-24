@@ -2433,7 +2433,7 @@ pub enum BasinMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes across all streams
     /// in the basin, with one observed value for each hour over the requested time range.
     Storage(TimeRange),
-    /// Returns [`AccumulationMetric`]s, one per storage class (standard, express).
+    /// Returns [`AccumulationMetric`]s, one per storage class.
     ///
     /// Each metric represents a timeseries of the number of append operations across all streams
     /// in the basin, with one accumulated value per interval over the requested time range.
