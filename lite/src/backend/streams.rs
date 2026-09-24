@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
-    Backend,
+    Backend, resolve_stream_config,
     store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
     streamer::{TerminalTrimCondition, TerminalTrimOutcome, doe_arm_delay},
 };
@@ -145,7 +145,7 @@ impl Backend {
                 return result;
             }
             (Some(existing), ProvisionMode::Ensure) => {
-                let desired_config = config.merge(basin_defaults);
+                let desired_config = resolve_stream_config(config, basin_defaults);
                 let config_unchanged = existing.config == desired_config;
                 let meta = kv::stream_meta::StreamMeta {
                     config: desired_config,
@@ -169,7 +169,7 @@ impl Backend {
                     .map(|req_token| creation_idempotency_key(req_token, &config));
                 (
                     ProvisionResult::Created(kv::stream_meta::StreamMeta {
-                        config: config.merge(basin_defaults),
+                        config: resolve_stream_config(config, basin_defaults),
                         cipher: basin_meta.config.stream_cipher,
                         created_at: OffsetDateTime::now_utc(),
                         deleted_at: None,
@@ -180,7 +180,7 @@ impl Backend {
             }
             (None, ProvisionMode::Ensure) => (
                 ProvisionResult::Created(kv::stream_meta::StreamMeta {
-                    config: config.merge(basin_defaults),
+                    config: resolve_stream_config(config, basin_defaults),
                     cipher: basin_meta.config.stream_cipher,
                     created_at: OffsetDateTime::now_utc(),
                     deleted_at: None,
@@ -298,9 +298,10 @@ impl Backend {
 
         let prior_doe_min_age = meta.config.delete_on_empty.min_age();
 
-        meta.config = OptionalStreamConfig::from(meta.config)
-            .reconfigure(reconfig)
-            .merge(basin_meta.config.default_stream_config);
+        meta.config = resolve_stream_config(
+            OptionalStreamConfig::from(meta.config).reconfigure(reconfig),
+            basin_meta.config.default_stream_config,
+        );
 
         txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
 

@@ -374,7 +374,7 @@ async fn test_provision_stream_ensure_preserves_idempotency_key() {
         .get_stream_config(basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to fetch stream config");
-    assert_eq!(stored_config.storage_class, None);
+    assert_eq!(stored_config.storage_class.as_deref(), Some("express"));
     assert_eq!(stored_config.timestamping.mode, TimestampingMode::Arrival);
 
     backend
