@@ -1315,6 +1315,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn s2s_read_does_not_compress_with_refused_encodings() {
+        static BODY: [u8; 4096] = [b'a'; 4096];
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "read-s2s-refused-encoding",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        append_payload(&backend, &basin, &stream, &BODY).await;
+
+        let response = send(
+            &app,
+            request_builder("GET", read_uri(&stream), &basin)
+                .header(header::CONTENT_TYPE, "s2s/proto")
+                .header(header::ACCEPT_ENCODING, "zstd;q=0, gzip;q=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_bytes(response, "s2s body").await;
+        // 3-byte length prefix, then the flag byte whose bits 5-6 carry the compression.
+        let compression_bits = (body[3] >> 5) & 0b11;
+        assert_eq!(
+            compression_bits,
+            s2s::CompressionAlgorithm::None as u8,
+            "frame compressed with an encoding the client refused"
+        );
+        let frame = decode_single_frame(body, "batch frame");
+        let SessionMessage::Regular(batch) = frame else {
+            panic!("expected regular frame");
+        };
+        let batch = batch
+            .try_into_proto::<proto::ReadBatch>()
+            .expect("decode read batch proto");
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].body.as_ref(), &BODY[..]);
+    }
+
+    #[tokio::test]
     async fn s2s_read_with_correct_encryption_returns_batch_frame() {
         let encryption_key = aegis_key(0x42);
         let (app, backend, basin, stream) = setup_app_with_config(
