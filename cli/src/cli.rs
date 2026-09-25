@@ -192,6 +192,7 @@ pub enum Command {
     ///   `+` create
     ///   `~` ensure
     ///   `=` unchanged
+    ///   `?` storage-class default resolved at apply
     ///
     /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
     ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[]}
@@ -835,6 +836,7 @@ pub struct ApplyArgs {
     ///   `+` create
     ///   `~` ensure
     ///   `=` unchanged
+    ///   `?` storage-class default resolved at apply
     #[arg(long)]
     pub dry_run: bool,
     /// Print the JSON Schema for the spec file format to stdout.

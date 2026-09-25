@@ -11,7 +11,7 @@ use s2_common::{
     stream::StreamName,
 };
 use s2_sdk::{
-    error::{ErrorCode, RequestError},
+    error::{ErrorCode, RequestError, StatusCode},
     types::BasinConfig,
 };
 
@@ -212,8 +212,24 @@ async fn apply_stream(
 
 enum ResourceAction {
     Create,
-    Ensure(Vec<FieldDiff>),
+    Ensure {
+        diffs: Vec<FieldDiff>,
+        storage_class_unresolved: bool,
+    },
     Unchanged,
+}
+
+impl ResourceAction {
+    fn from_diff(diffs: Vec<FieldDiff>, storage_class_unresolved: bool) -> Self {
+        if diffs.is_empty() && !storage_class_unresolved {
+            Self::Unchanged
+        } else {
+            Self::Ensure {
+                diffs,
+                storage_class_unresolved,
+            }
+        }
+    }
 }
 
 struct FieldDiff {
@@ -325,7 +341,9 @@ fn diff_basin_config(
 fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
-    if existing.storage_class != desired.storage_class {
+    if let Some(storage_class) = &desired.storage_class
+        && existing.storage_class.as_ref() != Some(storage_class)
+    {
         diffs.push(FieldDiff {
             field: "storage_class",
             old: existing
@@ -333,11 +351,7 @@ fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<F
                 .as_deref()
                 .unwrap_or("unspecified")
                 .to_owned(),
-            new: desired
-                .storage_class
-                .as_deref()
-                .unwrap_or("server default")
-                .to_owned(),
+            new: storage_class.to_string(),
         });
     }
 
@@ -464,10 +478,17 @@ fn print_basin_result(basin: &str, action: &ResourceAction) {
         ResourceAction::Create => {
             println!("{}", format!("+ basin {basin}").green().bold());
         }
-        ResourceAction::Ensure(diffs) => {
-            println!("{}", format!("~ basin {basin}").yellow().bold());
+        ResourceAction::Ensure {
+            diffs,
+            storage_class_unresolved,
+        } => {
+            let marker = if diffs.is_empty() { "?" } else { "~" };
+            println!("{}", format!("{marker} basin {basin}").yellow().bold());
             for diff in diffs {
                 println!("    {}: {} → {}", diff.field, diff.old.dimmed(), diff.new);
+            }
+            if *storage_class_unresolved {
+                println!("    default_stream_config.storage_class: resolved at apply");
             }
         }
         ResourceAction::Unchanged => {
@@ -481,10 +502,22 @@ fn print_stream_result(basin: &str, stream: &str, action: &ResourceAction) {
         ResourceAction::Create => {
             println!("{}", format!("  + stream {basin}/{stream}").green().bold());
         }
-        ResourceAction::Ensure(diffs) => {
-            println!("{}", format!("  ~ stream {basin}/{stream}").yellow().bold());
+        ResourceAction::Ensure {
+            diffs,
+            storage_class_unresolved,
+        } => {
+            let marker = if diffs.is_empty() { "?" } else { "~" };
+            println!(
+                "{}",
+                format!("  {marker} stream {basin}/{stream}")
+                    .yellow()
+                    .bold()
+            );
             for diff in diffs {
                 println!("      {}: {} → {}", diff.field, diff.old.dimmed(), diff.new);
+            }
+            if *storage_class_unresolved {
+                println!("      storage_class: resolved at apply");
             }
         }
         ResourceAction::Unchanged => {
@@ -514,23 +547,55 @@ fn print_stream_create(basin: &str, stream: &str, spec: &Option<s2_resource_spec
 pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miette::Result<()> {
     validate(&spec)?;
 
+    let needs_location_default = spec.basins.iter().any(|basin| {
+        basin
+            .config
+            .as_ref()
+            .and_then(|config| config.default_stream_config.as_ref())
+            .and_then(|config| config.storage_class.as_ref())
+            .is_none()
+    });
+    let default_storage_class = if needs_location_default {
+        match s2.get_default_location().await {
+            Ok(location) => location.default_storage_class,
+            Err(error)
+                if error.server_error().is_some_and(|error| {
+                    matches!(
+                        error.known_code(),
+                        Some(ErrorCode::NotImplemented | ErrorCode::PermissionDenied)
+                    ) || error.status == StatusCode::NOT_FOUND
+                }) =>
+            {
+                None
+            }
+            Err(error) => {
+                return Err(miette::miette!(
+                    "failed to get default storage class: {error}"
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     for basin_spec in spec.basins {
-        let desired_basin_config = basin_spec
+        let mut desired_basin_config = basin_spec
             .config
             .clone()
             .map(basin_config_to_sdk)
             .unwrap_or_default();
-        let desired_basin_default_stream_config =
-            desired_basin_config.default_stream_config.clone();
+        let desired_basin_defaults = desired_basin_config
+            .default_stream_config
+            .get_or_insert_default();
+        if desired_basin_defaults.storage_class.is_none() {
+            desired_basin_defaults.storage_class = default_storage_class.clone();
+        }
+        let desired_basin_defaults = desired_basin_defaults.clone();
 
         let basin_action = match s2.get_basin_config(basin_spec.name.clone()).await {
             Ok(existing) => {
                 let diffs = diff_basin_config(&existing, &desired_basin_config)?;
-                if diffs.is_empty() {
-                    ResourceAction::Unchanged
-                } else {
-                    ResourceAction::Ensure(diffs)
-                }
+                ResourceAction::from_diff(diffs, desired_basin_defaults.storage_class.is_none())
             }
             Err(e) if is_not_found_error(&e) => ResourceAction::Create,
             Err(e) => {
@@ -568,18 +633,11 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
                             .map(stream_config_to_sdk)
                             .unwrap_or_default()
                             .into(),
-                        desired_basin_default_stream_config
-                            .clone()
-                            .unwrap_or_default()
-                            .into(),
+                        desired_basin_defaults.clone().into(),
                     )
                     .into_diagnostic()?;
                     let diffs = diff_stream_configs(&existing, &desired_stream_config);
-                    if diffs.is_empty() {
-                        ResourceAction::Unchanged
-                    } else {
-                        ResourceAction::Ensure(diffs)
-                    }
+                    ResourceAction::from_diff(diffs, desired_stream_config.storage_class.is_none())
                 }
                 Err(e) if is_not_found_error(&e) => ResourceAction::Create,
                 Err(e) => {
