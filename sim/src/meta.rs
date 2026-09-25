@@ -24,6 +24,8 @@ use std::{
 use eyre::{WrapErr, bail, ensure, eyre};
 use tracing::info;
 
+use crate::lite_host::Faults;
+
 #[derive(clap::Args, Debug)]
 pub struct MetaArgs {
     /// Arguments to run the child simulations with, passed through verbatim
@@ -32,7 +34,7 @@ pub struct MetaArgs {
     pub args: Vec<String>,
 }
 
-pub fn run(meta: MetaArgs, seed: u64, fail_rate: f64) -> eyre::Result<()> {
+pub fn run(meta: MetaArgs, seed: u64, fail_rate: f64, faults: Faults) -> eyre::Result<()> {
     let exe = std::env::current_exe()?;
     let base = std::env::temp_dir().join(format!("s2-sim-meta-{}", std::process::id()));
 
@@ -42,6 +44,7 @@ pub fn run(meta: MetaArgs, seed: u64, fail_rate: f64) -> eyre::Result<()> {
     for (flag, value) in [
         ("--seed", seed.to_string()),
         ("--fail-rate", fail_rate.to_string()),
+        ("--stream-reset-rate", faults.stream_reset_rate.to_string()),
     ] {
         if !args
             .iter()
