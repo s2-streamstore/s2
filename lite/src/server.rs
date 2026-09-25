@@ -400,21 +400,10 @@ async fn s3_builder() -> object_store::aws::AmazonS3Builder {
         (Some(key_id), Some(secret_key)) => {
             info!(key_id, "using static credentials from env vars");
 
-            let region = std::env::var_os("AWS_REGION")
-                .and_then(|s| s.into_string().ok())
-                .or_else(|| {
-                    std::env::var_os("AWS_DEFAULT_REGION").and_then(|s| s.into_string().ok())
-                });
-            let region = match region {
-                Some(region) => Some(region),
-                None => aws_config::load_defaults(aws_config::BehaviorVersion::latest())
-                    .await
-                    .region()
-                    .map(|region| region.as_ref().to_string()),
-            };
-            if let Some(region) = region {
-                info!(region = %region);
-                builder = builder.with_region(region);
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            if let Some(region) = aws_config.region() {
+                info!(region = region.as_ref());
+                builder = builder.with_region(region.to_string());
             }
 
             let token = std::env::var_os("AWS_SESSION_TOKEN").and_then(|s| s.into_string().ok());
