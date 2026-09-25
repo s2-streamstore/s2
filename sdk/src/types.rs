@@ -501,12 +501,69 @@ impl RetryConfig {
     }
 }
 
+/// HTTP/2 receive-window sizes and per-connection request concurrency.
+///
+/// The connection window must cover the combined stream windows of all
+/// concurrent requests. These limits apply to unconsumed HTTP/2 DATA, not
+/// total memory usage or decoded message size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Http2Config {
+    pub(crate) max_concurrent_requests: usize,
+    pub(crate) stream_receive_window: u32,
+    pub(crate) connection_receive_window: u32,
+}
+
+impl Http2Config {
+    /// Configure the request cap per connection and receive windows in bytes.
+    ///
+    /// The request cap includes unary requests and streaming responses until
+    /// their bodies finish or are dropped. Additional requests use another
+    /// pooled connection. Adaptive receive windows are disabled.
+    ///
+    /// # Errors
+    ///
+    /// The request cap and stream window must be nonzero. Windows cannot exceed
+    /// 2^31 - 1 bytes, the connection window must be at least 65,535 bytes, and
+    /// it must cover `max_concurrent_requests * stream_receive_window`.
+    pub fn new(
+        max_concurrent_requests: usize,
+        stream_receive_window: u32,
+        connection_receive_window: u32,
+    ) -> Result<Self, ValidationError> {
+        if max_concurrent_requests == 0 {
+            return Err("HTTP/2 concurrent request limit must be nonzero".into());
+        }
+        if !(1..=i32::MAX as u32).contains(&stream_receive_window) {
+            return Err("HTTP/2 stream receive window must be between 1 and 2^31 - 1 bytes".into());
+        }
+        if !(65_535..=i32::MAX as u32).contains(&connection_receive_window) {
+            return Err(
+                "HTTP/2 connection receive window must be between 65,535 and 2^31 - 1 bytes".into(),
+            );
+        }
+        if max_concurrent_requests
+            .checked_mul(stream_receive_window as usize)
+            .is_none_or(|total| total > connection_receive_window as usize)
+        {
+            return Err(
+                "HTTP/2 connection receive window must cover every concurrent stream window".into(),
+            );
+        }
+        Ok(Self {
+            max_concurrent_requests,
+            stream_receive_window,
+            connection_receive_window,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Configuration for [`S2`](crate::S2).
 pub struct S2Config {
     pub(crate) access_token: AccessToken,
     pub(crate) endpoints: S2Endpoints,
+    pub(crate) http2: Option<Http2Config>,
     pub(crate) connection_timeout: Duration,
     pub(crate) request_timeout: Duration,
     pub(crate) retry: RetryConfig,
@@ -523,6 +580,7 @@ impl S2Config {
         Self {
             access_token: AccessToken::Static(access_token.into().into()),
             endpoints: S2Endpoints::for_cloud(),
+            http2: None,
             connection_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(5),
             retry: RetryConfig::new(),
@@ -596,6 +654,17 @@ impl S2Config {
             default_headers,
             ..self
         })
+    }
+
+    /// Set fixed HTTP/2 receive windows and the concurrent request cap.
+    ///
+    /// Without an override, the SDK uses its default transport configuration:
+    /// 90 concurrent requests per pooled client and Hyper's receive windows.
+    pub fn with_http2(self, http2: Http2Config) -> Self {
+        Self {
+            http2: Some(http2),
+            ..self
+        }
     }
 
     /// Set the timeout for establishing a connection to the server.
@@ -4591,5 +4660,27 @@ mod tests {
         assert_eq!(record.headers[0].name.as_ref(), b"k");
         assert_eq!(record.headers[0].value.as_ref(), b"v");
         assert_eq!(record.timestamp, 1234);
+    }
+}
+
+#[cfg(test)]
+mod http2_config_tests {
+    use super::Http2Config;
+
+    #[test]
+    fn receive_limits_cover_every_stream_without_overflow() {
+        assert!(Http2Config::new(16, 128 * 1024, 4 * 1024 * 1024).is_ok());
+        assert!(Http2Config::new(16, 128 * 1024, 2 * 1024 * 1024).is_ok());
+        for (requests, stream, connection) in [
+            (0, 128 * 1024, 4 * 1024 * 1024),
+            (16, 0, 4 * 1024 * 1024),
+            (1, u32::MAX, u32::MAX),
+            (1, 1, 65_534),
+            (1, 1, u32::MAX),
+            (90, 2 * 1024 * 1024, 5 * 1024 * 1024),
+            (usize::MAX, 128 * 1024, i32::MAX as u32),
+        ] {
+            assert!(Http2Config::new(requests, stream, connection).is_err());
+        }
     }
 }
