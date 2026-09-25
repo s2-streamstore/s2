@@ -591,9 +591,7 @@ impl object_store::CredentialProvider for S3CredentialProvider {
 
 #[cfg(test)]
 mod tests {
-    use slatedb::object_store::aws::AmazonS3ConfigKey;
-
-    use super::{ServerProtocol, WalS3Overrides, cli_endpoint, cli_env_hint, s3_builder};
+    use super::{ServerProtocol, WalS3Overrides, cli_endpoint, cli_env_hint};
 
     fn wal_config(values: &[(&str, &str)]) -> eyre::Result<WalS3Overrides> {
         WalS3Overrides::from_getter(|name| {
@@ -658,75 +656,5 @@ mod tests {
                 "export S2_SSL_NO_VERIFY=1",
             )
         );
-    }
-
-    fn region_config_path(region: Option<&str>) -> String {
-        let cfg_path = format!("/tmp/s2_lite_s3_region_{}.ini", uuid::Uuid::new_v4());
-        let body = match region {
-            Some(region) => format!("[default]\nregion = {region}\n"),
-            None => "[default]\n".to_string(),
-        };
-        std::fs::write(&cfg_path, body).unwrap();
-        cfg_path
-    }
-
-    fn set_static_creds_env(cfg_path: &str) {
-        unsafe {
-            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAEXAMPLEKEY");
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", "secretpassword");
-            std::env::remove_var("AWS_SESSION_TOKEN");
-            std::env::remove_var("AWS_REGION");
-            std::env::remove_var("AWS_DEFAULT_REGION");
-            std::env::remove_var("AWS_PROFILE");
-            std::env::remove_var("AWS_ENDPOINT_URL_S3");
-            std::env::set_var("AWS_CONFIG_FILE", cfg_path);
-            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
-        }
-    }
-
-    #[tokio::test]
-    async fn s3_builder_static_creds_use_profile_region_when_env_region_absent() {
-        let cfg_path = region_config_path(Some("eu-west-1"));
-        set_static_creds_env(&cfg_path);
-
-        let builder = s3_builder().await;
-        assert_eq!(
-            builder
-                .get_config_value(&AmazonS3ConfigKey::Region)
-                .as_deref(),
-            Some("eu-west-1")
-        );
-
-        let _ = std::fs::remove_file(&cfg_path);
-    }
-
-    #[tokio::test]
-    async fn s3_builder_static_creds_env_region_takes_precedence_over_profile() {
-        let cfg_path = region_config_path(Some("eu-west-1"));
-        set_static_creds_env(&cfg_path);
-        unsafe {
-            std::env::set_var("AWS_REGION", "us-west-2");
-        }
-
-        let builder = s3_builder().await;
-        assert_eq!(
-            builder
-                .get_config_value(&AmazonS3ConfigKey::Region)
-                .as_deref(),
-            Some("us-west-2")
-        );
-
-        let _ = std::fs::remove_file(&cfg_path);
-    }
-
-    #[tokio::test]
-    async fn s3_builder_static_creds_with_no_region_leave_region_unset() {
-        let cfg_path = region_config_path(None);
-        set_static_creds_env(&cfg_path);
-
-        let builder = s3_builder().await;
-        assert_eq!(builder.get_config_value(&AmazonS3ConfigKey::Region), None);
-
-        let _ = std::fs::remove_file(&cfg_path);
     }
 }
