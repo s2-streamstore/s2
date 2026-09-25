@@ -8,11 +8,13 @@ pub mod error;
 mod basins;
 pub mod bgtasks;
 mod core;
+mod doe;
 mod durability_notifier;
 mod read;
 mod store;
 mod streamer;
 mod streams;
+mod timestamp;
 
 #[cfg(test)]
 mod test_util;

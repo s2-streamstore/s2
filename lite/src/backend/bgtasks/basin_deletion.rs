@@ -10,6 +10,7 @@ use slatedb::{
 };
 use tracing::instrument;
 
+use super::{ItemProgress, PageProgress};
 use crate::backend::{
     Backend,
     error::{BasinDeletionError, ListStreamsError, StorageError},
@@ -25,17 +26,17 @@ impl Backend {
         if page.values.is_empty() {
             return Ok(page.has_more);
         }
+        let mut progress = PageProgress::new(page.has_more);
         let mut processed = stream::iter(page.values)
             .map(|(basin, cursor)| {
                 let backend = self.clone();
                 async move { backend.process_basin_deletion(basin, cursor).await }
             })
             .buffer_unordered(CONCURRENCY);
-        let mut has_more = page.has_more;
         while let Some(result) = processed.next().await {
-            has_more |= result?;
+            progress.record(result?);
         }
-        Ok(has_more)
+        Ok(progress.should_continue())
     }
 
     async fn list_basin_deletion_pending(
@@ -68,7 +69,7 @@ impl Backend {
         &self,
         basin: BasinName,
         cursor: StreamNameStartAfter,
-    ) -> Result<bool, BasinDeletionError> {
+    ) -> Result<ItemProgress, BasinDeletionError> {
         let request = ListStreamsRequest {
             prefix: StreamNamePrefix::default(),
             start_after: cursor.clone(),
@@ -94,20 +95,21 @@ impl Backend {
         if page.has_more {
             self.set_basin_deletion_cursor(&basin, &last_stream.expect("non-empty stream page"))
                 .await?;
-            Ok(true)
+            Ok(ItemProgress::Advanced)
         } else if last_stream.is_some() || !cursor.as_ref().is_empty() {
             // Streams still pending deletion or cursor was advanced past
             // earlier entries. Reset cursor so the next tick re-scans from
-            // the beginning.
+            // the beginning. A reset is not progress: counting it would
+            // rescan a multi-page basin in a tight loop.
             if !cursor.as_ref().is_empty() {
                 self.set_basin_deletion_cursor(&basin, &StreamNameStartAfter::default())
                     .await?;
             }
-            Ok(false)
+            Ok(ItemProgress::Blocked)
         } else {
             // No streams from the very beginning — safe to complete.
             self.complete_basin_deletion(&basin).await?;
-            Ok(false)
+            Ok(ItemProgress::Completed)
         }
     }
 

@@ -481,32 +481,35 @@ where
     serializer.serialize_str(&humantime::format_duration(*value).to_string())
 }
 
-impl From<sdk::types::BasinMatcher> for BasinMatcher {
-    fn from(matcher: sdk::types::BasinMatcher) -> Self {
+impl BasinMatcher {
+    /// Converts an SDK matcher, returning `None` for a matcher that matches no resources.
+    fn from_sdk(matcher: sdk::types::BasinMatcher) -> Option<Self> {
         match matcher {
-            sdk::types::BasinMatcher::Exact(v) => BasinMatcher::Exact(v),
-            sdk::types::BasinMatcher::Prefix(v) => BasinMatcher::Prefix(v),
-            sdk::types::BasinMatcher::None => BasinMatcher::Prefix(Default::default()),
+            sdk::types::BasinMatcher::Exact(v) => Some(BasinMatcher::Exact(v)),
+            sdk::types::BasinMatcher::Prefix(v) => Some(BasinMatcher::Prefix(v)),
+            sdk::types::BasinMatcher::None => None,
         }
     }
 }
 
-impl From<sdk::types::StreamMatcher> for StreamMatcher {
-    fn from(matcher: sdk::types::StreamMatcher) -> Self {
+impl StreamMatcher {
+    /// Converts an SDK matcher, returning `None` for a matcher that matches no resources.
+    fn from_sdk(matcher: sdk::types::StreamMatcher) -> Option<Self> {
         match matcher {
-            sdk::types::StreamMatcher::Exact(v) => StreamMatcher::Exact(v),
-            sdk::types::StreamMatcher::Prefix(v) => StreamMatcher::Prefix(v),
-            sdk::types::StreamMatcher::None => StreamMatcher::Prefix(Default::default()),
+            sdk::types::StreamMatcher::Exact(v) => Some(StreamMatcher::Exact(v)),
+            sdk::types::StreamMatcher::Prefix(v) => Some(StreamMatcher::Prefix(v)),
+            sdk::types::StreamMatcher::None => None,
         }
     }
 }
 
-impl From<sdk::types::AccessTokenMatcher> for AccessTokenMatcher {
-    fn from(matcher: sdk::types::AccessTokenMatcher) -> Self {
+impl AccessTokenMatcher {
+    /// Converts an SDK matcher, returning `None` for a matcher that matches no resources.
+    fn from_sdk(matcher: sdk::types::AccessTokenMatcher) -> Option<Self> {
         match matcher {
-            sdk::types::AccessTokenMatcher::Exact(v) => AccessTokenMatcher::Exact(v),
-            sdk::types::AccessTokenMatcher::Prefix(v) => AccessTokenMatcher::Prefix(v),
-            sdk::types::AccessTokenMatcher::None => AccessTokenMatcher::Prefix(Default::default()),
+            sdk::types::AccessTokenMatcher::Exact(v) => Some(AccessTokenMatcher::Exact(v)),
+            sdk::types::AccessTokenMatcher::Prefix(v) => Some(AccessTokenMatcher::Prefix(v)),
+            sdk::types::AccessTokenMatcher::None => None,
         }
     }
 }
@@ -760,9 +763,9 @@ pub struct AccessTokenScope {
 impl From<sdk::types::AccessTokenScope> for AccessTokenScope {
     fn from(scope: sdk::types::AccessTokenScope) -> Self {
         AccessTokenScope {
-            basins: scope.basins.map(Into::into),
-            streams: scope.streams.map(Into::into),
-            access_tokens: scope.access_tokens.map(Into::into),
+            basins: scope.basins.and_then(BasinMatcher::from_sdk),
+            streams: scope.streams.and_then(StreamMatcher::from_sdk),
+            access_tokens: scope.access_tokens.and_then(AccessTokenMatcher::from_sdk),
             op_group_perms: scope.op_group_perms.map(Into::into),
             ops: scope.ops.into_iter().map(Operation::from).collect(),
         }
@@ -928,6 +931,37 @@ mod tests {
             "∅",
             "an unset matcher grants nothing"
         );
+    }
+
+    #[test]
+    fn match_none_scope_matchers_render_as_no_access() {
+        colored::control::set_override(false);
+
+        // On the wire, an empty exact name means "match no resources".
+        let scope: s2_api::v1::access::AccessTokenScope =
+            serde_json::from_value(serde_json::json!({
+                "basins": { "exact": "" },
+                "streams": { "exact": "" },
+                "access_tokens": { "exact": "" },
+            }))
+            .unwrap();
+        let scope = s2_sdk::types::AccessTokenScope::from(scope);
+        let info = AccessTokenInfo {
+            id: "tok".to_owned(),
+            expires_at: None,
+            auto_prefix_streams: false,
+            scope: scope.into(),
+        };
+
+        assert_eq!(
+            info.summary_block(3),
+            "tok  expires never\n\
+             \x20 basins=∅  streams=∅  tokens=∅  perms=none  ops=0"
+        );
+        let json = serde_json::to_value(&info.scope).unwrap();
+        assert!(json["basins"].is_null(), "{json}");
+        assert!(json["streams"].is_null(), "{json}");
+        assert!(json["access_tokens"].is_null(), "{json}");
     }
 
     #[test]

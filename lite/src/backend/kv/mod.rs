@@ -1,6 +1,8 @@
 pub mod basin_deletion_pending;
 pub mod basin_meta;
+pub mod stream_doe_check;
 pub mod stream_doe_deadline;
+pub mod stream_doe_state;
 pub mod stream_fencing_token;
 pub mod stream_id_mapping;
 pub mod stream_meta;
@@ -8,7 +10,6 @@ pub mod stream_record_data;
 pub mod stream_record_timestamp;
 pub mod stream_tail_position;
 pub mod stream_trim_point;
-pub mod timestamp;
 
 use std::{ops::Range, str::FromStr};
 
@@ -19,7 +20,7 @@ use s2_common::{
 use strum::FromRepr;
 use thiserror::Error;
 
-use crate::stream_id::StreamId;
+use crate::{backend::timestamp::TimestampSecs, stream_id::StreamId};
 
 #[derive(Debug, Clone, Error)]
 pub enum DeserializationError {
@@ -49,6 +50,8 @@ pub enum KeyType {
     StreamRecordData = 6,
     StreamRecordTimestamp = 7,
     StreamDeleteOnEmptyDeadline = 10,
+    StreamDeleteOnEmptyState = 11,
+    StreamDeleteOnEmptyCheck = 12,
 }
 
 #[derive(Debug, Clone)]
@@ -89,10 +92,21 @@ pub enum Key {
     /// Key: StreamID Timestamp SeqNum
     /// Value: empty
     StreamRecordTimestamp(StreamId, StreamPosition),
-    /// (SDOED) per-schedule, immutable, deletable once processed
+    /// (SDOED) legacy schedule, consumed only to initialize the new DOE state
     /// Key: TimestampSecs StreamID ScheduleID (u128, absent in legacy keys)
     /// Value: MinAge seconds (u64)
-    StreamDeleteOnEmptyDeadline(timestamp::TimestampSecs, StreamId, Option<u128>),
+    StreamDeleteOnEmptyDeadline(TimestampSecs, StreamId, Option<u128>),
+    /// (SDOES) per-stream, updatable, optional
+    /// Key: StreamID
+    /// Value: Tag (u8: 0 = parked, 1 = scheduled).
+    /// Scheduled values append TimestampSecs (u32) CheckID (u128).
+    /// Uses the entry's SlateDB sequence as its revision.
+    /// State older than the current stream-ID mapping is stale.
+    StreamDeleteOnEmptyState(StreamId),
+    /// (SDOEC) per-check, immutable, deletable, time-ordered index of scheduled states
+    /// Key: TimestampSecs (u32) StreamID CheckID (u128)
+    /// Value: empty
+    StreamDeleteOnEmptyCheck(StreamId, stream_doe_state::Check),
 }
 
 impl From<Key> for Bytes {
@@ -111,6 +125,10 @@ impl From<Key> for Bytes {
             }
             Key::StreamDeleteOnEmptyDeadline(deadline, stream_id, schedule_id) => {
                 stream_doe_deadline::ser_key(deadline, stream_id, schedule_id)
+            }
+            Key::StreamDeleteOnEmptyState(stream_id) => stream_doe_state::ser_key(stream_id),
+            Key::StreamDeleteOnEmptyCheck(stream_id, check) => {
+                stream_doe_check::ser_key(stream_id, check)
             }
         }
     }
@@ -152,6 +170,11 @@ impl TryFrom<Bytes> for Key {
                     Key::StreamDeleteOnEmptyDeadline(deadline, stream_id, schedule_id)
                 })
             }
+            KeyType::StreamDeleteOnEmptyState => {
+                stream_doe_state::deser_key(bytes).map(Key::StreamDeleteOnEmptyState)
+            }
+            KeyType::StreamDeleteOnEmptyCheck => stream_doe_check::deser_key(bytes)
+                .map(|(stream_id, check)| Key::StreamDeleteOnEmptyCheck(stream_id, check)),
         }
     }
 }
