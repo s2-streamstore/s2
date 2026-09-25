@@ -42,7 +42,7 @@ use s2_sdk::{
     S2,
     types::{
         AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
-        EncryptionKey, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
+        EncryptionKey, LocationInfo, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
         StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig, TimestampingMode,
     },
 };
@@ -531,13 +531,13 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::ListLocations => {
             let locations = ops::list_locations(&s2).await?;
             for location_info in locations {
-                print_location_listing(location_info.name.to_string(), location_info.is_private);
+                print_location_listing(&location_info);
             }
         }
 
         Command::GetDefaultLocation => {
             let location = ops::get_default_location(&s2).await?;
-            print_location_listing(location.name.to_string(), location.is_private);
+            print_location_listing(&location);
         }
 
         Command::SetDefaultLocation { location } => {
@@ -549,7 +549,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     .green()
                     .bold()
             );
-            print_location_listing(location.name.to_string(), location.is_private);
+            print_location_listing(&location);
         }
 
         Command::GetAccountMetrics(args) => {
@@ -921,9 +921,20 @@ fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) 
     }
 }
 
-fn print_location_listing(name: String, is_private: bool) {
-    let visibility = format_location_visibility(is_private);
-    println!("{name} {visibility}");
+fn print_location_listing(location: &LocationInfo) {
+    let visibility = format_location_visibility(location.is_private);
+    println!("{} {visibility}", location.name);
+    if let Some(storage_classes) = &location.storage_classes {
+        let classes = if storage_classes.is_empty() {
+            "none".to_owned()
+        } else {
+            storage_classes.join(", ")
+        };
+        println!("  storage classes: {classes}");
+    }
+    if let Some(default_storage_class) = &location.default_storage_class {
+        println!("  default storage class: {default_storage_class}");
+    }
 }
 
 fn format_location_visibility(is_private: bool) -> colored::ColoredString {
