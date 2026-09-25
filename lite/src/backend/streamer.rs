@@ -27,7 +27,7 @@ use s2_storage::record::{
     StoredRecord, StoredSequencedRecord,
 };
 use slatedb::{
-    IterationOrder, WriteBatch,
+    IsolationLevel, IterationOrder, WriteBatch,
     config::{PutOptions, ScanOptions, Ttl},
 };
 use tokio::{
@@ -76,6 +76,37 @@ struct DbSubmitAppendOptions {
     retention: RetentionPolicy,
     fencing_token: Option<FencingToken>,
     trim_point: Option<RangeTo<SeqNum>>,
+    /// When set, the terminal trim is written via a serializable snapshot
+    /// transaction that revalidates the stream's configuration revision
+    /// (`stream_meta.seq`) against this expected value before committing.
+    /// Aborts (as a transaction conflict) when a concurrent `ReconfigureStream`
+    /// has committed a newer configuration since the DOE check observed it.
+    config_seq_guard: Option<u64>,
+}
+
+/// Snapshot of the actor state that [`handle_append`] mutates for a
+/// config-guarded terminal trim. Held alongside the pending DB write so the
+/// `run` loop can undo the mutation when the guarded transaction conflicts at
+/// commit (a concurrent `ReconfigureStream` increased `min_age` first).
+///
+/// Guarding `finalize_trim` or `mark_stream_deleted` alone does not close the
+/// race because destruction proceeds via the streamer's durability hook
+/// (`BgtaskTrigger::StreamTrim`) the instant the terminal trim is durable.
+/// Reverting here, before the append commits, keeps the irrevocable
+/// `stream_trim_point = ..MAX` marker out of SlateDB and lets DOE retry under
+/// the newer `min_age`.
+struct TerminalTrimGuard {
+    prev_trim_point: CommandState<RangeTo<SeqNum>>,
+    prev_next_ack_pos: Option<StreamPosition>,
+}
+
+/// A pending DB write future plus optional revert metadata.
+struct PendingDbWrite {
+    future: BoxFuture<'static, Result<InFlightAppend, slatedb::Error>>,
+    /// Revert information when this is a config-guarded terminal trim;
+    /// `None` for ordinary appends and terminal trims that do not need to
+    /// revalidate the configuration.
+    config_guard: Option<TerminalTrimGuard>,
 }
 
 #[derive(Debug, Default)]
@@ -313,7 +344,7 @@ struct Streamer {
     last_tail_write_timestamp: TimestampSecs,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
-    db_writes_pending: VecDeque<BoxFuture<'static, Result<InFlightAppend, slatedb::Error>>>,
+    db_writes_pending: VecDeque<PendingDbWrite>,
     db_durability_subscription: u64,
     inflight_appends: VecDeque<InFlightAppend>,
     pending_appends: append::PendingAppends,
@@ -396,6 +427,7 @@ impl Streamer {
         session: Option<append::SessionHandle>,
         reply_tx: oneshot::Sender<Result<AppendAck, AppendErrorInternal>>,
         append_type: AppendType,
+        config_seq_guard: Option<u64>,
     ) {
         let Some(ticket) = append::admit(reply_tx, session) else {
             return;
@@ -417,6 +449,13 @@ impl Streamer {
                         &StoredRecord::Plaintext(Record::Command(CommandRecord::Trim(SeqNum::MAX)))
                     );
                 }
+                // Capture the pre-mutation state for a config-guarded terminal
+                // trim before apply_command rewrites trim_point, so the run loop
+                // can revert when the guarded transaction conflicts at commit.
+                let config_guard = config_seq_guard.is_some().then(|| TerminalTrimGuard {
+                    prev_trim_point: self.trim_point.clone(),
+                    prev_next_ack_pos: self.pending_appends.next_ack_pos(),
+                });
                 for sr in sequenced_records.iter() {
                     if let StoredRecord::Plaintext(Record::Command(cmd)) = sr.inner() {
                         self.apply_command(sr.position().seq_num, cmd, append_type);
@@ -434,11 +473,18 @@ impl Streamer {
                         .trim_point
                         .is_applied_in(&seq_num_range)
                         .then_some(self.trim_point.state),
+                    config_seq_guard,
                 };
-                self.db_writes_pending.push_back(
-                    db_submit_append(self.db.clone(), self.stream_id, sequenced_records, opts)
-                        .boxed(),
-                );
+                self.db_writes_pending.push_back(PendingDbWrite {
+                    future: db_submit_append(
+                        self.db.clone(),
+                        self.stream_id,
+                        sequenced_records,
+                        opts,
+                    )
+                    .boxed(),
+                    config_guard,
+                });
                 self.pending_appends.accept(ticket, first_pos..next_pos);
                 self.last_tail_write_timestamp = TimestampSecs::now();
             }
@@ -455,7 +501,7 @@ impl Streamer {
     ) {
         match condition {
             TerminalTrimCondition::Always => {
-                self.ensure_terminal_trim(reply_tx);
+                self.ensure_terminal_trim(reply_tx, None);
             }
             TerminalTrimCondition::DeleteOnEmpty {
                 expected_stream_creation_seq,
@@ -464,7 +510,7 @@ impl Streamer {
                 if self.stream_creation_seq != expected_stream_creation_seq {
                     let _ = reply_tx.send(Ok(TerminalTrimOutcome::Obsolete));
                 } else if self.trim_point.state.end == SeqNum::MAX {
-                    self.ensure_terminal_trim(reply_tx);
+                    self.ensure_terminal_trim(reply_tx, None);
                 } else if self.config_seq != expected_config_seq {
                     // The worker may have observed a configuration commit before
                     // its notification reached this actor (or vice versa). Do not
@@ -509,7 +555,7 @@ impl Streamer {
             }
         };
         if self.trim_point.state.end == SeqNum::MAX {
-            self.ensure_terminal_trim(reply_tx);
+            self.ensure_terminal_trim(reply_tx, None);
             return;
         }
         if self.config_seq != config_seq_snapshot {
@@ -536,7 +582,15 @@ impl Streamer {
                     && self.next_assignable_pos() == stable_pos_snapshot
                     && old_enough
                 {
-                    self.ensure_terminal_trim(reply_tx);
+                    // Plumb the DOE-observed config revision so the terminal
+                    // trim append revalidates it transactionally. Without this,
+                    // a successful ReconfigureStream that increases min_age
+                    // (which bumps stream_meta.seq in SlateDB) could still have
+                    // the stream destroyed under the stale, smaller min_age the
+                    // actor holds in memory, because TerminalTrimCheckResult
+                    // is processed before the Reconfigure advise reaches the
+                    // mailbox.
+                    self.ensure_terminal_trim(reply_tx, Some(config_seq_snapshot));
                     return;
                 }
                 self.doe_retry_at(TimestampSecs::ZERO)
@@ -559,6 +613,7 @@ impl Streamer {
     fn ensure_terminal_trim(
         &mut self,
         reply_tx: oneshot::Sender<Result<TerminalTrimOutcome, DeleteStreamError>>,
+        config_seq_guard: Option<u64>,
     ) {
         let (append_reply_tx, append_reply_rx) = oneshot::channel();
         self.handle_append(
@@ -566,6 +621,7 @@ impl Streamer {
             None,
             append_reply_tx,
             AppendType::Terminal,
+            config_seq_guard,
         );
         tokio::spawn(async move {
             let result = match append_reply_rx.await {
@@ -573,6 +629,12 @@ impl Streamer {
                 Ok(Err(AppendErrorInternal::StreamDeletionPending { .. })) => {
                     Ok(TerminalTrimOutcome::DeletionPending)
                 }
+                // A concurrent ReconfigureStream increased min_age and
+                // committed first; the config-guarded terminal trim transaction
+                // aborted. Let DOE re-evaluate under the new configuration.
+                Ok(Err(AppendErrorInternal::DeleteOnEmptyConfigConflict)) => Ok(
+                    TerminalTrimOutcome::RetryAt(TimestampSecs::after(doe::RETRY_INTERVAL)),
+                ),
                 Ok(Err(AppendErrorInternal::Storage(e))) => Err(DeleteStreamError::Storage(e)),
                 Ok(Err(AppendErrorInternal::StreamerMissingInActionError(e))) => {
                     Err(DeleteStreamError::StreamerMissingInActionError(e))
@@ -652,8 +714,8 @@ impl Streamer {
             dormancy.as_mut().reset(Instant::now() + DORMANT_TIMEOUT);
             tokio::select! {
                 biased;
-                Some(res) = OptionFuture::from(self.db_writes_pending.front_mut()) => {
-                    drop(self.db_writes_pending.pop_front().expect("polled"));
+                Some(res) = OptionFuture::from(self.db_writes_pending.front_mut().map(|p| p.future.as_mut())) => {
+                    let pending = self.db_writes_pending.pop_front().expect("polled");
                     match res {
                         Ok(submitted_append) => {
                             if let Some(prev) = self.inflight_appends.back() {
@@ -663,6 +725,21 @@ impl Streamer {
                             self.subscribe_durability();
                         }
                         Err(db_err) => {
+                            // A config-guarded terminal trim can conflict if a
+                            // concurrent ReconfigureStream committed a newer
+                            // stream_meta after the DOE check observed it. Undo
+                            // the actor-side mutation and let DOE retry under the
+                            // new configuration instead of killing the streamer.
+                            if let Some(guard) = pending.config_guard
+                                && db_err.kind() == slatedb::ErrorKind::Transaction
+                            {
+                                self.trim_point = guard.prev_trim_point;
+                                self.pending_appends.retract_last(
+                                    AppendErrorInternal::DeleteOnEmptyConfigConflict,
+                                    guard.prev_next_ack_pos,
+                                );
+                                continue;
+                            }
                             self.pending_appends.on_durability_failed(db_err);
                             break;
                         }
@@ -676,7 +753,7 @@ impl Streamer {
                             reply_tx,
                             append_type,
                         } => {
-                            self.handle_append(input, session, reply_tx, append_type);
+                            self.handle_append(input, session, reply_tx, append_type, None);
                         }
                         Message::TerminalTrim {
                             condition,
@@ -1075,6 +1152,7 @@ async fn db_submit_append(
         retention,
         fencing_token,
         trim_point,
+        config_seq_guard,
     }: DbSubmitAppendOptions,
 ) -> Result<InFlightAppend, slatedb::Error> {
     let ttl = match retention {
@@ -1082,6 +1160,79 @@ async fn db_submit_append(
         RetentionPolicy::Infinite() => Ttl::NoExpiry,
     };
     let ttl_put_opts = PutOptions { ttl };
+
+    // A config-guarded terminal trim is the irrevocable step in the DOE
+    // deletion path. Revalidate the stream's configuration revision that the
+    // DOE check observed, transactionally, so a concurrent ReconfigureStream
+    // that committed a newer stream_meta.seq forces the trim to abort instead
+    // of destroying the stream under the stale (smaller) min_age the actor's
+    // in-memory config still holds.
+    if let Some(expected_config_seq) = config_seq_guard {
+        let txn = db.begin(IsolationLevel::SerializableSnapshot).await?;
+
+        // Resolve the basin/stream for stream_id. The read is tracked in the
+        // SSI transaction's read set so a concurrent recreation is detected.
+        let mapping = txn
+            .get_key_value(kv::stream_id_mapping::ser_key(stream_id))
+            .await?
+            .ok_or_else(|| slatedb::Error::invalid("stream id mapping missing".into()))?;
+        let (basin, stream) = kv::stream_id_mapping::deser_value(mapping.value)
+            .map_err(|e| slatedb::Error::invalid(format!("invalid stream id mapping: {e}")))?;
+
+        // Read stream_meta and check its commit sequence against the DOE
+        // snapshot. The SSI read set tracks this key, so a concurrent
+        // reconfigure that wrote stream_meta after this snapshot causes commit
+        // to abort with a transaction conflict. The sequence comparison below
+        // catches a reconfigure that already committed before this txn began.
+        let meta_entry = txn
+            .get_key_value(kv::stream_meta::ser_key(&basin, &stream))
+            .await?
+            .ok_or_else(|| slatedb::Error::invalid("stream meta missing".into()))?;
+        if meta_entry.seq != expected_config_seq {
+            return Err(slatedb::Error::transaction(
+                "stream config changed before terminal trim could commit".into(),
+            ));
+        }
+
+        for (position, record) in records.iter().map(|msr| msr.parts()) {
+            txn.put_with_options(
+                kv::stream_record_data::ser_key(stream_id, position),
+                kv::stream_record_data::ser_value(record),
+                &ttl_put_opts,
+            )?;
+            txn.put_with_options(
+                kv::stream_record_timestamp::ser_key(stream_id, position),
+                kv::stream_record_timestamp::ser_value(),
+                &ttl_put_opts,
+            )?;
+        }
+        if let Some(fencing_token) = fencing_token {
+            txn.put(
+                kv::stream_fencing_token::ser_key(stream_id),
+                kv::stream_fencing_token::ser_value(&fencing_token),
+            )?;
+        }
+        if let Some(trim_point) = trim_point.and_then(|tp| NonZeroSeqNum::new(tp.end)) {
+            txn.put(
+                kv::stream_trim_point::ser_key(stream_id),
+                kv::stream_trim_point::ser_value(..trim_point),
+            )?;
+        }
+        txn.put(
+            kv::stream_tail_position::ser_key(stream_id),
+            kv::stream_tail_position::ser_value(next_pos(&records)),
+        )?;
+
+        let handle = txn
+            .commit()
+            .await?
+            .expect("terminal trim writes a non-empty batch");
+        return Ok(InFlightAppend {
+            db_seq: handle.seqnum(),
+            records,
+        });
+    }
+
     let mut wb = WriteBatch::new();
     for (position, record) in records.iter().map(|msr| msr.parts()) {
         wb.put_bytes_with_options(
@@ -1460,12 +1611,8 @@ mod tests {
     }
 
     async fn make_pending_append_durable(streamer: &mut Streamer) {
-        let submitted = streamer
-            .db_writes_pending
-            .pop_front()
-            .unwrap()
-            .await
-            .unwrap();
+        let pending = streamer.db_writes_pending.pop_front().unwrap();
+        let submitted = pending.future.await.unwrap();
         let seq = submitted.db_seq;
         streamer.inflight_appends.push_back(submitted);
         streamer.db.flush().await.unwrap();
@@ -1637,7 +1784,7 @@ mod tests {
         replies.push(rx);
 
         let (tx, mut append_reply) = oneshot::channel();
-        streamer.handle_append(append_input(b"late"), None, tx, AppendType::Regular);
+        streamer.handle_append(append_input(b"late"), None, tx, AppendType::Regular, None);
         assert_eq!(streamer.db_writes_pending.len(), 1);
         tokio::task::yield_now().await;
         assert!(matches!(
@@ -1651,12 +1798,8 @@ mod tests {
             );
         }
 
-        let submitted = streamer
-            .db_writes_pending
-            .pop_front()
-            .unwrap()
-            .await
-            .unwrap();
+        let pending = streamer.db_writes_pending.pop_front().unwrap();
+        let submitted = pending.future.await.unwrap();
         let db_seq = submitted.db_seq;
         streamer.inflight_appends.push_back(submitted);
         tokio::task::yield_now().await;
@@ -1708,6 +1851,7 @@ mod tests {
             None,
             seed_tx,
             AppendType::Regular,
+            None,
         );
         make_pending_append_durable(&mut streamer).await;
         seed_rx.await.unwrap().unwrap();
@@ -1723,6 +1867,7 @@ mod tests {
                 None,
                 append_tx.take().unwrap(),
                 AppendType::Regular,
+                None,
             );
         }
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1748,6 +1893,7 @@ mod tests {
                 None,
                 append_tx.take().unwrap(),
                 AppendType::Regular,
+                None,
             );
         }
         if durable {
@@ -1796,6 +1942,7 @@ mod tests {
                 None,
                 append_tx.take().unwrap(),
                 AppendType::Regular,
+                None,
             );
         }
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1822,6 +1969,7 @@ mod tests {
                 None,
                 append_tx.take().unwrap(),
                 AppendType::Regular,
+                None,
             );
         }
         if durable {
@@ -1914,23 +2062,388 @@ mod tests {
         streamer.db.close().await.unwrap();
     }
 
+    /// Write the `stream_id_mapping` and `stream_meta` rows that the
+    /// config-guarded terminal trim transaction reads, returning the committed
+    /// sequence number of the `stream_meta` row (the DOE-observed config revision).
+    async fn seed_serializable_stream(
+        streamer: &Streamer,
+        min_age: Duration,
+    ) -> (
+        s2_common::basin::BasinName,
+        s2_common::stream::StreamName,
+        u64,
+    ) {
+        use std::str::FromStr as _;
+
+        use time::OffsetDateTime;
+        let basin = s2_common::basin::BasinName::from_str("test-basin").unwrap();
+        let stream = s2_common::stream::StreamName::from_str("test-stream").unwrap();
+        let meta = kv::stream_meta::StreamMeta {
+            config: StreamConfig {
+                delete_on_empty: s2_common::config::DeleteOnEmptyConfig { min_age },
+                ..Default::default()
+            },
+            cipher: None,
+            created_at: OffsetDateTime::now_utc(),
+            deleted_at: None,
+            creation_idempotency_key: None,
+        };
+        streamer
+            .db
+            .put(
+                kv::stream_id_mapping::ser_key(streamer.stream_id),
+                kv::stream_id_mapping::ser_value(&basin, &stream),
+            )
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        // The stream_meta write must be the most recent durable commit so its
+        // sequence equals the observed config revision.
+        let handle = streamer
+            .db
+            .put(
+                kv::stream_meta::ser_key(&basin, &stream),
+                kv::stream_meta::ser_value(&meta),
+            )
+            .await
+            .unwrap();
+        handle.await_durable().await.unwrap();
+        let observed = streamer
+            .db
+            .get_key_value(kv::stream_meta::ser_key(&basin, &stream))
+            .await
+            .unwrap()
+            .expect("stream_meta was just written")
+            .seq;
+        (basin, stream, observed)
+    }
+
+    async fn read_trim_point(
+        db: &slatedb::Db,
+        stream_id: StreamId,
+    ) -> Option<std::ops::RangeTo<NonZeroSeqNum>> {
+        db.get(kv::stream_trim_point::ser_key(stream_id))
+            .await
+            .unwrap()
+            .map(|bytes| kv::stream_trim_point::deser_value(bytes).expect("decode trim point"))
+    }
+
+    // Regression guard for the happy path: the config-guarded terminal trim
+    // commits when the stream configuration revision has not changed since the
+    // DOE check observed it. Without this test, a broken guard could silently
+    // drop every DOE deletion.
+    #[tokio::test]
+    async fn terminal_trim_with_config_guard_commits_when_config_unchanged() {
+        let mut streamer = test_streamer().await;
+        let stream_id = streamer.stream_id;
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(1);
+        streamer.last_tail_write_timestamp = TimestampSecs::ZERO;
+        let (_, _, observed_config_seq) =
+            seed_serializable_stream(&streamer, Duration::from_secs(1)).await;
+        let expected_creation_seq = streamer.stream_creation_seq;
+        streamer.config_seq = observed_config_seq;
+
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+        let (trim_reply_tx, trim_reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_stream_creation_seq: expected_creation_seq,
+                expected_config_seq: observed_config_seq,
+            },
+            trim_reply_tx,
+        );
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected scan to complete");
+        };
+        assert_eq!(records.as_ref().unwrap(), &RecordPresence::Empty);
+        // Let the minimum age elapse so the stream is old enough to delete.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Leave config_seq unchanged so the in-memory guard does not reject.
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        );
+        assert_eq!(streamer.db_writes_pending.len(), 1);
+        assert_eq!(streamer.trim_point.state.end, SeqNum::MAX);
+
+        let pending = streamer.db_writes_pending.pop_front().unwrap();
+        assert!(pending.config_guard.is_some());
+        let submitted = pending.future.await.unwrap();
+        let db_seq = submitted.db_seq;
+        streamer.inflight_appends.push_back(submitted);
+        streamer.db.flush().await.unwrap();
+        streamer.on_db_durable_seq_advanced(db_seq);
+        assert_eq!(
+            read_trim_point(&streamer.db, stream_id).await,
+            Some(..NonZeroSeqNum::MAX),
+        );
+        assert_eq!(
+            trim_reply_rx.await.unwrap().unwrap(),
+            TerminalTrimOutcome::DeletionPending,
+        );
+        streamer.db.close().await.unwrap();
+    }
+
+    // The bug: `handle_doe_check_result` can fire `ensure_terminal_trim` while
+    // the actor still holds the stale configuration (Message::Reconfigure has
+    // not reached the mailbox). After the fix, the terminal trim append
+    // transactionally revalidates the configuration revision and aborts as a
+    // transaction conflict when a concurrent reconfigure already incremented
+    // `stream_meta.seq`. The run loop reverts the trim_point mutation and
+    // returns `RetryAt` instead of destroying the stream under the old min_age.
+    #[tokio::test]
+    async fn terminal_trim_with_config_guard_aborts_when_config_changed() {
+        let mut streamer = test_streamer().await;
+        let stream_id = streamer.stream_id;
+        streamer.config.delete_on_empty.min_age = Duration::from_secs(1);
+        streamer.last_tail_write_timestamp = TimestampSecs::ZERO;
+        let (basin, stream, observed_config_seq) =
+            seed_serializable_stream(&streamer, Duration::from_secs(1)).await;
+        let expected_creation_seq = streamer.stream_creation_seq;
+        streamer.config_seq = observed_config_seq;
+
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx;
+        let (trim_reply_tx, trim_reply_rx) = oneshot::channel();
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_stream_creation_seq: expected_creation_seq,
+                expected_config_seq: observed_config_seq,
+            },
+            trim_reply_tx,
+        );
+        let Message::DeleteOnEmptyCheckResult {
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        } = msg_rx.recv().await.unwrap()
+        else {
+            panic!("expected scan to complete");
+        };
+        assert_eq!(records.as_ref().unwrap(), &RecordPresence::Empty);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Capture the pre-trim actor state, then leave config_seq unchanged so
+        // handle_doe_check_result proceeds to ensure_terminal_trim (the actor
+        // has not processed Reconfigure yet).
+        let prev_next_ack_pos = streamer.pending_appends.next_ack_pos();
+        let prev_trim_point = streamer.trim_point.clone();
+        streamer.handle_doe_check_result(
+            stable_pos_snapshot,
+            config_seq_snapshot,
+            records,
+            reply_tx,
+        );
+        assert_eq!(streamer.db_writes_pending.len(), 1);
+        assert_eq!(streamer.trim_point.state.end, SeqNum::MAX);
+
+        // Simulate a concurrent ReconfigureStream that successfully commits a
+        // new (larger) min_age, bumping stream_meta.seq, AFTER the DOE scan
+        // completed but BEFORE the actor's terminal trim write is submitted.
+        let bumped_meta = kv::stream_meta::StreamMeta {
+            config: StreamConfig {
+                delete_on_empty: s2_common::config::DeleteOnEmptyConfig {
+                    min_age: Duration::from_secs(3600),
+                },
+                ..Default::default()
+            },
+            cipher: None,
+            created_at: time::OffsetDateTime::now_utc(),
+            deleted_at: None,
+            creation_idempotency_key: None,
+        };
+        streamer
+            .db
+            .put(
+                kv::stream_meta::ser_key(&basin, &stream),
+                kv::stream_meta::ser_value(&bumped_meta),
+            )
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        let bumped_seq = streamer
+            .db
+            .get_key_value(kv::stream_meta::ser_key(&basin, &stream))
+            .await
+            .unwrap()
+            .unwrap()
+            .seq;
+        assert_ne!(bumped_seq, observed_config_seq);
+
+        // Drain the pending write exactly like the run loop does. The
+        // transaction must detect the config drift and abort, instead of
+        // committing an irrevocable terminal trim marker.
+        let pending = streamer.db_writes_pending.pop_front().unwrap();
+        let guard = pending.config_guard.expect("config guard captured");
+        let result = pending.future.await;
+        assert_eq!(result.unwrap_err().kind(), slatedb::ErrorKind::Transaction);
+
+        // Run-loop conflict handler: revert the actor state and reject the
+        // terminal-trim append so DOE can retry under the larger min_age.
+        streamer.trim_point = guard.prev_trim_point;
+        streamer.pending_appends.retract_last(
+            AppendErrorInternal::DeleteOnEmptyConfigConflict,
+            guard.prev_next_ack_pos,
+        );
+
+        // The irrevocable terminal trim marker must NOT be durable in SlateDB.
+        assert_eq!(read_trim_point(&streamer.db, stream_id).await, None);
+        // The actor's trim_point must be reverted so further appends succeed.
+        assert_ne!(streamer.trim_point.state.end, SeqNum::MAX);
+        assert_eq!(
+            streamer.trim_point.state, prev_trim_point.state,
+            "trim_point state must be restored to its pre-trim value"
+        );
+        assert_eq!(
+            streamer.trim_point.applied_point, prev_trim_point.applied_point,
+            "trim_point applied_point must be restored"
+        );
+        // The pending-append cursor must be restored so further appends
+        // continue from the previous position.
+        assert_eq!(
+            streamer.pending_appends.next_ack_pos(),
+            prev_next_ack_pos,
+            "next_ack_pos must be restored"
+        );
+
+        match trim_reply_rx.await.unwrap().unwrap() {
+            TerminalTrimOutcome::RetryAt(at) => {
+                assert!(
+                    at >= TimestampSecs::after(
+                        doe::RETRY_INTERVAL.saturating_sub(Duration::from_secs(1))
+                    ),
+                    "retry should let the DOE tick re-evaluate under the new min_age"
+                );
+            }
+            other => panic!("expected RetryAt, got {other:?}"),
+        }
+        streamer.db.close().await.unwrap();
+    }
+
+    // End-to-end through the run loop: when the config-guarded trim transaction
+    // conflicts, the run loop reverts the trim_point mutation, retracts the
+    // pending append, and returns RetryAt without breaking the streamer. This
+    // exercises the actual select! branch added for the conflict case.
+    //
+    // Determinism: stream_meta.seq is bumped BEFORE the run loop processes the
+    // DeleteOnEmptyCheckResult, so the actor's in-memory config_seq still
+    // matches the (stale) snapshot, but the trim transaction observes the new
+    // stream_meta.seq when it reads and aborts as a transaction conflict.
+    #[tokio::test]
+    async fn terminal_trim_conflict_reverts_state_via_run_loop() {
+        let mut streamer = test_streamer().await;
+        let stream_id = streamer.stream_id;
+        // The min_age slice is wall-clock based; with last_tail_write_timestamp
+        // at the epoch, the stream is always old enough at first observation.
+        streamer.config.delete_on_empty.min_age = Duration::from_millis(1);
+        streamer.last_tail_write_timestamp = TimestampSecs::ZERO;
+        let (basin, stream, observed_config_seq) =
+            seed_serializable_stream(&streamer, Duration::from_millis(1)).await;
+        streamer.config_seq = observed_config_seq;
+
+        // Simulate the reconfigure that commits the increased min_age BEFORE
+        // the run loop processes the DeleteOnEmptyCheckResult. The actor's
+        // in-memory config_seq still matches the snapshot, so the DOE check
+        // proceeds to ensure_terminal_trim, but the trim transaction will see
+        // the newer stream_meta.seq and conflict.
+        let bumped_meta = kv::stream_meta::StreamMeta {
+            config: StreamConfig {
+                delete_on_empty: s2_common::config::DeleteOnEmptyConfig {
+                    min_age: Duration::from_secs(3600),
+                },
+                ..Default::default()
+            },
+            cipher: None,
+            created_at: time::OffsetDateTime::now_utc(),
+            deleted_at: None,
+            creation_idempotency_key: None,
+        };
+        streamer
+            .db
+            .put(
+                kv::stream_meta::ser_key(&basin, &stream),
+                kv::stream_meta::ser_value(&bumped_meta),
+            )
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        let bumped_seq = streamer
+            .db
+            .get_key_value(kv::stream_meta::ser_key(&basin, &stream))
+            .await
+            .unwrap()
+            .unwrap()
+            .seq;
+        assert_ne!(bumped_seq, observed_config_seq);
+
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        streamer.msg_tx = msg_tx.clone();
+        let db_clone = streamer.db.clone();
+        let (trim_reply_tx, trim_reply_rx) = oneshot::channel();
+        // Drive the terminal-trim path through the live run loop so the
+        // select! branch for transaction conflicts is exercised.
+        streamer.handle_terminal_trim(
+            TerminalTrimCondition::DeleteOnEmpty {
+                expected_stream_creation_seq: streamer.stream_creation_seq,
+                expected_config_seq: observed_config_seq,
+            },
+            trim_reply_tx,
+        );
+        let task = tokio::spawn(streamer.run(msg_rx));
+
+        // Let the run loop process the concatenated sequence: DeleteOnEmpty
+        // scan completes (the stream is empty), mailbox delivers the result,
+        // handle_doe_check_result fires ensure_terminal_trim with the stale
+        // config_seq_guard, and the trim transaction conflicts and reverts.
+        let outcome = tokio::time::timeout(Duration::from_secs(30), trim_reply_rx)
+            .await
+            .expect("reply must be delivered")
+            .expect("reply channel not dropped")
+            .expect("DOE outcome must be Ok");
+        assert!(
+            matches!(outcome, TerminalTrimOutcome::RetryAt(_)),
+            "expected RetryAt after config-gated trim abort, got {outcome:?}"
+        );
+
+        // The irrevocable terminal trim marker must not be durable.
+        assert_eq!(read_trim_point(&db_clone, stream_id).await, None);
+
+        task.abort();
+        db_clone.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn append_acks_release_only_after_durable_seq_and_in_order() {
         let mut streamer = test_streamer().await;
         let mut follow_rx = streamer.follow_tx.subscribe();
 
         let (tx1, mut rx1) = oneshot::channel();
-        streamer.handle_append(append_input(b"p0"), None, tx1, AppendType::Regular);
+        streamer.handle_append(append_input(b"p0"), None, tx1, AppendType::Regular, None);
 
         let (tx2, mut rx2) = oneshot::channel();
-        streamer.handle_append(append_input(b"p1"), None, tx2, AppendType::Regular);
+        streamer.handle_append(append_input(b"p1"), None, tx2, AppendType::Regular, None);
 
         let (tx3, mut rx3) = oneshot::channel();
-        streamer.handle_append(append_input(b"p2"), None, tx3, AppendType::Regular);
+        streamer.handle_append(append_input(b"p2"), None, tx3, AppendType::Regular, None);
 
         let mut db_seqs = Vec::new();
-        while let Some(fut) = streamer.db_writes_pending.pop_front() {
-            let submitted = fut.await.expect("db submit");
+        while let Some(pending) = streamer.db_writes_pending.pop_front() {
+            let submitted = pending.future.await.expect("db submit");
             db_seqs.push(submitted.db_seq);
             streamer.inflight_appends.push_back(submitted);
         }
@@ -2015,12 +2528,13 @@ mod tests {
                 None,
                 tx,
                 AppendType::Regular,
+                None,
             );
         }
 
         let mut db_seqs = Vec::new();
-        while let Some(fut) = streamer.db_writes_pending.pop_front() {
-            let submitted = fut.await.expect("db submit");
+        while let Some(pending) = streamer.db_writes_pending.pop_front() {
+            let submitted = pending.future.await.expect("db submit");
             db_seqs.push(submitted.db_seq);
             streamer.inflight_appends.push_back(submitted);
         }
@@ -2062,6 +2576,7 @@ mod tests {
             None,
             reply_tx,
             AppendType::Regular,
+            None,
         );
         let task = tokio::spawn(streamer.run(msg_rx));
         tokio::time::timeout(Duration::from_secs(5), async {

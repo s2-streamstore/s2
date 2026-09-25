@@ -124,6 +124,8 @@ pub(super) enum AppendErrorInternal {
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
     MaxSeqNum(#[from] MaxSeqNumError),
+    #[error("delete-on-empty terminal trim aborted: stream configuration changed")]
+    DeleteOnEmptyConfigConflict,
 }
 
 impl AppendErrorInternal {
@@ -209,6 +211,9 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
             AppendErrorInternal::MaxSeqNum(e) => AppendError::MaxSeqNum(e),
+            AppendErrorInternal::DeleteOnEmptyConfigConflict => {
+                unreachable!("DeleteOnEmptyConfigConflict is handled by ensure_terminal_trim")
+            }
         }
     }
 }

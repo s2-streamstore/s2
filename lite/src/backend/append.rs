@@ -186,6 +186,25 @@ impl PendingAppends {
         }
     }
 
+    /// Remove and error the most recently accepted append, restoring the
+    /// assignable position cursor as if that append had never been sequenced.
+    ///
+    /// This reverts the effects of [`PendingAppends::accept`]'s mutation for a
+    /// single entry (the terminal trim), used when a config-guarded terminal
+    /// trim transaction conflicts at commit. Regular appends queued before the
+    /// trimmed batch are unaffected: their reply senders remain in the queue
+    /// and their durability dependencies continue to steer `on_stable`.
+    pub fn retract_last(
+        &mut self,
+        err: AppendErrorInternal,
+        prev_next_ack_pos: Option<StreamPosition>,
+    ) {
+        if let Some(sender) = self.queue.pop_back() {
+            let _ = sender.tx.send(Err(err));
+        }
+        self.next_ack_pos = prev_next_ack_pos;
+    }
+
     pub fn on_stable(&mut self, stable_pos: StreamPosition) {
         let completable = self
             .queue
