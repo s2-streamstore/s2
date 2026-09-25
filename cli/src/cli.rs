@@ -1,6 +1,7 @@
 use std::{num::NonZeroU64, path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::styling};
+use compact_str::CompactString;
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
     BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamName,
@@ -14,7 +15,7 @@ use crate::{
     },
     types::{
         BasinConfig, Interval, LocationName, Operation, PermittedOperationGroups,
-        S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig,
+        S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, StreamConfig,
     },
 };
 
@@ -191,6 +192,7 @@ pub enum Command {
     ///   `+` create
     ///   `~` ensure
     ///   `=` unchanged
+    ///   `?` storage-class default resolved at apply
     ///
     /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
     ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[]}
@@ -834,6 +836,7 @@ pub struct ApplyArgs {
     ///   `+` create
     ///   `~` ensure
     ///   `=` unchanged
+    ///   `?` storage-class default resolved at apply
     #[arg(long)]
     pub dry_run: bool,
     /// Print the JSON Schema for the spec file format to stdout.
@@ -848,7 +851,7 @@ pub struct BenchArgs {
 
     /// Storage class for the test stream. Uses basin default if not specified.
     #[arg(short = 'c', long)]
-    pub storage_class: Option<StorageClass>,
+    pub storage_class: Option<CompactString>,
 
     /// Total metered record size in bytes (includes headers and overhead).
     #[arg(

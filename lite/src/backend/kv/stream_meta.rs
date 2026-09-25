@@ -16,6 +16,7 @@ use super::{
     DeserializationError, KeyType, check_min_size, deser_json_value, increment_bytes,
     invalid_value_err, ser_json_value,
 };
+use crate::backend::resolve_stream_config;
 
 const FIELD_SEPARATOR: u8 = b'\0';
 
@@ -56,12 +57,12 @@ impl TryFrom<StreamMetaSerde> for StreamMeta {
 
     fn try_from(serde: StreamMetaSerde) -> Result<Self, Self::Error> {
         let config = match serde.config {
-            Some(api_config) => OptionalStreamConfig::try_from(api_config)?.into(),
-            None => StreamConfig::default(),
+            Some(api_config) => OptionalStreamConfig::try_from(api_config)?,
+            None => OptionalStreamConfig::default(),
         };
 
         Ok(Self {
-            config,
+            config: resolve_stream_config(config, OptionalStreamConfig::default()),
             cipher: serde.cipher,
             created_at: serde.created_at,
             deleted_at: serde.deleted_at,
@@ -155,7 +156,7 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::{
         basin::BasinName,
-        config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StorageClass, StreamConfig},
+        config::{OptionalDeleteOnEmptyConfig, OptionalStreamConfig, StreamConfig},
         encryption::EncryptionAlgorithm,
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     };
@@ -167,7 +168,7 @@ mod tests {
     #[test]
     fn value_roundtrip_stream_meta() {
         let config = OptionalStreamConfig {
-            storage_class: Some(StorageClass::Express),
+            storage_class: Some("express".into()),
             delete_on_empty: OptionalDeleteOnEmptyConfig {
                 min_age: Some(Duration::ZERO),
             },
@@ -228,7 +229,7 @@ mod tests {
         let decoded = super::deser_value(bytes).unwrap();
         let default_config = StreamConfig::default();
 
-        assert_eq!(decoded.config.storage_class, default_config.storage_class);
+        assert_eq!(decoded.config.storage_class.as_deref(), Some("express"));
         assert_eq!(
             decoded.config.retention_policy,
             default_config.retention_policy

@@ -55,7 +55,7 @@ async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), RequestErr
 async fn stream_config_roundtrip(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new()
-        .with_storage_class(StorageClass::Standard)
+        .with_storage_class("standard")
         .with_retention_policy(RetentionPolicy::Age(3600))
         .with_timestamping(TimestampingConfig::new().with_mode(TimestampingMode::ClientRequire));
 
@@ -68,14 +68,14 @@ async fn stream_config_roundtrip(basin: &S2Basin) -> Result<(), RequestError> {
     assert_matches!(
         retrieved_config,
         StreamConfig {
-            storage_class: Some(StorageClass::Standard),
+            storage_class: Some(ref storage_class),
             retention_policy: Some(RetentionPolicy::Age(3600)),
             timestamping: Some(TimestampingConfig {
                 mode: Some(TimestampingMode::ClientRequire),
                 ..
             }),
             ..
-        }
+        } if storage_class == "standard"
     );
 
     Ok(())
@@ -348,7 +348,7 @@ async fn delete_nonexistent_stream_with_ignore(basin: &S2Basin) -> Result<(), Re
 async fn get_stream_config(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
-    let config = StreamConfig::new().with_storage_class(StorageClass::Express);
+    let config = StreamConfig::new().with_storage_class("express");
 
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config))
@@ -356,7 +356,7 @@ async fn get_stream_config(basin: &S2Basin) -> Result<(), RequestError> {
 
     let retrieved_config = basin.get_stream_config(stream_name.clone()).await?;
 
-    assert_matches!(retrieved_config.storage_class, Some(StorageClass::Express));
+    assert_matches!(retrieved_config.storage_class.as_deref(), Some("express"));
 
     Ok(())
 }
@@ -605,7 +605,7 @@ async fn list_all_streams_include_deleted(
 async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new()
-        .with_storage_class(StorageClass::Standard)
+        .with_storage_class("standard")
         .with_retention_policy(RetentionPolicy::Age(86400))
         .with_timestamping(
             TimestampingConfig::new()
@@ -623,7 +623,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), Req
     assert_matches!(
         retrieved,
         StreamConfig {
-            storage_class: Some(StorageClass::Standard),
+            storage_class: Some(ref storage_class),
             retention_policy: Some(RetentionPolicy::Age(86400)),
             timestamping: Some(TimestampingConfig {
                 mode: Some(TimestampingMode::ClientRequire),
@@ -635,7 +635,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), Req
                 ..
             }),
             ..
-        }
+        } if storage_class == "standard"
     );
 
     basin
@@ -649,7 +649,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), Req
 #[tokio_shared_rt::test(shared)]
 async fn create_stream_storage_class_express(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
-    let config = StreamConfig::new().with_storage_class(StorageClass::Express);
+    let config = StreamConfig::new().with_storage_class("express");
 
     let result = basin
         .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config))
@@ -664,7 +664,7 @@ async fn create_stream_storage_class_express(basin: &SharedS2Basin) -> Result<()
     assert_eq!(info.name, stream_name);
 
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
-    assert_matches!(retrieved.storage_class, Some(StorageClass::Express) | None);
+    assert_matches!(retrieved.storage_class.as_deref(), Some("express") | None);
 
     basin
         .delete_stream(DeleteStreamInput::new(stream_name))
@@ -853,11 +853,11 @@ async fn reconfigure_stream_storage_class_standard(
     let config = basin
         .reconfigure_stream(ReconfigureStreamInput::new(
             stream_name.clone(),
-            StreamReconfiguration::new().with_storage_class(StorageClass::Standard),
+            StreamReconfiguration::new().with_storage_class("standard"),
         ))
         .await?;
 
-    assert_matches!(config.storage_class, Some(StorageClass::Standard));
+    assert_matches!(config.storage_class.as_deref(), Some("standard"));
 
     basin
         .delete_stream(DeleteStreamInput::new(stream_name))
@@ -879,7 +879,7 @@ async fn reconfigure_stream_storage_class_express(
     let result = basin
         .reconfigure_stream(ReconfigureStreamInput::new(
             stream_name.clone(),
-            StreamReconfiguration::new().with_storage_class(StorageClass::Express),
+            StreamReconfiguration::new().with_storage_class("express"),
         ))
         .await;
 
@@ -894,7 +894,7 @@ async fn reconfigure_stream_storage_class_express(
         Err(err) => return Err(err),
     };
 
-    assert_matches!(config.storage_class, Some(StorageClass::Express) | None);
+    assert_matches!(config.storage_class.as_deref(), Some("express") | None);
 
     basin
         .delete_stream(DeleteStreamInput::new(stream_name))
@@ -1126,7 +1126,7 @@ async fn reconfigure_stream_empty_config_no_change(
         .create_stream(
             CreateStreamInput::new(stream_name.clone()).with_config(
                 StreamConfig::new()
-                    .with_storage_class(StorageClass::Standard)
+                    .with_storage_class("standard")
                     .with_retention_policy(RetentionPolicy::Age(3600)),
             ),
         )
@@ -1140,7 +1140,7 @@ async fn reconfigure_stream_empty_config_no_change(
         .await?;
 
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
-    assert_matches!(retrieved.storage_class, Some(StorageClass::Standard));
+    assert_matches!(retrieved.storage_class.as_deref(), Some("standard"));
     assert_matches!(retrieved.retention_policy, Some(RetentionPolicy::Age(3600)));
 
     basin
@@ -1229,7 +1229,7 @@ async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<
     let result = basin
         .reconfigure_stream(ReconfigureStreamInput::new(
             unique_stream_name(),
-            StreamReconfiguration::new().with_storage_class(StorageClass::Standard),
+            StreamReconfiguration::new().with_storage_class("standard"),
         ))
         .await;
 

@@ -2,8 +2,9 @@
 //!
 //! Stream configuration uses three representations:
 //!
-//! - Resolved (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`): concrete values,
-//!   produced by merging optional configs with defaults using `merge()`.
+//! - Merged (`StreamConfig`, `TimestampingConfig`, `DeleteOnEmptyConfig`): values produced by
+//!   merging optional configs with defaults using `merge()`. Storage class remains unspecified when
+//!   neither the stream nor basin supplies one.
 //!
 //! - Optional (`OptionalStreamConfig`, `OptionalTimestampingConfig`,
 //!   `OptionalDeleteOnEmptyConfig`): partial configuration layers, where `None` means "not set at
@@ -17,39 +18,17 @@
 //! applies the inner reconfiguration to the existing value, while `Specified(None)`
 //! clears it to the default.
 //!
-//! `merge()` resolves optional configs into resolved configs with precedence:
-//! stream-level → basin-level → system default (via `Option::or` chaining).
+//! `merge()` applies configuration layers with precedence:
+//! stream-level → basin-level → field default.
 //!
 //! Basin config also carries basin-level knobs like `stream_cipher`,
 //! `create_stream_on_append`, and `create_stream_on_read`.
 
 use std::time::Duration;
 
-use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
+use compact_str::CompactString;
 
-#[derive(
-    Debug,
-    Default,
-    Clone,
-    Copy,
-    strum::Display,
-    strum::IntoStaticStr,
-    strum::EnumIter,
-    strum::FromRepr,
-    strum::EnumString,
-    PartialEq,
-    Eq,
-    Hash,
-)]
-#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[repr(u8)]
-pub enum StorageClass {
-    #[strum(serialize = "standard")]
-    Standard = 1,
-    #[default]
-    #[strum(serialize = "express")]
-    Express = 2,
-}
+use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPolicy {
@@ -110,7 +89,7 @@ impl DeleteOnEmptyConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamConfig {
-    pub storage_class: StorageClass,
+    pub storage_class: Option<CompactString>,
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
@@ -129,7 +108,7 @@ pub struct DeleteOnEmptyReconfiguration {
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamReconfiguration {
-    pub storage_class: Maybe<Option<StorageClass>>,
+    pub storage_class: Maybe<Option<CompactString>>,
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
@@ -217,7 +196,7 @@ impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalStreamConfig {
-    pub storage_class: Option<StorageClass>,
+    pub storage_class: Option<CompactString>,
     pub retention_policy: Option<RetentionPolicy>,
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,
@@ -258,10 +237,7 @@ impl OptionalStreamConfig {
     }
 
     pub fn merge(self, basin_defaults: Self) -> StreamConfig {
-        let storage_class = self
-            .storage_class
-            .or(basin_defaults.storage_class)
-            .unwrap_or_default();
+        let storage_class = self.storage_class.or(basin_defaults.storage_class);
 
         let retention_policy = self
             .retention_policy
@@ -291,7 +267,7 @@ impl From<OptionalStreamConfig> for StreamConfig {
         } = value;
 
         Self {
-            storage_class: storage_class.unwrap_or_default(),
+            storage_class,
             retention_policy: retention_policy.unwrap_or_default(),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),
@@ -309,7 +285,7 @@ impl From<StreamConfig> for OptionalStreamConfig {
         } = value;
 
         Self {
-            storage_class: Some(storage_class),
+            storage_class,
             retention_policy: Some(retention_policy),
             timestamping: timestamping.into(),
             delete_on_empty: delete_on_empty.into(),

@@ -1,4 +1,7 @@
-use s2_common::encryption::EncryptionSpec;
+use s2_common::{
+    config::{OptionalStreamConfig, StreamConfig},
+    encryption::EncryptionSpec,
+};
 
 pub mod error;
 
@@ -30,3 +33,12 @@ pub struct StreamHandle {
 }
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
+
+fn resolve_stream_config(
+    config: OptionalStreamConfig,
+    basin_defaults: OptionalStreamConfig,
+) -> StreamConfig {
+    let mut config = config.merge(basin_defaults);
+    config.storage_class.get_or_insert_with(|| "express".into());
+    config
+}

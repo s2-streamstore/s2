@@ -492,8 +492,7 @@ mod tests {
     use s2_common::{
         basin::{BASIN_HEADER, BasinName},
         config::{
-            BasinConfig, DeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy, StorageClass,
-            StreamConfig,
+            BasinConfig, DeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy, StreamConfig,
         },
         encryption::{EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
         read_extent::{ReadLimit, ReadUntil},
@@ -853,7 +852,7 @@ mod tests {
         BasinConfig {
             create_stream_on_append: true,
             default_stream_config: OptionalStreamConfig {
-                storage_class: Some(StorageClass::Standard),
+                storage_class: Some("standard".into()),
                 ..Default::default()
             },
             ..Default::default()
@@ -862,7 +861,7 @@ mod tests {
 
     fn expected_auto_created_config() -> StreamConfig {
         StreamConfig {
-            storage_class: StorageClass::Standard,
+            storage_class: Some("standard".into()),
             retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
             timestamping: Default::default(),
             delete_on_empty: DeleteOnEmptyConfig {
