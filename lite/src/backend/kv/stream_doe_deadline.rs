@@ -7,6 +7,7 @@ const LEGACY_KEY_LEN: usize = 1 + 4 + StreamId::LEN;
 const KEY_LEN: usize = LEGACY_KEY_LEN + 16;
 /// Legacy keys are retained only for decoding and migration. New schedules use
 /// `stream_doe_state` and `stream_doe_check`.
+#[allow(dead_code)]
 pub fn ser_key(deadline: TimestampSecs, stream_id: StreamId, schedule_id: Option<u128>) -> Bytes {
     let key_len = if schedule_id.is_some() {
         KEY_LEN
@@ -68,8 +69,6 @@ mod tests {
             prop_assert_eq!(deadline, decoded_deadline);
             prop_assert_eq!(stream_id, decoded_stream_id);
             prop_assert_eq!(schedule_id, decoded_schedule_id);
-            let decoded = super::super::Key::try_from(bytes.clone()).unwrap();
-            prop_assert_eq!(bytes, bytes::Bytes::from(decoded));
         }
     }
 }

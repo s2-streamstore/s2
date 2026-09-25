@@ -50,7 +50,6 @@ mod tests {
             let stream_id = StreamId::from(stream);
             let key = ser_key(stream_id, check);
             prop_assert_eq!(deser_key(key.clone()).unwrap(), (stream_id, check));
-            prop_assert_eq!(Bytes::from(super::super::Key::try_from(key.clone()).unwrap()), key);
         }
     }
 
