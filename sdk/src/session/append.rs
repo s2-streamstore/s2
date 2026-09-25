@@ -152,6 +152,32 @@ impl From<ApiError> for AppendSessionError {
     }
 }
 
+/// The two shared terminal-error locks recorded when an append session fails terminally.
+///
+/// Both locks are set together by the terminal branch, but they serve distinct purposes and so
+/// hold distinct error values:
+/// - [`Self::batch`] holds the **raw** final-attempt error. It is the per-batch fallback returned
+///   by `submit`/`reserve`/`BatchSubmitTicket` on a dead session for batches that never left the
+///   process, so a never-sent batch reports the final attempt's definite `has_no_side_effects()`
+///   classification rather than a session-level aggregate from unrelated batches.
+/// - [`Self::session`] holds the **session-level summary** — the final attempt's error wrapped in
+///   [`AppendSessionError::IndefiniteFailure`] when any inflight append carried prior uncertainty —
+///   reported by `close` as the session's overall outcome.
+#[derive(Clone)]
+struct TerminalErrorLocks {
+    batch: Arc<OnceLock<AppendSessionError>>,
+    session: Arc<OnceLock<AppendSessionError>>,
+}
+
+impl TerminalErrorLocks {
+    fn new() -> Self {
+        Self {
+            batch: Arc::new(OnceLock::new()),
+            session: Arc::new(OnceLock::new()),
+        }
+    }
+}
+
 /// A [`Future`] that resolves to an acknowledgement once the batch of records is appended.
 pub struct BatchSubmitTicket {
     rx: oneshot::Receiver<Result<AppendAck, AppendSessionError>>,
@@ -267,7 +293,7 @@ impl SessionState {
 pub struct AppendSession {
     cmd_tx: mpsc::Sender<Command>,
     permits: AppendPermits,
-    terminal_err: Arc<OnceLock<AppendSessionError>>,
+    terminal_errors: TerminalErrorLocks,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -285,7 +311,7 @@ impl AppendSession {
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
         let permits = AppendPermits::new(config.max_unacked_batches, config.max_unacked_bytes);
         let retry_builder = retry_builder(&client.config.retry);
-        let terminal_err = Arc::new(OnceLock::new());
+        let terminal_errors = TerminalErrorLocks::new();
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
@@ -293,12 +319,12 @@ impl AppendSession {
             cmd_rx,
             retry_builder,
             buffer_size,
-            terminal_err.clone(),
+            terminal_errors.clone(),
         )));
         Self {
             cmd_tx,
             permits,
-            terminal_err,
+            terminal_errors,
             _handle: handle,
         }
     }
@@ -347,7 +373,7 @@ impl AppendSession {
         Ok(BatchSubmitPermit {
             append_permit,
             cmd_tx_permit,
-            terminal_err: self.terminal_err.clone(),
+            terminal_err: self.terminal_errors.batch.clone(),
         })
     }
 
@@ -357,16 +383,28 @@ impl AppendSession {
         self.cmd_tx
             .send(Command::Close { done_tx })
             .await
-            .map_err(|_| self.terminal_err())?;
-        done_rx.await.map_err(|_| self.terminal_err())??;
+            .map_err(|_| self.terminal_session_err())?;
+        done_rx.await.map_err(|_| self.terminal_session_err())??;
         Ok(())
     }
 
     fn terminal_err(&self) -> AppendSessionError {
-        self.terminal_err
+        self.terminal_errors
+            .batch
             .get()
             .cloned()
             .unwrap_or(AppendSessionError::SessionClosed)
+    }
+
+    /// Session-level terminal error reported by [`close`](Self::close): the wrapped summary when
+    /// the session ended with prior uncertainty from an inflight append, falling back to the
+    /// per-batch terminal error when no session-level summary was recorded.
+    fn terminal_session_err(&self) -> AppendSessionError {
+        self.terminal_errors
+            .session
+            .get()
+            .cloned()
+            .unwrap_or_else(|| self.terminal_err())
     }
 }
 
@@ -395,7 +433,7 @@ impl BatchSubmitPermit {
 
 pub(crate) struct AppendSessionInternal {
     cmd_tx: mpsc::Sender<Command>,
-    terminal_err: Arc<OnceLock<AppendSessionError>>,
+    terminal_errors: TerminalErrorLocks,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -404,7 +442,7 @@ impl AppendSessionInternal {
         let buffer_size = DEFAULT_CHANNEL_BUFFER_SIZE;
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
         let retry_builder = retry_builder(&client.config.retry);
-        let terminal_err = Arc::new(OnceLock::new());
+        let terminal_errors = TerminalErrorLocks::new();
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
@@ -412,11 +450,11 @@ impl AppendSessionInternal {
             cmd_rx,
             retry_builder,
             buffer_size,
-            terminal_err.clone(),
+            terminal_errors.clone(),
         )));
         Self {
             cmd_tx,
-            terminal_err,
+            terminal_errors,
             _handle: handle,
         }
     }
@@ -426,7 +464,7 @@ impl AppendSessionInternal {
         input: AppendInput,
     ) -> impl Future<Output = Result<BatchSubmitTicket, AppendSessionError>> + Send + 'static {
         let cmd_tx = self.cmd_tx.clone();
-        let terminal_err = self.terminal_err.clone();
+        let terminal_err = self.terminal_errors.batch.clone();
         async move {
             let (ack_tx, ack_rx) = oneshot::channel();
             cmd_tx
@@ -454,16 +492,26 @@ impl AppendSessionInternal {
         self.cmd_tx
             .send(Command::Close { done_tx })
             .await
-            .map_err(|_| self.terminal_err())?;
-        done_rx.await.map_err(|_| self.terminal_err())??;
+            .map_err(|_| self.terminal_session_err())?;
+        done_rx.await.map_err(|_| self.terminal_session_err())??;
         Ok(())
     }
 
     fn terminal_err(&self) -> AppendSessionError {
-        self.terminal_err
+        self.terminal_errors
+            .batch
             .get()
             .cloned()
             .unwrap_or(AppendSessionError::SessionClosed)
+    }
+
+    /// Session-level terminal error reported by [`close`](Self::close).
+    fn terminal_session_err(&self) -> AppendSessionError {
+        self.terminal_errors
+            .session
+            .get()
+            .cloned()
+            .unwrap_or_else(|| self.terminal_err())
     }
 }
 
@@ -517,7 +565,7 @@ async fn run_session_with_retry(
     cmd_rx: mpsc::Receiver<Command>,
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
-    terminal_err: Arc<OnceLock<AppendSessionError>>,
+    terminal_errors: TerminalErrorLocks,
 ) {
     let access_token_mode = client.config.access_token.mode();
     let frame_signal = match client.config.retry.append_retry_policy {
@@ -606,35 +654,7 @@ async fn run_session_with_retry(
                         retries_exhausted = retry_backoff.is_exhausted(),
                         "not retrying append session"
                     );
-
-                    let session_err = err.clone().with_prior_uncertainty(
-                        state.inflight_appends.iter().any(|a| a.prior_uncertainty),
-                    );
-                    let _ = terminal_err.set(session_err.clone());
-
-                    for inflight_append in state.inflight_appends.drain(..) {
-                        let error = err
-                            .clone()
-                            .with_prior_uncertainty(inflight_append.prior_uncertainty);
-                        let _ = inflight_append.ack_tx.send(Err(error));
-                    }
-
-                    if let Some(stashed) = state.stashed_submission.take() {
-                        let _ = stashed.ack_tx.send(Err(err.clone()));
-                    }
-
-                    if let Some(done_tx) = state.close_tx.take() {
-                        let _ = done_tx.send(Err(session_err.clone()));
-                    }
-
-                    state.cmd_rx.close();
-                    while let Some(cmd) = state.cmd_rx.recv().await {
-                        let error = match &cmd {
-                            Command::Submit { .. } => &err,
-                            Command::Close { .. } => &session_err,
-                        };
-                        cmd.reject(error.clone());
-                    }
+                    settle_terminal_failure(err, &mut state, &terminal_errors).await;
                     break;
                 }
             }
@@ -643,6 +663,59 @@ async fn run_session_with_retry(
 
     if let Some(done_tx) = state.close_tx.take() {
         let _ = done_tx.send(Ok(()));
+    }
+}
+
+/// Settle a terminal append-session failure.
+///
+/// Records the terminal error in two shared locks with distinct semantics (see
+/// [`TerminalErrorLocks`]):
+/// - the per-batch lock holds the **raw** final-attempt error, so `submit`/`reserve`/
+///   `BatchSubmitTicket` fallbacks on a dead session report a never-sent batch with the final
+///   attempt's definite `has_no_side_effects()` classification rather than a session-level
+///   aggregate from unrelated batches;
+/// - the session-level lock holds the **session-level summary** — the final attempt's error wrapped
+///   in [`AppendSessionError::IndefiniteFailure`] when any inflight append carried prior
+///   uncertainty — reported by `close`.
+///
+/// Then resolves every already-buffered batch with the appropriate per-batch error: inflight
+/// appends are wrapped per their own `prior_uncertainty`; a stashed (never-sent) submission and
+/// buffered `Command::Submit`s get the raw error; the close handshake and buffered
+/// `Command::Close`s get the session-level summary. Finally it closes and drains the command
+/// channel so subsequent submits fail fast against the per-batch terminal error.
+async fn settle_terminal_failure(
+    err: AppendSessionError,
+    state: &mut SessionState,
+    terminal_errors: &TerminalErrorLocks,
+) {
+    let session_err = err
+        .clone()
+        .with_prior_uncertainty(state.inflight_appends.iter().any(|a| a.prior_uncertainty));
+    let _ = terminal_errors.batch.set(err.clone());
+    let _ = terminal_errors.session.set(session_err.clone());
+
+    for inflight_append in state.inflight_appends.drain(..) {
+        let error = err
+            .clone()
+            .with_prior_uncertainty(inflight_append.prior_uncertainty);
+        let _ = inflight_append.ack_tx.send(Err(error));
+    }
+
+    if let Some(stashed) = state.stashed_submission.take() {
+        let _ = stashed.ack_tx.send(Err(err.clone()));
+    }
+
+    if let Some(done_tx) = state.close_tx.take() {
+        let _ = done_tx.send(Err(session_err.clone()));
+    }
+
+    state.cmd_rx.close();
+    while let Some(cmd) = state.cmd_rx.recv().await {
+        let error = match &cmd {
+            Command::Submit { .. } => &err,
+            Command::Close { .. } => &session_err,
+        };
+        cmd.reject(error.clone());
     }
 }
 
@@ -1110,17 +1183,25 @@ impl From<usize> for TimerEvent {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{collections::VecDeque, error::Error};
 
     use http::StatusCode;
+    use tokio::{
+        sync::{mpsc, oneshot},
+        time::Instant,
+    };
+    use tokio_util::task::AbortOnDropHandle;
 
-    use super::{AppendSessionError, is_safe_to_retry};
+    use super::{
+        AppendPermits, AppendSession, AppendSessionError, Command, InflightAppend, SessionState,
+        StashedSubmission, TerminalErrorLocks, is_safe_to_retry, settle_terminal_failure,
+    };
     use crate::{
         api::{ApiError, ServerErrorBody},
         error::{AppendError, ProducerError, RequestError},
         frame_signal::FrameSignal,
         retry::AppendRetryError,
-        types::{AccessTokenMode, AppendRetryPolicy},
+        types::{AccessTokenMode, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy},
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
@@ -1131,6 +1212,47 @@ mod tests {
                 message: "test".to_owned(),
             },
         ))))
+    }
+
+    fn append_input(tag: &str) -> AppendInput {
+        AppendInput::new(
+            AppendRecordBatch::try_from_iter([AppendRecord::new(tag.to_owned()).unwrap()]).unwrap(),
+        )
+    }
+
+    fn inflight_append(
+        tag: &str,
+        prior_uncertainty: bool,
+    ) -> (
+        InflightAppend,
+        oneshot::Receiver<Result<crate::types::AppendAck, AppendSessionError>>,
+    ) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let append = InflightAppend {
+            input: append_input(tag),
+            input_metered_bytes: 0,
+            ack_tx,
+            ack_deadline: Instant::now(),
+            _permit: None,
+            prior_uncertainty,
+        };
+        (append, ack_rx)
+    }
+
+    fn stashed_submission(
+        tag: &str,
+    ) -> (
+        StashedSubmission,
+        oneshot::Receiver<Result<crate::types::AppendAck, AppendSessionError>>,
+    ) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let submission = StashedSubmission {
+            input: append_input(tag),
+            input_metered_bytes: 0,
+            ack_tx,
+            permit: None,
+        };
+        (submission, ack_rx)
     }
 
     #[rstest::rstest]
@@ -1294,6 +1416,271 @@ mod tests {
             true,
             Some(&signal),
             mode,
+        ));
+    }
+
+    #[tokio::test]
+    async fn settle_terminal_failure_records_per_batch_and_session_errors() {
+        // Final attempt failed definitively (permission_denied: no side effects, not retryable),
+        // but an earlier, uncertain attempt of an inflight batch (A) may have taken effect — the
+        // exact reachable scenario the bug report identifies (uncertain-then-definite failure
+        // with the default `All` retry policy).
+        let raw = server_error(StatusCode::FORBIDDEN, "permission_denied");
+        assert!(raw.has_no_side_effects());
+        assert!(!raw.is_retryable());
+
+        let terminal_errors = TerminalErrorLocks::new();
+
+        // Two inflight appends: A carried prior uncertainty (was sent, may have taken effect);
+        // B did not (was not sent before the terminal failure).
+        let (inflight_a, ack_a) = inflight_append("a", true);
+        let (inflight_b, ack_b) = inflight_append("b", false);
+
+        // A submission stashed but never sent to the server.
+        let (stashed, stashed_ack) = stashed_submission("c");
+
+        // A close handshake registered before the terminal failure.
+        let (close_done_tx, close_done) = oneshot::channel();
+
+        // Buffered commands that arrive while the terminal branch drains the channel.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(8);
+        let (buffered_submit_ack_tx, buffered_submit_ack) = oneshot::channel();
+        cmd_tx
+            .send(Command::Submit {
+                input: append_input("d"),
+                ack_tx: buffered_submit_ack_tx,
+                permit: None,
+            })
+            .await
+            .unwrap();
+        let (buffered_close_done_tx, buffered_close_done) = oneshot::channel();
+        cmd_tx
+            .send(Command::Close {
+                done_tx: buffered_close_done_tx,
+            })
+            .await
+            .unwrap();
+        drop(cmd_tx);
+
+        let mut state = SessionState {
+            cmd_rx,
+            inflight_appends: [inflight_a, inflight_b].into_iter().collect(),
+            inflight_bytes: 0,
+            close_tx: Some(close_done_tx),
+            total_records: 0,
+            total_acked_records: 0,
+            prev_ack_end: None,
+            stashed_submission: Some(stashed),
+        };
+
+        settle_terminal_failure(raw.clone(), &mut state, &terminal_errors).await;
+
+        // `terminal_errors.batch` is the per-batch fallback: the RAW final-attempt error, so a
+        // never-sent batch reports the definite classification. This is the core guard against
+        // the bug, which stored the wrapped aggregate here instead.
+        let stored_batch = terminal_errors.batch.get().unwrap();
+        assert!(stored_batch.has_no_side_effects());
+        assert!(!matches!(
+            stored_batch,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+        assert_eq!(stored_batch.to_string(), raw.to_string());
+
+        // `terminal_errors.session` is the session-level summary reported by `close`: wrapped
+        // because an inflight append carried prior uncertainty.
+        let stored_session = terminal_errors.session.get().unwrap();
+        assert!(!stored_session.has_no_side_effects());
+        assert!(matches!(
+            stored_session,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+
+        // Inflight A (prior uncertainty) is wrapped: it may have taken effect.
+        let a_err = ack_a.await.unwrap().unwrap_err();
+        assert!(!a_err.has_no_side_effects());
+        assert!(matches!(
+            a_err,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+
+        // Inflight B (no prior uncertainty) gets the raw definite error.
+        let b_err = ack_b.await.unwrap().unwrap_err();
+        assert!(b_err.has_no_side_effects());
+        assert!(!matches!(
+            b_err,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+
+        // The stashed, never-sent submission gets the raw definite error.
+        let stashed_err = stashed_ack.await.unwrap().unwrap_err();
+        assert!(stashed_err.has_no_side_effects());
+        assert!(!matches!(
+            stashed_err,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+
+        // The pre-registered close handshake gets the session-level summary.
+        let close_err = close_done.await.unwrap().unwrap_err();
+        assert!(!close_err.has_no_side_effects());
+        assert!(matches!(
+            close_err,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+
+        // A buffered `Command::Submit` (never sent) gets the raw definite error.
+        let buffered_submit_err = buffered_submit_ack.await.unwrap().unwrap_err();
+        assert!(buffered_submit_err.has_no_side_effects());
+        assert!(!matches!(
+            buffered_submit_err,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+
+        // A buffered `Command::Close` gets the session-level summary.
+        let buffered_close_err = buffered_close_done.await.unwrap().unwrap_err();
+        assert!(!buffered_close_err.has_no_side_effects());
+        assert!(matches!(
+            buffered_close_err,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+
+        // Everything buffered was drained; the session is quiesced.
+        assert!(state.inflight_appends.is_empty());
+        assert!(state.stashed_submission.is_none());
+        assert!(state.close_tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn settle_terminal_failure_without_prior_uncertainty_stores_raw_everywhere() {
+        // When no inflight append carried prior uncertainty, neither lock wraps: the per-batch
+        // and session-level errors coincide with the raw terminal error.
+        let raw = server_error(StatusCode::FORBIDDEN, "permission_denied");
+        let terminal_errors = TerminalErrorLocks::new();
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(1);
+        drop(cmd_tx);
+
+        let mut state = SessionState {
+            cmd_rx,
+            inflight_appends: VecDeque::new(),
+            inflight_bytes: 0,
+            close_tx: None,
+            total_records: 0,
+            total_acked_records: 0,
+            prev_ack_end: None,
+            stashed_submission: None,
+        };
+
+        settle_terminal_failure(raw.clone(), &mut state, &terminal_errors).await;
+
+        let stored_batch = terminal_errors.batch.get().unwrap();
+        let stored_session = terminal_errors.session.get().unwrap();
+        assert!(stored_batch.has_no_side_effects());
+        assert!(stored_session.has_no_side_effects());
+        assert!(!matches!(
+            stored_batch,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+        assert!(!matches!(
+            stored_session,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+        assert_eq!(stored_batch.to_string(), raw.to_string());
+        assert_eq!(stored_session.to_string(), raw.to_string());
+    }
+
+    #[tokio::test]
+    async fn dead_session_submit_reserves_per_batch_error_but_close_reports_session_summary() {
+        // Reproduce the post-terminal state the bug report describes: the session task has
+        // exited (cmd_rx is dropped, so `reserve`/`submit` fall back to `terminal_err`), with
+        // the per-batch lock holding the RAW definite error and the session-level lock holding
+        // the wrapped summary — exactly as `settle_terminal_failure` records them.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(1);
+        drop(cmd_rx);
+
+        let terminal_errors = TerminalErrorLocks::new();
+        let raw = server_error(StatusCode::FORBIDDEN, "permission_denied");
+        let session_summary = raw.clone().with_prior_uncertainty(true);
+        assert!(raw.has_no_side_effects());
+        assert!(!session_summary.has_no_side_effects());
+        terminal_errors.batch.set(raw).unwrap();
+        terminal_errors.session.set(session_summary).unwrap();
+
+        let session = AppendSession {
+            cmd_tx,
+            permits: AppendPermits::new(None, crate::types::ONE_MIB),
+            terminal_errors,
+            _handle: AbortOnDropHandle::new(tokio::spawn(async {})),
+        };
+
+        // A brand-new batch submitted after the session died never left the process: it must
+        // report the per-batch (raw, definite) error, not the session-level aggregate.
+        let err = session
+            .submit(append_input("never-sent"))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.has_no_side_effects(),
+            "never-sent batch must be definite"
+        );
+        assert!(!matches!(err, AppendSessionError::IndefiniteFailure { .. }));
+
+        // `reserve`, the lower-level vector the report identifies as always-reachable, likewise
+        // returns the per-batch raw error.
+        let err = session.reserve(128).await.err().unwrap();
+        assert!(err.has_no_side_effects());
+        assert!(!matches!(err, AppendSessionError::IndefiniteFailure { .. }));
+
+        // `close` on the dead session reports the session-level summary (wrapped).
+        let close_err = session.close().await.unwrap_err();
+        assert!(!close_err.has_no_side_effects());
+        assert!(matches!(
+            close_err,
+            AppendSessionError::IndefiniteFailure { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn batch_submit_ticket_dropped_ack_reports_per_batch_error() {
+        // G4: the `BatchSubmitTicket::poll` `Err(_)` arm (the oneshot ack receiver's
+        // sender was dropped without a send — e.g. a permit acquired while alive then
+        // `submit` after the session task exited and drained `cmd_rx`) returns the
+        // per-batch raw `terminal_err`, so a never-sent batch reports the definite
+        // classification rather than the session-level aggregate.
+        use std::{future::poll_fn, pin::Pin};
+
+        use super::BatchSubmitTicket;
+
+        let terminal_errors = TerminalErrorLocks::new();
+        let raw = server_error(StatusCode::FORBIDDEN, "permission_denied");
+        let session_summary = raw.clone().with_prior_uncertainty(true);
+        assert!(raw.has_no_side_effects());
+        assert!(!session_summary.has_no_side_effects());
+        terminal_errors.batch.set(raw).unwrap();
+        terminal_errors.session.set(session_summary).unwrap();
+
+        // Construct a ticket whose ack sender is dropped without a send (simulating
+        // the permit-acquired-then-task-exited window the report describes).
+        let (_, ack_rx) = oneshot::channel::<Result<crate::types::AppendAck, AppendSessionError>>();
+        // `ack_rx`'s sender is dropped immediately, so polling the ticket yields the
+        // `Err(_)` receiver arm.
+        let mut ticket = BatchSubmitTicket {
+            rx: ack_rx,
+            terminal_err: terminal_errors.batch.clone(),
+        };
+
+        let err = poll_fn(|cx| Pin::new(&mut ticket).poll(cx))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.has_no_side_effects(),
+            "dropped-ack ticket must report the per-batch definite error: {err}"
+        );
+        assert!(!matches!(err, AppendSessionError::IndefiniteFailure { .. }));
+        assert!(matches!(
+            err,
+            AppendSessionError::Append(AppendError::Request(RequestError::Server(_)))
         ));
     }
 }
