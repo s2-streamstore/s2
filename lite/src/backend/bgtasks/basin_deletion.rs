@@ -10,6 +10,7 @@ use slatedb::{
 };
 use tracing::instrument;
 
+use super::PageProgress;
 use crate::backend::{
     Backend,
     error::{BasinDeletionError, ListStreamsError, StorageError},
@@ -19,21 +20,12 @@ use crate::backend::{
 const PENDING_LIST_LIMIT: usize = 32;
 const CONCURRENCY: usize = 4;
 
-/// Per-basin outcome of a deletion tick. Unlike a single `bool`, this
-/// distinguishes forward progress from a basin blocked waiting for
-/// `stream_trim` to purge its tombstoned `stream_meta` rows, so a full
-/// pending page that makes no progress yields to the scheduler instead of
-/// tight-looping — mirroring the `PageProgress` contract used by the sibling
-/// bgtasks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BasinProgress {
-    /// The stream cursor advanced past a full stream page; re-scan
-    /// immediately to keep draining this basin's remaining streams.
+    /// More streams remain past the advanced cursor.
     Advanced,
-    /// The basin had no remaining streams and was fully removed.
     Completed,
-    /// Tombstoned stream metadata still exists; the basin waits for
-    /// `stream_trim` to purge it before it can complete.
+    /// Tombstoned streams await `stream_trim`, or the cursor was reset. A reset is not progress:
+    /// counting it would rescan a multi-page basin in a tight loop.
     Blocked,
 }
 
@@ -43,25 +35,27 @@ impl Backend {
         if page.values.is_empty() {
             return Ok(page.has_more);
         }
+        let mut progress = PageProgress {
+            has_more: page.has_more,
+            ..Default::default()
+        };
         let mut processed = stream::iter(page.values)
             .map(|(basin, cursor)| {
                 let backend = self.clone();
                 async move { backend.process_basin_deletion(basin, cursor).await }
             })
             .buffer_unordered(CONCURRENCY);
-        let mut any_succeeded = false;
-        let mut any_advanced = false;
         while let Some(result) = processed.next().await {
-            let progress = result?;
-            any_succeeded |= progress != BasinProgress::Blocked;
-            any_advanced |= progress == BasinProgress::Advanced;
+            match result? {
+                BasinProgress::Advanced => {
+                    progress.has_more = true;
+                    progress.any_succeeded = true;
+                }
+                BasinProgress::Completed => progress.any_succeeded = true,
+                BasinProgress::Blocked => {}
+            }
         }
-        // Keep draining only when the page made progress: a full page where
-        // every basin is blocked yields to the scheduler instead of retrying
-        // in a tight loop. A basin whose stream cursor advanced re-ticks
-        // immediately regardless of `page.has_more` so its remaining streams
-        // drain without waiting for the next timer interval.
-        Ok(any_advanced || (page.has_more && any_succeeded))
+        Ok(progress.should_continue())
     }
 
     async fn list_basin_deletion_pending(
