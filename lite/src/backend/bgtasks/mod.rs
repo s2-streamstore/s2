@@ -229,4 +229,13 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
+
+    #[test]
+    fn blocked_page_waits_for_next_tick() {
+        let mut progress = PageProgress::new(true);
+        progress.record(ItemProgress::Blocked);
+        assert!(!progress.should_continue());
+        progress.record(ItemProgress::Completed);
+        assert!(progress.should_continue());
+    }
 }

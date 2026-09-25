@@ -527,30 +527,4 @@ mod tests {
                 .is_none()
         );
     }
-
-    #[tokio::test]
-    async fn basin_deletion_drains_backlog_only_on_progress() {
-        let backend = test_backend().await;
-        // More basins are pending than fit in one page, and all are blocked.
-        let basins: Vec<_> = (0..=super::PENDING_LIST_LIMIT)
-            .map(|i| BasinName::from_str(&format!("basin-{i:02}")).unwrap())
-            .collect();
-        futures::future::join_all(basins.iter().map(|basin| {
-            let backend = backend.clone();
-            async move {
-                seed_basin_for_deletion(&backend, basin).await;
-                seed_tombstoned_streams(&backend, basin, 1).await;
-            }
-        }))
-        .await;
-
-        let has_more = backend.clone().tick_basin_deletion().await.unwrap();
-        assert!(!has_more);
-
-        // Simulate stream_trim cleaning up one basin's tombstoned stream.
-        let tombstone = kv::stream_meta::ser_key(&basins[0], &stream_name_for_index(0));
-        backend.db.delete(tombstone).assert_durable().await;
-        let has_more = backend.clone().tick_basin_deletion().await.unwrap();
-        assert!(has_more);
-    }
 }
