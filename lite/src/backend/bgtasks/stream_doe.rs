@@ -51,7 +51,7 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            progress.record(result, StreamDeleteOnEmptyError::is_transaction_conflict)?;
+            progress.record_result(result, StreamDeleteOnEmptyError::is_transaction_conflict)?;
         }
         Ok(progress.should_continue())
     }
@@ -273,10 +273,7 @@ impl Backend {
                 break;
             }
         }
-        let mut progress = PageProgress {
-            has_more: count == PENDING_LIST_LIMIT,
-            ..Default::default()
-        };
+        let mut progress = PageProgress::new(count == PENDING_LIST_LIMIT);
         if pending.is_empty() {
             return Ok(progress);
         }
@@ -286,7 +283,9 @@ impl Backend {
             .buffer_unordered(CONCURRENCY);
         let mut cleanup = WriteBatch::new();
         while let Some(result) = migrations.next().await {
-            if let Some(keys) = progress.record(result, StorageError::is_transaction_conflict)? {
+            if let Some(keys) =
+                progress.record_result(result, StorageError::is_transaction_conflict)?
+            {
                 for key in keys {
                     cleanup.delete(key);
                 }

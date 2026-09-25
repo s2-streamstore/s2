@@ -9,32 +9,60 @@ mod basin_deletion;
 mod stream_doe;
 mod stream_trim;
 
-/// Keep draining the backlog while at least one item succeeds. A page where
-/// every item conflicts waits for the next tick instead of retrying in a tight loop.
-#[derive(Default)]
+/// Keep draining the backlog while at least one item makes progress. A page where
+/// every item is blocked waits for the next tick instead of retrying in a tight loop.
 struct PageProgress {
     has_more: bool,
-    any_succeeded: bool,
+    any_progressed: bool,
+}
+
+enum ItemProgress {
+    /// Made progress, and more work for this item can run immediately.
+    Advanced,
+    Completed,
+    /// Made no progress; the item waits for a later tick.
+    Blocked,
 }
 
 impl PageProgress {
-    fn record<T, E>(
+    fn new(has_more: bool) -> Self {
+        Self {
+            has_more,
+            any_progressed: false,
+        }
+    }
+
+    fn record(&mut self, item: ItemProgress) {
+        match item {
+            ItemProgress::Advanced => {
+                self.has_more = true;
+                self.any_progressed = true;
+            }
+            ItemProgress::Completed => self.any_progressed = true,
+            ItemProgress::Blocked => {}
+        }
+    }
+
+    fn record_result<T, E>(
         &mut self,
         result: Result<T, E>,
         is_conflict: fn(&E) -> bool,
     ) -> Result<Option<T>, E> {
         match result {
             Ok(value) => {
-                self.any_succeeded = true;
+                self.record(ItemProgress::Completed);
                 Ok(Some(value))
             }
-            Err(err) if is_conflict(&err) => Ok(None),
+            Err(err) if is_conflict(&err) => {
+                self.record(ItemProgress::Blocked);
+                Ok(None)
+            }
             Err(err) => Err(err),
         }
     }
 
     fn should_continue(&self) -> bool {
-        self.has_more && self.any_succeeded
+        self.has_more && self.any_progressed
     }
 }
 
@@ -200,5 +228,14 @@ mod tests {
         run_tick("test", &tick, &backend).await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn blocked_page_waits_for_next_tick() {
+        let mut progress = PageProgress::new(true);
+        progress.record(ItemProgress::Blocked);
+        assert!(!progress.should_continue());
+        progress.record(ItemProgress::Completed);
+        assert!(progress.should_continue());
     }
 }
