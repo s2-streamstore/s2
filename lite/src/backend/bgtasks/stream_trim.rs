@@ -37,10 +37,7 @@ impl Backend {
         if page.values.is_empty() {
             return Ok(page.has_more);
         }
-        let mut progress = PageProgress {
-            has_more: page.has_more,
-            ..Default::default()
-        };
+        let mut progress = PageProgress::new(page.has_more);
         let mut processed = stream::iter(page.values)
             .map(|pending| {
                 let backend = self.clone();
@@ -48,7 +45,7 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            progress.record(result, StorageError::is_transaction_conflict)?;
+            progress.record_result(result, StorageError::is_transaction_conflict)?;
         }
         Ok(progress.should_continue())
     }

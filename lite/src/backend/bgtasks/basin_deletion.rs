@@ -10,7 +10,7 @@ use slatedb::{
 };
 use tracing::instrument;
 
-use super::PageProgress;
+use super::{ItemProgress, PageProgress};
 use crate::backend::{
     Backend,
     error::{BasinDeletionError, ListStreamsError, StorageError},
@@ -20,25 +20,13 @@ use crate::backend::{
 const PENDING_LIST_LIMIT: usize = 32;
 const CONCURRENCY: usize = 4;
 
-enum BasinProgress {
-    /// More streams remain past the advanced cursor.
-    Advanced,
-    Completed,
-    /// Tombstoned streams await `stream_trim`, or the cursor was reset. A reset is not progress:
-    /// counting it would rescan a multi-page basin in a tight loop.
-    Blocked,
-}
-
 impl Backend {
     pub(super) async fn tick_basin_deletion(self) -> Result<bool, BasinDeletionError> {
         let page = self.list_basin_deletion_pending().await?;
         if page.values.is_empty() {
             return Ok(page.has_more);
         }
-        let mut progress = PageProgress {
-            has_more: page.has_more,
-            ..Default::default()
-        };
+        let mut progress = PageProgress::new(page.has_more);
         let mut processed = stream::iter(page.values)
             .map(|(basin, cursor)| {
                 let backend = self.clone();
@@ -46,14 +34,7 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            match result? {
-                BasinProgress::Advanced => {
-                    progress.has_more = true;
-                    progress.any_succeeded = true;
-                }
-                BasinProgress::Completed => progress.any_succeeded = true,
-                BasinProgress::Blocked => {}
-            }
+            progress.record(result?);
         }
         Ok(progress.should_continue())
     }
@@ -88,7 +69,7 @@ impl Backend {
         &self,
         basin: BasinName,
         cursor: StreamNameStartAfter,
-    ) -> Result<BasinProgress, BasinDeletionError> {
+    ) -> Result<ItemProgress, BasinDeletionError> {
         let request = ListStreamsRequest {
             prefix: StreamNamePrefix::default(),
             start_after: cursor.clone(),
@@ -114,20 +95,21 @@ impl Backend {
         if page.has_more {
             self.set_basin_deletion_cursor(&basin, &last_stream.expect("non-empty stream page"))
                 .await?;
-            Ok(BasinProgress::Advanced)
+            Ok(ItemProgress::Advanced)
         } else if last_stream.is_some() || !cursor.as_ref().is_empty() {
             // Streams still pending deletion or cursor was advanced past
             // earlier entries. Reset cursor so the next tick re-scans from
-            // the beginning.
+            // the beginning. A reset is not progress: counting it would
+            // rescan a multi-page basin in a tight loop.
             if !cursor.as_ref().is_empty() {
                 self.set_basin_deletion_cursor(&basin, &StreamNameStartAfter::default())
                     .await?;
             }
-            Ok(BasinProgress::Blocked)
+            Ok(ItemProgress::Blocked)
         } else {
             // No streams from the very beginning — safe to complete.
             self.complete_basin_deletion(&basin).await?;
-            Ok(BasinProgress::Completed)
+            Ok(ItemProgress::Completed)
         }
     }
 
