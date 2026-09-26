@@ -26,6 +26,23 @@ pub fn router() -> axum::Router<Backend> {
             super::paths::streams::RECONFIGURE,
             patch(reconfigure_stream),
         )
+        // Stream names may contain '/', which must be percent-encoded per
+        // request. An unencoded '/' makes the path resolve to more segments
+        // than any route above expects, which axum's default router would
+        // otherwise reject as a bare, bodyless 404. Catch that here and
+        // return a `BadPath` error that hints at the fix. This is scoped to
+        // one segment past `{stream}` (rather than `/streams/{*rest}`) so it
+        // doesn't conflict with the exact single-segment `{stream}` routes
+        // above; more specific literal routes (e.g. `.../records`) still win
+        // over this wildcard.
+        .route(
+            "/streams/{stream}/{*rest}",
+            axum::routing::any(ambiguous_stream_path),
+        )
+}
+
+async fn ambiguous_stream_path() -> ServiceError {
+    ServiceError::AmbiguousStreamPath
 }
 
 #[derive(FromRequest)]
@@ -361,7 +378,7 @@ mod test {
 
     use crate::{backend::Backend, handlers};
 
-    async fn setup_app(test_suffix: &str) -> (axum::Router, Backend, BasinName) {
+    async fn create_backend() -> Backend {
         let object_store = Arc::new(InMemory::new());
         let db_path = format!("/tmp/streams-handler-test-{}", Uuid::new_v4());
         let db = Db::builder(db_path, object_store)
@@ -372,7 +389,11 @@ mod test {
             .build()
             .await
             .expect("create in-memory db");
-        let backend = Backend::new(db, ByteSize::mib(10));
+        Backend::new(db, ByteSize::mib(10))
+    }
+
+    async fn setup_app(test_suffix: &str) -> (axum::Router, Backend, BasinName) {
+        let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
             .provision_basin(
@@ -490,5 +511,66 @@ mod test {
         );
 
         backend.close().await.expect("close backend");
+    }
+
+    #[tokio::test]
+    async fn unencoded_slash_in_stream_name_returns_helpful_bad_path_error() {
+        let backend = create_backend().await;
+        let app = handlers::router().with_state(backend);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/streams/cdc/products/records?seq_num=0&count=1")
+                    .header(BASIN_HEADER.as_str(), "my-basin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["code"], "bad_path");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("percent-encoded"),
+            "unexpected message: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn percent_encoded_slash_in_stream_name_reaches_the_records_route() {
+        let backend = create_backend().await;
+        let app = handlers::router().with_state(backend);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/streams/cdc%2Fproducts/records?seq_num=0&count=1")
+                    .header(BASIN_HEADER.as_str(), "my-basin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request should complete");
+
+        // The basin/stream don't exist, so this legitimately 404s, but via
+        // the records handler's `StreamNotFound`/`BasinNotFound` error body
+        // -- not the bare, bodyless 404 from an unmatched route, and not our
+        // `BadPath` guard.
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        assert!(!body.is_empty(), "expected a JSON error body, got empty");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_ne!(json["code"], "bad_path");
     }
 }
