@@ -36,6 +36,9 @@ struct Args {
     #[arg(long, default_value_t = 0.0, global = true)]
     fail_rate: f64,
 
+    #[command(flatten)]
+    faults: lite_host::Faults,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -68,7 +71,7 @@ fn main() -> eyre::Result<()> {
         // The meta harness only spawns child processes; it must not install
         // simulated clocks or otherwise behave like a simulation itself.
         init_tracing();
-        return meta::run(meta, args.seed, args.fail_rate);
+        return meta::run(meta, args.seed, args.fail_rate, args.faults);
     }
 
     // Keep shadowed clocks installed for the lifetime of the simulation, so
@@ -85,8 +88,9 @@ fn main() -> eyre::Result<()> {
     sim.host(s3::HOST, || async {
         s3::serve().await.inspect_err(log_host_exit(s3::HOST))
     });
-    sim.host(lite_host::HOST, || async {
-        lite_host::serve()
+    let faults = args.faults;
+    sim.host(lite_host::HOST, move || async move {
+        lite_host::serve(faults)
             .await
             .inspect_err(log_host_exit(lite_host::HOST))
     });

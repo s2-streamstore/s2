@@ -8,6 +8,12 @@ Basic smoke test:
 just sim smoke --seed 12345
 ```
 
+Fault injection: `--fail-rate` drops network messages; `--stream-reset-rate` makes s2-lite fail response bodies mid-stream, which reaches the client as an HTTP/2 `RST_STREAM`.
+
+```bash
+just sim linearizable --seed 6 --stream-reset-rate 0.05
+```
+
 Meta-test, which compares the output of two runs of a selected sim and compares logging output. Helpful for determining if determinism has been broken.
 
 ```bash

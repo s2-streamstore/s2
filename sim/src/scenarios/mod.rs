@@ -7,7 +7,7 @@
 pub mod linearizable;
 pub mod smoke;
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, time::Duration};
 
 use s2_sdk::{
     S2, S2Stream,
@@ -23,8 +23,10 @@ pub const BASIN: &str = "sim-basin";
 pub const STREAM: &str = "sim-stream";
 
 /// Provisioning races s2-lite's startup, which under injected faults can take a
-/// while; it needs a much larger retry budget than workload operations.
+/// while (each lost object store message costs a 30s request timeout); it needs
+/// a much larger retry budget than workload operations.
 const PROVISION_ATTEMPTS: u32 = 30;
+const PROVISION_MAX_BASE_DELAY: Duration = Duration::from_secs(10);
 
 fn client(retry: RetryConfig) -> eyre::Result<S2> {
     let endpoints = S2Endpoints::new(
@@ -66,8 +68,9 @@ pub async fn provision_stream() -> eyre::Result<S2Stream> {
     let basin_name: BasinName = BASIN.parse()?;
     let stream_name: StreamName = STREAM.parse()?;
 
-    let retry =
-        RetryConfig::new().with_max_attempts(NonZeroU32::new(PROVISION_ATTEMPTS).expect("nonzero"));
+    let retry = RetryConfig::new()
+        .with_max_attempts(NonZeroU32::new(PROVISION_ATTEMPTS).expect("nonzero"))
+        .with_max_base_delay(PROVISION_MAX_BASE_DELAY);
     let provisioner = client(retry)?;
     provisioner
         .ensure_basin(EnsureBasinInput::new(basin_name.clone()))
