@@ -502,12 +502,115 @@ impl RetryConfig {
     }
 }
 
+/// Overrides for the HTTP/2 transport used by pooled connections.
+///
+/// Unset knobs keep the SDK defaults: 90 concurrent requests per connection and
+/// Hyper's receive windows (2 MiB per stream, 5 MiB per connection). Receive
+/// windows bound unconsumed server-to-client DATA only; they do not affect
+/// append throughput, which is governed by the server's receive windows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Http2Config {
+    pub(crate) max_concurrent_requests: Option<usize>,
+    pub(crate) stream_receive_window: Option<u32>,
+    pub(crate) connection_receive_window: Option<u32>,
+}
+
+impl Http2Config {
+    /// Stream limit advertised by S2 servers per HTTP/2 connection.
+    pub const MAX_CONCURRENT_REQUESTS: usize = 100;
+
+    /// Maximum HTTP/2 flow-control window in bytes (`2^31 - 1`).
+    pub const MAX_RECEIVE_WINDOW: u32 = i32::MAX as u32;
+
+    /// Minimum HTTP/2 connection receive window in bytes.
+    ///
+    /// The connection window cannot be shrunk below the protocol default.
+    pub const MIN_CONNECTION_RECEIVE_WINDOW: u32 = 65_535;
+
+    /// Start from the SDK defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cap concurrent requests per pooled connection.
+    ///
+    /// The cap includes unary requests and streaming sessions until their
+    /// bodies finish or are dropped. Additional requests use another pooled
+    /// connection.
+    ///
+    /// # Errors
+    ///
+    /// Must be between 1 and [`Self::MAX_CONCURRENT_REQUESTS`]. Requests beyond
+    /// the server's stream limit would queue on the connection instead of
+    /// spilling over to another one.
+    pub fn with_max_concurrent_requests(
+        self,
+        max_concurrent_requests: usize,
+    ) -> Result<Self, ValidationError> {
+        if !(1..=Self::MAX_CONCURRENT_REQUESTS).contains(&max_concurrent_requests) {
+            return Err(format!(
+                "HTTP/2 concurrent request limit must be between 1 and {}",
+                Self::MAX_CONCURRENT_REQUESTS
+            )
+            .into());
+        }
+        Ok(Self {
+            max_concurrent_requests: Some(max_concurrent_requests),
+            ..self
+        })
+    }
+
+    /// Set the initial per-stream receive window in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Must be between 1 and [`Self::MAX_RECEIVE_WINDOW`].
+    pub fn with_stream_receive_window(
+        self,
+        stream_receive_window: u32,
+    ) -> Result<Self, ValidationError> {
+        if !(1..=Self::MAX_RECEIVE_WINDOW).contains(&stream_receive_window) {
+            return Err("HTTP/2 stream receive window must be between 1 and 2^31 - 1 bytes".into());
+        }
+        Ok(Self {
+            stream_receive_window: Some(stream_receive_window),
+            ..self
+        })
+    }
+
+    /// Set the connection-level receive window in bytes, shared by all streams
+    /// on the connection.
+    ///
+    /// # Errors
+    ///
+    /// Must be between [`Self::MIN_CONNECTION_RECEIVE_WINDOW`] and
+    /// [`Self::MAX_RECEIVE_WINDOW`].
+    pub fn with_connection_receive_window(
+        self,
+        connection_receive_window: u32,
+    ) -> Result<Self, ValidationError> {
+        if !(Self::MIN_CONNECTION_RECEIVE_WINDOW..=Self::MAX_RECEIVE_WINDOW)
+            .contains(&connection_receive_window)
+        {
+            return Err(
+                "HTTP/2 connection receive window must be between 65,535 and 2^31 - 1 bytes".into(),
+            );
+        }
+        Ok(Self {
+            connection_receive_window: Some(connection_receive_window),
+            ..self
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Configuration for [`S2`](crate::S2).
 pub struct S2Config {
     pub(crate) access_token: AccessToken,
     pub(crate) endpoints: S2Endpoints,
+    pub(crate) http2: Http2Config,
     pub(crate) connection_timeout: Duration,
     pub(crate) request_timeout: Duration,
     pub(crate) retry: RetryConfig,
@@ -524,6 +627,7 @@ impl S2Config {
         Self {
             access_token: AccessToken::Static(access_token.into().into()),
             endpoints: S2Endpoints::for_cloud(),
+            http2: Http2Config::new(),
             connection_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(5),
             retry: RetryConfig::new(),
@@ -597,6 +701,13 @@ impl S2Config {
             default_headers,
             ..self
         })
+    }
+
+    /// Override HTTP/2 transport settings for pooled connections.
+    ///
+    /// Defaults to [`Http2Config::new()`].
+    pub fn with_http2(self, http2: Http2Config) -> Self {
+        Self { http2, ..self }
     }
 
     /// Set the timeout for establishing a connection to the server.
@@ -4556,5 +4667,55 @@ mod tests {
         assert_eq!(record.headers[0].name.as_ref(), b"k");
         assert_eq!(record.headers[0].value.as_ref(), b"v");
         assert_eq!(record.timestamp, 1234);
+    }
+
+    #[test]
+    fn http2_config_bounds() {
+        let config = Http2Config::new()
+            .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS)
+            .unwrap()
+            .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW)
+            .unwrap()
+            .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+            .unwrap();
+        assert_eq!(
+            config.max_concurrent_requests,
+            Some(Http2Config::MAX_CONCURRENT_REQUESTS)
+        );
+        assert_eq!(
+            config.stream_receive_window,
+            Some(Http2Config::MAX_RECEIVE_WINDOW)
+        );
+        assert_eq!(
+            config.connection_receive_window,
+            Some(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+        );
+
+        let partial = Http2Config::new().with_stream_receive_window(1).unwrap();
+        assert_eq!(partial.max_concurrent_requests, None);
+        assert_eq!(partial.connection_receive_window, None);
+
+        assert!(Http2Config::new().with_max_concurrent_requests(0).is_err());
+        assert!(
+            Http2Config::new()
+                .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS + 1)
+                .is_err()
+        );
+        assert!(Http2Config::new().with_stream_receive_window(0).is_err());
+        assert!(
+            Http2Config::new()
+                .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW + 1)
+                .is_err()
+        );
+        assert!(
+            Http2Config::new()
+                .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW - 1)
+                .is_err()
+        );
+        assert!(
+            Http2Config::new()
+                .with_connection_receive_window(u32::MAX)
+                .is_err()
+        );
     }
 }

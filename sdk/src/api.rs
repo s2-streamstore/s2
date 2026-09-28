@@ -859,7 +859,7 @@ impl BaseClient {
             Compression::None => {}
         }
 
-        let client = client::Pool::new(connector);
+        let client = client::Pool::new(connector, config.http2);
 
         Ok(Self {
             client: Arc::new(client),
