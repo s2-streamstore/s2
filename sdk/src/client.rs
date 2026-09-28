@@ -832,7 +832,7 @@ impl<C> PooledClient<C> {
 }
 
 struct HostPool<C> {
-    http2: Option<Http2Config>,
+    http2: Http2Config,
     clients: StdRwLock<Vec<PooledClient<C>>>,
     connector: C,
 }
@@ -841,7 +841,7 @@ impl<C> HostPool<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    fn new(connector: C, http2: Option<Http2Config>) -> Self {
+    fn new(connector: C, http2: Http2Config) -> Self {
         Self {
             http2,
             clients: StdRwLock::new(Vec::new()),
@@ -855,17 +855,17 @@ where
             .timer(TokioTimer::new())
             .http2_only(true)
             .http2_keep_alive_interval(Duration::from_secs(20))
-            .http2_keep_alive_timeout(Duration::from_secs(10));
-        let max_requests = if let Some(config) = self.http2 {
-            builder
-                .http2_initial_stream_window_size(config.stream_receive_window)
-                .http2_initial_connection_window_size(config.connection_receive_window)
-                .http2_adaptive_window(false);
-            config.max_concurrent_requests
-        } else {
-            MAX_CONCURRENT_REQUESTS_PER_CLIENT
-        };
-        PooledClient::new(builder.build(self.connector.clone()), max_requests)
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_initial_stream_window_size(self.http2.stream_receive_window)
+            .http2_initial_connection_window_size(self.http2.connection_receive_window);
+        let max_concurrent_requests = self
+            .http2
+            .max_concurrent_requests
+            .unwrap_or(MAX_CONCURRENT_REQUESTS_PER_CLIENT);
+        PooledClient::new(
+            builder.build(self.connector.clone()),
+            max_concurrent_requests,
+        )
     }
 
     fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
@@ -921,7 +921,7 @@ where
 }
 
 pub struct Pool<C> {
-    http2: Option<Http2Config>,
+    http2: Http2Config,
     hosts: Arc<RwLock<HashMap<String, Arc<HostPool<C>>>>>,
     connector: C,
     _reaper: AbortOnDropHandle<()>,
@@ -931,7 +931,7 @@ impl<C> Pool<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    pub fn new(connector: C, http2: Option<Http2Config>) -> Self {
+    pub fn new(connector: C, http2: Http2Config) -> Self {
         let hosts = Arc::new(RwLock::new(HashMap::new()));
 
         let _reaper = AbortOnDropHandle::new(tokio::spawn({
@@ -1026,7 +1026,7 @@ mod tests {
     const TEST_HOST: &str = "localhost:8080";
 
     fn test_pool() -> Pool<HttpConnector> {
-        Pool::new(HttpConnector::new(), None)
+        Pool::new(HttpConnector::new(), Http2Config::new())
     }
 
     #[test]
@@ -1148,6 +1148,22 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
+            permits.push(permit);
+        }
+        assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
+
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
+        permits.push(permit);
+        assert_eq!(host_client_count(&pool, TEST_HOST).await, 2);
+    }
+
+    #[tokio::test]
+    async fn custom_request_cap_bounds_client() {
+        let http2 = Http2Config::new().with_max_concurrent_requests(2).unwrap();
+        let pool = Pool::new(HttpConnector::new(), http2);
+        let mut permits = Vec::new();
+        for _ in 0..2 {
             let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
