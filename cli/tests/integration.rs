@@ -48,6 +48,13 @@ fn ensure_test_basin(name: &str) -> String {
     name.to_string()
 }
 
+fn bench_stream_uri_from_stderr(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        let (_, rest) = line.split_once("Creating temporary stream ")?;
+        rest.split_whitespace().next().map(|uri| uri.to_string())
+    })
+}
+
 #[test]
 #[serial]
 fn list_basins() {
@@ -1330,4 +1337,83 @@ fn bench_stream() {
     ])
     .assert()
     .success();
+}
+
+#[test]
+#[serial]
+fn bench_stream_cleans_up_on_error() {
+    let basin = ensure_test_basin("test-cli-data");
+    let s2_bin = assert_cmd::cargo::cargo_bin!("s2");
+
+    let mut bench = std::process::Command::new(s2_bin);
+    bench
+        .args([
+            "bench",
+            &basin,
+            "--duration",
+            "3s",
+            "--target-mibps",
+            "1",
+            "--catchup-delay",
+            "0s",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = bench.spawn().expect("spawn bench");
+    let child_stderr = child.stderr.take().expect("piped stderr");
+
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<std::io::Result<String>>();
+    let drain = std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(child_stderr).lines() {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut stream_uri: Option<String> = None;
+    let mut started = false;
+    while let Ok(line) = line_rx.recv() {
+        let line = line.expect("bench stderr is utf-8");
+        stream_uri = stream_uri.or_else(|| bench_stream_uri_from_stderr(&line));
+        if line.starts_with("Running for") {
+            started = true;
+            break;
+        }
+    }
+    let stream_uri = stream_uri.expect("bench announces the temporary stream");
+    assert!(started, "bench prints a 'Running for ...' line");
+
+    let mut append = std::process::Command::new(s2_bin);
+    append
+        .args(["append", "--format", "json", &stream_uri])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut append_child = append.spawn().expect("spawn append");
+    {
+        use std::io::Write;
+        let stdin = append_child.stdin.as_mut().expect("piped stdin");
+        stdin
+            .write_all(b"{\"timestamp\":0,\"body\":\"x\"}\n")
+            .expect("write foreign record");
+    }
+    let append_status = append_child.wait().expect("wait append");
+    assert!(append_status.success(), "foreign append should succeed");
+
+    let bench_status = child.wait().expect("wait bench");
+    assert!(
+        !bench_status.success(),
+        "bench should fail when a foreign record breaks verification"
+    );
+
+    drop(line_rx);
+    let _ = drain.join();
+
+    s2().args(["get-stream-config", &stream_uri])
+        .assert()
+        .failure();
 }
