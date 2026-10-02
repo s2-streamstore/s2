@@ -79,10 +79,10 @@ pub enum CliError {
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help(
         "Token loaded from {1}. Verify it does not contain invalid characters.\n\
-         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`.\n\n{}",
+         {2}\n\n{}",
         HELP
     ))]
-    MalformedAccessToken(#[source] SdkError, TokenSource),
+    MalformedAccessToken(#[source] SdkError, TokenSource, &'static str),
 
     #[error(transparent)]
     #[diagnostic(help("{}", BUG_HELP))]
@@ -107,9 +107,9 @@ pub enum CliError {
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
-         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`."
+         {3}"
     ))]
-    UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
+    UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource, &'static str),
 
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
@@ -150,12 +150,17 @@ impl CliError {
     pub fn with_token_source(self, token_source: Option<TokenSource>) -> Self {
         match (self, token_source) {
             (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
-                CliError::UnauthorizedAccessToken(kind, source, token_source)
+                CliError::UnauthorizedAccessToken(
+                    kind,
+                    source,
+                    token_source,
+                    recovery_command(token_source),
+                )
             }
             (CliError::SdkInit(source), Some(token_source))
                 if is_malformed_access_token(&source) =>
             {
-                CliError::MalformedAccessToken(source, token_source)
+                CliError::MalformedAccessToken(source, token_source, recovery_command(token_source))
             }
             (err, _) => err,
         }
@@ -218,7 +223,7 @@ pub enum S2UriParseError {
     MissingStreamName,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenSource {
     Environment,
     BrowserLogin,
@@ -233,6 +238,22 @@ impl std::fmt::Display for TokenSource {
             TokenSource::BrowserLogin => write!(f, "browser login"),
             TokenSource::StoredAccessToken => write!(f, "stored access token"),
             TokenSource::ConfigFile => write!(f, "config file"),
+        }
+    }
+}
+
+/// Recovery guidance specific to the credential `source` that produced the
+/// rejected (or malformed) access token.
+///
+/// This is the single source of truth for source-specific recovery text; it is
+/// shared by the operation error path ([`CliError::UnauthorizedAccessToken`] /
+/// [`CliError::MalformedAccessToken`]) and by `s2 auth status`.
+pub(crate) fn recovery_command(source: TokenSource) -> &'static str {
+    match source {
+        TokenSource::BrowserLogin => "Run `s2 login` again.",
+        TokenSource::Environment => "Set S2_ACCESS_TOKEN to a valid access token.",
+        TokenSource::StoredAccessToken | TokenSource::ConfigFile => {
+            "Run `s2 auth access-token set` to replace it."
         }
     }
 }
@@ -360,5 +381,159 @@ impl From<config::ConfigError> for CliConfigError {
     fn from(_error: config::ConfigError) -> Self {
         // Parser errors can include source excerpts containing a legacy plaintext token.
         Self::Load
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use miette::Diagnostic;
+    use s2_sdk::error::ClientError;
+
+    use super::*;
+    use crate::error::TokenSource;
+
+    /// A constructible [`SdkError`] used as the `#[source]` field of error
+    /// variants in these tests. The exact wrapped error does not affect the
+    /// recovery-text behavior under test; it only has to type-check as an
+    /// `SdkError`. (`RequestError::Server` / `ServerError` cannot be built from
+    /// outside the SDK crate because `ServerError` is `#[non_exhaustive]` with no
+    /// public constructor, so the auth-error *routing* is verified end-to-end in
+    /// integration tests instead.)
+    fn placeholder_sdk_error() -> SdkError {
+        SdkError::Request(RequestError::Client(ClientError::Timeout))
+    }
+
+    fn malformed_sdk_error() -> SdkError {
+        SdkError::Request(RequestError::MalformedAccessToken("bad".to_owned()))
+    }
+
+    /// The access-token-only recovery string that used to be hardcoded into both
+    /// diagnostics regardless of the token source.
+    const OLD_HARDCODED: &str =
+        "Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`.";
+
+    #[test]
+    fn recovery_command_is_source_specific() {
+        assert_eq!(
+            recovery_command(TokenSource::BrowserLogin),
+            "Run `s2 login` again."
+        );
+        assert_eq!(
+            recovery_command(TokenSource::Environment),
+            "Set S2_ACCESS_TOKEN to a valid access token."
+        );
+        assert_eq!(
+            recovery_command(TokenSource::StoredAccessToken),
+            "Run `s2 auth access-token set` to replace it."
+        );
+        assert_eq!(
+            recovery_command(TokenSource::ConfigFile),
+            "Run `s2 auth access-token set` to replace it."
+        );
+    }
+
+    #[test]
+    fn unauthorized_access_token_help_is_source_aware_for_every_source() {
+        for source in [
+            TokenSource::BrowserLogin,
+            TokenSource::Environment,
+            TokenSource::StoredAccessToken,
+            TokenSource::ConfigFile,
+        ] {
+            let err = CliError::UnauthorizedAccessToken(
+                OpKind::ListBasins,
+                placeholder_sdk_error(),
+                source,
+                recovery_command(source),
+            );
+
+            let help = err
+                .help()
+                .expect("UnauthorizedAccessToken should render help")
+                .to_string();
+
+            // The first sentence must still name the actual token source.
+            assert!(
+                help.contains(&source.to_string()),
+                "help should mention the token source {source}, got: {help}"
+            );
+            // The second sentence must be the source-specific recovery command.
+            assert!(
+                help.contains(recovery_command(source)),
+                "help should contain the source-specific recovery text, got: {help}"
+            );
+            // The access-token-only recovery string must never be rendered.
+            assert!(
+                !help.contains(OLD_HARDCODED),
+                "help must not contain the old access-token-only recovery text, got: {help}"
+            );
+
+            // Browser login in particular must direct the user to `s2 login`, not
+            // to storing/replacing an access token.
+            if source == TokenSource::BrowserLogin {
+                assert!(
+                    help.contains("`s2 login`"),
+                    "browser-login help should suggest `s2 login`, got: {help}"
+                );
+                assert!(
+                    !help.contains("s2 auth access-token set") && !help.contains("S2_ACCESS_TOKEN"),
+                    "browser-login help must not suggest access-token recovery, got: {help}"
+                );
+            } else {
+                // Access-token-backed sources must keep directing users to an
+                // access-token remediation (no regression for those sources).
+                assert!(
+                    help.contains("access-token") || help.contains("S2_ACCESS_TOKEN"),
+                    "access-token-source help should suggest an access-token remediation, got: {help}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_access_token_upgrade_carries_source_aware_recovery_for_every_source() {
+        for source in [
+            TokenSource::BrowserLogin,
+            TokenSource::Environment,
+            TokenSource::StoredAccessToken,
+            TokenSource::ConfigFile,
+        ] {
+            let err = CliError::SdkInit(malformed_sdk_error()).with_token_source(Some(source));
+
+            let recovery = match err {
+                CliError::MalformedAccessToken(_, src, rec) => {
+                    assert_eq!(src, source, "token source should round-trip for {source:?}");
+                    rec
+                }
+                other => panic!("expected MalformedAccessToken for {source:?}, got {other:?}"),
+            };
+
+            // The upgrade must wire in `recovery_command(source)`.
+            assert_eq!(recovery, recovery_command(source));
+
+            let help = err
+                .help()
+                .expect("MalformedAccessToken should render help")
+                .to_string();
+            assert!(
+                help.contains(&source.to_string()),
+                "help should mention the token source {source}, got: {help}"
+            );
+            assert!(
+                help.contains(recovery),
+                "help should contain the source-specific recovery text, got: {help}"
+            );
+            assert!(
+                !help.contains(OLD_HARDCODED),
+                "help must not contain the old access-token-only recovery text, got: {help}"
+            );
+
+            if source == TokenSource::BrowserLogin {
+                assert!(
+                    help.contains("`s2 login`"),
+                    "browser-login help should suggest `s2 login`, got: {help}"
+                );
+            }
+        }
     }
 }
