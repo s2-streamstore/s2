@@ -5,7 +5,7 @@ use s2_common::{
     basin::BasinName,
     config::{
         BasinConfig, DeleteOnEmptyConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig,
-        RetentionPolicy, StorageClass, StreamConfig,
+        RetentionPolicy, StreamConfig,
     },
     encryption::EncryptionAlgorithm,
     read_extent::{ReadLimit, ReadUntil},
@@ -130,7 +130,7 @@ fn basin_config_with_defaults() -> BasinConfig {
     BasinConfig {
         create_stream_on_append: true,
         default_stream_config: OptionalStreamConfig {
-            storage_class: Some(StorageClass::Standard),
+            storage_class: Some("standard".into()),
             retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(7 * 24 * 60 * 60))),
             ..Default::default()
         },
@@ -150,7 +150,7 @@ fn requested_stream_config() -> OptionalStreamConfig {
 
 fn expected_merged_stream_config() -> StreamConfig {
     StreamConfig {
-        storage_class: StorageClass::Standard,
+        storage_class: Some("standard".into()),
         retention_policy: RetentionPolicy::Age(Duration::from_secs(3600)),
         timestamping: Default::default(),
         delete_on_empty: DeleteOnEmptyConfig {

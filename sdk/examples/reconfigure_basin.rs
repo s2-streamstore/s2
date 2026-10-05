@@ -1,8 +1,8 @@
 use s2_sdk::{
     S2,
     types::{
-        BasinName, BasinReconfiguration, ReconfigureBasinInput, S2Config, StorageClass,
-        StreamReconfiguration, TimestampingReconfiguration,
+        BasinName, BasinReconfiguration, ReconfigureBasinInput, S2Config, StreamReconfiguration,
+        TimestampingReconfiguration,
     },
 };
 
@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         BasinReconfiguration::new()
             .with_default_stream_config(
                 StreamReconfiguration::new()
-                    .with_storage_class(StorageClass::Standard)
+                    .with_storage_class("standard")
                     .with_timestamping(TimestampingReconfiguration::new().with_uncapped(true)),
             )
             .with_create_stream_on_read(true),

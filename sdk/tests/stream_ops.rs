@@ -1971,7 +1971,7 @@ async fn create_stream_inherits_basin_default_config() -> Result<(), Box<dyn std
 
     let basin_name = unique_basin_name();
     let default_stream_config = StreamConfig::new()
-        .with_storage_class(StorageClass::Standard)
+        .with_storage_class("standard")
         .with_retention_policy(RetentionPolicy::Age(3600))
         .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600)));
     let basin_config = BasinConfig::new().with_default_stream_config(default_stream_config);
@@ -1989,14 +1989,14 @@ async fn create_stream_inherits_basin_default_config() -> Result<(), Box<dyn std
     assert_matches!(
         stream_config,
         StreamConfig {
-            storage_class: Some(StorageClass::Standard),
+            storage_class: Some(ref storage_class),
             retention_policy: Some(RetentionPolicy::Age(3600)),
             delete_on_empty: Some(DeleteOnEmptyConfig {
                 min_age_secs: 3600,
                 ..
             }),
             ..
-        }
+        } if storage_class == "standard"
     );
 
     basin
@@ -2019,7 +2019,7 @@ async fn compression_roundtrip_unary(
 
     let basin_name = unique_basin_name();
     let basin_config = BasinConfig::new()
-        .with_default_stream_config(StreamConfig::new().with_storage_class(StorageClass::Standard));
+        .with_default_stream_config(StreamConfig::new().with_storage_class("standard"));
     s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(basin_config))
         .await?;
 
@@ -2066,7 +2066,7 @@ async fn compression_with_no_side_effects_unary(
 
     let basin_name = unique_basin_name();
     let basin_config = BasinConfig::new()
-        .with_default_stream_config(StreamConfig::new().with_storage_class(StorageClass::Standard));
+        .with_default_stream_config(StreamConfig::new().with_storage_class("standard"));
     s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(basin_config))
         .await?;
 
@@ -2117,7 +2117,7 @@ async fn compression_roundtrip_session(
 
     let basin = s2.basin(basin_name.clone());
     let stream_name = unique_stream_name();
-    let stream_config = StreamConfig::new().with_storage_class(StorageClass::Standard);
+    let stream_config = StreamConfig::new().with_storage_class("standard");
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(stream_config))
         .await?;
@@ -2221,9 +2221,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
         CreateBasinInput::new(basin_name.clone()).with_config(
             BasinConfig::new()
                 .with_create_stream_on_append(true)
-                .with_default_stream_config(
-                    StreamConfig::new().with_storage_class(StorageClass::Standard),
-                ),
+                .with_default_stream_config(StreamConfig::new().with_storage_class("standard")),
         ),
     )
     .await?;
@@ -2247,14 +2245,14 @@ async fn stream_config_applies_only_when_append_creates_stream()
     assert_matches!(
         config,
         StreamConfig {
-            storage_class: Some(StorageClass::Standard),
+            storage_class: Some(ref storage_class),
             retention_policy: Some(RetentionPolicy::Age(3600)),
             delete_on_empty: Some(DeleteOnEmptyConfig {
                 min_age_secs: 300,
                 ..
             }),
             ..
-        }
+        } if storage_class == "standard"
     );
 
     let session_stream = unique_stream_name();

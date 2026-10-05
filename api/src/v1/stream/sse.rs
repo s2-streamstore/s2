@@ -9,8 +9,11 @@ static LAST_EVENT_ID_HEADER: http::HeaderName = http::HeaderName::from_static("l
 
 #[derive(Debug, Clone, Copy)]
 pub struct LastEventId {
+    /// Sequence number of the last delivered record.
     pub seq_num: u64,
+    /// Total records delivered.
     pub count: usize,
+    /// Total metered bytes delivered.
     pub bytes: usize,
 }
 

@@ -332,12 +332,28 @@ pub enum AppendError {
     /// The append condition did not match.
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailed),
+    /// The final attempt failed definitively, but an earlier attempt may have taken effect,
+    /// so the entire append operation is indeterminate.
+    #[error(
+        "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
+    )]
+    IndefiniteFailure {
+        /// The definite error returned by the final attempt.
+        #[source]
+        final_attempt_error: Box<Self>,
+    },
 }
 
 impl AppendError {
     /// Whether retrying the operation is safe or sensible.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Request(error) if error.is_retryable())
+        match self {
+            Self::Request(error) => error.is_retryable(),
+            Self::ConditionFailed(_) => false,
+            Self::IndefiniteFailure {
+                final_attempt_error,
+            } => final_attempt_error.is_retryable(),
+        }
     }
 
     /// Whether retrying the operation cannot duplicate a mutation.
@@ -345,6 +361,7 @@ impl AppendError {
         match self {
             Self::Request(error) => error.has_no_side_effects(),
             Self::ConditionFailed(_) => true,
+            Self::IndefiniteFailure { .. } => false,
         }
     }
 
@@ -353,6 +370,9 @@ impl AppendError {
         match self {
             Self::Request(error) => Some(error),
             Self::ConditionFailed(_) => None,
+            Self::IndefiniteFailure {
+                final_attempt_error,
+            } => final_attempt_error.request_error(),
         }
     }
 }
@@ -361,6 +381,11 @@ impl From<ApiError> for AppendError {
     fn from(error: ApiError) -> Self {
         match error {
             ApiError::AppendConditionFailed(condition) => Self::ConditionFailed(condition.into()),
+            ApiError::IndefiniteFailure {
+                final_attempt_error,
+            } => Self::IndefiniteFailure {
+                final_attempt_error: Box::new((*final_attempt_error).into()),
+            },
             other => Self::Request(other.into()),
         }
     }

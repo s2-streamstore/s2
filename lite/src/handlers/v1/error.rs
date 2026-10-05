@@ -181,7 +181,7 @@ impl ServiceError {
                 }
                 DeleteStreamError::RequestDroppedError(e) => {
                     // Unavailable error code promised to be side-effect free,
-                    // AppendType::Terminal may have become durable prior to drop.
+                    // The terminal trim marker may have become durable prior to drop.
                     standard(ErrorCode::Other, e.to_string())
                 }
                 DeleteStreamError::StreamNotFound(e) => {
@@ -243,7 +243,7 @@ impl ServiceError {
                 }
                 AppendError::RequestDroppedError(e) => {
                     // Unavailable error code promised to be side-effect free,
-                    // AppendType::Regular may have become durable prior to drop.
+                    // The append may have become durable prior to drop.
                     standard(ErrorCode::Other, e.to_string())
                 }
                 AppendError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),

@@ -466,7 +466,7 @@ pub mod extract {
             // StreamReconfiguration: exercises Maybe<T> in all three states
             use s2_common::maybe::Maybe;
 
-            use crate::v1::config::{StorageClass, TimestampingMode, TimestampingReconfiguration};
+            use crate::v1::config::{TimestampingMode, TimestampingReconfiguration};
 
             // All fields unspecified (empty JSON object)
             assert_roundtrip(&StreamReconfiguration {
@@ -477,7 +477,7 @@ pub mod extract {
             });
             // Mix of specified-null and specified-value
             assert_roundtrip(&StreamReconfiguration {
-                storage_class: Maybe::Specified(Some(StorageClass::Express)),
+                storage_class: Maybe::Specified(Some("express".into())),
                 retention_policy: Maybe::Specified(None),
                 timestamping: Maybe::Specified(Some(TimestampingReconfiguration {
                     mode: Maybe::Specified(Some(TimestampingMode::ClientRequire)),

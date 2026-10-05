@@ -87,14 +87,10 @@
       "type": "object",
       "properties": {
         "storage_class": {
-          "description": "Storage class for recent writes.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StorageClass"
-            },
-            {
-              "type": "null"
-            }
+          "description": "[Storage class](https://s2.dev/docs/storage-classes) for recent writes.",
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -133,14 +129,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "StorageClass": {
-      "description": "Storage class for recent writes.",
-      "type": "string",
-      "enum": [
-        "standard",
-        "express"
-      ]
     },
     "RetentionPolicy": {
       "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically trim records older than the given duration (e.g. \"7days\", \"1week\"). Age durations must be greater than 0 seconds.",

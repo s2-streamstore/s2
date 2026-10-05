@@ -1,7 +1,7 @@
 [package]
 name = "s2-sdk"
 description = "Rust SDK for S2"
-version = "0.34.7"
+version = "0.35.1"
 edition.workspace = true
 license.workspace = true
 repository = "https://github.com/s2-streamstore/s2/tree/main/sdk"
@@ -25,6 +25,7 @@ async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 h2 = "0.4"
@@ -46,7 +47,7 @@ serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
 time = { workspace = true }
-tokio = { version = "1.6", features = ["time", "macros", "io-util", "sync"] }
+tokio = { version = "1.53", features = ["time", "macros", "io-util", "sync"] }
 tokio-muxt = "0.7"
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["rt", "codec"] }
