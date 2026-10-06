@@ -23,6 +23,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Created client with custom endpoints: {:?}", client);
     }
 
+    // Example: Endpoints from environment variables
+    if std::env::var("S2_ACCOUNT_ENDPOINT").is_ok() && std::env::var("S2_BASIN_ENDPOINT").is_ok() {
+        // ANCHOR: env-endpoints
+        // Reads S2_ACCOUNT_ENDPOINT and S2_BASIN_ENDPOINT.
+        let client = S2::new(
+            S2Config::new(std::env::var("S2_ACCESS_TOKEN")?)
+                .with_endpoints(S2Endpoints::from_env()?),
+        )?;
+        // ANCHOR_END: env-endpoints
+        println!("Created client from environment: {:?}", client);
+    }
+
     // Example: Custom retry configuration
     {
         let access_token = std::env::var("S2_ACCESS_TOKEN").unwrap_or_else(|_| "demo".into());
