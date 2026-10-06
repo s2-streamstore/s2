@@ -24,7 +24,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Example: Endpoints from environment variables
-    if std::env::var("S2_ACCOUNT_ENDPOINT").is_ok() && std::env::var("S2_BASIN_ENDPOINT").is_ok() {
+    if [
+        "S2_ACCESS_TOKEN",
+        "S2_ACCOUNT_ENDPOINT",
+        "S2_BASIN_ENDPOINT",
+    ]
+    .iter()
+    .all(|v| std::env::var(v).is_ok())
+    {
         // ANCHOR: env-endpoints
         // Reads S2_ACCOUNT_ENDPOINT and S2_BASIN_ENDPOINT.
         let client = S2::new(
