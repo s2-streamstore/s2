@@ -208,7 +208,8 @@ fn compare_streams(
             return Ok(StreamComparison {
                 name,
                 first_mismatch: Some(Mismatch {
-                    line: lines,
+                    // At EOF, the first stream has not advanced this round.
+                    line: lines + usize::from(read_a == 0),
                     a: preview(&line_a),
                     b: preview(&line_b),
                 }),
@@ -265,4 +266,48 @@ fn history_file_names(dir: &Path) -> eyre::Result<BTreeSet<String>> {
         }
     }
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatch_reports_the_comparison_line_in_both_directions() {
+        for (a, b, expected_line) in [
+            ("", "extra\n", 1),
+            ("same\n", "same\nextra\n", 2),
+            ("one\ntwo\nthree\n", "one\ntwo\nthree\nfour\n", 4),
+            ("same\n", "same\nextra", 2),
+            ("one\na\n", "one\nb\n", 2),
+        ] {
+            for (a, b) in [(a, b), (b, a)] {
+                let comparison = compare_streams("stdout", a.as_bytes(), b.as_bytes()).unwrap();
+                assert_eq!(
+                    comparison.first_mismatch.as_ref().unwrap().line,
+                    expected_line
+                );
+                assert!(
+                    comparison
+                        .ensure_identical()
+                        .unwrap_err()
+                        .to_string()
+                        .contains(&format!("stdout differs at line {expected_line}:"),)
+                );
+                // This counter describes only the first stream, not comparison rounds.
+                assert_eq!(comparison.lines, a.lines().count().min(expected_line));
+            }
+        }
+    }
+
+    #[test]
+    fn identical_streams_keep_their_line_counts() {
+        for (contents, expected_lines) in [("", 0), ("one\n", 1), ("one\ntwo", 2)] {
+            let comparison =
+                compare_streams("stderr", contents.as_bytes(), contents.as_bytes()).unwrap();
+            assert!(comparison.first_mismatch.is_none());
+            assert_eq!(comparison.lines, expected_lines);
+            comparison.ensure_identical().unwrap();
+        }
+    }
 }
