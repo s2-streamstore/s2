@@ -119,7 +119,7 @@ mod tests {
     use proptest::prelude::*;
     use s2_common::{
         basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
-        config::{BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig},
+        config::{BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy},
     };
     use s2_storage::bash::Bash;
     use time::OffsetDateTime;
@@ -279,6 +279,32 @@ mod tests {
         );
         assert_eq!(basin_meta.created_at, decoded.created_at);
         assert_eq!(basin_meta.deleted_at, decoded.deleted_at);
+    }
+
+    #[test]
+    fn basin_meta_whole_second_retention_roundtrips() {
+        let config = BasinConfig {
+            default_stream_config: OptionalStreamConfig {
+                retention_policy: Some(RetentionPolicy::Age(Duration::from_secs(3600))),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let basin_meta = super::BasinMeta {
+            config,
+            created_at: OffsetDateTime::from_unix_timestamp(1234567890).unwrap(),
+            deleted_at: None,
+            creation_idempotency_key: None,
+        };
+
+        let bytes = super::ser_value(&basin_meta);
+        let decoded = super::deser_value(bytes)
+            .expect("whole-second retention should round-trip through basin meta");
+
+        assert_eq!(
+            decoded.config.default_stream_config.retention_policy,
+            Some(RetentionPolicy::Age(Duration::from_secs(3600)))
+        );
     }
 
     #[test]
