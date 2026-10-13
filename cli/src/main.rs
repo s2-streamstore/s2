@@ -1035,6 +1035,7 @@ fn format_unit(unit: s2_sdk::types::MetricUnit) -> &'static str {
     match unit {
         s2_sdk::types::MetricUnit::Bytes => "bytes",
         s2_sdk::types::MetricUnit::Operations => "operations",
+        s2_sdk::types::MetricUnit::Usd => "usd",
     }
 }
 
