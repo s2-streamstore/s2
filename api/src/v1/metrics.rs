@@ -38,7 +38,7 @@ impl From<s2_common::metrics::TimeseriesInterval> for TimeseriesInterval {
 pub struct AccountMetricSetRequest {
     /// Metric set to return.
     pub set: AccountMetricSet,
-    /// Start timestamp as Unix epoch seconds, if applicable for the metric set.
+    /// Start timestamp as Unix epoch seconds, if applicable for the metric set. Time ranges may span at most 90 days.
     pub start: Option<u32>,
     /// End timestamp as Unix epoch seconds, if applicable for the metric set.
     pub end: Option<u32>,
@@ -54,6 +54,9 @@ impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest
                     s2_common::metrics::AccountMetricSet::ActiveBasins
                 }
                 AccountMetricSet::AccountOps => s2_common::metrics::AccountMetricSet::AccountOps,
+                AccountMetricSet::EstimatedBillableUsage => {
+                    s2_common::metrics::AccountMetricSet::EstimatedBillableUsage
+                }
             },
             start: value.start,
             end: value.end,
@@ -66,11 +69,21 @@ impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
+/// Account-level metric sets.
+/// `estimated-billable-usage` returns estimated USD by billing dimension and as a `total` series.
+/// It uses list prices, excluding credits, taxes, and customer-specific pricing; it is not an invoice total.
+/// Supports hour (default) and day intervals. Only complete UTC buckets wholly within the requested
+/// range are returned, and every hour in a bucket must have finished billing processing.
+/// Completed buckets with no usage have a zero total; pending buckets are omitted.
+/// Dimension series appear when they have usage in a returned bucket, with zeroes in other completed
+/// buckets. Accounts without processed billing hours return no series.
 pub enum AccountMetricSet {
     /// Set of all basins that had at least one stream during the specified period.
     ActiveBasins,
-    /// Count of append RPC operations, per interval.
+    /// Count of account-level RPC operations, per interval.
     AccountOps,
+    /// Estimated USD billable usage by dimension, plus a total.
+    EstimatedBillableUsage,
 }
 
 #[rustfmt::skip]
@@ -80,7 +93,7 @@ pub enum AccountMetricSet {
 pub struct BasinMetricSetRequest {
     /// Metric set to return.
     pub set: BasinMetricSet,
-    /// Start timestamp as Unix epoch seconds, if applicable for the metric set.
+    /// Start timestamp as Unix epoch seconds, if applicable for the metric set. Time ranges may span at most 90 days.
     pub start: Option<u32>,
     /// End timestamp as Unix epoch seconds, if applicable for the metric set.
     pub end: Option<u32>,
@@ -136,7 +149,7 @@ pub enum BasinMetricSet {
 pub struct StreamMetricSetRequest {
     /// Metric set to return.
     pub set: StreamMetricSet,
-    /// Start timestamp as Unix epoch seconds, if applicable for the metric set.
+    /// Start timestamp as Unix epoch seconds, if applicable for the metric set. Time ranges may span at most 90 days.
     pub start: Option<u32>,
     /// End timestamp as Unix epoch seconds, if applicable for metric set.
     pub end: Option<u32>,
@@ -173,6 +186,8 @@ pub enum StreamMetricSet {
 pub enum MetricUnit {
     Bytes,
     Operations,
+    /// US dollars, without currency conversion.
+    Usd,
 }
 
 impl From<s2_common::metrics::MetricUnit> for MetricUnit {
@@ -180,6 +195,7 @@ impl From<s2_common::metrics::MetricUnit> for MetricUnit {
         match value {
             s2_common::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
             s2_common::metrics::MetricUnit::Operations => MetricUnit::Operations,
+            s2_common::metrics::MetricUnit::Usd => MetricUnit::Usd,
         }
     }
 }
@@ -221,6 +237,8 @@ pub struct AccumulationMetric {
     /// Timeseries values.
     /// Each element is a tuple of a timestamp in Unix epoch seconds and a data point.
     /// The data point represents the accumulated value for the time period starting at the timestamp, spanning one `interval`.
+    /// The series need not contain every interval in the requested range. An omitted interval is not
+    /// necessarily zero; availability and completeness depend on the metric set.
     pub values: Vec<(u32, f64)>,
 }
 
