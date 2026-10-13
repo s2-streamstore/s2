@@ -232,8 +232,6 @@ pub struct AccumulationMetric {
     /// Timeseries values.
     /// Each element is a tuple of a timestamp in Unix epoch seconds and a data point.
     /// The data point represents the accumulated value for the time period starting at the timestamp, spanning one `interval`.
-    /// The series need not contain every interval in the requested range. An omitted interval is not
-    /// necessarily zero; availability and completeness depend on the metric set.
     pub values: Vec<(u32, f64)>,
 }
 
