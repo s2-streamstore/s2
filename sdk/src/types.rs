@@ -2714,6 +2714,8 @@ pub enum MetricUnit {
     Bytes,
     /// Number of operations.
     Operations,
+    /// US dollars.
+    Usd,
 }
 
 impl From<api::metrics::MetricUnit> for MetricUnit {
@@ -2721,6 +2723,7 @@ impl From<api::metrics::MetricUnit> for MetricUnit {
         match value {
             api::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
             api::metrics::MetricUnit::Operations => MetricUnit::Operations,
+            api::metrics::MetricUnit::Usd => MetricUnit::Usd,
         }
     }
 }
