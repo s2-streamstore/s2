@@ -72,10 +72,12 @@ impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest
 /// Account-level metric sets.
 /// `estimated-billable-usage` returns estimated USD by billing dimension and as a `total` series.
 /// It uses list prices, excluding credits, taxes, and customer-specific pricing; it is not an invoice total.
-/// Supports hour (default) and day intervals. Only complete UTC buckets wholly within the requested
-/// range are returned, and every hour in a bucket must have finished billing processing.
-/// Completed buckets with no usage have a zero total; pending buckets are omitted.
-/// Dimension series appear when they have usage in a returned bucket, with zeroes in other completed
+/// Supports hour (default) and day intervals. Only fully processed UTC hours wholly within the requested
+/// range contribute. Daily points sum the available processed hours and may be partial because of
+/// processing lag or request boundaries; their estimates can grow as more hours finish processing.
+/// Daily timestamps identify the start of the UTC day, which may precede the requested start.
+/// Buckets with processed hours but no usage have a zero total; buckets with no processed hours are omitted.
+/// Dimension series appear when they have usage in a returned bucket, with zeroes in other returned
 /// buckets. Accounts without processed billing hours return no series.
 pub enum AccountMetricSet {
     /// Set of all basins that had at least one stream during the specified period.
