@@ -545,6 +545,7 @@ fn extract_named(archive_bytes: &[u8], want: &str) -> Result<Vec<u8>, UpdateErro
         let is_file = entry.is_file();
         let base = entry
             .name()
+            .map_err(|e| UpdateError::Archive(e.to_string()))?
             .rsplit(['/', '\\'])
             .next()
             .unwrap_or("")

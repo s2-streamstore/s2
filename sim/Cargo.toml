@@ -48,7 +48,7 @@ s2-sdk = { path = "../sdk", features = ["_hidden"] }
 s2-verification = { git = "https://github.com/s2-streamstore/s2-verification", rev = "b4af8c8ef4965d9b335101c422eadb33f3169004" }
 s3s = "0.15.0"
 serde_json = "1.0"
-slatedb = { version = "0.16.0", features = ["lz4", "zstd"] }
+slatedb = { version = "0.17", features = ["lz4", "zstd"] }
 tokio = { version = "1.53", features = ["macros", "rt", "sync", "time", "io-util"] }
 tower = "0.5"
 tracing = "0.1"
