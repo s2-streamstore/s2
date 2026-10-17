@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use colored::Colorize;
+use compact_str::CompactString;
 use miette::IntoDiagnostic;
 use s2_common::{
     basin::BasinName,
@@ -271,9 +272,13 @@ fn default_stream_config_field(field: &'static str) -> &'static str {
     }
 }
 
+/// `inherited_storage_class` is the class an existing basin with no storage class of
+/// its own resolves to. Pass it only when the spec also omits the class, so both sides
+/// are compared after the same server-side resolution.
 fn diff_basin_config(
     existing: &BasinConfig,
     desired: &BasinConfig,
+    inherited_storage_class: Option<&CompactString>,
 ) -> miette::Result<Vec<FieldDiff>> {
     let mut diffs = Vec::new();
 
@@ -309,7 +314,7 @@ fn diff_basin_config(
         });
     }
 
-    let existing_dsc = resolve_stream_config(
+    let mut existing_dsc = resolve_stream_config(
         existing
             .default_stream_config
             .clone()
@@ -318,6 +323,7 @@ fn diff_basin_config(
         Default::default(),
     )
     .into_diagnostic()?;
+    inherit_storage_class(&mut existing_dsc, inherited_storage_class);
     let desired_dsc = resolve_stream_config(
         desired
             .default_stream_config
@@ -336,6 +342,13 @@ fn diff_basin_config(
     }
 
     Ok(diffs)
+}
+
+/// Gives a config with no storage class of its own the class it resolves to.
+fn inherit_storage_class(config: &mut StreamConfig, inherited: Option<&CompactString>) {
+    if config.storage_class.is_none() {
+        config.storage_class = inherited.cloned();
+    }
 }
 
 fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<FieldDiff> {
@@ -592,9 +605,31 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
         }
         let desired_basin_defaults = desired_basin_defaults.clone();
 
+        // An omitted class is predicted from the location default on the desired side
+        // above, so an existing basin that also has none resolves to the same default.
+        let spec_omits_storage_class = basin_spec
+            .config
+            .as_ref()
+            .and_then(|config| config.default_stream_config.as_ref())
+            .and_then(|config| config.storage_class.as_ref())
+            .is_none();
+        let mut existing_basin_storage_class = default_storage_class.clone();
         let basin_action = match s2.get_basin_config(basin_spec.name.clone()).await {
             Ok(existing) => {
-                let diffs = diff_basin_config(&existing, &desired_basin_config)?;
+                if let Some(class) = existing
+                    .default_stream_config
+                    .as_ref()
+                    .and_then(|config| config.storage_class.clone())
+                {
+                    existing_basin_storage_class = Some(class);
+                }
+                let diffs = diff_basin_config(
+                    &existing,
+                    &desired_basin_config,
+                    default_storage_class
+                        .as_ref()
+                        .filter(|_| spec_omits_storage_class),
+                )?;
                 ResourceAction::from_diff(diffs, desired_basin_defaults.storage_class.is_none())
             }
             Err(e) if is_not_found_error(&e) => ResourceAction::Create,
@@ -624,8 +659,21 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
                 .await
             {
                 Ok(existing) => {
-                    let existing = resolve_stream_config(existing.into(), Default::default())
+                    let mut existing = resolve_stream_config(existing.into(), Default::default())
                         .into_diagnostic()?;
+                    // A stream with no class of its own inherits its basin's, so when the
+                    // spec omits one too, compare against what the stream inherits today.
+                    let stream_spec_omits_storage_class = stream_spec
+                        .config
+                        .as_ref()
+                        .and_then(|config| config.storage_class.as_ref())
+                        .is_none();
+                    inherit_storage_class(
+                        &mut existing,
+                        existing_basin_storage_class
+                            .as_ref()
+                            .filter(|_| stream_spec_omits_storage_class),
+                    );
                     let desired_stream_config = resolve_stream_config(
                         stream_spec
                             .config
@@ -669,4 +717,89 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use compact_str::CompactString;
+    use s2_sdk::types::{BasinConfig, StreamConfig};
+
+    use super::{diff_basin_config, diff_stream_configs, inherit_storage_class};
+    use crate::types::resolve_stream_config;
+
+    fn basin_with_class(class: Option<&str>) -> BasinConfig {
+        let mut defaults = StreamConfig::default();
+        if let Some(class) = class {
+            defaults = defaults.with_storage_class(class);
+        }
+        BasinConfig::default().with_default_stream_config(defaults)
+    }
+
+    fn storage_class_diffs(
+        existing: Option<&str>,
+        desired: Option<&str>,
+        inherited: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let inherited = inherited.map(CompactString::from);
+        diff_basin_config(
+            &basin_with_class(existing),
+            &basin_with_class(desired),
+            inherited.as_ref(),
+        )
+        .expect("configs resolve")
+        .into_iter()
+        .filter(|diff| diff.field == "default_stream_config.storage_class")
+        .map(|diff| (diff.old, diff.new))
+        .collect()
+    }
+
+    #[test]
+    fn omitted_class_on_both_sides_is_unchanged() {
+        // The spec omits the class, so dry-run predicts the location default on the
+        // desired side; the existing basin stored none and resolves to the same default.
+        assert!(storage_class_diffs(None, Some("express"), Some("express")).is_empty());
+    }
+
+    #[test]
+    fn explicit_class_still_differs_from_an_unspecified_basin() {
+        // No inherited class is passed when the spec names one, so pinning it is reported.
+        assert_eq!(
+            storage_class_diffs(None, Some("express"), None),
+            vec![("unspecified".to_owned(), "express".to_owned())]
+        );
+    }
+
+    #[test]
+    fn stored_class_is_compared_against_the_predicted_default() {
+        assert_eq!(
+            storage_class_diffs(Some("standard"), Some("express"), Some("express")),
+            vec![("standard".to_owned(), "express".to_owned())]
+        );
+    }
+
+    fn resolved(class: Option<&str>) -> s2_common::config::StreamConfig {
+        let mut config = StreamConfig::default();
+        if let Some(class) = class {
+            config = config.with_storage_class(class);
+        }
+        resolve_stream_config(config.into(), Default::default()).expect("config resolves")
+    }
+
+    #[test]
+    fn stream_without_a_class_inherits_its_basin_class() {
+        let mut existing = resolved(None);
+        let basin_class = CompactString::from("express");
+        inherit_storage_class(&mut existing, Some(&basin_class));
+        assert!(diff_stream_configs(&existing, &resolved(Some("express"))).is_empty());
+    }
+
+    #[test]
+    fn stream_class_of_its_own_is_kept() {
+        let mut existing = resolved(Some("standard"));
+        let basin_class = CompactString::from("express");
+        inherit_storage_class(&mut existing, Some(&basin_class));
+        let diffs = diff_stream_configs(&existing, &resolved(Some("express")));
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].old, "standard");
+    }
 }
