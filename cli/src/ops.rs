@@ -1,5 +1,6 @@
 use std::{pin::Pin, time::Duration};
 
+use compact_str::CompactString;
 use futures::{Stream, StreamExt, TryStreamExt, stream, stream::FuturesOrdered};
 use s2_api::v1::{
     access::AccessTokenInfo as ApiAccessTokenInfo,
@@ -8,6 +9,7 @@ use s2_api::v1::{
 use s2_sdk::{
     self as sdk, S2, S2Stream,
     batching::BatchingConfig,
+    error::{ErrorCode, StatusCode},
     producer::{IndexedAppendAck, ProducerConfig},
     read_session::ReadSession,
     types::{
@@ -298,6 +300,25 @@ pub async fn get_default_location(s2: &S2) -> Result<LocationInfo, CliError> {
     s2.get_default_location()
         .await
         .map_err(|e| CliError::op(OpKind::GetDefaultLocation, e))
+}
+
+/// The storage class an omitted class resolves to. `None` when the server doesn't
+/// expose location discovery (s2-lite, or a token without access to it).
+pub async fn default_storage_class(s2: &S2) -> Result<Option<CompactString>, CliError> {
+    match s2.get_default_location().await {
+        Ok(location) => Ok(location.default_storage_class),
+        Err(error)
+            if error.server_error().is_some_and(|error| {
+                matches!(
+                    error.known_code(),
+                    Some(ErrorCode::NotImplemented | ErrorCode::PermissionDenied)
+                ) || error.status == StatusCode::NOT_FOUND
+            }) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(CliError::op(OpKind::GetDefaultLocation, error)),
+    }
 }
 
 pub async fn set_default_location(

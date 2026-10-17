@@ -78,7 +78,8 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         right_label,
     } = resolve_args(&args)?;
 
-    let (left_view, right_view) = match (left, right) {
+    let basin_on_left = matches!(left, DiffResource::Basin(_));
+    let (mut left_view, mut right_view) = match (left, right) {
         (DiffResource::Basin(left), DiffResource::Basin(right)) => {
             let (left_config, right_config) = tokio::try_join!(
                 ops::get_basin_config_api(s2, &left),
@@ -126,11 +127,34 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         _ => unreachable!("diff arguments are resolved to matching resource types"),
     };
 
+    let mut storage_class_uncompared = false;
+    if comparison == DiffComparison::StreamVsBasinDefaults {
+        let (defaults, stream) = if basin_on_left {
+            (&mut left_view, &mut right_view)
+        } else {
+            (&mut right_view, &mut left_view)
+        };
+        if defaults.get("storage_class").is_some_and(Value::is_null) {
+            let location_default = ops::default_storage_class(s2).await?;
+            storage_class_uncompared =
+                !resolve_inherited_storage_class(defaults, stream, location_default.as_deref());
+        }
+    }
+
     let differences = field_diffs(&left_view, &right_view);
     let has_differences = !differences.is_empty();
 
     match args.output {
-        DiffOutput::Text => print_text_diff(&left_label, &right_label, &differences),
+        DiffOutput::Text => {
+            print_text_diff(&left_label, &right_label, &differences);
+            if storage_class_uncompared {
+                eprintln!(
+                    "{}",
+                    "storage_class not compared: the basin inherits the location default,                      which this server does not report"
+                        .dimmed()
+                );
+            }
+        }
         DiffOutput::Json => println!(
             "{}",
             serde_json::to_string_pretty(&JsonDiff {
@@ -478,6 +502,31 @@ fn stream_view(config: s2_api::v1::config::StreamConfig) -> Result<Value, CliErr
     Ok(serde_json::to_value(StreamConfigView::from(config))?)
 }
 
+/// A basin with no default storage class leaves it to the location default, which its
+/// streams report once resolved. Fills that default into the basin's view so the two are
+/// compared like for like. Without a known default the field can't be compared either way,
+/// so it is left out of both views. Returns whether the field is still compared.
+fn resolve_inherited_storage_class(
+    defaults: &mut Value,
+    stream: &mut Value,
+    location_default: Option<&str>,
+) -> bool {
+    match location_default {
+        Some(class) => {
+            defaults["storage_class"] = Value::from(class);
+            true
+        }
+        None => {
+            for view in [defaults, stream] {
+                if let Value::Object(fields) = view {
+                    fields.remove("storage_class");
+                }
+            }
+            false
+        }
+    }
+}
+
 fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
     let ApiAccessTokenInfo {
         // Identity, not configuration.
@@ -633,7 +682,8 @@ mod tests {
 
     use super::{
         DiffComparison, access_token_view, basin_stream_defaults_view, basin_view, field_diffs,
-        format_value_lines, resolve_args, resource_kind, stream_view,
+        format_value_lines, resolve_args, resolve_inherited_storage_class, resource_kind,
+        stream_view,
     };
     use crate::cli::{DiffArgs, DiffOutput, DiffResourceKind};
 
@@ -933,5 +983,50 @@ mod tests {
     #[test]
     fn omits_unchanged_fields() {
         assert!(field_diffs(&json!({"same": [1, 2]}), &json!({"same": [1, 2]})).is_empty());
+    }
+
+    fn defaults_and_stream(stream_class: &str) -> (serde_json::Value, serde_json::Value) {
+        let basin = serde_json::from_value(json!({})).expect("basin config deserializes");
+        let stream = serde_json::from_value(json!({ "storage_class": stream_class }))
+            .expect("stream config deserializes");
+        (
+            basin_stream_defaults_view(basin).expect("defaults view renders"),
+            stream_view(stream).expect("stream view renders"),
+        )
+    }
+
+    #[test]
+    fn inherited_storage_class_matches_the_location_default() {
+        let (mut defaults, mut stream) = defaults_and_stream("express");
+        assert!(resolve_inherited_storage_class(
+            &mut defaults,
+            &mut stream,
+            Some("express")
+        ));
+        assert!(field_diffs(&defaults, &stream).is_empty());
+    }
+
+    #[test]
+    fn stream_class_differing_from_the_location_default_is_reported() {
+        let (mut defaults, mut stream) = defaults_and_stream("standard");
+        resolve_inherited_storage_class(&mut defaults, &mut stream, Some("express"));
+        let diffs = field_diffs(&defaults, &stream);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "storage_class");
+        assert_eq!(diffs[0].left, Some(json!("express")));
+        assert_eq!(diffs[0].right, Some(json!("standard")));
+    }
+
+    #[test]
+    fn inherited_storage_class_without_a_known_default_is_not_compared() {
+        // s2-lite: no location discovery, and the stream reads back resolved.
+        let (mut defaults, mut stream) = defaults_and_stream("express");
+        assert!(!field_diffs(&defaults, &stream).is_empty());
+        assert!(!resolve_inherited_storage_class(
+            &mut defaults,
+            &mut stream,
+            None
+        ));
+        assert!(field_diffs(&defaults, &stream).is_empty());
     }
 }
