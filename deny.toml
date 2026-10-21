@@ -8,6 +8,10 @@ ignore = [
     "RUSTSEC-2025-0141", # bincode unmaintained
     "RUSTSEC-2024-0449", # unsafe-libyaml via SlateDB/figment; YAML-file config unused
 
+    # Keep the existing Linux keyring stack; these standalone crates moved into zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "Accept zvariant maintenance advisory for the existing transitive Linux keyring stack." },
+    { id = "RUSTSEC-2026-0371", reason = "Accept zbus_names maintenance advisory for the existing transitive Linux keyring stack." },
+    { id = "RUSTSEC-2026-0372", reason = "Accept zvariant_derive maintenance advisory for the existing transitive Linux keyring stack." },
 ]
 
 [licenses]
