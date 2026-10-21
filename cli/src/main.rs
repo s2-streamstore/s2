@@ -614,7 +614,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 format!(
                     "✓ [APPENDED] trim to {} // tail: {}",
                     trim_point,
-                    format_position(out.start.seq_num, out.start.timestamp)
+                    format_position(out.tail.seq_num, out.tail.timestamp)
                 )
                 .green()
                 .bold()
@@ -629,7 +629,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 format!(
                     "✓ [APPENDED] new fencing token \"{}\" // tail: {}",
                     fencing_token,
-                    format_position(out.start.seq_num, out.start.timestamp)
+                    format_position(out.tail.seq_num, out.tail.timestamp)
                 )
                 .green()
                 .bold()
