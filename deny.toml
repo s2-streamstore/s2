@@ -8,13 +8,6 @@ ignore = [
     "RUSTSEC-2025-0141", # bincode unmaintained
     "RUSTSEC-2024-0449", # unsafe-libyaml via SlateDB/figment; YAML-file config unused
 
-    # Temporary risk acceptance while rustls 0.23.46 completes the 7-day cooldown.
-    # TODO(2026-10-21): upgrade after 09:54:15 UTC and remove these four ignores.
-    # This date is a manual deadline, not an automatically enforced expiry.
-    { id = "RUSTSEC-2026-0346", reason = "Until 2026-10-21: rustls 0.23.46 cooldown; no custom session-value Debug logging in this workspace." },
-    { id = "RUSTSEC-2026-0347", reason = "Until 2026-10-21: rustls 0.23.46 cooldown; ECH is not configured in this workspace." },
-    { id = "RUSTSEC-2026-0348", reason = "Until 2026-10-21: rustls 0.23.46 cooldown; the rustls brotli feature is disabled." },
-    { id = "RUSTSEC-2026-0349", reason = "Until 2026-10-21: accept post-quantum downgrade risk while rustls 0.23.46 completes its cooldown." },
 ]
 
 [licenses]
