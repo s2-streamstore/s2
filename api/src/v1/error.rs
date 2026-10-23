@@ -157,10 +157,16 @@ impl ErrorCode {
     }
 }
 
+/// Standard error body.
+///
+/// See the [error codes reference](https://s2.dev/docs/api/error-codes) for
+/// every code along with its HTTP status, retryability, and side effects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ErrorInfo {
+    /// Machine-readable reason, e.g. `stream_not_found`.
     pub code: &'static str,
+    /// Human-readable detail.
     pub message: String,
 }
 

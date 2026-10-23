@@ -30,9 +30,21 @@ pub struct ListArgs {
     tag = super::paths::access_tokens::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::access::ListAccessTokensResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_query`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::access::ListAccessTokensRequest),
 ))]
@@ -57,11 +69,31 @@ pub struct IssueArgs {
     tag = super::paths::access_tokens::TAG,
     request_body = v1t::access::IssueAccessTokenRequest,
     responses(
-        (status = StatusCode::CREATED, body = v1t::access::IssueAccessTokenResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::CREATED,
+            description = "Access token issued.",
+            body = v1t::access::IssueAccessTokenResponse,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`resource_already_exists`: an access token with this ID already exists.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
 ))]
 pub async fn issue_access_token(
@@ -84,10 +116,22 @@ pub struct RevokeArgs {
     path = super::paths::access_tokens::REVOKE,
     tag = super::paths::access_tokens::TAG,
     responses(
-        (status = StatusCode::NO_CONTENT),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (status = StatusCode::NO_CONTENT, description = "Access token revoked."),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_path`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::AccessTokenIdPathSegment),
 ))]

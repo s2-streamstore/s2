@@ -38,9 +38,21 @@ pub struct ListArgs {
     tag = super::paths::basins::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::basin::ListBasinsResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_query`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::basin::ListBasinsRequest),
 ))]
@@ -72,12 +84,31 @@ pub struct CreateArgs {
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::basin::CreateBasinRequest,
     responses(
-        (status = StatusCode::OK, body = v1t::basin::BasinInfo),
-        (status = StatusCode::CREATED, body = v1t::basin::BasinInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::CREATED,
+            description = "Basin created (`s2-provision-result: created`), or an idempotent retry of the original create request (`s2-provision-result: noop`).",
+            body = v1t::basin::BasinInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`resource_already_exists`: a basin with this name exists; `basin_deletion_pending`: a basin with this name is still being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`, or `quota_exhausted` if the account's basin limit has been reached.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
 ))]
 pub async fn create_basin(
@@ -133,11 +164,31 @@ pub struct GetConfigArgs {
     tag = super::paths::basins::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::config::BasinConfig),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`basin_deletion_pending`: the basin is being deleted.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_path`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::BasinNamePathSegment),
 ))]
@@ -165,11 +216,31 @@ pub struct EnsureArgs {
     request_body = Option<v1t::basin::EnsureBasinRequest>,
     params(v1t::BasinNamePathSegment),
     responses(
-        (status = StatusCode::OK, body = v1t::basin::BasinInfo),
-        (status = StatusCode::CREATED, body = v1t::basin::BasinInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::OK,
+            description = "Basin already existed; `s2-provision-result` is `updated` if its config changed, otherwise `noop`.",
+            body = v1t::basin::BasinInfo,
+        ),
+        (
+            status = StatusCode::CREATED,
+            description = "Basin created; `s2-provision-result: created`.",
+            body = v1t::basin::BasinInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`basin_deletion_pending`: a basin with this name is still being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_path`, or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
 ))]
 pub async fn ensure_basin(
@@ -220,12 +291,32 @@ pub struct DeleteArgs {
     path = super::paths::basins::DELETE,
     tag = super::paths::basins::TAG,
     responses(
-        (status = StatusCode::ACCEPTED),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (status = StatusCode::ACCEPTED, description = "Deletion accepted and completes asynchronously; until then the basin reports `basin_deletion_pending`."),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_path`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::BasinNamePathSegment),
 ))]
@@ -254,10 +345,26 @@ pub struct ReconfigureArgs {
     request_body = v1t::config::BasinReconfiguration,
     responses(
         (status = StatusCode::OK, body = v1t::config::BasinConfig),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_path`, or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::BasinNamePathSegment),
 ))]
