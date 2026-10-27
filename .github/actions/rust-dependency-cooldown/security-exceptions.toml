@@ -21,3 +21,9 @@ crate = "webpki-root-certs"
 version = "1.0.10"
 advisory = "RUSTSEC-2026-0383"
 reason = "Removes the emSign ECC Root CA-G3 trust anchor after intermediate key exposure"
+
+[[exception]]
+crate = "ctutils"
+version = "0.4.4"
+advisory = "RUSTSEC-2026-0385"
+reason = "Fixes branching mask generation and 32-bit u128 comparisons in constant-time primitives"
