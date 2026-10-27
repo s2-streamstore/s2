@@ -25,9 +25,29 @@
 [s2.dev](https://s2.dev) is a serverless datastore for real-time, streaming data.
 
 This repository contains:
-- **[s2-cli](cli/)** - The official S2 command-line interface
-- **[s2-lite](lite/)** - An open source, self-hostable server implementation of the [S2 API](https://s2.dev/docs/api)
-- **[s2-sdk](sdk/)** - The official Rust SDK for S2
+- **[s2-cli](cli/)** - Command-line interface for S2
+- **[s2-lite](lite/)** - Open source, self-hostable server implementation of the [S2 API](https://s2.dev/docs/api)
+- **[s2-sdk](sdk/)** - Rust SDK for S2
+
+## Development
+
+Use the nightly Cargo dependency commands so that the repository publication cooldown applies:
+
+```bash
+cargo +nightly add <crate>
+cargo +nightly update
+cargo +nightly update -p <crate>
+cargo +nightly remove <crate>
+cargo +nightly generate-lockfile
+```
+
+Use `--locked` with normal build, check, test, run, document, fetch, and metadata commands. The simulator is temporarily exempt until its separate lockfile is regenerated. The pull request dependency check verifies every proposed lock-file change before Rust build jobs start.
+
+Install the repository Cargo tools from Homebrew bottles:
+
+```bash
+brew install cargo-deny cargo-nextest
+```
 
 ## Installation
 
@@ -174,6 +194,34 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite-helm/README.md) for installation instructions and configuration options.
 
+### Storage
+
+Lite persists to an S3-compatible bucket or a local directory, or runs in-memory when neither is given.
+The write-ahead log (WAL) shares the main store by default; it can be placed in a separate bucket or
+directory to isolate WAL latency from flushes and compaction. `--path` applies to both stores.
+
+| Setting | Main store | WAL store |
+| --- | --- | --- |
+| S3 bucket | `--bucket` | `--wal-bucket` / `S2LITE_WAL_BUCKET` |
+| Local directory | `--local-root` | `--wal-local-root` / `S2LITE_WAL_LOCAL_ROOT` |
+| S3 endpoint | `AWS_ENDPOINT_URL_S3` | `S2LITE_WAL_AWS_ENDPOINT_URL_S3` |
+| AWS region | `AWS_REGION` | `S2LITE_WAL_AWS_REGION` |
+| Static credentials | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | `S2LITE_WAL_AWS_ACCESS_KEY_ID` + `S2LITE_WAL_AWS_SECRET_ACCESS_KEY` |
+| Session token | `AWS_SESSION_TOKEN` | `S2LITE_WAL_AWS_SESSION_TOKEN` |
+
+Without static credentials, the standard AWS credential chain (profile, instance role, etc.) is used.
+The WAL bucket inherits the main store's S3 settings; each `S2LITE_WAL_AWS_*` variable overrides just
+that setting, except that a WAL key pair replaces the main credentials (and session token) as a set.
+A WAL store requires a persistent main store.
+
+```bash
+# LSM in S3, WAL on local disk
+s2 lite --bucket my-bucket --wal-local-root /data/wal
+
+# LSM and WAL in separate buckets
+s2 lite --bucket my-bucket --wal-bucket my-wal-bucket
+```
+
 ### Monitoring
 
 `/health` will return 200 on success for readiness and liveness checks
@@ -189,7 +237,7 @@ Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](ch
 Use `SL8_` prefixed environment variables, e.g.:
 
 ```bash
-# Defaults to 50ms for remote bucket / 5ms in-memory
+# Defaults to 50ms for S3, 5ms otherwise; follows the WAL store when set
 SL8_FLUSH_INTERVAL=10ms
 ```
 

@@ -71,7 +71,11 @@ impl CompressionAlgorithm {
         for header_value in headers.get_all(http::header::ACCEPT_ENCODING) {
             if let Ok(value) = header_value.to_str() {
                 for encoding in value.split(',') {
-                    let encoding = encoding.trim().split(';').next().unwrap_or("").trim();
+                    let mut parts = encoding.split(';');
+                    let encoding = parts.next().unwrap_or("").trim();
+                    if parts.any(is_zero_qvalue) {
+                        continue;
+                    }
                     if encoding.eq_ignore_ascii_case("zstd") {
                         return Self::Zstd;
                     } else if encoding.eq_ignore_ascii_case("gzip") {
@@ -82,6 +86,15 @@ impl CompressionAlgorithm {
         }
         if gzip { Self::Gzip } else { Self::None }
     }
+}
+
+/// Whether an `Accept-Encoding` parameter is a `q=0` weight, which marks the coding as
+/// "not acceptable" (RFC 9110 §12.4.2).
+fn is_zero_qvalue(param: &str) -> bool {
+    let Some((name, value)) = param.split_once('=') else {
+        return false;
+    };
+    name.trim().eq_ignore_ascii_case("q") && value.trim().parse::<f32>().is_ok_and(|q| q == 0.0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,6 +589,26 @@ mod test {
 
         let algo = CompressionAlgorithm::from_accept_encoding(&headers);
         assert_eq!(algo, CompressionAlgorithm::Gzip);
+    }
+
+    #[rstest::rstest]
+    #[case("zstd;q=0, gzip", CompressionAlgorithm::Gzip)]
+    #[case("zstd; q=0.0, gzip;q=0.5", CompressionAlgorithm::Gzip)]
+    #[case("gzip;q=0", CompressionAlgorithm::None)]
+    #[case("gzip;Q=0.000, zstd;q=0", CompressionAlgorithm::None)]
+    #[case("zstd;q=0.001", CompressionAlgorithm::Zstd)]
+    fn from_accept_encoding_skips_refused_codings(
+        #[case] accept_encoding: &'static str,
+        #[case] expected: CompressionAlgorithm,
+    ) {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT_ENCODING,
+            HeaderValue::from_static(accept_encoding),
+        );
+
+        let algo = CompressionAlgorithm::from_accept_encoding(&headers);
+        assert_eq!(algo, expected);
     }
 
     #[test]

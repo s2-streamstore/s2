@@ -1,7 +1,9 @@
 use std::{
-    io::{Read as _, Write as _},
+    convert::Infallible,
     net::TcpListener,
+    sync::{Arc, Mutex},
     thread::JoinHandle,
+    time::Duration,
 };
 
 use assert_cmd::Command;
@@ -29,31 +31,17 @@ struct TestServer {
 }
 
 impl TestServer {
+    /// Serves one HTTP/2 request and returns the request line and headers it
+    /// saw. The client speaks h2 with prior knowledge over cleartext.
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
         let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let bytes_read = stream.read(&mut buffer).expect("read request");
-                if bytes_read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..bytes_read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let body = r#"{"basins":[],"has_more":false}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("write response");
-            String::from_utf8(request).expect("request is UTF-8")
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(serve_one_request(listener))
         });
         Self { endpoint, handle }
     }
@@ -61,6 +49,55 @@ impl TestServer {
     fn finish(self) -> String {
         self.handle.join().expect("test server")
     }
+}
+
+const TEST_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn serve_one_request(listener: TcpListener) -> String {
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking listener");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+    let (stream, _) = tokio::time::timeout(TEST_SERVER_TIMEOUT, listener.accept())
+        .await
+        .expect("timed out waiting for a connection")
+        .expect("accept connection");
+
+    let observed = Arc::new(Mutex::new(None));
+    let captured = observed.clone();
+    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let captured = captured.clone();
+        async move {
+            let mut rendered = format!("{} {}\r\n", req.method(), req.uri());
+            for (name, value) in req.headers() {
+                rendered.push_str(name.as_str());
+                rendered.push_str(": ");
+                rendered.push_str(value.to_str().unwrap_or_default());
+                rendered.push_str("\r\n");
+            }
+            *captured.lock().expect("capture request") = Some(rendered);
+
+            let body = r#"{"basins":[],"has_more":false}"#;
+            Ok::<_, Infallible>(
+                hyper::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+                    .expect("build response"),
+            )
+        }
+    });
+
+    // A client that exits right after its response can reset the connection,
+    // so the served result only matters when no request came through.
+    let served = tokio::time::timeout(
+        TEST_SERVER_TIMEOUT,
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .serve_connection(hyper_util::rt::TokioIo::new(stream), service),
+    )
+    .await;
+
+    let observed = observed.lock().expect("read request").take();
+    observed.unwrap_or_else(|| panic!("server received no HTTP/2 request: {served:?}"))
 }
 
 impl TestEnv {

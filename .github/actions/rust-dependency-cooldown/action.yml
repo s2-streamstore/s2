@@ -1,0 +1,25 @@
+name: Rust dependency cooldown gate
+description: Reject new crates.io versions that are inside the publication cooldown
+
+inputs:
+  base-sha:
+    description: Pull request base commit
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check dependency publish age
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        BASE_SHA: ${{ inputs.base-sha }}
+      run: |
+        env -i \
+          HOME="$RUNNER_TEMP" \
+          PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+          python3 "$ACTION_PATH/check.py" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --config "$GITHUB_WORKSPACE/.cargo/config.toml" \
+            --allowlist "$ACTION_PATH/first-party-crates.txt" \
+            "$BASE_SHA"

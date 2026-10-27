@@ -1,0 +1,10 @@
+# Crates that bypass only the minimum publish age.
+# Use exact crate names. Only add crates that S2 publishes and controls.
+s2-api
+s2-cli
+s2-common
+s2-lite
+s2-resource-spec
+s2-sdk
+s2-storage
+s2-testcontainers

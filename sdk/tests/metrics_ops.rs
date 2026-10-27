@@ -44,7 +44,7 @@ fn invalid_time_ranges(now: u32) -> [(u32, u32); 3] {
     [
         (now, now.saturating_sub(3600)),
         (now.saturating_sub(3600), now.saturating_add(600)),
-        (now.saturating_sub(40 * 24 * 3600), now),
+        (now.saturating_sub(91 * 24 * 3600), now),
     ]
 }
 

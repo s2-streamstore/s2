@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use s2_common::{
-    config::{OptionalStreamConfig, RetentionPolicy, StorageClass, StreamReconfiguration},
+    config::{OptionalStreamConfig, RetentionPolicy, StreamReconfiguration},
     read_extent::{ReadLimit, ReadUntil},
     stream::{AppendInput, ReadEnd, ReadFrom, ReadStart},
 };
@@ -147,7 +147,7 @@ async fn test_concurrent_reconfigure_during_append() {
     ready.notified().await;
 
     let reconfig = StreamReconfiguration {
-        storage_class: s2_common::maybe::Maybe::from(Some(StorageClass::Express)),
+        storage_class: s2_common::maybe::Maybe::from(Some("express".into())),
         retention_policy: s2_common::maybe::Maybe::from(Some(RetentionPolicy::Infinite())),
         timestamping: s2_common::maybe::Maybe::default(),
         delete_on_empty: s2_common::maybe::Maybe::default(),
@@ -157,7 +157,7 @@ async fn test_concurrent_reconfigure_during_append() {
         .reconfigure_stream(basin_name.clone(), stream_name.clone(), reconfig)
         .await
         .expect("Failed to reconfigure stream during appends");
-    assert_eq!(updated_config.storage_class, StorageClass::Express);
+    assert_eq!(updated_config.storage_class.as_deref(), Some("express"));
 
     append_handle.await.unwrap();
 

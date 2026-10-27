@@ -54,6 +54,40 @@ helm install my-s2-lite s2/s2-lite-helm \
 
 Supports AWS S3, MinIO, Tigris, Cloudflare R2, and other S3-compatible services.
 
+### Persistent volume
+
+```bash
+helm install my-s2-lite s2/s2-lite-helm \
+  --set persistentVolume.enabled=true \
+  --set persistentVolume.size=20Gi
+```
+
+Stores the database on a `PersistentVolumeClaim` instead of a bucket. Set
+`persistentVolume.existingClaim` to use your own claim.
+
+### Separate WAL storage
+
+The write-ahead log can live in a separate bucket or on its own persistent
+volume (see [Storage](../../README.md#storage)). Requires `objectStorage` or
+`persistentVolume`.
+
+```bash
+# WAL on a persistent volume
+helm install my-s2-lite s2/s2-lite-helm \
+  --set objectStorage.enabled=true \
+  --set objectStorage.bucket=my-bucket \
+  --set walStorage.persistentVolume.enabled=true
+
+# WAL in a separate bucket
+helm install my-s2-lite s2/s2-lite-helm \
+  --set objectStorage.enabled=true \
+  --set objectStorage.bucket=my-bucket \
+  --set walStorage.bucket=my-wal-bucket
+```
+
+Keep the WAL location the same across upgrades; changing it does not migrate
+WAL data and the server starts without an error.
+
 ### TLS Configuration
 
 **Self-signed certificate (for dev/testing):**
@@ -104,6 +138,11 @@ Common configurations:
 | `objectStorage.enabled` | Enable S3-compatible storage | `false` |
 | `objectStorage.bucket` | S3 bucket name | `""` |
 | `objectStorage.path` | Path prefix within bucket | `""` |
+| `persistentVolume.enabled` | Store the database on a persistent volume | `false` |
+| `persistentVolume.size` | Volume size | `10Gi` |
+| `walStorage.bucket` | Separate S3 bucket for the WAL | `""` |
+| `walStorage.persistentVolume.enabled` | Store the WAL on a persistent volume | `false` |
+| `walStorage.persistentVolume.size` | WAL volume size | `10Gi` |
 | `metrics.serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
 
 ## Examples
@@ -123,6 +162,21 @@ serviceAccount:
 
 ```bash
 helm install my-s2-lite s2/s2-lite-helm -f values.yaml
+```
+
+### S3 with a local WAL volume
+
+```yaml
+# values.yaml
+objectStorage:
+  enabled: true
+  bucket: my-s3-bucket
+
+walStorage:
+  persistentVolume:
+    enabled: true
+    size: 20Gi
+    storageClass: gp3
 ```
 
 ### Behind AWS Network Load Balancer
@@ -164,4 +218,15 @@ helm upgrade my-s2-lite s2/s2-lite-helm --version 0.1.0
 ```bash
 helm uninstall my-s2-lite
 ```
+
+This deletes any `PersistentVolumeClaim` the chart created, and with it the data on the
+volume. To keep the claim, annotate it before uninstalling:
+
+```yaml
+persistentVolume:
+  annotations:
+    helm.sh/resource-policy: keep
+```
+
+Claims supplied via `existingClaim` are never deleted by the chart.
 

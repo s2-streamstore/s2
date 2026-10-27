@@ -53,7 +53,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build s2-lite
-        run: cargo build --profile ci -p s2-lite
+        run: cargo build --locked --profile ci -p s2-lite
 
       - name: Upload binary
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

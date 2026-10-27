@@ -20,9 +20,11 @@ use crate::{
     api::BasinClient,
     batching::{AppendInputs, AppendRecordBatches, BatchingConfig},
     error::ProducerError,
-    session::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket},
+    session::{
+        AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket, StreamHeaders,
+    },
     types::{
-        AppendAck, AppendRecord, EncryptionKey, FencingToken, MeteredBytes, ONE_MIB, StreamName,
+        AppendAck, AppendRecord, FencingToken, MeteredBytes, ONE_MIB, StreamConfig, StreamName,
         ValidationError,
     },
 };
@@ -75,6 +77,7 @@ pub struct ProducerConfig {
     batching: BatchingConfig,
     fencing_token: Option<FencingToken>,
     match_seq_num: Option<u64>,
+    stream_config: Option<StreamConfig>,
 }
 
 impl Default for ProducerConfig {
@@ -84,6 +87,7 @@ impl Default for ProducerConfig {
             batching: BatchingConfig::default(),
             fencing_token: None,
             match_seq_num: None,
+            stream_config: None,
         }
     }
 }
@@ -137,6 +141,23 @@ impl ProducerConfig {
             ..self
         }
     }
+
+    /// Set the stream configuration to apply if the stream is created on append.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    ///
+    /// Defaults to `None`.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
+            ..self
+        }
+    }
+
+    pub(crate) fn stream_config(&self) -> Option<&StreamConfig> {
+        self.stream_config.as_ref()
+    }
 }
 
 /// High-level interface for submitting individual [`AppendRecord`]s.
@@ -154,12 +175,12 @@ impl Producer {
     pub(crate) fn new(
         client: BasinClient,
         stream: StreamName,
-        encryption: Option<EncryptionKey>,
+        headers: StreamHeaders,
         config: ProducerConfig,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(RECORD_BATCH_MAX.count);
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
-        let session = AppendSessionInternal::new(client, stream, encryption);
+        let session = AppendSessionInternal::new(client, stream, headers);
         let terminal_err = Arc::new(OnceLock::new());
         let _handle = AbortOnDropHandle::new(tokio::spawn(Self::run(
             session,

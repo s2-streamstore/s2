@@ -1,36 +1,9 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
-use s2_common::maybe::Maybe;
+use compact_str::CompactString;
+use http::{HeaderName, HeaderValue};
+use s2_common::{http::ParseableHeader, maybe::Maybe};
 use serde::{Deserialize, Serialize};
-
-#[rustfmt::skip]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum StorageClass {
-    /// Append tail latency under 400 milliseconds with s2.dev.
-    Standard,
-    /// Append tail latency under 40 milliseconds with s2.dev.
-    Express,
-}
-
-impl From<StorageClass> for s2_common::config::StorageClass {
-    fn from(value: StorageClass) -> Self {
-        match value {
-            StorageClass::Express => Self::Express,
-            StorageClass::Standard => Self::Standard,
-        }
-    }
-}
-
-impl From<s2_common::config::StorageClass> for StorageClass {
-    fn from(value: s2_common::config::StorageClass) -> Self {
-        match value {
-            s2_common::config::StorageClass::Express => Self::Express,
-            s2_common::config::StorageClass::Standard => Self::Standard,
-        }
-    }
-}
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,8 +271,9 @@ impl From<s2_common::encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamConfig {
-    /// Storage class for recent writes.
-    pub storage_class: Option<StorageClass>,
+    /// [Storage class](https://s2.dev/docs/storage-classes) for recent writes.
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub storage_class: Option<CompactString>,
     /// Retention policy for the stream.
     /// If unspecified, the default is to retain records for 7 days.
     pub retention_policy: Option<RetentionPolicy>,
@@ -320,7 +294,7 @@ impl StreamConfig {
         } = config;
 
         let config = StreamConfig {
-            storage_class: storage_class.map(Into::into),
+            storage_class,
             retention_policy: retention_policy.map(Into::into),
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
@@ -330,6 +304,12 @@ impl StreamConfig {
         } else {
             Some(config)
         }
+    }
+
+    /// Encode as compact JSON for the `s2-stream-config` header.
+    pub fn to_header_value(&self) -> HeaderValue {
+        let json = serde_json::to_string(self).expect("StreamConfig serializes to JSON");
+        HeaderValue::from_str(&json).expect("compact JSON of StreamConfig is a valid header value")
     }
 }
 
@@ -343,11 +323,35 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
         } = value;
 
         Self {
-            storage_class: Some(storage_class.into()),
+            storage_class,
             retention_policy: Some(retention_policy.into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
         }
+    }
+}
+
+pub static STREAM_CONFIG_HEADER: HeaderName = HeaderName::from_static("s2-stream-config");
+
+/// Value of the `s2-stream-config` header: a JSON-encoded [`StreamConfig`] to apply over the
+/// basin's default stream config if the stream is created on append or read. Ignored if the
+/// stream already exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamConfigHeader(pub s2_common::config::OptionalStreamConfig);
+
+impl FromStr for StreamConfigHeader {
+    type Err = s2_common::ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let config: StreamConfig =
+            serde_json::from_str(s).map_err(|e| format!("invalid JSON: {e}"))?;
+        Ok(Self(config.try_into()?))
+    }
+}
+
+impl ParseableHeader for StreamConfigHeader {
+    fn name() -> &'static HeaderName {
+        &STREAM_CONFIG_HEADER
     }
 }
 
@@ -368,7 +372,7 @@ impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
         };
 
         let config = Self {
-            storage_class: storage_class.map(Into::into),
+            storage_class,
             retention_policy,
             timestamping: timestamping.map(Into::into).unwrap_or_default(),
             delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
@@ -382,10 +386,10 @@ impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamReconfiguration {
-    /// Storage class for recent writes.
+    /// [Storage class](https://s2.dev/docs/storage-classes) for recent writes.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
-    #[cfg_attr(feature = "utoipa", schema(value_type = Option<StorageClass>))]
-    pub storage_class: Maybe<Option<StorageClass>>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub storage_class: Maybe<Option<CompactString>>,
     /// Retention policy for the stream.
     /// If unspecified, the default is to retain records for 7 days.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
@@ -413,7 +417,7 @@ impl TryFrom<StreamReconfiguration> for s2_common::config::StreamReconfiguration
         } = value;
 
         Ok(Self {
-            storage_class: storage_class.map_opt(Into::into),
+            storage_class,
             retention_policy: retention_policy.try_map_opt(TryInto::try_into)?,
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
@@ -431,7 +435,7 @@ impl From<s2_common::config::StreamReconfiguration> for StreamReconfiguration {
         } = value;
 
         Self {
-            storage_class: storage_class.map_opt(Into::into),
+            storage_class,
             retention_policy: retention_policy.map_opt(Into::into),
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
@@ -566,8 +570,8 @@ mod tests {
 
     use super::*;
 
-    fn gen_storage_class() -> impl Strategy<Value = StorageClass> {
-        prop_oneof![Just(StorageClass::Standard), Just(StorageClass::Express)]
+    fn gen_storage_class() -> impl Strategy<Value = CompactString> {
+        "[a-z][a-z0-9-]{0,30}".prop_map(CompactString::from)
     }
 
     fn gen_timestamping_mode() -> impl Strategy<Value = TimestampingMode> {
@@ -724,7 +728,7 @@ mod tests {
         )
             .prop_map(|(sc, rp, ts_mode, ts_uncapped, doe)| {
                 s2_common::config::OptionalStreamConfig {
-                    storage_class: sc.map(Into::into),
+                    storage_class: sc,
                     retention_policy: rp.map(|rp| match rp {
                         RetentionPolicy::Age(secs) => {
                             s2_common::config::RetentionPolicy::Age(Duration::from_secs(secs))
@@ -796,7 +800,7 @@ mod tests {
 
             prop_assert_eq!(
                 merged.storage_class,
-                stream.storage_class.or(basin.storage_class).unwrap_or_default()
+                stream.storage_class.or(basin.storage_class)
             );
             prop_assert_eq!(
                 merged.retention_policy,
@@ -852,7 +856,7 @@ mod tests {
             new_rp_secs in 1u64..u64::MAX,
         ) {
             let reconfig = s2_common::config::StreamReconfiguration {
-                storage_class: Maybe::Specified(Some(new_sc.into())),
+                storage_class: Maybe::Specified(Some(new_sc.clone())),
                 retention_policy: Maybe::Specified(Some(
                     s2_common::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs))
                 )),
@@ -860,7 +864,7 @@ mod tests {
             };
             let result = base.reconfigure(reconfig);
 
-            prop_assert_eq!(result.storage_class, Some(new_sc.into()));
+            prop_assert_eq!(result.storage_class, Some(new_sc));
             prop_assert_eq!(
                 result.retention_policy,
                 Some(s2_common::config::RetentionPolicy::Age(Duration::from_secs(new_rp_secs)))
@@ -875,7 +879,7 @@ mod tests {
         ) {
             // non-default storage class -> Some
             let internal = s2_common::config::OptionalStreamConfig {
-                storage_class: Some(sc.into()),
+                storage_class: Some(sc),
                 ..Default::default()
             };
             prop_assert!(StreamConfig::to_opt(internal).is_some());
@@ -923,7 +927,7 @@ mod tests {
         ) {
             let base = s2_common::config::BasinConfig {
                 default_stream_config: s2_common::config::OptionalStreamConfig {
-                    storage_class: base_sc.map(Into::into),
+                    storage_class: base_sc,
                     ..Default::default()
                 },
                 stream_cipher: base_algorithm.map(Into::into),
@@ -954,7 +958,7 @@ mod tests {
 
             let reconfig = s2_common::config::BasinReconfiguration {
                 default_stream_config: Maybe::Specified(Some(s2_common::config::StreamReconfiguration {
-                    storage_class: Maybe::Specified(Some(new_sc.into())),
+                    storage_class: Maybe::Specified(Some(new_sc.clone())),
                     ..Default::default()
                 })),
                 stream_cipher: Maybe::Specified(Some(new_algorithm.into())),
@@ -963,7 +967,7 @@ mod tests {
             };
             let result = base.reconfigure(reconfig);
 
-            prop_assert_eq!(result.default_stream_config.storage_class, Some(new_sc.into()));
+            prop_assert_eq!(result.default_stream_config.storage_class, Some(new_sc));
             prop_assert_eq!(result.stream_cipher, Some(new_algorithm.into()));
             prop_assert_eq!(result.create_stream_on_append, new_on_append);
         }
@@ -1055,6 +1059,69 @@ mod tests {
         assert!(
             internal.delete_on_empty.min_age.is_none(),
             "delete_on_empty.min_age should be None"
+        );
+    }
+
+    #[test]
+    fn stream_config_header_parses_and_validates() {
+        let header: StreamConfigHeader =
+            r#"{"retention_policy":{"age":3600},"delete_on_empty":{"min_age_secs":300}}"#
+                .parse()
+                .unwrap();
+        assert_eq!(
+            header.0,
+            s2_common::config::OptionalStreamConfig {
+                retention_policy: Some(s2_common::config::RetentionPolicy::Age(
+                    Duration::from_secs(3600)
+                )),
+                delete_on_empty: s2_common::config::OptionalDeleteOnEmptyConfig {
+                    min_age: Some(Duration::from_secs(300)),
+                },
+                ..Default::default()
+            }
+        );
+
+        for spaced in [
+            r#"{ "retention_policy": { "age": 3600 }, "delete_on_empty": { "min_age_secs": 300 } }"#,
+            "{\t\"delete_on_empty\":\t{\"min_age_secs\":\t300},\t\"retention_policy\":\t{\"age\":\t3600}\t}",
+            "  {\"retention_policy\":{\"age\":3600},\"delete_on_empty\":{\"min_age_secs\":300}}  ",
+        ] {
+            let parsed: StreamConfigHeader = spaced.parse().unwrap();
+            assert_eq!(parsed, header, "{spaced:?}");
+        }
+
+        let empty: StreamConfigHeader = "{}".parse().unwrap();
+        assert_eq!(empty.0, Default::default());
+
+        let invalid_json = "not json".parse::<StreamConfigHeader>().unwrap_err();
+        assert!(invalid_json.to_string().contains("invalid JSON"));
+
+        let invalid_age =
+            r#"{"retention_policy":{"age":0}}"#.parse::<StreamConfigHeader>().unwrap_err();
+        assert!(
+            invalid_age
+                .to_string()
+                .contains("age must be greater than 0 seconds"),
+            "{invalid_age}"
+        );
+    }
+
+    #[test]
+    fn stream_config_header_value_roundtrips() {
+        let config = StreamConfig {
+            storage_class: Some("express".into()),
+            retention_policy: Some(RetentionPolicy::Infinite(InfiniteRetention {})),
+            timestamping: Some(TimestampingConfig {
+                mode: Some(TimestampingMode::ClientRequire),
+                uncapped: Some(true),
+            }),
+            delete_on_empty: Some(DeleteOnEmptyConfig { min_age_secs: 60 }),
+        };
+        let value = config.to_header_value();
+        let parsed: StreamConfigHeader = value.to_str().unwrap().parse().unwrap();
+        assert_eq!(
+            parsed.0,
+            s2_common::config::OptionalStreamConfig::try_from(config).unwrap()
         );
     }
 }

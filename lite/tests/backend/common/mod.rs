@@ -3,6 +3,7 @@ use std::pin::Pin;
 use futures::Stream;
 use s2_common::{
     basin::BasinName,
+    config::OptionalStreamConfig,
     encryption::EncryptionSpec,
     record::StreamPosition,
     stream::{AppendAck, AppendInput, StreamName},
@@ -30,6 +31,7 @@ pub async fn append(
             &basin,
             &stream,
             encryption.and_then(encryption_key_for_spec),
+            OptionalStreamConfig::default(),
         )
         .await?
         .append(input)
@@ -51,6 +53,7 @@ where
             &basin,
             &stream,
             encryption.and_then(encryption_key_for_spec),
+            OptionalStreamConfig::default(),
         )
         .await?
         .append_session(inputs);

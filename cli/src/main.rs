@@ -42,7 +42,7 @@ use s2_sdk::{
     S2,
     types::{
         AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
-        EncryptionKey, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
+        EncryptionKey, LocationInfo, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
         StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig, TimestampingMode,
     },
 };
@@ -531,13 +531,13 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::ListLocations => {
             let locations = ops::list_locations(&s2).await?;
             for location_info in locations {
-                print_location_listing(location_info.name.to_string(), location_info.is_private);
+                print_location_listing(&location_info);
             }
         }
 
         Command::GetDefaultLocation => {
             let location = ops::get_default_location(&s2).await?;
-            print_location_listing(location.name.to_string(), location.is_private);
+            print_location_listing(&location);
         }
 
         Command::SetDefaultLocation { location } => {
@@ -549,7 +549,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     .green()
                     .bold()
             );
-            print_location_listing(location.name.to_string(), location.is_private);
+            print_location_listing(&location);
         }
 
         Command::GetAccountMetrics(args) => {
@@ -614,7 +614,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 format!(
                     "✓ [APPENDED] trim to {} // tail: {}",
                     trim_point,
-                    format_position(out.start.seq_num, out.start.timestamp)
+                    format_position(out.tail.seq_num, out.tail.timestamp)
                 )
                 .green()
                 .bold()
@@ -629,7 +629,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 format!(
                     "✓ [APPENDED] new fencing token \"{}\" // tail: {}",
                     fencing_token,
-                    format_position(out.start.seq_num, out.start.timestamp)
+                    format_position(out.tail.seq_num, out.tail.timestamp)
                 )
                 .green()
                 .bold()
@@ -657,9 +657,13 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 record_stream,
                 args.uri,
                 encryption_key.as_ref(),
-                args.fencing_token,
-                args.match_seq_num,
-                *args.linger,
+                ops::AppendOptions {
+                    fencing_token: args.fencing_token,
+                    match_seq_num: args.match_seq_num,
+                    linger: *args.linger,
+                    stream_config: (!args.stream_config.is_empty())
+                        .then(|| args.stream_config.into()),
+                },
             );
             let mut acks = std::pin::pin!(acks);
             let mut last_printed_batch_end: Option<u64> = None;
@@ -848,7 +852,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         .with_mode(TimestampingMode::ClientRequire)
                         .with_uncapped(true),
                 );
-            stream_config.storage_class = args.storage_class.map(Into::into);
+            stream_config.storage_class = args.storage_class;
 
             let s2 = S2::new(sdk_config.clone().with_retry(
                 RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
@@ -917,9 +921,20 @@ fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) 
     }
 }
 
-fn print_location_listing(name: String, is_private: bool) {
-    let visibility = format_location_visibility(is_private);
-    println!("{name} {visibility}");
+fn print_location_listing(location: &LocationInfo) {
+    let visibility = format_location_visibility(location.is_private);
+    println!("{} {visibility}", location.name);
+    if let Some(storage_classes) = &location.storage_classes {
+        let classes = if storage_classes.is_empty() {
+            "none".to_owned()
+        } else {
+            storage_classes.join(", ")
+        };
+        println!("  storage classes: {classes}");
+    }
+    if let Some(default_storage_class) = &location.default_storage_class {
+        println!("  default storage class: {default_storage_class}");
+    }
 }
 
 fn format_location_visibility(is_private: bool) -> colored::ColoredString {
@@ -1020,6 +1035,7 @@ fn format_unit(unit: s2_sdk::types::MetricUnit) -> &'static str {
     match unit {
         s2_sdk::types::MetricUnit::Bytes => "bytes",
         s2_sdk::types::MetricUnit::Operations => "operations",
+        s2_sdk::types::MetricUnit::Usd => "usd",
     }
 }
 

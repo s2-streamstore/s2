@@ -44,6 +44,14 @@ impl TimestampSecs {
             .map(|secs| Self(secs as u32))
     }
 
+    pub fn saturating_add_duration(self, dur: Duration) -> Self {
+        Self(
+            u64::from(self.0)
+                .saturating_add(dur.as_secs())
+                .min(u64::from(u32::MAX)) as u32,
+        )
+    }
+
     fn from_system_time(time: SystemTime) -> Self {
         match time.duration_since(UNIX_EPOCH) {
             Ok(duration) => {

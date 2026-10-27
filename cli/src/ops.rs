@@ -570,13 +570,24 @@ pub async fn read(
         stop = stop.with_until(..until);
     }
 
+    let mut input = ReadInput::new().with_start(start).with_stop(stop);
+    if !args.stream_config.is_empty() {
+        input = input.with_stream_config(args.stream_config.clone().into());
+    }
+
     stream
-        .read_session(
-            ReadInput::new().with_start(start).with_stop(stop),
-            ReadSessionConfig::default(),
-        )
+        .read_session(input, ReadSessionConfig::default())
         .await
         .map_err(|e| CliError::op(OpKind::Read, e))
+}
+
+/// Options controlling how records are appended.
+pub struct AppendOptions {
+    pub fencing_token: Option<FencingToken>,
+    pub match_seq_num: Option<u64>,
+    pub linger: Duration,
+    /// Stream configuration to apply if the stream is created on append.
+    pub stream_config: Option<sdk::types::StreamConfig>,
 }
 
 pub fn append<'a, S, E>(
@@ -584,9 +595,7 @@ pub fn append<'a, S, E>(
     records: S,
     uri: S2BasinAndStreamUri,
     encryption_key: Option<&'a EncryptionKey>,
-    fencing_token: Option<FencingToken>,
-    match_seq_num: Option<u64>,
-    linger: Duration,
+    options: AppendOptions,
 ) -> impl Stream<Item = Result<IndexedAppendAck, CliError>> + Send + 'a
 where
     S: Stream<Item = Result<AppendRecord, E>> + Send + Unpin + 'a,
@@ -594,12 +603,15 @@ where
 {
     let stream = stream_with_encryption(s2, uri, encryption_key);
 
-    let batching_config = BatchingConfig::new().with_linger(linger);
+    let batching_config = BatchingConfig::new().with_linger(options.linger);
     let mut producer_config = ProducerConfig::new().with_batching(batching_config);
-    if let Some(ft) = fencing_token {
+    if let Some(config) = options.stream_config {
+        producer_config = producer_config.with_stream_config(config);
+    }
+    if let Some(ft) = options.fencing_token {
         producer_config = producer_config.with_fencing_token(ft);
     }
-    if let Some(seq) = match_seq_num {
+    if let Some(seq) = options.match_seq_num {
         producer_config = producer_config.with_match_seq_num(seq);
     }
 

@@ -4,6 +4,7 @@ use compact_str::CompactString;
 pub enum MetricUnit {
     Bytes,
     Operations,
+    Usd,
 }
 
 #[derive(Clone, Copy, Debug, strum::IntoStaticStr)]
@@ -55,6 +56,7 @@ pub enum Metric {
 pub enum AccountMetricSet {
     ActiveBasins,
     AccountOps,
+    EstimatedBillableUsage,
 }
 
 pub struct AccountMetricsRequest {

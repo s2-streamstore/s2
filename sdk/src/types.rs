@@ -15,7 +15,9 @@ use std::{
 #[cfg(feature = "_hidden")]
 use async_trait::async_trait;
 use bytes::Bytes;
+use compact_str::CompactString;
 use http::{
+    HeaderMap,
     header::HeaderValue,
     uri::{Authority, Scheme},
 };
@@ -25,11 +27,12 @@ use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::ValidationError;
 /// Access token ID.
 ///
-/// **Note:** It must be unique to the account and between 1 and 96 bytes in length.
+/// **Note:** It must be unique to the account and between 1 and 96 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::access::AccessTokenId;
-/// See [`ListAccessTokensInput::prefix`].
+/// See [`ListAccessTokensInput::prefix`]. It must not contain NUL bytes.
 pub use s2_common::access::AccessTokenIdPrefix;
-/// See [`ListAccessTokensInput::start_after`].
+/// See [`ListAccessTokensInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::access::AccessTokenIdStartAfter;
 /// Basin name.
 ///
@@ -47,11 +50,12 @@ pub use s2_common::basin::BasinNameStartAfter;
 pub use s2_common::location::LocationName;
 /// Stream name.
 ///
-/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length.
+/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length, and must
+/// not contain NUL bytes.
 pub use s2_common::stream::StreamName;
-/// See [`ListStreamsInput::prefix`].
+/// See [`ListStreamsInput::prefix`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNamePrefix;
-/// See [`ListStreamsInput::start_after`].
+/// See [`ListStreamsInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNameStartAfter;
 pub use s2_common::{
     caps::RECORD_BATCH_MAX,
@@ -498,17 +502,121 @@ impl RetryConfig {
     }
 }
 
+/// Overrides for the HTTP/2 transport used by pooled connections.
+///
+/// Unset knobs keep the SDK defaults: 90 concurrent requests per connection and
+/// Hyper's receive windows (2 MiB per stream, 5 MiB per connection). Receive
+/// windows bound unconsumed server-to-client DATA only; they do not affect
+/// append throughput, which is governed by the server's receive windows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Http2Config {
+    pub(crate) max_concurrent_requests: Option<usize>,
+    pub(crate) stream_receive_window: Option<u32>,
+    pub(crate) connection_receive_window: Option<u32>,
+}
+
+impl Http2Config {
+    /// Stream limit advertised by S2 servers per HTTP/2 connection.
+    pub const MAX_CONCURRENT_REQUESTS: usize = 100;
+
+    /// Maximum HTTP/2 flow-control window in bytes (`2^31 - 1`).
+    pub const MAX_RECEIVE_WINDOW: u32 = i32::MAX as u32;
+
+    /// Minimum HTTP/2 connection receive window in bytes.
+    ///
+    /// The connection window cannot be shrunk below the protocol default.
+    pub const MIN_CONNECTION_RECEIVE_WINDOW: u32 = 65_535;
+
+    /// Start from the SDK defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cap concurrent requests per pooled connection.
+    ///
+    /// The cap includes unary requests and streaming sessions until their
+    /// bodies finish or are dropped. Additional requests use another pooled
+    /// connection.
+    ///
+    /// # Errors
+    ///
+    /// Must be between 1 and [`Self::MAX_CONCURRENT_REQUESTS`]. Requests beyond
+    /// the server's stream limit would queue on the connection instead of
+    /// spilling over to another one.
+    pub fn with_max_concurrent_requests(
+        self,
+        max_concurrent_requests: usize,
+    ) -> Result<Self, ValidationError> {
+        if !(1..=Self::MAX_CONCURRENT_REQUESTS).contains(&max_concurrent_requests) {
+            return Err(format!(
+                "HTTP/2 concurrent request limit must be between 1 and {}",
+                Self::MAX_CONCURRENT_REQUESTS
+            )
+            .into());
+        }
+        Ok(Self {
+            max_concurrent_requests: Some(max_concurrent_requests),
+            ..self
+        })
+    }
+
+    /// Set the initial per-stream receive window in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Must be between 1 and [`Self::MAX_RECEIVE_WINDOW`].
+    pub fn with_stream_receive_window(
+        self,
+        stream_receive_window: u32,
+    ) -> Result<Self, ValidationError> {
+        if !(1..=Self::MAX_RECEIVE_WINDOW).contains(&stream_receive_window) {
+            return Err("HTTP/2 stream receive window must be between 1 and 2^31 - 1 bytes".into());
+        }
+        Ok(Self {
+            stream_receive_window: Some(stream_receive_window),
+            ..self
+        })
+    }
+
+    /// Set the connection-level receive window in bytes, shared by all streams
+    /// on the connection.
+    ///
+    /// # Errors
+    ///
+    /// Must be between [`Self::MIN_CONNECTION_RECEIVE_WINDOW`] and
+    /// [`Self::MAX_RECEIVE_WINDOW`].
+    pub fn with_connection_receive_window(
+        self,
+        connection_receive_window: u32,
+    ) -> Result<Self, ValidationError> {
+        if !(Self::MIN_CONNECTION_RECEIVE_WINDOW..=Self::MAX_RECEIVE_WINDOW)
+            .contains(&connection_receive_window)
+        {
+            return Err(
+                "HTTP/2 connection receive window must be between 65,535 and 2^31 - 1 bytes".into(),
+            );
+        }
+        Ok(Self {
+            connection_receive_window: Some(connection_receive_window),
+            ..self
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Configuration for [`S2`](crate::S2).
 pub struct S2Config {
     pub(crate) access_token: AccessToken,
     pub(crate) endpoints: S2Endpoints,
+    pub(crate) http2: Http2Config,
     pub(crate) connection_timeout: Duration,
     pub(crate) request_timeout: Duration,
     pub(crate) retry: RetryConfig,
     pub(crate) compression: Compression,
     pub(crate) user_agent: HeaderValue,
+    pub(crate) default_headers: HeaderMap,
     pub(crate) insecure_skip_cert_verification: bool,
     pub(crate) rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
 }
@@ -519,6 +627,7 @@ impl S2Config {
         Self {
             access_token: AccessToken::Static(access_token.into().into()),
             endpoints: S2Endpoints::for_cloud(),
+            http2: Http2Config::new(),
             connection_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(5),
             retry: RetryConfig::new(),
@@ -526,6 +635,7 @@ impl S2Config {
             user_agent: concat!("s2-sdk-rust/", env!("CARGO_PKG_VERSION"))
                 .parse()
                 .expect("valid user agent"),
+            default_headers: HeaderMap::new(),
             insecure_skip_cert_verification: false,
             rustls_crypto_provider: default_rustls_crypto_provider(),
         }
@@ -543,6 +653,61 @@ impl S2Config {
     /// Set the S2 endpoints to connect to.
     pub fn with_endpoints(self, endpoints: S2Endpoints) -> Self {
         Self { endpoints, ..self }
+    }
+
+    /// Set additional HTTP headers to send with every request.
+    ///
+    /// These headers apply to account, basin, and stream operations, including
+    /// retries and streaming requests. SDK-generated headers, such as
+    /// authorization and basin routing, take precedence over these defaults.
+    /// Calling this method again replaces the previous set of default headers.
+    ///
+    /// `Accept-Encoding` defaults are used only when [`Compression::None`] is
+    /// configured; otherwise the SDK sets the header to the configured
+    /// compression algorithm.
+    ///
+    /// Headers are sent to all configured S2 endpoints. Use
+    /// [`HeaderValue::set_sensitive`] for values that should be redacted in debug
+    /// output. Do not use these defaults for per-request identifiers, since the
+    /// same values are reused across requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `default_headers` contains `Content-Type`,
+    /// `Content-Encoding`, `Content-Length`, or `Transfer-Encoding`.
+    /// The SDK controls request format and body framing.
+    /// Use [`Self::with_compression`] to configure request body encoding.
+    #[cfg(feature = "_hidden")]
+    #[doc(hidden)]
+    pub fn with_default_headers(self, default_headers: HeaderMap) -> Result<Self, ValidationError> {
+        if default_headers.contains_key(http::header::CONTENT_ENCODING) {
+            return Err(ValidationError(
+                "Content-Encoding cannot be set in default headers; use S2Config::with_compression instead"
+                    .into(),
+            ));
+        }
+        for name in [
+            http::header::CONTENT_TYPE,
+            http::header::CONTENT_LENGTH,
+            http::header::TRANSFER_ENCODING,
+        ] {
+            if default_headers.contains_key(&name) {
+                return Err(ValidationError(format!(
+                    "{name} cannot be set in default headers; the SDK controls request format and body framing"
+                )));
+            }
+        }
+        Ok(Self {
+            default_headers,
+            ..self
+        })
+    }
+
+    /// Override HTTP/2 transport settings for pooled connections.
+    ///
+    /// Defaults to [`Http2Config::new()`].
+    pub fn with_http2(self, http2: Http2Config) -> Self {
+        Self { http2, ..self }
     }
 
     /// Set the timeout for establishing a connection to the server.
@@ -676,33 +841,6 @@ impl<T> Page<T> {
         Self {
             values: values.into(),
             has_more,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Storage class for recent appends.
-pub enum StorageClass {
-    /// Standard storage class that offers append latencies under `500ms`.
-    Standard,
-    /// Express storage class that offers append latencies under `50ms`.
-    Express,
-}
-
-impl From<api::config::StorageClass> for StorageClass {
-    fn from(value: api::config::StorageClass) -> Self {
-        match value {
-            api::config::StorageClass::Standard => StorageClass::Standard,
-            api::config::StorageClass::Express => StorageClass::Express,
-        }
-    }
-}
-
-impl From<StorageClass> for api::config::StorageClass {
-    fn from(value: StorageClass) -> Self {
-        match value {
-            StorageClass::Standard => api::config::StorageClass::Standard,
-            StorageClass::Express => api::config::StorageClass::Express,
         }
     }
 }
@@ -866,10 +1004,8 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
 #[non_exhaustive]
 /// Configuration for a stream.
 pub struct StreamConfig {
-    /// Storage class for the stream.
-    ///
-    /// Defaults to [`Express`](StorageClass::Express).
-    pub storage_class: Option<StorageClass>,
+    /// [Storage class](https://s2.dev/docs/storage-classes) for the stream.
+    pub storage_class: Option<CompactString>,
     /// Retention policy for records in the stream.
     ///
     /// Defaults to `7 days` of retention.
@@ -891,9 +1027,9 @@ impl StreamConfig {
     }
 
     /// Set the storage class for the stream.
-    pub fn with_storage_class(self, storage_class: StorageClass) -> Self {
+    pub fn with_storage_class(self, storage_class: impl Into<CompactString>) -> Self {
         Self {
-            storage_class: Some(storage_class),
+            storage_class: Some(storage_class.into()),
             ..self
         }
     }
@@ -926,7 +1062,7 @@ impl StreamConfig {
 impl From<api::config::StreamConfig> for StreamConfig {
     fn from(value: api::config::StreamConfig) -> Self {
         Self {
-            storage_class: value.storage_class.map(Into::into),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
@@ -937,7 +1073,7 @@ impl From<api::config::StreamConfig> for StreamConfig {
 impl From<StreamConfig> for api::config::StreamConfig {
     fn from(value: StreamConfig) -> Self {
         Self {
-            storage_class: value.storage_class.map(Into::into),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
@@ -1415,7 +1551,7 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
 /// Reconfiguration for [`StreamConfig`].
 pub struct StreamReconfiguration {
     /// Override for the existing [`storage_class`](StreamConfig::storage_class).
-    pub storage_class: Maybe<Option<StorageClass>>,
+    pub storage_class: Maybe<Option<CompactString>>,
     /// Override for the existing [`retention_policy`](StreamConfig::retention_policy).
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     /// Override for the existing [`timestamping`](StreamConfig::timestamping).
@@ -1431,9 +1567,9 @@ impl StreamReconfiguration {
     }
 
     /// Set the override for the existing [`storage_class`](StreamConfig::storage_class).
-    pub fn with_storage_class(self, storage_class: StorageClass) -> Self {
+    pub fn with_storage_class(self, storage_class: impl Into<CompactString>) -> Self {
         Self {
-            storage_class: Maybe::Specified(Some(storage_class)),
+            storage_class: Maybe::Specified(Some(storage_class.into())),
             ..self
         }
     }
@@ -1466,7 +1602,7 @@ impl StreamReconfiguration {
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
     fn from(value: StreamReconfiguration) -> Self {
         Self {
-            storage_class: value.storage_class.map(|m| m.map(Into::into)),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
@@ -1658,6 +1794,10 @@ pub struct LocationInfo {
     pub name: LocationName,
     /// Location represents a private placement, limited by account.
     pub is_private: bool,
+    /// [Storage classes](https://s2.dev/docs/storage-classes) available to the account in this location.
+    pub storage_classes: Option<Vec<CompactString>>,
+    /// Default [storage class](https://s2.dev/docs/storage-classes) for this location.
+    pub default_storage_class: Option<CompactString>,
 }
 
 impl From<api::location::LocationInfo> for LocationInfo {
@@ -1665,6 +1805,8 @@ impl From<api::location::LocationInfo> for LocationInfo {
         Self {
             name: value.name,
             is_private: value.is_private,
+            storage_classes: value.storage_classes,
+            default_storage_class: value.default_storage_class,
         }
     }
 }
@@ -2402,7 +2544,7 @@ pub enum BasinMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes across all streams
     /// in the basin, with one observed value for each hour over the requested time range.
     Storage(TimeRange),
-    /// Returns [`AccumulationMetric`]s, one per storage class (standard, express).
+    /// Returns [`AccumulationMetric`]s, one per storage class.
     ///
     /// Each metric represents a timeseries of the number of append operations across all streams
     /// in the basin, with one accumulated value per interval over the requested time range.
@@ -2572,6 +2714,8 @@ pub enum MetricUnit {
     Bytes,
     /// Number of operations.
     Operations,
+    /// US dollars.
+    Usd,
 }
 
 impl From<api::metrics::MetricUnit> for MetricUnit {
@@ -2579,6 +2723,7 @@ impl From<api::metrics::MetricUnit> for MetricUnit {
         match value {
             api::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
             api::metrics::MetricUnit::Operations => MetricUnit::Operations,
+            api::metrics::MetricUnit::Usd => MetricUnit::Usd,
         }
     }
 }
@@ -3360,6 +3505,16 @@ pub struct AppendInput {
     /// If unspecified, no matching is performed. If specified and mismatched,
     /// the append fails. A stream defaults to `""` as its fencing token.
     pub fencing_token: Option<FencingToken>,
+    /// Stream configuration to apply if the stream is created on append.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    ///
+    /// Only used by [`append`](crate::S2Stream::append). Append sessions send the header once
+    /// at connect; see
+    /// [`AppendSessionConfig::with_stream_config`](crate::append_session::AppendSessionConfig::with_stream_config)
+    /// and [`ProducerConfig::with_stream_config`](crate::producer::ProducerConfig::with_stream_config).
+    pub stream_config: Option<StreamConfig>,
 }
 
 impl AppendInput {
@@ -3369,6 +3524,15 @@ impl AppendInput {
             records,
             match_seq_num: None,
             fencing_token: None,
+            stream_config: None,
+        }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on append.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
+            ..self
         }
     }
 
@@ -3625,6 +3789,11 @@ pub struct ReadInput {
     ///
     /// Defaults to `false`.
     pub ignore_command_records: bool,
+    /// Stream configuration to apply if the stream is created on read.
+    ///
+    /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
+    /// already exists.
+    pub stream_config: Option<StreamConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -3689,6 +3858,14 @@ impl ReadInput {
     pub fn with_ignore_command_records(self, ignore_command_records: bool) -> Self {
         Self {
             ignore_command_records,
+            ..self
+        }
+    }
+
+    /// Set the stream configuration to apply if the stream is created on read.
+    pub fn with_stream_config(self, stream_config: StreamConfig) -> Self {
+        Self {
+            stream_config: Some(stream_config),
             ..self
         }
     }
@@ -3987,15 +4164,51 @@ mod tests {
         assert!(!cfg.insecure_skip_cert_verification);
     }
 
-    // -- StorageClass --
-
+    #[cfg(feature = "_hidden")]
     #[rstest]
-    #[case::standard(StorageClass::Standard)]
-    #[case::express(StorageClass::Express)]
-    fn storage_class_roundtrip(#[case] sdk: StorageClass) {
-        let api: api::config::StorageClass = sdk.into();
-        let back: StorageClass = api.into();
-        assert_eq!(back, sdk);
+    #[case::matching_compression("content-encoding", "gzip", Compression::Gzip)]
+    #[case::mixed_case("Content-Encoding", "identity", Compression::None)]
+    #[case::empty_value("content-encoding", "", Compression::None)]
+    fn default_headers_reject_content_encoding(
+        #[case] name: &str,
+        #[case] value: &str,
+        #[case] compression: Compression,
+    ) {
+        let headers = HeaderMap::from_iter([(
+            name.parse::<http::header::HeaderName>().unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        )]);
+        let error = S2Config::new("token")
+            .with_compression(compression)
+            .with_default_headers(headers)
+            .unwrap_err();
+        assert!(error.0.contains("Content-Encoding"));
+        assert!(error.0.contains("with_compression"));
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[rstest]
+    #[case::content_type_s2s("content-type", "s2s/proto")]
+    #[case::content_type_protobuf("content-type", "application/protobuf")]
+    #[case::content_type_json("content-type", "application/json")]
+    #[case::content_type_mixed_case("Content-Type", "s2s/proto")]
+    #[case::content_type_empty("content-type", "")]
+    #[case::content_length("content-length", "123")]
+    #[case::content_length_mixed_case("Content-Length", "0")]
+    #[case::content_length_empty("content-length", "")]
+    #[case::transfer_encoding("transfer-encoding", "chunked")]
+    #[case::transfer_encoding_mixed_case("Transfer-Encoding", "chunked")]
+    #[case::transfer_encoding_empty("transfer-encoding", "")]
+    fn default_headers_reject_framing_headers(#[case] name: &str, #[case] value: &str) {
+        let headers = HeaderMap::from_iter([(
+            name.parse::<http::header::HeaderName>().unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        )]);
+        let error = S2Config::new("token")
+            .with_default_headers(headers)
+            .unwrap_err();
+        assert!(error.0.contains(&name.to_ascii_lowercase()));
+        assert!(error.0.contains("framing"));
     }
 
     // -- RetentionPolicy --
@@ -4059,7 +4272,7 @@ mod tests {
     #[test]
     fn stream_config_builder_and_roundtrip() {
         let sdk = StreamConfig::new()
-            .with_storage_class(StorageClass::Express)
+            .with_storage_class("express")
             .with_retention_policy(RetentionPolicy::Age(86400))
             .with_timestamping(TimestampingConfig {
                 mode: Some(TimestampingMode::ClientPrefer),
@@ -4076,9 +4289,7 @@ mod tests {
     #[test]
     fn basin_config_builder_and_roundtrip() {
         let sdk = BasinConfig::new()
-            .with_default_stream_config(
-                StreamConfig::new().with_storage_class(StorageClass::Standard),
-            )
+            .with_default_stream_config(StreamConfig::new().with_storage_class("standard"))
             .with_create_stream_on_append(true)
             .with_create_stream_on_read(false);
         let api: api::config::BasinConfig = sdk.clone().into();
@@ -4459,5 +4670,55 @@ mod tests {
         assert_eq!(record.headers[0].name.as_ref(), b"k");
         assert_eq!(record.headers[0].value.as_ref(), b"v");
         assert_eq!(record.timestamp, 1234);
+    }
+
+    #[test]
+    fn http2_config_bounds() {
+        let config = Http2Config::new()
+            .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS)
+            .unwrap()
+            .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW)
+            .unwrap()
+            .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+            .unwrap();
+        assert_eq!(
+            config.max_concurrent_requests,
+            Some(Http2Config::MAX_CONCURRENT_REQUESTS)
+        );
+        assert_eq!(
+            config.stream_receive_window,
+            Some(Http2Config::MAX_RECEIVE_WINDOW)
+        );
+        assert_eq!(
+            config.connection_receive_window,
+            Some(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+        );
+
+        let partial = Http2Config::new().with_stream_receive_window(1).unwrap();
+        assert_eq!(partial.max_concurrent_requests, None);
+        assert_eq!(partial.connection_receive_window, None);
+
+        assert!(Http2Config::new().with_max_concurrent_requests(0).is_err());
+        assert!(
+            Http2Config::new()
+                .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS + 1)
+                .is_err()
+        );
+        assert!(Http2Config::new().with_stream_receive_window(0).is_err());
+        assert!(
+            Http2Config::new()
+                .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW + 1)
+                .is_err()
+        );
+        assert!(
+            Http2Config::new()
+                .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW - 1)
+                .is_err()
+        );
+        assert!(
+            Http2Config::new()
+                .with_connection_receive_window(u32::MAX)
+                .is_err()
+        );
     }
 }

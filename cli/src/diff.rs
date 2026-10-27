@@ -1,16 +1,12 @@
-//! Diffing over typed presentation views of Basins, Streams, and Access Tokens.
-//!
-//! - Configs are fetched as API DTOs and converted into `s2_common` domain types via the existing
-//!   `TryFrom` conversions, which also resolve omitted fields to their effective defaults (e.g. an
-//!   unset `storage_class` becomes `express`).
-//!
-//! - Domain values are rendered into `*View` structs and serialized to JSON, which is diffed
-//!   field-by-field. Views own all presentation: compact exact durations (`"7d"`, `"1h"`),
-//!   wire-format enum names, canonically ordered operation sets.
+//! Diffing over typed presentation views of basins, streams, and access tokens.
 
 use colored::Colorize;
+use compact_str::CompactString;
 use s2_api::v1::access::AccessTokenInfo as ApiAccessTokenInfo;
-use s2_common::access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet};
+use s2_common::{
+    access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet},
+    config::StreamConfig,
+};
 use s2_sdk::types::AccessTokenId;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -19,7 +15,7 @@ use crate::{
     cli::{DiffArgs, DiffOutput, DiffResourceKind},
     error::CliError,
     ops,
-    types::{DiffResource, S2BasinAndStreamUri, S2BasinUri},
+    types::{DiffResource, S2BasinAndStreamUri, S2BasinUri, resolve_stream_config},
 };
 
 #[derive(Debug, Serialize)]
@@ -298,7 +294,7 @@ fn resource_kind(resource: &DiffResource) -> DiffResourceKind {
     }
 }
 
-/// Presentation of an effective (fully resolved) stream configuration.
+/// Presentation of a stream configuration for comparison.
 ///
 /// - Field names and nesting mirror the API wire format so that `--output json` paths line up with
 ///   API responses.
@@ -306,7 +302,7 @@ fn resource_kind(resource: &DiffResource) -> DiffResourceKind {
 ///   duration.
 #[derive(Serialize)]
 struct StreamConfigView {
-    storage_class: String,
+    storage_class: Option<CompactString>,
     retention_policy: String,
     timestamping: TimestampingConfigView,
     delete_on_empty: DeleteOnEmptyConfigView,
@@ -323,9 +319,9 @@ struct DeleteOnEmptyConfigView {
     min_age: String,
 }
 
-impl From<s2_common::config::StreamConfig> for StreamConfigView {
-    fn from(config: s2_common::config::StreamConfig) -> Self {
-        let s2_common::config::StreamConfig {
+impl From<StreamConfig> for StreamConfigView {
+    fn from(config: StreamConfig) -> Self {
+        let StreamConfig {
             storage_class,
             retention_policy,
             timestamping,
@@ -334,7 +330,7 @@ impl From<s2_common::config::StreamConfig> for StreamConfigView {
         let s2_common::config::TimestampingConfig { mode, uncapped } = timestamping;
 
         Self {
-            storage_class: wire_name(s2_api::v1::config::StorageClass::from(storage_class)),
+            storage_class,
             retention_policy: match retention_policy {
                 s2_common::config::RetentionPolicy::Age(age) => compact_duration(age),
                 s2_common::config::RetentionPolicy::Infinite() => "infinite".to_owned(),
@@ -359,25 +355,30 @@ struct BasinConfigView {
     create_stream_on_read: bool,
 }
 
-impl From<s2_common::config::BasinConfig> for BasinConfigView {
-    fn from(config: s2_common::config::BasinConfig) -> Self {
-        let s2_common::config::BasinConfig {
+impl TryFrom<s2_api::v1::config::BasinConfig> for BasinConfigView {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(config: s2_api::v1::config::BasinConfig) -> Result<Self, Self::Error> {
+        let s2_api::v1::config::BasinConfig {
             default_stream_config,
             stream_cipher,
             create_stream_on_append,
             create_stream_on_read,
         } = config;
 
-        Self {
-            default_stream_config: s2_common::config::StreamConfig::from(default_stream_config)
-                .into(),
+        Ok(Self {
+            default_stream_config: resolve_stream_config(
+                default_stream_config.unwrap_or_default(),
+                Default::default(),
+            )?
+            .into(),
             stream_cipher: match stream_cipher {
                 None => "none".to_owned(),
-                Some(cipher) => wire_name(s2_api::v1::config::EncryptionAlgorithm::from(cipher)),
+                Some(cipher) => wire_name(cipher),
             },
             create_stream_on_append,
             create_stream_on_read,
-        }
+        })
     }
 }
 
@@ -464,20 +465,16 @@ fn permissions_view(permissions: ReadWritePermissions) -> String {
 }
 
 fn basin_view(config: s2_api::v1::config::BasinConfig) -> Result<Value, CliError> {
-    let config: s2_common::config::BasinConfig = config.try_into()?;
-    Ok(serde_json::to_value(BasinConfigView::from(config))?)
+    Ok(serde_json::to_value(BasinConfigView::try_from(config)?)?)
 }
 
 /// Renders a basin's effective stream defaults for comparison against a concrete stream.
 fn basin_stream_defaults_view(config: s2_api::v1::config::BasinConfig) -> Result<Value, CliError> {
-    let config: s2_common::config::BasinConfig = config.try_into()?;
-    let defaults = s2_common::config::StreamConfig::from(config.default_stream_config);
-    Ok(serde_json::to_value(StreamConfigView::from(defaults))?)
+    stream_view(config.default_stream_config.unwrap_or_default())
 }
 
 fn stream_view(config: s2_api::v1::config::StreamConfig) -> Result<Value, CliError> {
-    let config: s2_common::config::OptionalStreamConfig = config.try_into()?;
-    let config = s2_common::config::StreamConfig::from(config);
+    let config = resolve_stream_config(config, Default::default())?;
     Ok(serde_json::to_value(StreamConfigView::from(config))?)
 }
 
@@ -741,7 +738,7 @@ mod tests {
         assert_eq!(
             view,
             json!({
-                "storage_class": "express",
+                "storage_class": null,
                 "retention_policy": "2d",
                 "timestamping": {"mode": "client-prefer", "uncapped": false},
                 "delete_on_empty": {"min_age": "1h"}
@@ -773,7 +770,7 @@ mod tests {
     fn omitted_and_explicit_defaults_render_identically() {
         let omitted = serde_json::from_value(json!({})).expect("empty config deserializes");
         let explicit = serde_json::from_value(json!({
-            "storage_class": "express",
+            "storage_class": null,
             "retention_policy": {"age": 604800},
             "timestamping": {"mode": "client-prefer", "uncapped": false},
             "delete_on_empty": {"min_age_secs": 0}
@@ -802,7 +799,7 @@ mod tests {
             view,
             json!({
                 "default_stream_config": {
-                    "storage_class": "express",
+                    "storage_class": null,
                     "retention_policy": "7d",
                     "timestamping": {"mode": "client-prefer", "uncapped": false},
                     "delete_on_empty": {"min_age": "0s"}

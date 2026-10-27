@@ -1,15 +1,23 @@
-use s2_common::encryption::EncryptionSpec;
+use s2_common::{
+    config::{OptionalStreamConfig, StreamConfig},
+    encryption::EncryptionSpec,
+};
 
 pub mod error;
 
 mod basins;
 pub mod bgtasks;
 mod core;
+mod doe;
 mod durability_notifier;
 mod read;
 mod store;
 mod streamer;
 mod streams;
+mod timestamp;
+
+#[cfg(test)]
+mod test_util;
 
 mod append;
 mod kv;
@@ -25,3 +33,12 @@ pub struct StreamHandle {
 }
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
+
+fn resolve_stream_config(
+    config: OptionalStreamConfig,
+    basin_defaults: OptionalStreamConfig,
+) -> StreamConfig {
+    let mut config = config.merge(basin_defaults);
+    config.storage_class.get_or_insert_with(|| "express".into());
+    config
+}

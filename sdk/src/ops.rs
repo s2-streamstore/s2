@@ -4,7 +4,9 @@ use crate::{
     api::{AccountClient, BaseClient, BasinClient},
     error::{AppendError, ReadError, RequestError},
     producer::{Producer, ProducerConfig},
-    session::{self, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError},
+    session::{
+        self, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError, StreamHeaders,
+    },
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
@@ -437,6 +439,13 @@ impl S2Stream {
         }
     }
 
+    fn headers(&self, stream_config: Option<&StreamConfig>) -> StreamHeaders {
+        StreamHeaders {
+            encryption: self.encryption.clone(),
+            stream_config: stream_config.cloned().map(Into::into),
+        }
+    }
+
     /// Check tail position.
     pub async fn check_tail(&self) -> Result<StreamPosition, ReadError> {
         let response = self.client.check_tail(&self.name).await?;
@@ -444,13 +453,18 @@ impl S2Stream {
     }
 
     /// Append records.
-    pub async fn append(&self, input: AppendInput) -> Result<AppendAck, AppendError> {
+    pub async fn append(&self, mut input: AppendInput) -> Result<AppendAck, AppendError> {
+        let stream_config = input
+            .stream_config
+            .take()
+            .map(s2_api::v1::config::StreamConfig::from);
         let ack = self
             .client
             .append(
                 &self.name,
                 input.into(),
                 self.encryption.as_ref(),
+                stream_config.as_ref(),
                 self.client.config.retry.append_retry_policy,
             )
             .await?;
@@ -459,6 +473,9 @@ impl S2Stream {
 
     /// Read records.
     pub async fn read(&self, input: ReadInput) -> Result<ReadBatch, ReadError> {
+        let stream_config = input
+            .stream_config
+            .map(s2_api::v1::config::StreamConfig::from);
         let batch = self
             .client
             .read(
@@ -466,6 +483,7 @@ impl S2Stream {
                 input.start.into(),
                 input.stop.into(),
                 self.encryption.as_ref(),
+                stream_config.as_ref(),
             )
             .await?;
         let mut batch = ReadBatch::from_api(batch);
@@ -480,7 +498,7 @@ impl S2Stream {
         AppendSession::new(
             self.client.clone(),
             self.name.clone(),
-            self.encryption.clone(),
+            self.headers(config.stream_config()),
             config,
         )
     }
@@ -490,7 +508,7 @@ impl S2Stream {
         Producer::new(
             self.client.clone(),
             self.name.clone(),
-            self.encryption.clone(),
+            self.headers(config.stream_config()),
             config,
         )
     }
@@ -504,7 +522,7 @@ impl S2Stream {
         session::read_session(
             self.client.clone(),
             self.name.clone(),
-            self.encryption.clone(),
+            self.headers(input.stream_config.as_ref()),
             input,
             config,
         )

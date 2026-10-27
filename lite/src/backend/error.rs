@@ -12,10 +12,18 @@ use crate::backend::kv;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum StorageError {
+    #[error("invariant violation: {0}")]
+    InvariantViolation(String),
     #[error("deserialization: {0}")]
     Deserialization(#[from] kv::DeserializationError),
     #[error("database: {0}")]
     Database(Arc<slatedb::Error>),
+}
+
+impl StorageError {
+    pub(super) fn is_transaction_conflict(&self) -> bool {
+        matches!(self, Self::Database(err) if err.kind() == slatedb::ErrorKind::Transaction)
+    }
 }
 
 impl From<slatedb::Error> for StorageError {
@@ -106,8 +114,10 @@ pub(super) enum AppendErrorInternal {
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
     RequestDroppedError(#[from] RequestDroppedError),
-    #[error(transparent)]
-    StreamDeletionPending(#[from] StreamDeletionPendingError),
+    #[error("stream deletion pending")]
+    StreamDeletionPending {
+        durability_dependency: RangeTo<SeqNum>,
+    },
     #[error(transparent)]
     ConditionFailed(#[from] AppendConditionFailedError),
     #[error(transparent)]
@@ -119,6 +129,9 @@ pub(super) enum AppendErrorInternal {
 impl AppendErrorInternal {
     pub fn durability_dependency(&self) -> RangeTo<SeqNum> {
         match self {
+            Self::StreamDeletionPending {
+                durability_dependency,
+            } => *durability_dependency,
             Self::ConditionFailed(e) => e.durability_dependency(),
             Self::MaxSeqNum(e) => e.durability_dependency(),
             _ => ..0,
@@ -190,7 +203,9 @@ impl From<AppendErrorInternal> for AppendError {
                 AppendError::StreamerMissingInActionError(e)
             }
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
-            AppendErrorInternal::StreamDeletionPending(e) => AppendError::StreamDeletionPending(e),
+            AppendErrorInternal::StreamDeletionPending { .. } => {
+                AppendError::StreamDeletionPending(StreamDeletionPendingError)
+            }
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
             AppendErrorInternal::MaxSeqNum(e) => AppendError::MaxSeqNum(e),
@@ -308,7 +323,7 @@ impl From<kv::DeserializationError> for ListStreamsError {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProvisionStreamError {
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
@@ -325,10 +340,16 @@ pub enum ProvisionStreamError {
 
 impl From<slatedb::Error> for ProvisionStreamError {
     fn from(err: slatedb::Error) -> Self {
-        if err.kind() == slatedb::ErrorKind::Transaction {
+        Self::from(StorageError::from(err))
+    }
+}
+
+impl From<StorageError> for ProvisionStreamError {
+    fn from(err: StorageError) -> Self {
+        if err.is_transaction_conflict() {
             Self::TransactionConflict(TransactionConflictError)
         } else {
-            Self::Storage(err.into())
+            Self::Storage(err)
         }
     }
 }
@@ -390,6 +411,18 @@ pub enum StreamDeleteOnEmptyError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     DeleteStream(#[from] DeleteStreamError),
+}
+
+impl StreamDeleteOnEmptyError {
+    pub(super) fn is_transaction_conflict(&self) -> bool {
+        match self {
+            Self::Storage(err) | Self::DeleteStream(DeleteStreamError::Storage(err)) => {
+                err.is_transaction_conflict()
+            }
+            Self::DeleteStream(DeleteStreamError::TransactionConflict(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -465,7 +498,7 @@ impl From<slatedb::Error> for ReconfigureBasinError {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ReconfigureStreamError {
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
@@ -482,10 +515,16 @@ pub enum ReconfigureStreamError {
 
 impl From<slatedb::Error> for ReconfigureStreamError {
     fn from(err: slatedb::Error) -> Self {
-        if err.kind() == slatedb::ErrorKind::Transaction {
+        Self::from(StorageError::from(err))
+    }
+}
+
+impl From<StorageError> for ReconfigureStreamError {
+    fn from(err: StorageError) -> Self {
+        if err.is_transaction_conflict() {
             Self::TransactionConflict(TransactionConflictError)
         } else {
-            Self::Storage(err.into())
+            Self::Storage(err)
         }
     }
 }

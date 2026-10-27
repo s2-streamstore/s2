@@ -2,6 +2,7 @@ use std::{str::FromStr, time::Duration};
 
 use clap::{Args, Parser, ValueEnum};
 use colored::Colorize;
+use compact_str::CompactString;
 use s2_sdk::{
     self as sdk,
     types::{
@@ -174,7 +175,7 @@ pub struct BasinConfig {
 pub struct StreamConfig {
     #[arg(long)]
     /// Storage class for a stream.
-    pub storage_class: Option<StorageClass>,
+    pub storage_class: Option<CompactString>,
     #[arg(long, help("Example: 1d, 1w, 1y"))]
     /// Retention policy for a stream.
     pub retention_policy: Option<RetentionPolicy>,
@@ -201,14 +202,15 @@ impl StreamConfig {
     }
 }
 
-pub use sdk::types::LocationName;
-
-#[derive(ValueEnum, Debug, Clone, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StorageClass {
-    Standard,
-    Express,
+pub fn resolve_stream_config(
+    config: s2_api::v1::config::StreamConfig,
+    basin_defaults: s2_api::v1::config::StreamConfig,
+) -> Result<s2_common::config::StreamConfig, s2_common::ValidationError> {
+    let config: s2_common::config::OptionalStreamConfig = config.try_into()?;
+    Ok(config.merge(basin_defaults.try_into()?))
 }
+
+pub use sdk::types::LocationName;
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -302,7 +304,7 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
     fn from(config: StreamConfig) -> Self {
         let mut stream_config = sdk::types::StreamConfig::new();
         if let Some(storage_class) = config.storage_class {
-            stream_config = stream_config.with_storage_class(storage_class.into());
+            stream_config = stream_config.with_storage_class(storage_class);
         }
         if let Some(retention_policy) = config.retention_policy {
             stream_config = stream_config.with_retention_policy(retention_policy.into());
@@ -314,24 +316,6 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
             stream_config = stream_config.with_delete_on_empty(delete_on_empty.into());
         }
         stream_config
-    }
-}
-
-impl From<StorageClass> for sdk::types::StorageClass {
-    fn from(class: StorageClass) -> Self {
-        match class {
-            StorageClass::Standard => sdk::types::StorageClass::Standard,
-            StorageClass::Express => sdk::types::StorageClass::Express,
-        }
-    }
-}
-
-impl From<sdk::types::StorageClass> for StorageClass {
-    fn from(class: sdk::types::StorageClass) -> Self {
-        match class {
-            sdk::types::StorageClass::Standard => StorageClass::Standard,
-            sdk::types::StorageClass::Express => StorageClass::Express,
-        }
     }
 }
 
@@ -414,7 +398,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
 impl From<sdk::types::StreamConfig> for StreamConfig {
     fn from(config: sdk::types::StreamConfig) -> Self {
         StreamConfig {
-            storage_class: config.storage_class.map(Into::into),
+            storage_class: config.storage_class,
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),
@@ -426,7 +410,7 @@ impl From<StreamConfig> for sdk::types::StreamReconfiguration {
     fn from(config: StreamConfig) -> Self {
         let mut reconfig = sdk::types::StreamReconfiguration::new();
         if let Some(storage_class) = config.storage_class {
-            reconfig = reconfig.with_storage_class(storage_class.into());
+            reconfig = reconfig.with_storage_class(storage_class);
         }
         if let Some(retention_policy) = config.retention_policy {
             reconfig = reconfig.with_retention_policy(retention_policy.into());
@@ -497,32 +481,35 @@ where
     serializer.serialize_str(&humantime::format_duration(*value).to_string())
 }
 
-impl From<sdk::types::BasinMatcher> for BasinMatcher {
-    fn from(matcher: sdk::types::BasinMatcher) -> Self {
+impl BasinMatcher {
+    /// Converts an SDK matcher, returning `None` for a matcher that matches no resources.
+    fn from_sdk(matcher: sdk::types::BasinMatcher) -> Option<Self> {
         match matcher {
-            sdk::types::BasinMatcher::Exact(v) => BasinMatcher::Exact(v),
-            sdk::types::BasinMatcher::Prefix(v) => BasinMatcher::Prefix(v),
-            sdk::types::BasinMatcher::None => BasinMatcher::Prefix(Default::default()),
+            sdk::types::BasinMatcher::Exact(v) => Some(BasinMatcher::Exact(v)),
+            sdk::types::BasinMatcher::Prefix(v) => Some(BasinMatcher::Prefix(v)),
+            sdk::types::BasinMatcher::None => None,
         }
     }
 }
 
-impl From<sdk::types::StreamMatcher> for StreamMatcher {
-    fn from(matcher: sdk::types::StreamMatcher) -> Self {
+impl StreamMatcher {
+    /// Converts an SDK matcher, returning `None` for a matcher that matches no resources.
+    fn from_sdk(matcher: sdk::types::StreamMatcher) -> Option<Self> {
         match matcher {
-            sdk::types::StreamMatcher::Exact(v) => StreamMatcher::Exact(v),
-            sdk::types::StreamMatcher::Prefix(v) => StreamMatcher::Prefix(v),
-            sdk::types::StreamMatcher::None => StreamMatcher::Prefix(Default::default()),
+            sdk::types::StreamMatcher::Exact(v) => Some(StreamMatcher::Exact(v)),
+            sdk::types::StreamMatcher::Prefix(v) => Some(StreamMatcher::Prefix(v)),
+            sdk::types::StreamMatcher::None => None,
         }
     }
 }
 
-impl From<sdk::types::AccessTokenMatcher> for AccessTokenMatcher {
-    fn from(matcher: sdk::types::AccessTokenMatcher) -> Self {
+impl AccessTokenMatcher {
+    /// Converts an SDK matcher, returning `None` for a matcher that matches no resources.
+    fn from_sdk(matcher: sdk::types::AccessTokenMatcher) -> Option<Self> {
         match matcher {
-            sdk::types::AccessTokenMatcher::Exact(v) => AccessTokenMatcher::Exact(v),
-            sdk::types::AccessTokenMatcher::Prefix(v) => AccessTokenMatcher::Prefix(v),
-            sdk::types::AccessTokenMatcher::None => AccessTokenMatcher::Prefix(Default::default()),
+            sdk::types::AccessTokenMatcher::Exact(v) => Some(AccessTokenMatcher::Exact(v)),
+            sdk::types::AccessTokenMatcher::Prefix(v) => Some(AccessTokenMatcher::Prefix(v)),
+            sdk::types::AccessTokenMatcher::None => None,
         }
     }
 }
@@ -776,9 +763,9 @@ pub struct AccessTokenScope {
 impl From<sdk::types::AccessTokenScope> for AccessTokenScope {
     fn from(scope: sdk::types::AccessTokenScope) -> Self {
         AccessTokenScope {
-            basins: scope.basins.map(Into::into),
-            streams: scope.streams.map(Into::into),
-            access_tokens: scope.access_tokens.map(Into::into),
+            basins: scope.basins.and_then(BasinMatcher::from_sdk),
+            streams: scope.streams.and_then(StreamMatcher::from_sdk),
+            access_tokens: scope.access_tokens.and_then(AccessTokenMatcher::from_sdk),
             op_group_perms: scope.op_group_perms.map(Into::into),
             ops: scope.ops.into_iter().map(Operation::from).collect(),
         }
@@ -944,6 +931,37 @@ mod tests {
             "∅",
             "an unset matcher grants nothing"
         );
+    }
+
+    #[test]
+    fn match_none_scope_matchers_render_as_no_access() {
+        colored::control::set_override(false);
+
+        // On the wire, an empty exact name means "match no resources".
+        let scope: s2_api::v1::access::AccessTokenScope =
+            serde_json::from_value(serde_json::json!({
+                "basins": { "exact": "" },
+                "streams": { "exact": "" },
+                "access_tokens": { "exact": "" },
+            }))
+            .unwrap();
+        let scope = s2_sdk::types::AccessTokenScope::from(scope);
+        let info = AccessTokenInfo {
+            id: "tok".to_owned(),
+            expires_at: None,
+            auto_prefix_streams: false,
+            scope: scope.into(),
+        };
+
+        assert_eq!(
+            info.summary_block(3),
+            "tok  expires never\n\
+             \x20 basins=∅  streams=∅  tokens=∅  perms=none  ops=0"
+        );
+        let json = serde_json::to_value(&info.scope).unwrap();
+        assert!(json["basins"].is_null(), "{json}");
+        assert!(json["streams"].is_null(), "{json}");
+        assert!(json["access_tokens"].is_null(), "{json}");
     }
 
     #[test]

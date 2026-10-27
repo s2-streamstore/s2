@@ -1,0 +1,22 @@
+name: Rust dependency cooldown tests
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/rust-dependency-cooldown/**
+      - .github/workflows/rust-dependency-cooldown-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/rust-dependency-cooldown/**
+      - .github/workflows/rust-dependency-cooldown-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: python3 -m unittest discover -s .github/actions/rust-dependency-cooldown -p 'test_*.py' -v

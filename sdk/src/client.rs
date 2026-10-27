@@ -2,8 +2,8 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock as StdRwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -29,7 +29,7 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 pub use hyper_util::client::legacy::connect::Connect;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
-    rt::TokioExecutor,
+    rt::{TokioExecutor, TokioTimer},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
@@ -39,7 +39,10 @@ use tokio::{
 };
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::frame_signal::{FrameSignal, RequestFrameMonitorBody};
+use crate::{
+    frame_signal::{FrameSignal, RequestFrameMonitorBody},
+    types::Http2Config,
+};
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 90;
@@ -304,9 +307,8 @@ impl RequestBuilder {
     }
 
     pub fn headers(mut self, headers: &HeaderMap) -> Self {
-        for (key, value) in headers {
-            self.headers.insert(key.clone(), value.clone());
-        }
+        // An owned HeaderMap replaces each key's existing values while preserving duplicates.
+        self.headers.extend(headers.clone());
         self
     }
 
@@ -369,20 +371,63 @@ impl UnaryResponse {
     }
 }
 
+/// Identifies a pooled connection within its host pool, so poisoning drops
+/// just the connection reconnect advice arrived on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConnectionId(u64);
+
+impl ConnectionId {
+    fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Grants its holder the ability to poison the pooled connection a streaming
+/// response was served on, dropping it from the pool so no new request reuses
+/// it. Requests already in flight keep the connection.
+///
+/// Poisoning is idempotent: the connection is identified by its
+/// [`ConnectionId`], so poisoning it again — including from another session
+/// sharing the connection — is a no-op.
+pub struct PoisonHandle {
+    poison: Box<dyn Fn() + Send + Sync>,
+}
+
+impl PoisonHandle {
+    fn new(poison: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            poison: Box::new(poison),
+        }
+    }
+
+    pub(crate) fn poison(&self) {
+        (self.poison)();
+    }
+}
+
 pub struct StreamingResponse {
     status: StatusCode,
     headers: HeaderMap,
     body: Incoming,
     permit: RequestPermit,
+    poison_handle: PoisonHandle,
 }
 
 impl StreamingResponse {
-    fn new(status: StatusCode, headers: HeaderMap, body: Incoming, permit: RequestPermit) -> Self {
+    fn new(
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Incoming,
+        permit: RequestPermit,
+        poison_handle: PoisonHandle,
+    ) -> Self {
         Self {
             status,
             headers,
             body,
             permit,
+            poison_handle,
         }
     }
 
@@ -390,20 +435,37 @@ impl StreamingResponse {
         self.status
     }
 
-    pub async fn into_bytes(self) -> Result<Bytes, HttpError> {
-        let bytes = self.body.collect().await?.to_bytes();
-        decompress_body(&self.headers, bytes).await
+    pub(crate) async fn into_bytes_with_poison_handle(
+        self,
+    ) -> Result<(Bytes, PoisonHandle), HttpError> {
+        let Self {
+            headers,
+            body,
+            permit,
+            poison_handle,
+            ..
+        } = self;
+        let bytes = body.collect().await?.to_bytes();
+        let bytes = decompress_body(&headers, bytes).await?;
+        drop(permit);
+        Ok((bytes, poison_handle))
     }
 
-    pub fn stream(self) -> impl Stream<Item = Result<Bytes, HttpError>> {
-        let permit = self.permit;
-        http_body_util::BodyStream::new(self.body).filter_map(move |result| {
+    pub fn into_stream(self) -> (impl Stream<Item = Result<Bytes, HttpError>>, PoisonHandle) {
+        let Self {
+            body,
+            permit,
+            poison_handle,
+            ..
+        } = self;
+        let stream = http_body_util::BodyStream::new(body).filter_map(move |result| {
             let _ = &permit;
             std::future::ready(match result {
                 Ok(frame) => frame.into_data().ok().map(Ok),
                 Err(e) => Some(Err(HttpError::Receive(e))),
             })
-        })
+        });
+        (stream, poison_handle)
     }
 }
 
@@ -514,11 +576,7 @@ fn build_http_request(
     let mut builder = http::Request::builder().method(method).uri(uri.clone());
 
     if let Some(req_headers) = builder.headers_mut() {
-        for (key, value) in headers {
-            if let Some(key) = key {
-                req_headers.insert(key, value);
-            }
-        }
+        *req_headers = headers;
         if let Some(encoding) = content_encoding {
             req_headers.insert(CONTENT_ENCODING, encoding);
         }
@@ -577,6 +635,7 @@ async fn init_streaming_with<C>(
     client: &HyperClient<C, BoxBody>,
     request: Request,
     permit: RequestPermit,
+    poison_handle: PoisonHandle,
 ) -> Result<StreamingResponse, HttpError>
 where
     C: Connect + Clone + Send + Sync + 'static,
@@ -600,6 +659,7 @@ where
             parts.headers,
             body,
             permit,
+            poison_handle,
         ))
     };
 
@@ -729,14 +789,18 @@ impl Drop for RequestPermit {
 }
 
 struct PooledClient<C> {
+    max_concurrent_requests: usize,
+    id: ConnectionId,
     client: Arc<HyperClient<C, BoxBody>>,
     active_requests: Arc<AtomicUsize>,
     idle_since: Arc<Mutex<Option<Instant>>>,
 }
 
 impl<C> PooledClient<C> {
-    fn new(client: HyperClient<C, BoxBody>) -> Self {
+    fn new(client: HyperClient<C, BoxBody>, max_concurrent_requests: usize) -> Self {
         Self {
+            max_concurrent_requests,
+            id: ConnectionId::next(),
             client: Arc::new(client),
             active_requests: Arc::new(AtomicUsize::new(0)),
             idle_since: Arc::new(Mutex::new(Some(Instant::now()))),
@@ -746,7 +810,7 @@ impl<C> PooledClient<C> {
     fn request_permit(&self) -> Option<RequestPermit> {
         self.active_requests
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ar| {
-                (ar < MAX_CONCURRENT_REQUESTS_PER_CLIENT).then_some(ar + 1)
+                (ar < self.max_concurrent_requests).then_some(ar + 1)
             })
             .ok()?;
         *self.idle_since.lock().unwrap() = None;
@@ -768,7 +832,8 @@ impl<C> PooledClient<C> {
 }
 
 struct HostPool<C> {
-    clients: RwLock<Vec<PooledClient<C>>>,
+    http2: Http2Config,
+    clients: StdRwLock<Vec<PooledClient<C>>>,
     connector: C,
 }
 
@@ -776,31 +841,46 @@ impl<C> HostPool<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    fn new(connector: C) -> Self {
+    fn new(connector: C, http2: Http2Config) -> Self {
         Self {
-            clients: RwLock::new(Vec::new()),
+            http2,
+            clients: StdRwLock::new(Vec::new()),
             connector,
         }
     }
 
     fn create_client(&self) -> PooledClient<C> {
-        let client = HyperClient::builder(TokioExecutor::new()).build(self.connector.clone());
-        PooledClient::new(client)
+        let mut builder = HyperClient::builder(TokioExecutor::new());
+        builder
+            .timer(TokioTimer::new())
+            .http2_only(true)
+            .http2_keep_alive_interval(Duration::from_secs(20))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_initial_stream_window_size(self.http2.stream_receive_window)
+            .http2_initial_connection_window_size(self.http2.connection_receive_window);
+        let max_concurrent_requests = self
+            .http2
+            .max_concurrent_requests
+            .unwrap_or(MAX_CONCURRENT_REQUESTS_PER_CLIENT);
+        PooledClient::new(
+            builder.build(self.connector.clone()),
+            max_concurrent_requests,
+        )
     }
 
-    async fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit) {
+    fn checkout(&self) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
         {
-            let clients = self.clients.read().await;
+            let clients = self.clients.read().unwrap();
             for pooled in clients.iter() {
                 if let Some(permit) = pooled.request_permit() {
-                    return (pooled.client.clone(), permit);
+                    return (pooled.client.clone(), permit, pooled.id);
                 }
             }
         }
-        let mut clients = self.clients.write().await;
+        let mut clients = self.clients.write().unwrap();
         for pooled in clients.iter() {
             if let Some(permit) = pooled.request_permit() {
-                return (pooled.client.clone(), permit);
+                return (pooled.client.clone(), permit, pooled.id);
             }
         }
         let new_client = self.create_client();
@@ -808,14 +888,27 @@ where
             .request_permit()
             .expect("new client must have a permit");
         let client = new_client.client.clone();
+        let id = new_client.id;
         clients.push(new_client);
-        (client, permit)
+        (client, permit, id)
     }
 
-    async fn reap_idle_clients(&self) {
+    /// Drop the pooled client identified by `id` so no new request reuses it.
+    /// Clients pinned to servers that are not going away stay pooled, requests
+    /// already in flight keep their connection, and poisoning the same
+    /// connection again is a no-op.
+    fn poison(&self, host: &str, id: ConnectionId) {
+        let mut clients = self.clients.write().unwrap();
+        let pooled = clients.len();
+        clients.retain(|pooled| pooled.id != id);
+        let removed = pooled - clients.len();
+        tracing::debug!(host, connection = ?id, removed, "poisoned pooled connections");
+    }
+
+    fn reap_idle_clients(&self) {
         self.clients
             .write()
-            .await
+            .unwrap()
             .retain(|pooled| !pooled.should_reap(IDLE_TIMEOUT));
     }
 
@@ -828,6 +921,7 @@ where
 }
 
 pub struct Pool<C> {
+    http2: Http2Config,
     hosts: Arc<RwLock<HashMap<String, Arc<HostPool<C>>>>>,
     connector: C,
     _reaper: AbortOnDropHandle<()>,
@@ -837,7 +931,7 @@ impl<C> Pool<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    pub fn new(connector: C) -> Self {
+    pub fn new(connector: C, http2: Http2Config) -> Self {
         let hosts = Arc::new(RwLock::new(HashMap::new()));
 
         let _reaper = AbortOnDropHandle::new(tokio::spawn({
@@ -852,6 +946,7 @@ where
         }));
 
         Self {
+            http2,
             hosts,
             connector,
             _reaper,
@@ -868,12 +963,15 @@ where
         let mut hosts = self.hosts.write().await;
         hosts
             .entry(host.to_owned())
-            .or_insert_with(|| Arc::new(HostPool::new(self.connector.clone())))
+            .or_insert_with(|| Arc::new(HostPool::new(self.connector.clone(), self.http2)))
             .clone()
     }
 
-    async fn checkout(&self, host: &str) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit) {
-        self.get_or_create_host_pool(host).await.checkout().await
+    async fn checkout(
+        &self,
+        host: &str,
+    ) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
+        self.get_or_create_host_pool(host).await.checkout()
     }
 }
 
@@ -886,7 +984,7 @@ async fn reap_idle_clients<C: Connect + Clone + Send + Sync + 'static>(
     };
 
     for pool in &pools {
-        pool.reap_idle_clients().await;
+        pool.reap_idle_clients();
     }
 
     hosts.write().await.retain(|_, pool| !pool.is_empty());
@@ -898,13 +996,23 @@ where
     C: Connect + Clone + Send + Sync + 'static,
 {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
-        let (client, _permit) = self.checkout(request.authority()).await;
+        let (client, _permit, _) = self.checkout(request.authority()).await;
         execute_unary_with(&client, request).await
     }
 
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
-        let (client, permit) = self.checkout(request.authority()).await;
-        init_streaming_with(&client, request, permit).await
+        let host = request.authority().to_owned();
+        let pool = self.get_or_create_host_pool(&host).await;
+        let (client, permit, id) = pool.checkout();
+        // Weak: the handle can outlive the pool (a session holds it for the
+        // connection's lifetime) and must not keep a reaped pool alive.
+        let weak = Arc::downgrade(&pool);
+        let poison_handle = PoisonHandle::new(move || {
+            if let Some(pool) = weak.upgrade() {
+                pool.poison(&host, id);
+            }
+        });
+        init_streaming_with(&client, request, permit, poison_handle).await
     }
 }
 
@@ -918,7 +1026,38 @@ mod tests {
     const TEST_HOST: &str = "localhost:8080";
 
     fn test_pool() -> Pool<HttpConnector> {
-        Pool::new(HttpConnector::new())
+        Pool::new(HttpConnector::new(), Http2Config::new())
+    }
+
+    #[test]
+    fn default_headers_preserve_multiple_values_and_sensitive_flags_on_wire_request() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", HeaderValue::from_static("first"));
+        let mut second = HeaderValue::from_static("second");
+        second.set_sensitive(true);
+        headers.append("x-tag", second);
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("wrong-encoding"));
+
+        let request = RequestBuilder::get("http://example.test".parse().unwrap())
+            .header("x-tag", "replaced")
+            .headers(&headers)
+            .build()
+            .unwrap();
+        let cloned = request.try_clone().unwrap();
+        let http = build_http_request(
+            cloned.method,
+            &cloned.uri,
+            cloned.headers,
+            cloned.body.into_http_body(),
+            Some(HeaderValue::from_static("gzip")),
+        )
+        .unwrap();
+        let values = http.headers().get_all("x-tag").iter().collect::<Vec<_>>();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], "first");
+        assert_eq!(values[1], "second");
+        assert!(values[1].is_sensitive());
+        assert_eq!(http.headers()[CONTENT_ENCODING], "gzip");
     }
 
     #[test]
@@ -955,7 +1094,7 @@ mod tests {
     async fn host_client_count(pool: &Pool<HttpConnector>, host: &str) -> usize {
         let hosts = pool.hosts.read().await;
         match hosts.get(host) {
-            Some(pool) => pool.clients.read().await.len(),
+            Some(pool) => pool.clients.read().unwrap().len(),
             None => 0,
         }
     }
@@ -998,7 +1137,7 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
@@ -1009,12 +1148,28 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
 
-        let (_client, permit) = pool.checkout(TEST_HOST).await;
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
+        permits.push(permit);
+        assert_eq!(host_client_count(&pool, TEST_HOST).await, 2);
+    }
+
+    #[tokio::test]
+    async fn custom_request_cap_bounds_client() {
+        let http2 = Http2Config::new().with_max_concurrent_requests(2).unwrap();
+        let pool = Pool::new(HttpConnector::new(), http2);
+        let mut permits = Vec::new();
+        for _ in 0..2 {
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
+            permits.push(permit);
+        }
+        assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
+
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
         permits.push(permit);
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 2);
     }
@@ -1024,12 +1179,12 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
         permits.pop();
 
-        let (_client, permit) = pool.checkout(TEST_HOST).await;
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
         permits.push(permit);
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 1);
     }
@@ -1039,10 +1194,10 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(TEST_HOST).await;
+            let (_client, permit, _) = pool.checkout(TEST_HOST).await;
             permits.push(permit);
         }
-        let (_client, permit) = pool.checkout(TEST_HOST).await;
+        let (_client, permit, _) = pool.checkout(TEST_HOST).await;
         permits.push(permit);
         assert_eq!(host_client_count(&pool, TEST_HOST).await, 2);
 
@@ -1050,7 +1205,7 @@ mod tests {
         {
             let hosts = pool.hosts.read().await;
             let pool = hosts.get(TEST_HOST).unwrap();
-            let clients = pool.clients.read().await;
+            let clients = pool.clients.read().unwrap();
             for pooled in clients.iter() {
                 *pooled.idle_since.lock().unwrap() =
                     Some(Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1));
@@ -1070,12 +1225,12 @@ mod tests {
 
         let mut permits_a = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit) = pool.checkout(host_a).await;
+            let (_client, permit, _) = pool.checkout(host_a).await;
             permits_a.push(permit);
         }
         assert_eq!(host_client_count(&pool, host_a).await, 1);
 
-        let (_client, permit_b) = pool.checkout(host_b).await;
+        let (_client, permit_b, _) = pool.checkout(host_b).await;
         assert_eq!(host_client_count(&pool, host_b).await, 1);
         assert_eq!(host_client_count(&pool, host_a).await, 1);
 
@@ -1087,15 +1242,15 @@ mod tests {
     async fn reaper_removes_empty_host_entries() {
         let pool = test_pool();
 
-        let (_client, permit_a) = pool.checkout("host-a:443").await;
-        let (_client, permit_b) = pool.checkout("host-b:443").await;
+        let (_client, permit_a, _) = pool.checkout("host-a:443").await;
+        let (_client, permit_b, _) = pool.checkout("host-b:443").await;
         assert_eq!(pool.hosts.read().await.len(), 2);
 
         drop(permit_a);
         {
             let hosts = pool.hosts.read().await;
             let pool_a = hosts.get("host-a:443").unwrap();
-            let clients = pool_a.clients.read().await;
+            let clients = pool_a.clients.read().unwrap();
             for pooled in clients.iter() {
                 *pooled.idle_since.lock().unwrap() =
                     Some(Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1));

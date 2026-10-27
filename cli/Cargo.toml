@@ -1,6 +1,6 @@
 [package]
 name = "s2-cli"
-version = "0.42.7"
+version = "0.43.2"
 description = "CLI for S2"
 edition.workspace = true
 license.workspace = true
@@ -21,6 +21,7 @@ bytes = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 color-print = { workspace = true }
 colored = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
 config = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
@@ -56,7 +57,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { workspace = true, features = ["v4"] }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # tikv-jemallocator does not build on the MSVC toolchain; on Windows-MSVC
 # Rust falls back to the system allocator (HeapAlloc).
@@ -71,6 +72,9 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["http2", "server", "tokio"] }
 predicates = "3.1"
 proptest = { workspace = true }
 rstest = { workspace = true }

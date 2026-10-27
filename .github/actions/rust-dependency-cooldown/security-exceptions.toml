@@ -1,0 +1,29 @@
+[[exception]]
+crate = "rustls"
+version = "0.23.45"
+advisory = "RUSTSEC-2026-0285"
+reason = "Fixes TLS 1.3 handshake messages accepted at the wrong encryption level"
+
+[[exception]]
+crate = "rustls-webpki"
+version = "0.103.16"
+advisory = "RUSTSEC-2026-0382"
+reason = "Rejects certificate chains containing compromised intermediate public keys"
+
+[[exception]]
+crate = "webpki-roots"
+version = "1.0.10"
+advisory = "RUSTSEC-2026-0381"
+reason = "Removes the emSign ECC Root CA-G3 trust anchor after intermediate key exposure"
+
+[[exception]]
+crate = "webpki-root-certs"
+version = "1.0.10"
+advisory = "RUSTSEC-2026-0383"
+reason = "Removes the emSign ECC Root CA-G3 trust anchor after intermediate key exposure"
+
+[[exception]]
+crate = "ctutils"
+version = "0.4.4"
+advisory = "RUSTSEC-2026-0385"
+reason = "Fixes branching mask generation and 32-bit u128 comparisons in constant-time primitives"
