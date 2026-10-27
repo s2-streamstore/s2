@@ -12,6 +12,11 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "Accept zvariant maintenance advisory for the existing transitive Linux keyring stack." },
     { id = "RUSTSEC-2026-0371", reason = "Accept zbus_names maintenance advisory for the existing transitive Linux keyring stack." },
     { id = "RUSTSEC-2026-0372", reason = "Accept zvariant_derive maintenance advisory for the existing transitive Linux keyring stack." },
+
+    # zstd 0.13 / zstd-safe 7 via slatedb and foyer-storage have no patched release; our direct zstd 0.14 is fixed.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 via slatedb/foyer: neither reuses a context through `with_context`." },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 via slatedb/foyer: the `seekable` feature is not enabled." },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 via slatedb/foyer: they only decompress with `decode_all` and `read::Decoder`, which are unaffected." },
 ]
 
 [licenses]
