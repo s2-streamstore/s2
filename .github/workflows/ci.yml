@@ -349,7 +349,7 @@ jobs:
             "repo": "s2-streamstore/s2-sdk-go",
             "ref": "main",
             "lang": "go",
-            "go-version": "1.24",
+            "go-version": "1.26",
             "test_cmd": "go test -v -count=1 -skip 'WithScope|AccessToken|Metrics|Client_InvalidToken|Location' ./s2/..."
           },
           {
