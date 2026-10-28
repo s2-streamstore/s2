@@ -33,6 +33,7 @@ dashmap = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+include_dir = "0.7.4"
 indexmap = { workspace = true }
 itertools = { workspace = true }
 parking_lot = { workspace = true, features = ["arc_lock"] }

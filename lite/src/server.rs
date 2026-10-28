@@ -18,7 +18,7 @@ use tower_http::{
 };
 use tracing::info;
 
-use crate::{backend::Backend, handlers, init};
+use crate::{backend::Backend, dashboard, handlers, init};
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct TlsConfig {
@@ -103,6 +103,12 @@ pub struct LiteArgs {
     /// should be denied at the HTTP layer.
     #[arg(long)]
     pub no_cors: bool,
+
+    /// Do not serve the web dashboard at /dashboard.
+    ///
+    /// Can also be set via S2LITE_NO_DASHBOARD environment variable.
+    #[arg(long, env = "S2LITE_NO_DASHBOARD")]
+    pub no_dashboard: bool,
 
     /// Path to a JSON file defining basins and streams to create at startup.
     ///
@@ -261,7 +267,12 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         init::apply(&backend, spec).await?;
     }
 
-    let mut app = handlers::router()
+    let mut app = handlers::router();
+    if !args.no_dashboard {
+        app = app.merge(dashboard::router());
+        info!("dashboard: {}/dashboard", cli_endpoint(protocol, port));
+    }
+    let mut app = app
         .with_state(backend)
         .layer(
             TraceLayer::new_for_http()

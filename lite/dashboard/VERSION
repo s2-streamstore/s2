@@ -1,0 +1,3 @@
+source: https://github.com/s2-streamstore/s2-dashboard
+commit: 5a3cc57ba8da3ce9bddcdb9feb35cef07fc439ae
+build: pnpm --filter @s2-dev/dashboard-lite build (apps/lite/dist)
