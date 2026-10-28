@@ -1,9 +1,9 @@
 //! Static dashboard bundle served at `/dashboard`.
 //!
-//! The files under `lite/dashboard/` are the built output of
-//! <https://github.com/s2-streamstore/s2-dashboard> (`apps/lite`); see
-//! `lite/dashboard/VERSION` for the vendored commit. The app talks to this
-//! server on the same origin, so no token or CORS configuration is needed.
+//! `lite/dashboard/` is a git submodule of
+//! <https://github.com/s2-streamstore/s2-dashboard>, pinned to a release tag;
+//! only its committed `apps/lite/dist` build is embedded. The app talks to
+//! this server on the same origin, so no token or CORS configuration is needed.
 
 use axum::{
     Router,
@@ -15,7 +15,7 @@ use axum::{
 };
 use include_dir::{Dir, include_dir};
 
-static DASHBOARD_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/dashboard");
+static DASHBOARD_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/dashboard/apps/lite/dist");
 
 pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
