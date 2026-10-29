@@ -4,9 +4,9 @@ use bytes::Bytes;
 use s2_common::{
     config::{OptionalStreamConfig, RetentionPolicy, StreamReconfiguration},
     read_extent::{ReadLimit, ReadUntil},
-    stream::{AppendInput, ReadEnd, ReadFrom, ReadStart},
+    stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart},
 };
-use s2_lite::backend::error::{AppendError, CheckTailError, ReadError};
+use s2_lite::backend::error::{AppendError, CheckTailError, ListStreamsError, ReadError};
 use tokio::sync::Notify;
 
 use super::common::*;
@@ -45,10 +45,18 @@ async fn test_operations_on_nonexistent_basin() {
     .await;
     assert!(matches!(append_result, Err(AppendError::BasinNotFound(_))));
 
-    let check_tail_result = check_tail(&backend, basin_name, stream_name).await;
+    let check_tail_result = check_tail(&backend, basin_name.clone(), stream_name).await;
     assert!(matches!(
         check_tail_result,
         Err(CheckTailError::BasinNotFound(_))
+    ));
+
+    let list_streams_result = backend
+        .list_streams(basin_name, ListStreamsRequest::default())
+        .await;
+    assert!(matches!(
+        list_streams_result,
+        Err(ListStreamsError::BasinNotFound(_))
     ));
 }
 
