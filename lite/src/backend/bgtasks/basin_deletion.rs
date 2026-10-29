@@ -13,7 +13,7 @@ use tracing::instrument;
 use super::{ItemProgress, PageProgress};
 use crate::backend::{
     Backend,
-    error::{BasinDeletionError, ListStreamsError, StorageError},
+    error::{BasinDeletionError, StorageError},
     kv,
 };
 
@@ -75,12 +75,7 @@ impl Backend {
             start_after: cursor.clone(),
             limit: ListLimit::MAX,
         };
-        let page = self
-            .list_streams(basin.clone(), request)
-            .await
-            .map_err(|err| match err {
-                ListStreamsError::Storage(error) => error,
-            })?;
+        let page = self.scan_streams(basin.clone(), request).await?;
 
         let mut last_stream = None;
         for info in page.values {

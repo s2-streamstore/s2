@@ -138,6 +138,9 @@ impl ServiceError {
             },
             ServiceError::ListStreams(e) => match e {
                 ListStreamsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                ListStreamsError::BasinNotFound(e) => {
+                    standard(ErrorCode::BasinNotFound, e.to_string())
+                }
             },
             ServiceError::ProvisionStream(e) => match e {
                 ProvisionStreamError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),

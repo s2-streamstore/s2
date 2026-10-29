@@ -306,18 +306,8 @@ impl From<slatedb::Error> for ReadError {
 pub enum ListStreamsError {
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-impl From<slatedb::Error> for ListStreamsError {
-    fn from(e: slatedb::Error) -> Self {
-        Self::Storage(e.into())
-    }
-}
-
-impl From<kv::DeserializationError> for ListStreamsError {
-    fn from(e: kv::DeserializationError) -> Self {
-        Self::Storage(e.into())
-    }
+    #[error(transparent)]
+    BasinNotFound(#[from] BasinNotFoundError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
