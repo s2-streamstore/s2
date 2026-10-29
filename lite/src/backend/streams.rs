@@ -38,6 +38,21 @@ impl Backend {
         basin: BasinName,
         request: ListStreamsRequest,
     ) -> Result<Page<StreamInfo>, ListStreamsError> {
+        if self
+            .db_get(kv::basin_meta::ser_key(&basin), kv::basin_meta::deser_value)
+            .await?
+            .is_none()
+        {
+            return Err(BasinNotFoundError { basin }.into());
+        }
+        Ok(self.scan_streams(basin, request).await?)
+    }
+
+    pub(super) async fn scan_streams(
+        &self,
+        basin: BasinName,
+        request: ListStreamsRequest,
+    ) -> Result<Page<StreamInfo>, StorageError> {
         let ListStreamsRequest {
             prefix,
             start_after,
