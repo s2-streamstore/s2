@@ -5,6 +5,8 @@
 //! only its committed `apps/lite/dist` build is embedded. The app talks to
 //! this server on the same origin, so no token or CORS configuration is needed.
 
+use std::sync::Arc;
+
 use axum::{
     Router,
     body::Body,
@@ -14,13 +16,60 @@ use axum::{
     routing::get,
 };
 use include_dir::{Dir, include_dir};
+use serde::Serialize;
 
 static DASHBOARD_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/dashboard/apps/lite/dist");
 
-pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
+/// Where the database (or its WAL) lives.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoreInfo {
+    Memory,
+    Local { root: String },
+    S3 { bucket: String },
+}
+
+/// How this server was configured at startup, shown on the dashboard's Server page.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerInfo {
+    pub version: &'static str,
+    pub started_at: String,
+    pub store: StoreInfo,
+    /// Dedicated WAL store, if one was configured.
+    pub wal: Option<StoreInfo>,
+    /// Base path within the object store.
+    pub path: String,
+    pub flush_interval_ms: Option<u64>,
+    pub tls: &'static str,
+    pub port: u16,
+    pub cors: bool,
+    pub init_file: Option<String>,
+    pub append_inflight_bytes: u64,
+}
+
+pub fn router<S: Clone + Send + Sync + 'static>(info: &ServerInfo) -> Router<S> {
+    let config_json: Arc<str> = serde_json::to_string(info)
+        .expect("ServerInfo serializes")
+        .into();
     Router::new()
         .route("/dashboard", get(index))
         .route("/dashboard/", get(index))
+        .route(
+            "/dashboard/config.json",
+            get(move || {
+                let body = config_json.clone();
+                async move {
+                    (
+                        [
+                            (header::CONTENT_TYPE, "application/json"),
+                            (header::CACHE_CONTROL, "no-cache"),
+                        ],
+                        Body::from(body.to_string()),
+                    )
+                        .into_response()
+                }
+            }),
+        )
         .route("/dashboard/{*path}", get(asset))
 }
 

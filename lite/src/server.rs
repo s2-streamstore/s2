@@ -131,6 +131,18 @@ enum StoreType {
 }
 
 impl StoreType {
+    fn info(&self) -> dashboard::StoreInfo {
+        match self {
+            StoreType::S3Bucket(bucket) => dashboard::StoreInfo::S3 {
+                bucket: bucket.clone(),
+            },
+            StoreType::LocalFileSystem(root) => dashboard::StoreInfo::Local {
+                root: root.display().to_string(),
+            },
+            StoreType::InMemory => dashboard::StoreInfo::Memory,
+        }
+    }
+
     fn default_flush_interval(&self) -> Duration {
         Duration::from_millis(match self {
             StoreType::S3Bucket(_) => 50,
@@ -153,6 +165,14 @@ impl ServerProtocol {
             Self::Https { self_signed: false }
         } else {
             Self::Http
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Http => "none",
+            Self::Https { self_signed: true } => "self_signed",
+            Self::Https { self_signed: false } => "certificate",
         }
     }
 
@@ -243,6 +263,23 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let manifest_poll_interval = db_settings.manifest_poll_interval;
 
+    let server_info = dashboard::ServerInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        started_at: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)?,
+        store: store_type.info(),
+        wal: wal_store_type.as_ref().map(StoreType::info),
+        path: args.path.clone(),
+        flush_interval_ms: db_settings
+            .flush_interval
+            .map(|d| d.as_millis().try_into().unwrap_or(u64::MAX)),
+        tls: protocol.describe(),
+        port,
+        cors: !args.no_cors,
+        init_file: args.init_file.as_ref().map(|p| p.display().to_string()),
+        append_inflight_bytes: args.append_inflight_bytes.as_u64(),
+    };
+
     let mut builder = slatedb::Db::builder(args.path, object_store).with_settings(db_settings);
     if let Some(wal_object_store) = wal_object_store {
         info!(store = ?wal_store_type, "using dedicated WAL object store");
@@ -269,7 +306,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let mut app = handlers::router();
     if !args.no_dashboard {
-        app = app.merge(dashboard::router());
+        app = app.merge(dashboard::router(&server_info));
         info!("dashboard: {}/dashboard", cli_endpoint(protocol, port));
     }
     let mut app = app
