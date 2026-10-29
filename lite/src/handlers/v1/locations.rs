@@ -18,9 +18,21 @@ pub fn router() -> axum::Router<Backend> {
     tag = super::paths::locations::TAG,
     responses(
         (status = 200, body = Vec<v1t::location::LocationInfo>),
-        (status = 400, body = v1t::error::ErrorInfo),
-        (status = 403, body = v1t::error::ErrorInfo),
-        (status = 408, body = v1t::error::ErrorInfo),
+        (
+            status = 400,
+            description = "`bad_header` or `bad_query`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = 403,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = 408,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
 ))]
 pub async fn list_locations(
@@ -36,8 +48,16 @@ pub async fn list_locations(
     tag = super::paths::locations::TAG,
     responses(
         (status = 200, body = v1t::location::GetDefaultLocationResponse),
-        (status = 403, body = v1t::error::ErrorInfo),
-        (status = 408, body = v1t::error::ErrorInfo),
+        (
+            status = 403,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = 408,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
 ))]
 pub async fn get_default_location(
@@ -61,9 +81,21 @@ pub struct SetDefaultArgs {
     request_body = v1t::location::SetDefaultLocationRequest,
     responses(
         (status = 200, body = v1t::location::GetDefaultLocationResponse),
-        (status = 400, body = v1t::error::ErrorInfo),
-        (status = 403, body = v1t::error::ErrorInfo),
-        (status = 408, body = v1t::error::ErrorInfo),
+        (
+            status = 400,
+            description = "`bad_header` or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = 403,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = 408,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
 ))]
 pub async fn set_default_location(

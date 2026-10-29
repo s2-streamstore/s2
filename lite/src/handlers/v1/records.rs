@@ -104,11 +104,31 @@ pub struct CheckTailArgs {
     tag = super::paths::streams::records::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::stream::TailResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_path`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`stream_deletion_pending` / `basin_deletion_pending`: the stream or basin is being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found` or `stream_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::StreamNamePathSegment),
     servers(
@@ -151,16 +171,40 @@ pub struct ReadArgs {
     path = super::paths::streams::records::READ,
     tag = super::paths::streams::records::TAG,
     responses(
-        (status = StatusCode::OK, content(
+        (status = StatusCode::OK, description = "A single batch of records (`application/json`), or a stream of events when `Accept: text/event-stream` is sent.", content(
             (v1t::stream::ReadBatch = "application/json"),
             (v1t::stream::sse::ReadEvent = "text/event-stream"),
         )),
-        (status = StatusCode::RANGE_NOT_SATISFIABLE, body = v1t::stream::TailResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::RANGE_NOT_SATISFIABLE,
+            description = "No records satisfy the request under its effective `wait` and `clamp` behavior, e.g. the start position is beyond the tail; the body is the current tail. See https://s2.dev/docs/api/records/read#when-reads-return-416.",
+            body = v1t::stream::TailResponse,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_path`, or `bad_query`; `decryption_failed` if `s2-encryption-key` does not match the key the records were encrypted with.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`stream_deletion_pending` / `basin_deletion_pending`: the stream or basin is being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found` or `stream_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(
         v1t::StreamNamePathSegment,
@@ -361,13 +405,41 @@ pub struct AppendArgs {
     tag = super::paths::streams::records::TAG,
     request_body(content = v1t::stream::AppendInput, content_type = "application/json"),
     responses(
-        (status = StatusCode::OK, body = v1t::stream::AppendAck),
-        (status = StatusCode::PRECONDITION_FAILED, body = v1t::stream::AppendConditionFailed),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::OK,
+            description = "Records durably appended; the ack carries the assigned sequence number range and the new tail.",
+            body = v1t::stream::AppendAck,
+        ),
+        (
+            status = StatusCode::PRECONDITION_FAILED,
+            description = "An append condition was not met: `fencing_token_mismatch` (body carries the stream's current fencing token) or `seq_num_mismatch` (body carries the next assignable sequence number). Retrying unchanged will fail again.",
+            body = v1t::stream::AppendConditionFailed,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_json`, or `bad_proto`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`stream_deletion_pending` / `basin_deletion_pending`: the stream or basin is being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found` or `stream_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: the batch may or may not have been appended. If the original request included `match_seq_num`, retry with the same value to prevent duplicates. A `fencing_token` alone does not prevent duplicates.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(
         v1t::StreamNamePathSegment,
