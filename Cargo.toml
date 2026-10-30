@@ -18,7 +18,9 @@ repository = "https://github.com/s2-streamstore/s2"
 homepage = "https://s2.dev"
 
 [workspace.dependencies]
-aegis = "0.9"
+# aegis 0.9.20 makes GCC 9.2 in the x86_64 musl image pinned in Cross.toml
+# emit invalid AVX-512VL assembly. Recheck new aegis releases or image updates.
+aegis = "=0.9.15"
 aes-gcm = "0.11"
 async-stream = "0.3"
 async-trait = "0.1"
