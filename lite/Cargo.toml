@@ -8,6 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 keywords = ["s2", "durable", "streams", "object", "storage"]
 categories = ["database-implementations"]
+# Only the built dashboard bundle ships in the crate, not the submodule sources.
+exclude = ["dashboard/**", "!dashboard/apps/lite/dist/**"]
 
 [[bin]]
 name = "openapi"

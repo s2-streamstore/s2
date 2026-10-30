@@ -107,7 +107,11 @@ pub struct LiteArgs {
     /// Do not serve the web dashboard at /dashboard.
     ///
     /// Can also be set via S2LITE_NO_DASHBOARD environment variable.
-    #[arg(long, env = "S2LITE_NO_DASHBOARD")]
+    #[arg(
+        long,
+        env = "S2LITE_NO_DASHBOARD",
+        value_parser = clap::builder::FalseyValueParser::new()
+    )]
     pub no_dashboard: bool,
 
     /// Path to a JSON file defining basins and streams to create at startup.
