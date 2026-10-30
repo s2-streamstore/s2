@@ -114,3 +114,92 @@ async fn asset(Path(path): Path<String>) -> Response {
     }
     index().await
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::to_bytes, http::Request};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    fn info() -> ServerInfo {
+        ServerInfo {
+            version: "0.0.0-test",
+            started_at: "2026-01-01T00:00:00Z".into(),
+            store: StoreInfo::Memory,
+            wal: None,
+            path: String::new(),
+            flush_interval_ms: None,
+            tls: "off",
+            port: 4243,
+            cors: false,
+            init_file: None,
+            append_inflight_bytes: 0,
+        }
+    }
+
+    async fn get_path(path: &str) -> (StatusCode, String, String, String) {
+        let response = router::<()>(&info())
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let hdr = |name: header::HeaderName| {
+            response
+                .headers()
+                .get(name)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default()
+        };
+        let (content_type, cache) = (hdr(header::CONTENT_TYPE), hdr(header::CACHE_CONTROL));
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            content_type,
+            cache,
+            String::from_utf8_lossy(&body).into_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn serves_bundle_config_and_spa_fallback() {
+        let js = DASHBOARD_DIR
+            .get_dir("assets")
+            .and_then(|dir| {
+                dir.files()
+                    .find(|f| f.path().extension().is_some_and(|e| e == "js"))
+            })
+            .expect("bundle has a js asset");
+        let js_path = format!("/dashboard/{}", js.path().display());
+
+        let (status, content_type, cache, body) = get_path(&js_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, "text/javascript; charset=utf-8");
+        assert_eq!(cache, "public, max-age=3600");
+        assert_eq!(body.as_bytes(), js.contents());
+
+        let (status, _, _, _) = get_path("/dashboard/assets/missing.js").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, content_type, cache, body) = get_path("/dashboard").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(cache, "no-cache");
+        assert!(
+            body.contains("/dashboard/assets/"),
+            "index links its assets"
+        );
+
+        let (status, _, _, spa) = get_path("/dashboard/basins/abc/studio").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(spa, body, "client routes get the SPA shell");
+
+        let (status, content_type, cache, body) = get_path("/dashboard/config.json").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, "application/json");
+        assert_eq!(cache, "no-cache");
+        let config: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(config["store"]["kind"], "memory");
+        assert_eq!(config["version"], "0.0.0-test");
+    }
+}
