@@ -214,7 +214,7 @@ fn cli_env_hint(protocol: ServerProtocol, port: u16, dashboard: bool) -> String 
 
     if dashboard {
         lines.push(String::new());
-        lines.push(format!("... or use the dashboard at {endpoint}/dashboard"));
+        lines.push(format!("or use the dashboard at {endpoint}/dashboard"));
     }
 
     lines.join("\n")
@@ -693,7 +693,7 @@ mod tests {
                 "export S2_BASIN_ENDPOINT=http://localhost:8080\n",
                 "export S2_ACCESS_TOKEN=ignored\n",
                 "\n",
-                "... or use the dashboard at http://localhost:8080/dashboard",
+                "or use the dashboard at http://localhost:8080/dashboard",
             )
         );
     }
