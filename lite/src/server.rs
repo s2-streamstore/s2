@@ -199,7 +199,7 @@ fn cli_endpoint(protocol: ServerProtocol, port: u16) -> String {
     format!("{}://localhost:{port}", protocol.scheme())
 }
 
-fn cli_env_hint(protocol: ServerProtocol, port: u16) -> String {
+fn cli_env_hint(protocol: ServerProtocol, port: u16, dashboard: bool) -> String {
     let endpoint = cli_endpoint(protocol, port);
     let mut lines = vec![
         "copy/paste into a new terminal to point the S2 CLI at this server:".to_string(),
@@ -212,6 +212,11 @@ fn cli_env_hint(protocol: ServerProtocol, port: u16) -> String {
         lines.push("export S2_SSL_NO_VERIFY=1".to_string());
     }
 
+    if dashboard {
+        lines.push(String::new());
+        lines.push(format!("... or use the dashboard at {endpoint}/dashboard"));
+    }
+
     lines.join("\n")
 }
 
@@ -221,7 +226,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     let protocol = ServerProtocol::from_args(&args);
     let port = args.port.unwrap_or_else(|| protocol.default_port());
     let addr = format!("0.0.0.0:{port}");
-    let cli_hint = cli_env_hint(protocol, port);
+    let cli_hint = cli_env_hint(protocol, port, !args.no_dashboard);
 
     let store_type = if let Some(bucket) = args.bucket {
         StoreType::S3Bucket(bucket)
@@ -307,7 +312,6 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     let mut app = handlers::router();
     if !args.no_dashboard {
         app = app.merge(dashboard::router(&server_info));
-        info!("dashboard: {}/dashboard", cli_endpoint(protocol, port));
     }
     let mut app = app
         .with_state(backend)
@@ -682,12 +686,14 @@ mod tests {
     #[test]
     fn cli_env_hint_includes_exports_for_http() {
         assert_eq!(
-            cli_env_hint(ServerProtocol::Http, 8080),
+            cli_env_hint(ServerProtocol::Http, 8080, true),
             concat!(
                 "copy/paste into a new terminal to point the S2 CLI at this server:\n",
                 "export S2_ACCOUNT_ENDPOINT=http://localhost:8080\n",
                 "export S2_BASIN_ENDPOINT=http://localhost:8080\n",
-                "export S2_ACCESS_TOKEN=ignored",
+                "export S2_ACCESS_TOKEN=ignored\n",
+                "\n",
+                "... or use the dashboard at http://localhost:8080/dashboard",
             )
         );
     }
@@ -695,7 +701,7 @@ mod tests {
     #[test]
     fn cli_env_hint_includes_ssl_no_verify_for_self_signed_tls() {
         assert_eq!(
-            cli_env_hint(ServerProtocol::Https { self_signed: true }, 8443),
+            cli_env_hint(ServerProtocol::Https { self_signed: true }, 8443, false),
             concat!(
                 "copy/paste into a new terminal to point the S2 CLI at this server:\n",
                 "export S2_ACCOUNT_ENDPOINT=https://localhost:8443\n",
