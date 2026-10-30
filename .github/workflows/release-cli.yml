@@ -338,11 +338,19 @@ jobs:
           echo "MAC_INTEL_SHA256=$MAC_INTEL_SHA256" >> $GITHUB_ENV
           MAC_ARM_SHA256=$(shasum -a 256 aarch64-apple-darwin/s2-aarch64-apple-darwin.zip | awk '{print $1}')
           echo "MAC_ARM_SHA256=$MAC_ARM_SHA256" >> $GITHUB_ENV
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        id: generate-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          owner: s2-streamstore
+          repositories: homebrew-s2
       - name: Checkout homebrew repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: 's2-streamstore/homebrew-s2'
-          token: ${{ secrets.HOMEBREW_PAT }}
+          token: ${{ steps.generate-token.outputs.token }}
       - name: Update formula
         run: |
           sed -i.bak "s/^  version \".*\"$/  version \"${{ steps.version.outputs.value }}\"/" s2.rb
@@ -352,8 +360,8 @@ jobs:
           sed -z -i -e 's/[0-9a-f]\{64\}/${{ env.LINUX_ARM_SHA256 }}/4' s2.rb
       - name: Push formula
         run: |
-          git config --global user.email "mehul@s2.dev"
-          git config --global user.name "Mehul Arora"
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
           git add s2.rb
           git commit -m "Update S2 to ${{ steps.version.outputs.value }}"
           git push
