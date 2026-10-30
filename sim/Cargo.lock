@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.43.4"
+version = "0.43.5"
 dependencies = [
  "async-stream",
  "async-trait",
