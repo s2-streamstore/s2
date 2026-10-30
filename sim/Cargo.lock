@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.43.3"
+version = "0.43.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "s2-storage"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "aegis",
  "aes-gcm",
