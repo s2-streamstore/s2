@@ -12,7 +12,7 @@ keywords = ["s2", "durable", "streams", "storage"]
 test-util = []
 
 [dependencies]
-aegis = "=0.9.15"
+aegis = { workspace = true }
 aes-gcm = { workspace = true, features = ["zeroize"] }
 blake3 = { workspace = true }
 bytes = { workspace = true }
