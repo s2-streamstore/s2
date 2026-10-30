@@ -1,3 +1,6 @@
 [submodule "api/specs"]
 	path = api/specs
 	url = https://github.com/s2-streamstore/s2-specs.git
+[submodule "lite/dashboard"]
+	path = lite/dashboard
+	url = https://github.com/s2-streamstore/s2-dashboard.git

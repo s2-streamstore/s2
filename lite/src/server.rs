@@ -18,7 +18,7 @@ use tower_http::{
 };
 use tracing::info;
 
-use crate::{backend::Backend, handlers, init};
+use crate::{backend::Backend, dashboard, handlers, init};
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct TlsConfig {
@@ -104,6 +104,16 @@ pub struct LiteArgs {
     #[arg(long)]
     pub no_cors: bool,
 
+    /// Do not serve the web dashboard at /dashboard.
+    ///
+    /// Can also be set via S2LITE_NO_DASHBOARD environment variable.
+    #[arg(
+        long,
+        env = "S2LITE_NO_DASHBOARD",
+        value_parser = clap::builder::FalseyValueParser::new()
+    )]
+    pub no_dashboard: bool,
+
     /// Path to a JSON file defining basins and streams to create at startup.
     ///
     /// Creates missing resources and updates existing configs to match the file,
@@ -125,6 +135,18 @@ enum StoreType {
 }
 
 impl StoreType {
+    fn info(&self) -> dashboard::StoreInfo {
+        match self {
+            StoreType::S3Bucket(bucket) => dashboard::StoreInfo::S3 {
+                bucket: bucket.clone(),
+            },
+            StoreType::LocalFileSystem(root) => dashboard::StoreInfo::Local {
+                root: root.display().to_string(),
+            },
+            StoreType::InMemory => dashboard::StoreInfo::Memory,
+        }
+    }
+
     fn default_flush_interval(&self) -> Duration {
         Duration::from_millis(match self {
             StoreType::S3Bucket(_) => 50,
@@ -147,6 +169,14 @@ impl ServerProtocol {
             Self::Https { self_signed: false }
         } else {
             Self::Http
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Http => "none",
+            Self::Https { self_signed: true } => "self_signed",
+            Self::Https { self_signed: false } => "certificate",
         }
     }
 
@@ -173,7 +203,7 @@ fn cli_endpoint(protocol: ServerProtocol, port: u16) -> String {
     format!("{}://localhost:{port}", protocol.scheme())
 }
 
-fn cli_env_hint(protocol: ServerProtocol, port: u16) -> String {
+fn cli_env_hint(protocol: ServerProtocol, port: u16, dashboard: bool) -> String {
     let endpoint = cli_endpoint(protocol, port);
     let mut lines = vec![
         "copy/paste into a new terminal to point the S2 CLI at this server:".to_string(),
@@ -186,6 +216,11 @@ fn cli_env_hint(protocol: ServerProtocol, port: u16) -> String {
         lines.push("export S2_SSL_NO_VERIFY=1".to_string());
     }
 
+    if dashboard {
+        lines.push(String::new());
+        lines.push(format!("or use the dashboard at {endpoint}/dashboard"));
+    }
+
     lines.join("\n")
 }
 
@@ -195,7 +230,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     let protocol = ServerProtocol::from_args(&args);
     let port = args.port.unwrap_or_else(|| protocol.default_port());
     let addr = format!("0.0.0.0:{port}");
-    let cli_hint = cli_env_hint(protocol, port);
+    let cli_hint = cli_env_hint(protocol, port, !args.no_dashboard);
 
     let store_type = if let Some(bucket) = args.bucket {
         StoreType::S3Bucket(bucket)
@@ -237,6 +272,23 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let manifest_poll_interval = db_settings.manifest_poll_interval;
 
+    let server_info = dashboard::ServerInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        started_at: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)?,
+        store: store_type.info(),
+        wal: wal_store_type.as_ref().map(StoreType::info),
+        path: args.path.clone(),
+        flush_interval_ms: db_settings
+            .flush_interval
+            .map(|d| d.as_millis().try_into().unwrap_or(u64::MAX)),
+        tls: protocol.describe(),
+        port,
+        cors: !args.no_cors,
+        init_file: args.init_file.as_ref().map(|p| p.display().to_string()),
+        append_inflight_bytes: args.append_inflight_bytes.as_u64(),
+    };
+
     let mut builder = slatedb::Db::builder(args.path, object_store).with_settings(db_settings);
     if let Some(wal_object_store) = wal_object_store {
         info!(store = ?wal_store_type, "using dedicated WAL object store");
@@ -261,7 +313,11 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         init::apply(&backend, spec).await?;
     }
 
-    let mut app = handlers::router()
+    let mut app = handlers::router();
+    if !args.no_dashboard {
+        app = app.merge(dashboard::router(&server_info));
+    }
+    let mut app = app
         .with_state(backend)
         .layer(
             TraceLayer::new_for_http()
@@ -634,12 +690,14 @@ mod tests {
     #[test]
     fn cli_env_hint_includes_exports_for_http() {
         assert_eq!(
-            cli_env_hint(ServerProtocol::Http, 8080),
+            cli_env_hint(ServerProtocol::Http, 8080, true),
             concat!(
                 "copy/paste into a new terminal to point the S2 CLI at this server:\n",
                 "export S2_ACCOUNT_ENDPOINT=http://localhost:8080\n",
                 "export S2_BASIN_ENDPOINT=http://localhost:8080\n",
-                "export S2_ACCESS_TOKEN=ignored",
+                "export S2_ACCESS_TOKEN=ignored\n",
+                "\n",
+                "or use the dashboard at http://localhost:8080/dashboard",
             )
         );
     }
@@ -647,7 +705,7 @@ mod tests {
     #[test]
     fn cli_env_hint_includes_ssl_no_verify_for_self_signed_tls() {
         assert_eq!(
-            cli_env_hint(ServerProtocol::Https { self_signed: true }, 8443),
+            cli_env_hint(ServerProtocol::Https { self_signed: true }, 8443, false),
             concat!(
                 "copy/paste into a new terminal to point the S2 CLI at this server:\n",
                 "export S2_ACCOUNT_ENDPOINT=https://localhost:8443\n",

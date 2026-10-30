@@ -67,6 +67,7 @@ jobs:
           ref: ${{ matrix.sdk.ref }}
           token: ${{ secrets.GH_TOKEN || github.token }}
           path: sdk
+          submodules: true
 
       - name: Setup Go
         if: matrix.sdk.lang == 'go'
