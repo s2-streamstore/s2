@@ -194,6 +194,23 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](charts/s2-lite-helm/README.md) for installation instructions and configuration options.
 
+### Network
+
+By default, Lite listens on all IPv4 interfaces (`0.0.0.0`). Use `--host` (or `S2LITE_HOST`) to listen elsewhere:
+
+```bash
+s2 lite --port 8080 --host ::         # IPv4 and IPv6 (dual-stack)
+s2 lite --port 8080 --host ::1        # IPv6 loopback only
+s2 lite --port 8080 --host 127.0.0.1  # IPv4 loopback only
+```
+
+IPv6 addresses in endpoint URLs must be enclosed in brackets:
+
+```bash
+export S2_ACCOUNT_ENDPOINT="http://[::1]:8080"
+export S2_BASIN_ENDPOINT="http://[::1]:8080"
+```
+
 ### Storage
 
 Lite persists to an S3-compatible bucket or a local directory, or runs in-memory when neither is given.

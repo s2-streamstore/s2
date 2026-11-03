@@ -3611,6 +3611,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slatedb",
+ "socket2",
  "strum",
  "thiserror 2.0.21",
  "tikv-jemallocator",

@@ -5,7 +5,7 @@
 //! only its committed `apps/lite/dist` build is embedded. The app talks to
 //! this server on the same origin, so no token or CORS configuration is needed.
 
-use std::sync::Arc;
+use std::{net::IpAddr, sync::Arc};
 
 use axum::{
     Router,
@@ -41,6 +41,8 @@ pub struct ServerInfo {
     pub path: String,
     pub flush_interval_ms: Option<u64>,
     pub tls: &'static str,
+    /// IP address the server listens on.
+    pub host: IpAddr,
     pub port: u16,
     pub cors: bool,
     pub init_file: Option<String>,
@@ -131,6 +133,7 @@ mod tests {
             path: String::new(),
             flush_interval_ms: None,
             tls: "off",
+            host: "::".parse().unwrap(),
             port: 4243,
             cors: false,
             init_file: None,
@@ -201,5 +204,6 @@ mod tests {
         let config: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(config["store"]["kind"], "memory");
         assert_eq!(config["version"], "0.0.0-test");
+        assert_eq!(config["host"], "::");
     }
 }
