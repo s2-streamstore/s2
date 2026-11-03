@@ -4,6 +4,7 @@ use std::{
     collections::HashSet,
     env::VarError,
     fmt,
+    net::IpAddr,
     num::NonZeroU32,
     ops::{Deref, RangeTo},
     pin::Pin,
@@ -215,6 +216,32 @@ pub(crate) enum BasinAuthority {
     Direct(Authority),
 }
 
+/// Parses the authority of an account or basin endpoint.
+fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, String> {
+    authority.parse().map_err(|e| {
+        // A bare IPv6 address has several colons, which `Authority` cannot tell
+        // apart from the port separator.
+        if !authority.starts_with('[') && authority.matches(':').count() > 1 {
+            format!(
+                "invalid {kind} endpoint authority: {e}; IPv6 addresses must be enclosed in \
+                 brackets, e.g. [::1]:8080"
+            )
+        } else {
+            format!("invalid {kind} endpoint authority: {e}")
+        }
+    })
+}
+
+/// Whether the authority's host is an IP address (`127.0.0.1`, `[::1]`) rather than a DNS name.
+fn is_ip_literal(authority: &Authority) -> bool {
+    let host = authority.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().is_ok()
+}
+
 /// Account endpoint.
 #[derive(Debug, Clone)]
 pub struct AccountEndpoint {
@@ -244,9 +271,7 @@ impl FromStr for AccountEndpoint {
         };
         Ok(Self {
             scheme,
-            authority: authority
-                .parse()
-                .map_err(|e| format!("invalid account endpoint authority: {e}"))?,
+            authority: parse_endpoint_authority(authority, "account")?,
         })
     }
 }
@@ -260,6 +285,9 @@ pub struct BasinEndpoint {
 
 impl BasinEndpoint {
     /// Create a new [`BasinEndpoint`] with the given endpoint.
+    ///
+    /// Returns an error if the `{basin}.` placeholder is used with an IP address,
+    /// which cannot have basin subdomains.
     pub fn new(endpoint: &str) -> Result<Self, ValidationError> {
         endpoint.parse()
     }
@@ -279,17 +307,18 @@ impl FromStr for BasinEndpoint {
             None => (Scheme::HTTPS, s),
         };
         let authority = if let Some(authority) = authority.strip_prefix("{basin}.") {
-            BasinAuthority::ParentZone(
-                authority
-                    .parse()
-                    .map_err(|e| format!("invalid basin endpoint authority: {e}"))?,
-            )
+            let zone = parse_endpoint_authority(authority, "basin")?;
+            if is_ip_literal(&zone) {
+                return Err(format!(
+                    "invalid basin endpoint: the {{basin}}. placeholder requires a DNS name, but \
+                     {zone} is an IP address; remove the placeholder to connect to the address \
+                     directly"
+                )
+                .into());
+            }
+            BasinAuthority::ParentZone(zone)
         } else {
-            BasinAuthority::Direct(
-                authority
-                    .parse()
-                    .map_err(|e| format!("invalid basin endpoint authority: {e}"))?,
-            )
+            BasinAuthority::Direct(parse_endpoint_authority(authority, "basin")?)
         };
         Ok(Self { scheme, authority })
     }
@@ -4065,9 +4094,28 @@ mod tests {
     #[case::https_with_scheme("https://aws.s2.dev", Scheme::HTTPS)]
     #[case::http_with_scheme("http://localhost:8080", Scheme::HTTP)]
     #[case::default_https("aws.s2.dev", Scheme::HTTPS)]
+    #[case::ipv4("http://127.0.0.1:8080", Scheme::HTTP)]
+    #[case::ipv6("http://[::1]:8080", Scheme::HTTP)]
+    #[case::ipv6_default_https("[2001:db8::1]", Scheme::HTTPS)]
     fn account_endpoint_parse(#[case] input: &str, #[case] expected_scheme: Scheme) {
         let ep: AccountEndpoint = input.parse().unwrap();
         assert_eq!(ep.scheme, expected_scheme);
+    }
+
+    #[rstest]
+    #[case::loopback("http://::1:8080")]
+    #[case::no_port("2001:db8::1")]
+    fn endpoint_unbracketed_ipv6_suggests_brackets(#[case] input: &str) {
+        let error = input.parse::<AccountEndpoint>().unwrap_err();
+        assert!(error.0.contains("must be enclosed in brackets"));
+        let error = input.parse::<BasinEndpoint>().unwrap_err();
+        assert!(error.0.contains("must be enclosed in brackets"));
+    }
+
+    #[test]
+    fn endpoint_invalid_authority_without_ipv6_has_no_bracket_hint() {
+        let error = "http://bad host".parse::<AccountEndpoint>().unwrap_err();
+        assert!(!error.0.contains("brackets"));
     }
 
     // -- BasinEndpoint --
@@ -4076,6 +4124,9 @@ mod tests {
     #[case::https_parent_zone("https://{basin}.b.s2.dev", Scheme::HTTPS, true)]
     #[case::http_direct("http://localhost:8080", Scheme::HTTP, false)]
     #[case::default_https_parent_zone("{basin}.b.s2.dev", Scheme::HTTPS, true)]
+    #[case::ipv4_direct("http://127.0.0.1:8080", Scheme::HTTP, false)]
+    #[case::ipv6_direct("http://[::1]:8080", Scheme::HTTP, false)]
+    #[case::ipv6_default_https_direct("[2001:db8::1]:8443", Scheme::HTTPS, false)]
     fn basin_endpoint_parse(
         #[case] input: &str,
         #[case] expected_scheme: Scheme,
@@ -4087,6 +4138,15 @@ mod tests {
             matches!(ep.authority, BasinAuthority::ParentZone(_)),
             expected_parent_zone
         );
+    }
+
+    #[rstest]
+    #[case::ipv4("http://{basin}.127.0.0.1:8080")]
+    #[case::ipv6("http://{basin}.[::1]:8080")]
+    #[case::ipv6_default_https("{basin}.[2001:db8::1]")]
+    fn basin_endpoint_parent_zone_rejects_ip_literals(#[case] input: &str) {
+        let error = input.parse::<BasinEndpoint>().unwrap_err();
+        assert!(error.0.contains("placeholder requires a DNS name"));
     }
 
     // -- S2Endpoints --
