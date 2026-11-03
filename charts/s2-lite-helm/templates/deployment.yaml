@@ -43,6 +43,10 @@ spec:
           - lite
           - --port
           - {{ .Values.service.targetPort | quote }}
+          {{- with .Values.listenAddress }}
+          - --host
+          - {{ . | quote }}
+          {{- end }}
           {{- if .Values.tls.enabled }}
           {{- if .Values.tls.selfSigned }}
           - --tls-self

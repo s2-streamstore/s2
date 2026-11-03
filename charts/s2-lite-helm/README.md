@@ -117,6 +117,22 @@ helm install my-s2-lite s2/s2-lite-helm \
   --set volumes[0].secret.secretName=s2-lite-tls
 ```
 
+### IPv6 and dual-stack clusters
+
+By default s2-lite listens on IPv4 only. On IPv6-only or IPv6-primary clusters the pod IP is IPv6, so
+health probes fail and the pod never becomes ready. Set `listenAddress` to `::` to listen on both IPv4
+and IPv6, and optionally make the Service dual-stack:
+
+```yaml
+# values.yaml
+listenAddress: "::"
+service:
+  ipFamilyPolicy: PreferDualStack
+  ipFamilies: [IPv6, IPv4]
+```
+
+`listenAddress` requires an s2 image that supports `s2 lite --host`.
+
 ## Configuration
 
 For all configuration options, see the [values.yaml](values.yaml) file.
@@ -131,6 +147,9 @@ Common configurations:
 | `service.type` | Service type | `ClusterIP` |
 | `service.port` | Service port | `80` |
 | `service.targetPort` | Container port | `8080` |
+| `service.ipFamilyPolicy` | Service IP family policy (`SingleStack`, `PreferDualStack`, `RequireDualStack`) | `""` (cluster default) |
+| `service.ipFamilies` | Service IP families, e.g. `[IPv6, IPv4]` | `[]` (cluster default) |
+| `listenAddress` | IP address to listen on (`--host`); `::` for IPv4 and IPv6 | `""` (`0.0.0.0`) |
 | `tls.enabled` | Enable TLS | `false` |
 | `tls.selfSigned` | Use auto-generated self-signed certificate | `false` |
 | `tls.cert` | Path to TLS certificate (when using provided cert) | `""` |

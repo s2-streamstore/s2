@@ -64,6 +64,19 @@ service:
   # External-DNS example (automatic DNS record creation):
   #   external-dns.alpha.kubernetes.io/hostname: "s2-lite.example.com"
   annotations: {}
+  # IP families for dual-stack or IPv6-only clusters. Leave unset to use the
+  # cluster default. Example:
+  #   ipFamilyPolicy: PreferDualStack
+  #   ipFamilies: [IPv6, IPv4]
+  ipFamilyPolicy: ""
+  ipFamilies: []
+
+# IP address s2-lite listens on inside the pod (--host). Leave empty for the
+# server default (0.0.0.0, IPv4 only). Set to "::" to listen on IPv4 and IPv6,
+# which is required on IPv6-only and IPv6-primary clusters, where pod IPs
+# (and therefore health probes) are IPv6. Requires an s2 image with --host
+# support.
+listenAddress: ""
 
 # ------------------------------------------------------------------------------
 # TLS Configuration
