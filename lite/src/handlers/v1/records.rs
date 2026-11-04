@@ -416,34 +416,50 @@ pub async fn append(
         v1t::stream::AppendRequest::S2s {
             encryption_key,
             create_stream_config_patch,
-            inputs,
+            mut inputs,
             response_compression,
         } => {
-            let handle = backend
-                .open_for_append(&basin, &stream, encryption_key, create_stream_config_patch)
-                .await?;
             let (err_tx, err_rx) = tokio::sync::oneshot::channel();
 
-            let inputs = async_stream::stream! {
-                tokio::pin!(inputs);
-                let mut err_tx = Some(err_tx);
-                while let Some(input) = inputs.next().await {
-                    match input {
-                        Ok(input) => yield input,
-                        Err(e) => {
-                            if let Some(tx) = err_tx.take() {
-                                let _ = tx.send(e);
+            let ack_stream = match inputs.next().await {
+                Some(Ok(first)) => {
+                    let handle = backend
+                        .open_for_append(
+                            &basin,
+                            &stream,
+                            encryption_key,
+                            create_stream_config_patch,
+                        )
+                        .await?;
+                    let rest = async_stream::stream! {
+                        yield first;
+                        let mut err_tx = Some(err_tx);
+                        while let Some(input) = inputs.next().await {
+                            match input {
+                                Ok(input) => yield input,
+                                Err(e) => {
+                                    if let Some(tx) = err_tx.take() {
+                                        let _ = tx.send(e);
+                                    }
+                                    break;
+                                }
                             }
-                            break;
                         }
-                    }
+                    };
+                    handle
+                        .append_session(rest)
+                        .map(|res| {
+                            res.map(v1t::stream::proto::AppendAck::from)
+                                .map_err(ServiceError::from)
+                        })
+                        .left_stream()
                 }
+                Some(Err(e)) => {
+                    let _ = err_tx.send(e);
+                    futures::stream::empty().right_stream()
+                }
+                None => futures::stream::empty().right_stream(),
             };
-
-            let ack_stream = handle.append_session(inputs).map(|res| {
-                res.map(v1t::stream::proto::AppendAck::from)
-                    .map_err(ServiceError::from)
-            });
 
             let input_err_stream = futures::stream::once(err_rx).filter_map(|res| async move {
                 match res {
@@ -1001,6 +1017,68 @@ mod tests {
             .await
             .expect("get stream config");
         assert_eq!(config, expected_auto_created_config());
+    }
+
+    #[tokio::test]
+    async fn s2s_append_with_malformed_body_does_not_auto_create_stream() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-s2s-malformed-body",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        // Regular frame (flag = 0x00, None compression) carrying a payload that
+        // is not a valid `AppendInput` proto, so frame decoding fails lazily
+        // after the handler starts consuming the s2s body.
+        let mut body = BytesMut::new();
+        body.extend_from_slice(&[0x00, 0x00, 0x03, 0x00, 0xff, 0xff]);
+
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "s2s/proto")
+                .body(Body::from(body.freeze()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_bytes(response, "s2s terminal error frame").await;
+        let frame = decode_single_frame(body, "terminal error frame");
+        let SessionMessage::Terminal(msg) = frame else {
+            panic!("expected terminal error frame, got {frame:?}");
+        };
+        assert!(
+            msg.status >= 400,
+            "expected an error status, got {} ({:?})",
+            msg.status,
+            msg.body
+        );
+
+        assert_no_streams(&backend, &basin).await;
+    }
+
+    #[tokio::test]
+    async fn s2s_append_with_empty_body_does_not_auto_create_stream() {
+        let (app, backend, basin, stream) = setup_app_without_stream(
+            "append-s2s-empty-body",
+            basin_config_with_create_stream_on_append(),
+        )
+        .await;
+
+        let response = send(
+            &app,
+            request_builder("POST", format!("/v1/streams/{stream}/records"), &basin)
+                .header(header::CONTENT_TYPE, "s2s/proto")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_bytes(response, "s2s empty body").await;
+        assert!(body.is_empty(), "expected no s2s frames, got {body:?}");
+        assert_no_streams(&backend, &basin).await;
     }
 
     #[rstest::rstest]
