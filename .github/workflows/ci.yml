@@ -232,19 +232,22 @@ jobs:
           cd /tmp/s2-verification/golang/s2-porcupine
           go build -o /tmp/s2-porcupine .
 
+      # The checker has no time limit of its own and can search a very ambiguous
+      # history for hours. Fail the step instead of hitting the job timeout,
+      # which cancels the job and skips uploading the histories.
       - name: Linearizability tests
         run: |
           for seed in 1 2 3; do
             echo "starting"
             ./sim/target/sim/sim linearizable --seed "$seed" --clients 3 --ops-per-client 50
-            /tmp/s2-porcupine -file="history.$seed.jsonl"
+            timeout 5m /tmp/s2-porcupine -file="history.$seed.jsonl"
             echo "finished"
           done
           # And under network chaos (message loss).
           for seed in 4 5; do
             echo "starting"
             ./sim/target/sim/sim --fail-rate 0.005 linearizable --seed "$seed" --clients 3 --ops-per-client 50
-            /tmp/s2-porcupine -file="history.$seed.jsonl"
+            timeout 5m /tmp/s2-porcupine -file="history.$seed.jsonl"
             echo "finished"
           done
 
