@@ -17,6 +17,8 @@ ignore = [
     { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 via slatedb/foyer: neither reuses a context through `with_context`." },
     { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 via slatedb/foyer: the `seekable` feature is not enabled." },
     { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 via slatedb/foyer: they only decompress with `decode_all` and `read::Decoder`, which are unaffected." },
+
+    { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar unmaintained, required by testcontainers 0.28 (latest); s2-testcontainers does not use its tar-backed copy or image-build APIs." },
 ]
 
 [licenses]
