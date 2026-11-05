@@ -403,6 +403,8 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
       - name: Run tests
+        # These run against S2 cloud, and fork PRs don't get the token.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         run: cargo test --locked -p s2-sdk --all-features
         env:
           S2_ACCESS_TOKEN: ${{ secrets.S2_ACCESS_TOKEN_FOR_RUST_SDK_TESTS }}
@@ -426,3 +428,32 @@ jobs:
             "test_cmd": "cargo test --locked -p s2-cli --test integration -j 1"
           }
         ]
+
+  # The single check to require on main. A required check that was skipped
+  # counts as passing, so requiring the jobs directly would let a PR merge while
+  # the cooldown gate holds them back.
+  ci-result:
+    name: CI Result
+    if: ${{ !cancelled() }}
+    needs:
+      - rust-dependency-cooldown
+      - changes
+      - cli-schema-drift
+      - fmt
+      - lockfile
+      - sort
+      - deny
+      - clippy
+      - test
+      - testcontainers
+      - simulation
+      - helm-lint
+      - build-server
+      - sdk-integration-tests
+      - rust-sdk
+      - cli-integration-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
