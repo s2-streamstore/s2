@@ -2,4 +2,4 @@
 min-publish-age = true
 
 [registry]
-global-min-publish-age = "7 days"
+global-min-publish-age = "3 days"

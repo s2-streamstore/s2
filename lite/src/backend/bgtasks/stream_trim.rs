@@ -126,7 +126,7 @@ impl Backend {
         pending: PendingTrim,
         has_remaining_records: bool,
     ) -> Result<(), StorageError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
         let trim_point_key = kv::stream_trim_point::ser_key(pending.stream_id);
         let current_seq = db_txn_get_with(&txn, &trim_point_key, |entry| Ok(entry.seq)).await?;
         // A tick can exit on error while its submitted cleanup is still running.

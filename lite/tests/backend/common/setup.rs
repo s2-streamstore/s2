@@ -59,7 +59,7 @@ pub async fn assert_pending_until_committed<T: Debug>(
             result = operation => panic!("metadata acknowledged before flush: {result:?}"),
             seq = async {
                 loop {
-                    let seq = db.snapshot().await.unwrap().seq();
+                    let seq = db.snapshot().unwrap().seq();
                     if seq > db.status().durable_seq {
                         return seq;
                     }

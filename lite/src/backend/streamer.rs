@@ -2065,7 +2065,7 @@ mod tests {
         );
         let task = tokio::spawn(streamer.run(msg_rx));
         tokio::time::timeout(Duration::from_secs(5), async {
-            while db.snapshot().await.unwrap().seq() == 0 {
+            while db.snapshot().unwrap().seq() == 0 {
                 tokio::task::yield_now().await;
             }
         })
