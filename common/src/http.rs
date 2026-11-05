@@ -17,7 +17,7 @@ pub mod extract {
     pub enum HeaderRejection {
         #[error("Missing header `{0}`")]
         MissingHeader(&'static http::HeaderName),
-        #[error("Invalid header `{0}`: not UTF-8")]
+        #[error("Invalid header `{0}`: not visible ASCII")]
         InvalidUtf8(&'static http::HeaderName),
         #[error("Invalid header `{0}`: {1}")]
         InvalidHeaderValue(&'static http::HeaderName, String),
