@@ -115,7 +115,7 @@ impl Backend {
         stream: StreamName,
     ) -> Result<StreamerClient, StreamerError> {
         // Read one consistent, durable view of the stream.
-        let snapshot = self.db.snapshot().await.map_err(StorageError::from)?;
+        let snapshot = self.db.snapshot().map_err(StorageError::from)?;
         self.await_durable_seq(snapshot.seq()).await?;
         let stream_id = StreamId::new(&basin, &stream);
 

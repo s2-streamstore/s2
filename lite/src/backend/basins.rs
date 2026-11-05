@@ -77,7 +77,7 @@ impl Backend {
     ) -> Result<ProvisionResult<BasinInfo>, ProvisionBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
 
         // A transaction can see metadata that has not been flushed yet.
         let (existing_meta, existing_seq) = db_txn_get_with(&txn, &meta_key, |entry| {
@@ -184,7 +184,7 @@ impl Backend {
     ) -> Result<BasinConfig, ReconfigureBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
 
         let Some(mut meta) = db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await? else {
             return Err(BasinNotFoundError { basin }.into());
@@ -204,7 +204,7 @@ impl Backend {
     }
 
     pub async fn delete_basin(&self, basin: BasinName) -> Result<(), DeleteBasinError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
         let meta_key = kv::basin_meta::ser_key(&basin);
         let Some((mut meta, seq)) = db_txn_get_with(&txn, &meta_key, |entry| {
             Ok((kv::basin_meta::deser_value(entry.value)?, entry.seq))

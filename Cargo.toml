@@ -65,7 +65,7 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rkyv = "0.8"
 rpassword = "7.5"
-rstest = "0.27"
+rstest = "0.28"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 s2-api = { path = "api", version = "0.32" }
 s2-common = { path = "common", version = "0.42" }
@@ -78,7 +78,7 @@ secrecy = "0.10.3"
 semver = "1.0"
 serde = "1.0"
 serde_json = "1.0"
-slatedb = "0.17"
+slatedb = "0.18"
 strum = "0.28"
 tabled = "0.22"
 tempfile = "3.27"

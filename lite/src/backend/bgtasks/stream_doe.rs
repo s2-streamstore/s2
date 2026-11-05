@@ -112,7 +112,7 @@ impl Backend {
     ) -> Result<Option<CheckSnapshot>, StorageError> {
         // Observation needs a consistent view, but no transaction read set. The
         // completion transaction validates this revision after the actor's scan.
-        let snapshot = self.db.snapshot().await?;
+        let snapshot = self.db.snapshot()?;
         let state = db_snapshot_get_with(
             &snapshot,
             kv::stream_doe_state::ser_key(pending.stream_id),
@@ -163,7 +163,7 @@ impl Backend {
         pending: PendingCheck,
         observed: Option<(kv::stream_doe_state::State, u64)>,
     ) -> Result<(), StorageError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
         let current = db_txn_get_with(
             &txn,
             kv::stream_doe_state::ser_key(pending.stream_id),
@@ -199,7 +199,7 @@ impl Backend {
         snapshot: CheckSnapshot,
         outcome: TerminalTrimOutcome,
     ) -> Result<(), StorageError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
         let state = db_txn_get_with(
             &txn,
             kv::stream_doe_state::ser_key(pending.stream_id),
@@ -277,7 +277,7 @@ impl Backend {
         if pending.is_empty() {
             return Ok(progress);
         }
-        let snapshot = self.db.snapshot().await?;
+        let snapshot = self.db.snapshot()?;
         let mut migrations = stream::iter(pending)
             .map(|(stream_id, keys)| self.migrate_doe_deadlines(&snapshot, stream_id, keys))
             .buffer_unordered(CONCURRENCY);
@@ -321,7 +321,7 @@ impl Backend {
         stream_id: StreamId,
         keys: Vec<Bytes>,
     ) -> Result<(), StorageError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
         let mapping = db_txn_get_with(&txn, kv::stream_id_mapping::ser_key(stream_id), |entry| {
             Ok((kv::stream_id_mapping::deser_value(entry.value)?, entry.seq))
         })
@@ -456,7 +456,6 @@ mod tests {
         let txn = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
-            .await
             .unwrap();
         doe::schedule(&txn, stream_id, TimestampSecs::ZERO)
             .await
@@ -782,7 +781,6 @@ mod tests {
             let txn = backend
                 .db
                 .begin(IsolationLevel::SerializableSnapshot)
-                .await
                 .unwrap();
             doe::clear(&txn, stream_id).await.unwrap();
             db_txn_commit_durable(txn).await.unwrap();
@@ -830,7 +828,6 @@ mod tests {
         let txn = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
-            .await
             .unwrap();
         doe::clear(&txn, stream_id).await.unwrap();
         db_txn_commit_durable(txn).await.unwrap();
@@ -874,7 +871,6 @@ mod tests {
             let txn = backend
                 .db
                 .begin(IsolationLevel::SerializableSnapshot)
-                .await
                 .unwrap();
             doe::clear(&txn, stream_id).await.unwrap();
             db_txn_commit_durable(txn).await.unwrap();
@@ -882,7 +878,6 @@ mod tests {
         let txn = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
-            .await
             .unwrap();
         doe::wake_after_trim(&txn, stream_id, false).await.unwrap();
         configure_min_age(&backend, &basin, &stream, 0, false).await;
@@ -973,7 +968,6 @@ mod tests {
         let txn = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
-            .await
             .unwrap();
         doe::clear(&txn, stream_id).await.unwrap();
         db_txn_commit_durable(txn).await.unwrap();
@@ -1070,10 +1064,10 @@ mod tests {
                 keys.push(legacy(&backend, stream_id, Some(id)).await);
             }
         }
-        let before_seq = backend.db.snapshot().await.unwrap().seq();
+        let before_seq = backend.db.snapshot().unwrap().seq();
         backend.migrate_stream_doe().await.unwrap();
         assert_eq!(
-            backend.db.snapshot().await.unwrap().seq(),
+            backend.db.snapshot().unwrap().seq(),
             before_seq + 1,
             "all cleanup-only streams should share one durable batch"
         );
@@ -1097,12 +1091,11 @@ mod tests {
         let txn = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
-            .await
             .unwrap();
         doe::clear(&txn, stream_id).await.unwrap();
         db_txn_commit_durable(txn).await.unwrap();
         let key = legacy(&backend, stream_id, None).await;
-        let snapshot = backend.db.snapshot().await.unwrap();
+        let snapshot = backend.db.snapshot().unwrap();
         configure_min_age(&backend, &basin, &stream, min_age, false).await;
         let configured = state(&backend, stream_id).await;
         backend
@@ -1124,7 +1117,6 @@ mod tests {
         let txn = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
-            .await
             .unwrap();
         let previous = doe::state(&txn, stream_id).await.unwrap();
         doe::replace(
@@ -1138,7 +1130,6 @@ mod tests {
         let wake = backend
             .db
             .begin(IsolationLevel::SerializableSnapshot)
-            .await
             .unwrap();
         doe::schedule(&wake, stream_id, TimestampSecs::now())
             .await

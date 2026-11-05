@@ -102,7 +102,7 @@ impl Backend {
         config: OptionalStreamConfig,
         mode: ProvisionMode,
     ) -> Result<ProvisionResult<StreamInfo>, ProvisionStreamError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
 
         let Some(basin_meta) = db_txn_get(
             &txn,
@@ -269,7 +269,7 @@ impl Backend {
         stream: StreamName,
         reconfig: StreamReconfiguration,
     ) -> Result<StreamConfig, ReconfigureStreamError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
 
         let meta_key = kv::stream_meta::ser_key(&basin, &stream);
         let (basin_meta, meta) = tokio::try_join!(
@@ -387,7 +387,7 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
         // A delayed deletion request may resume after the trim worker has deleted the old
         // stream and the name has been reused. Only mark metadata when this
         // transaction also sees a terminal trim marker.
