@@ -1,4 +1,5 @@
 use std::{
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
@@ -17,7 +18,7 @@ use tower_http::{
     sensitive_headers::SetSensitiveRequestHeadersLayer,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{backend::Backend, dashboard, handlers, init};
 
@@ -92,19 +93,14 @@ pub struct LiteArgs {
     #[command(flatten)]
     pub tls: TlsConfig,
 
-    /// IP address to listen on.
+    /// IP address to listen on [default: ::, or 0.0.0.0 if IPv6 is unavailable]
     ///
-    /// Use :: to listen on both IPv4 and IPv6 (dual-stack), or a specific
-    /// address such as 127.0.0.1 or ::1 to listen on a single interface.
+    /// :: listens on both IPv4 and IPv6. Use 0.0.0.0 to listen on IPv4 only, or
+    /// a specific address such as 127.0.0.1 or ::1 to listen on a single interface.
     ///
-    /// Can also be set via S2LITE_HOST environment variable.
-    #[arg(
-        long,
-        env = "S2LITE_HOST",
-        value_name = "IP",
-        default_value_t = IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-    )]
-    pub host: IpAddr,
+    /// Can also be set via S2LITE_LISTEN_ADDRESS environment variable.
+    #[arg(long, env = "S2LITE_LISTEN_ADDRESS", value_name = "IP")]
+    pub listen_address: Option<IpAddr>,
 
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
@@ -214,24 +210,24 @@ impl ServerProtocol {
     }
 }
 
-fn cli_endpoint(protocol: ServerProtocol, host: IpAddr, port: u16) -> String {
+fn cli_endpoint(protocol: ServerProtocol, ip: IpAddr, port: u16) -> String {
     let scheme = protocol.scheme();
     // `localhost` only stands for the wildcards and the two canonical loopback
     // addresses. Any other loopback address (e.g. 127.0.0.2) must be printed as-is,
     // or the hint points at a different address than the one the server bound.
-    let uses_localhost = host.is_unspecified()
-        || host == IpAddr::V4(Ipv4Addr::LOCALHOST)
-        || host == IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let uses_localhost = ip.is_unspecified()
+        || ip == IpAddr::V4(Ipv4Addr::LOCALHOST)
+        || ip == IpAddr::V6(Ipv6Addr::LOCALHOST);
     if uses_localhost {
         format!("{scheme}://localhost:{port}")
     } else {
         // `SocketAddr` formatting brackets IPv6 addresses, e.g. `[2001:db8::1]:8080`.
-        format!("{scheme}://{}", SocketAddr::new(host, port))
+        format!("{scheme}://{}", SocketAddr::new(ip, port))
     }
 }
 
-fn cli_env_hint(protocol: ServerProtocol, host: IpAddr, port: u16, dashboard: bool) -> String {
-    let endpoint = cli_endpoint(protocol, host, port);
+fn cli_env_hint(protocol: ServerProtocol, ip: IpAddr, port: u16, dashboard: bool) -> String {
+    let endpoint = cli_endpoint(protocol, ip, port);
     let mut lines = vec![
         "copy/paste into a new terminal to point the S2 CLI at this server:".to_string(),
         format!("export S2_ACCOUNT_ENDPOINT={endpoint}"),
@@ -256,13 +252,13 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let protocol = ServerProtocol::from_args(&args);
     let port = args.port.unwrap_or_else(|| protocol.default_port());
-    let addr = SocketAddr::new(args.host, port);
-    let cli_hint = cli_env_hint(protocol, args.host, port, !args.no_dashboard);
 
-    // Bind before opening the database. Opening SlateDB fences out any other
-    // instance using the same store, so a bad --host or a port already in use
-    // must fail here rather than after taking over the store.
-    let listener = bind_listener(addr)?;
+    // Bind before opening the database, which fences out any other instance
+    // using the same store, so that a bad address or a port already in use fails
+    // first. Connections are only accepted once the server is ready to serve.
+    let socket = BoundSocket::bind(args.listen_address, port)?;
+    let addr = socket.addr;
+    let cli_hint = cli_env_hint(protocol, addr.ip(), port, !args.no_dashboard);
 
     let store_type = if let Some(bucket) = args.bucket {
         StoreType::S3Bucket(bucket)
@@ -315,7 +311,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
             .flush_interval
             .map(|d| d.as_millis().try_into().unwrap_or(u64::MAX)),
         tls: protocol.describe(),
-        host: args.host,
+        listen_address: addr.ip(),
         port,
         cors: !args.no_cors,
         init_file: args.init_file.as_ref().map(|p| p.display().to_string()),
@@ -367,6 +363,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         app = app.layer(CorsLayer::very_permissive());
     }
 
+    let listener = socket.listen()?;
     let server_handle = axum_server::Handle::new();
     tokio::spawn(shutdown_signal(server_handle.clone()));
     match (
@@ -588,35 +585,86 @@ impl WalS3Overrides {
     }
 }
 
-/// Binds the TCP listener for the HTTP server.
+/// A TCP socket bound to the server address but not yet listening.
 ///
-/// Binding the unspecified IPv6 address (`::`) clears `IPV6_V6ONLY`, so the
-/// listener also accepts IPv4 connections regardless of the platform default
-/// (such as Linux's `net.ipv6.bindv6only` sysctl).
-fn bind_listener(addr: SocketAddr) -> eyre::Result<std::net::TcpListener> {
-    // An IPv4-mapped address such as `::ffff:127.0.0.1` cannot be bound as an
-    // IPv6-only socket (Linux returns EINVAL), so bind it as the IPv4 address.
-    let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
-    let bind = || -> std::io::Result<std::net::TcpListener> {
-        let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
-        if addr.is_ipv6() {
-            socket.set_only_v6(!addr.ip().is_unspecified())?;
-        }
-        // Matches what tokio and std do when binding listeners on Unix.
-        #[cfg(unix)]
-        socket.set_reuse_address(true)?;
-        socket.bind(&addr.into())?;
-        socket.listen(1024)?;
-        // `axum_server::from_tcp` hands the listener to tokio as-is, which
-        // requires it to be non-blocking.
-        socket.set_nonblocking(true)?;
-        Ok(socket.into())
-    };
+/// Until [`BoundSocket::listen`] is called, the kernel does not accept
+/// connections for it (Linux refuses them).
+#[derive(Debug)]
+struct BoundSocket {
+    socket: Socket,
+    addr: SocketAddr,
+}
 
-    // Include the OS error in the message itself: the CLI only prints the
-    // outermost error, and "address in use" vs. "cannot assign address"
-    // matters to the user.
-    bind().map_err(|error| eyre::eyre!("failed to listen on {addr}: {error}"))
+impl BoundSocket {
+    /// Binds `listen_address`, or `::` if not specified, falling back to
+    /// `0.0.0.0` when IPv6 is unavailable.
+    fn bind(listen_address: Option<IpAddr>, port: u16) -> eyre::Result<Self> {
+        let (ip, socket) = match listen_address {
+            // An IPv4-mapped address such as `::ffff:127.0.0.1` cannot be bound by
+            // an IPv6-only socket (Linux returns EINVAL), so bind it as IPv4.
+            Some(ip) => {
+                let ip = ip.to_canonical();
+                (ip, new_socket(ip))
+            }
+            None => {
+                let ip = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+                match new_socket(ip) {
+                    Ok(socket) => (ip, Ok(socket)),
+                    Err(error) => {
+                        warn!(%error, "IPv6 is unavailable, listening on IPv4 only");
+                        let ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+                        (ip, new_socket(ip))
+                    }
+                }
+            }
+        };
+        let addr = SocketAddr::new(ip, port);
+        socket
+            .and_then(|socket| {
+                socket.bind(&addr.into())?;
+                Ok(Self { socket, addr })
+            })
+            .map_err(|error| listen_error(addr, error))
+    }
+
+    fn listen(self) -> eyre::Result<std::net::TcpListener> {
+        let Self { socket, addr } = self;
+        let listen = || -> io::Result<()> {
+            socket.listen(1024)?;
+            // `axum_server::from_tcp` hands the listener to tokio as-is, which
+            // requires it to be non-blocking.
+            socket.set_nonblocking(true)
+        };
+        listen().map_err(|error| listen_error(addr, error))?;
+        Ok(socket.into())
+    }
+}
+
+/// Creates a TCP socket for `ip`.
+///
+/// For `::`, `IPV6_V6ONLY` is cleared so the socket also accepts IPv4
+/// connections regardless of the platform default (such as Linux's
+/// `net.ipv6.bindv6only` sysctl).
+fn new_socket(ip: IpAddr) -> io::Result<Socket> {
+    let domain = if ip.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    if ip.is_ipv6() {
+        socket.set_only_v6(!ip.is_unspecified())?;
+    }
+    // Matches what tokio and std do when binding listeners on Unix.
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    Ok(socket)
+}
+
+// The CLI only prints the outermost error, so include the OS error: "address
+// in use" vs. "cannot assign address" matters to the user.
+fn listen_error(addr: SocketAddr, error: io::Error) -> eyre::Report {
+    eyre::eyre!("failed to listen on {addr}: {error}")
 }
 
 async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
@@ -711,13 +759,13 @@ impl object_store::CredentialProvider for S3CredentialProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 
     use clap::Parser;
     use rstest::rstest;
 
     use super::{
-        LiteArgs, ServerProtocol, WalS3Overrides, bind_listener, cli_endpoint, cli_env_hint,
+        BoundSocket, LiteArgs, ServerProtocol, WalS3Overrides, cli_endpoint, cli_env_hint,
     };
 
     const ANY_V4: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -728,10 +776,17 @@ mod tests {
         lite: LiteArgs,
     }
 
+    fn listen_on(listen_address: Option<IpAddr>) -> TcpListener {
+        BoundSocket::bind(listen_address, 0)
+            .unwrap()
+            .listen()
+            .unwrap()
+    }
+
     #[test]
-    fn host_defaults_to_ipv4_unspecified() {
+    fn listen_address_is_unset_by_default() {
         let cli = TestCli::try_parse_from(["lite"]).unwrap();
-        assert_eq!(cli.lite.host, ANY_V4);
+        assert_eq!(cli.lite.listen_address, None);
     }
 
     #[rstest]
@@ -739,9 +794,9 @@ mod tests {
     #[case::ipv6_loopback("::1")]
     #[case::ipv4_loopback("127.0.0.1")]
     #[case::ipv6_global("2001:db8::1")]
-    fn host_accepts_ip_addresses(#[case] arg: &str) {
-        let cli = TestCli::try_parse_from(["lite", "--host", arg]).unwrap();
-        assert_eq!(cli.lite.host, arg.parse::<IpAddr>().unwrap());
+    fn listen_address_accepts_ip_addresses(#[case] arg: &str) {
+        let cli = TestCli::try_parse_from(["lite", "--listen-address", arg]).unwrap();
+        assert_eq!(cli.lite.listen_address, Some(arg.parse().unwrap()));
     }
 
     #[rstest]
@@ -749,53 +804,66 @@ mod tests {
     #[case::hostname("localhost")]
     #[case::with_port("0.0.0.0:80")]
     #[case::empty("")]
-    fn host_rejects_non_ip_values(#[case] arg: &str) {
-        assert!(TestCli::try_parse_from(["lite", "--host", arg]).is_err());
+    fn listen_address_rejects_non_ip_values(#[case] arg: &str) {
+        assert!(TestCli::try_parse_from(["lite", "--listen-address", arg]).is_err());
     }
 
-    #[test]
-    fn bind_listener_ipv4() {
-        let listener = bind_listener(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-    }
-
-    #[test]
-    fn bind_listener_is_non_blocking() {
-        let listener = bind_listener(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
-        let error = listener.accept().unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-    }
-
-    #[test]
-    fn bind_listener_unspecified_ipv6_is_dual_stack() {
-        let listener = bind_listener(SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0)).unwrap();
+    #[rstest]
+    #[case::default(None)]
+    #[case::explicit(Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)))]
+    fn unspecified_ipv6_is_dual_stack(#[case] listen_address: Option<IpAddr>) {
+        let listener = listen_on(listen_address);
         let port = listener.local_addr().unwrap().port();
         TcpStream::connect((Ipv6Addr::LOCALHOST, port)).unwrap();
         TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
     }
 
     #[test]
-    fn bind_listener_specific_ipv6() {
-        let listener = bind_listener(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        TcpStream::connect((Ipv6Addr::LOCALHOST, port)).unwrap();
+    fn listen_on_ipv4() {
+        let listener = listen_on(Some(Ipv4Addr::LOCALHOST.into()));
+        TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     }
 
     #[test]
-    fn bind_listener_ipv4_mapped_address_binds_as_ipv4() {
-        let mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
-        let listener = bind_listener(SocketAddr::new(mapped, 0)).unwrap();
+    fn listen_on_specific_ipv6() {
+        let listener = listen_on(Some(Ipv6Addr::LOCALHOST.into()));
+        TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn listen_on_ipv4_mapped_address_binds_as_ipv4() {
+        let listener = listen_on(Some("::ffff:127.0.0.1".parse().unwrap()));
         let addr = listener.local_addr().unwrap();
         assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         TcpStream::connect(addr).unwrap();
     }
 
     #[test]
-    fn bind_listener_error_names_the_address() {
-        let first = bind_listener(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+    fn listener_is_non_blocking() {
+        let error = listen_on(Some(Ipv4Addr::LOCALHOST.into()))
+            .accept()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bound_socket_refuses_connections_until_listening() {
+        let bound = BoundSocket::bind(Some(Ipv4Addr::LOCALHOST.into()), 0).unwrap();
+        let addr = bound.socket.local_addr().unwrap().as_socket().unwrap();
+        let error = TcpStream::connect(addr).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        let _listener = bound.listen().unwrap();
+        TcpStream::connect(addr).unwrap();
+    }
+
+    #[test]
+    fn bind_error_names_the_address() {
+        let first = listen_on(Some(Ipv4Addr::LOCALHOST.into()));
         let addr = first.local_addr().unwrap();
-        let error = bind_listener(addr).unwrap_err().to_string();
+        let error = BoundSocket::bind(Some(addr.ip()), addr.port())
+            .unwrap_err()
+            .to_string();
         assert!(error.starts_with(&format!("failed to listen on {addr}: ")));
     }
 

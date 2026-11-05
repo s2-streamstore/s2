@@ -196,12 +196,12 @@ Deploy `s2-lite` to Kubernetes using Helm. See the [Helm chart documentation](ch
 
 ### Network
 
-By default, Lite listens on all IPv4 interfaces (`0.0.0.0`). Use `--host` (or `S2LITE_HOST`) to listen elsewhere:
+By default, Lite listens on all IPv4 and IPv6 interfaces (`::`), or on all IPv4 interfaces (`0.0.0.0`) where IPv6 is unavailable. Use `--listen-address` (or `S2LITE_LISTEN_ADDRESS`) to listen elsewhere:
 
 ```bash
-s2 lite --port 8080 --host ::         # IPv4 and IPv6 (dual-stack)
-s2 lite --port 8080 --host ::1        # IPv6 loopback only
-s2 lite --port 8080 --host 127.0.0.1  # IPv4 loopback only
+s2 lite --port 8080 --listen-address 0.0.0.0    # IPv4 only
+s2 lite --port 8080 --listen-address ::1        # IPv6 loopback only
+s2 lite --port 8080 --listen-address 127.0.0.1  # IPv4 loopback only
 ```
 
 IPv6 addresses in endpoint URLs must be enclosed in brackets:
