@@ -214,7 +214,9 @@ impl WireEncode for Metered<&StoredRecord> {
 
 fn magic_byte(record: &Metered<&StoredRecord>) -> MagicByte {
     let metered_size = record.metered_size();
-    let metered_size_varlen = 8 - (metered_size.leading_zeros() / 8) as u8;
+    // The decoder preserves the stored metered-size prefix, including zero.
+    // The wire format still needs one byte to represent that zero value.
+    let metered_size_varlen = (8 - (metered_size.leading_zeros() / 8) as u8).max(1);
     if metered_size_varlen > 3 {
         panic!("illegal metered size varlen {metered_size} for record")
     }
@@ -560,6 +562,24 @@ mod test {
 
         assert_eq!(decoded.metered_size(), 99);
         assert_eq!(decoded.into_inner(), record);
+    }
+
+    #[test]
+    fn decoded_stored_records_reencode_preserving_metered_sizes() {
+        // Empty envelope records with zero, noncanonical zero, and each prefix width.
+        // Decoding intentionally preserves these sizes instead of recomputing them.
+        for wire in [
+            &[0x02, 0x00, 0x00][..],
+            &[0x0a, 0x00, 0x00, 0x00],
+            &[0x12, 0x00, 0x00, 0x00, 0x00],
+            &[0x02, 0xff, 0x00],
+            &[0x0a, 0x01, 0x00, 0x00],
+            &[0x12, 0x01, 0x00, 0x00, 0x00],
+        ] {
+            let decoded = decode_stored_record(Bytes::copy_from_slice(wire)).unwrap();
+            let encoded = encode_stored_record(decoded.as_ref());
+            assert_eq!(decode_stored_record(encoded).unwrap(), decoded);
+        }
     }
 
     #[test]
