@@ -216,7 +216,6 @@ pub(crate) enum BasinAuthority {
     Direct(Authority),
 }
 
-/// Parses the authority of an account or basin endpoint.
 fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, String> {
     authority.parse().map_err(|e| {
         // A bare IPv6 address has several colons, which `Authority` cannot tell
@@ -311,8 +310,9 @@ impl FromStr for BasinEndpoint {
             if is_ip_literal(&zone) {
                 return Err(format!(
                     "invalid basin endpoint: the {{basin}}. placeholder requires a DNS name, but \
-                     {zone} is an IP address; remove the placeholder to connect to the address \
-                     directly"
+                     {} is an IP address; remove the placeholder to connect to the address \
+                     directly",
+                    zone.host()
                 )
                 .into());
             }
@@ -4141,12 +4141,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::ipv4("http://{basin}.127.0.0.1:8080")]
-    #[case::ipv6("http://{basin}.[::1]:8080")]
-    #[case::ipv6_default_https("{basin}.[2001:db8::1]")]
-    fn basin_endpoint_parent_zone_rejects_ip_literals(#[case] input: &str) {
+    #[case::ipv4("http://{basin}.127.0.0.1:8080", "127.0.0.1")]
+    #[case::ipv6("http://{basin}.[::1]:8080", "[::1]")]
+    #[case::ipv6_default_https("{basin}.[2001:db8::1]", "[2001:db8::1]")]
+    fn basin_endpoint_parent_zone_rejects_ip_literals(#[case] input: &str, #[case] host: &str) {
         let error = input.parse::<BasinEndpoint>().unwrap_err();
-        assert!(error.0.contains("placeholder requires a DNS name"));
+        assert!(error.0.contains(&format!(
+            "placeholder requires a DNS name, but {host} is an IP address"
+        )));
     }
 
     // -- S2Endpoints --
