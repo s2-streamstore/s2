@@ -41,7 +41,7 @@ pub struct ServerInfo {
     pub path: String,
     pub flush_interval_ms: Option<u64>,
     pub tls: &'static str,
-    pub listen_address: IpAddr,
+    pub bind_address: IpAddr,
     pub port: u16,
     pub cors: bool,
     pub init_file: Option<String>,
@@ -132,7 +132,7 @@ mod tests {
             path: String::new(),
             flush_interval_ms: None,
             tls: "off",
-            listen_address: "::".parse().unwrap(),
+            bind_address: "::".parse().unwrap(),
             port: 4243,
             cors: false,
             init_file: None,
@@ -203,6 +203,6 @@ mod tests {
         let config: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(config["store"]["kind"], "memory");
         assert_eq!(config["version"], "0.0.0-test");
-        assert_eq!(config["listen_address"], "::");
+        assert_eq!(config["bind_address"], "::");
     }
 }

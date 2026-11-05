@@ -98,7 +98,7 @@ pub struct LiteArgs {
     /// :: listens on both IPv4 and IPv6. Use 0.0.0.0 to listen on IPv4 only, or
     /// a specific address such as 127.0.0.1 or ::1 to listen on a single interface.
     #[arg(long, value_name = "IP")]
-    pub listen_address: Option<IpAddr>,
+    pub bind_address: Option<IpAddr>,
 
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
@@ -254,7 +254,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     // Bind before opening the database, which fences out any other instance
     // using the same store, so that a bad address or a port already in use fails
     // first. Connections are only accepted once the server is ready to serve.
-    let socket = BoundSocket::bind(args.listen_address, port)?;
+    let socket = BoundSocket::bind(args.bind_address, port)?;
     let addr = socket.addr;
     let cli_hint = cli_env_hint(protocol, addr.ip(), port, !args.no_dashboard);
 
@@ -309,7 +309,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
             .flush_interval
             .map(|d| d.as_millis().try_into().unwrap_or(u64::MAX)),
         tls: protocol.describe(),
-        listen_address: addr.ip(),
+        bind_address: addr.ip(),
         port,
         cors: !args.no_cors,
         init_file: args.init_file.as_ref().map(|p| p.display().to_string()),
@@ -594,10 +594,10 @@ struct BoundSocket {
 }
 
 impl BoundSocket {
-    /// Binds `listen_address`, or `::` if not specified, falling back to
+    /// Binds `bind_address`, or `::` if not specified, falling back to
     /// `0.0.0.0` when IPv6 is unavailable.
-    fn bind(listen_address: Option<IpAddr>, port: u16) -> eyre::Result<Self> {
-        let (ip, socket) = match listen_address {
+    fn bind(bind_address: Option<IpAddr>, port: u16) -> eyre::Result<Self> {
+        let (ip, socket) = match bind_address {
             // An IPv4-mapped address such as `::ffff:127.0.0.1` cannot be bound by
             // an IPv6-only socket (Linux returns EINVAL), so bind it as IPv4.
             Some(ip) => {
@@ -774,17 +774,17 @@ mod tests {
         lite: LiteArgs,
     }
 
-    fn listen_on(listen_address: Option<IpAddr>) -> TcpListener {
-        BoundSocket::bind(listen_address, 0)
+    fn listen_on(bind_address: Option<IpAddr>) -> TcpListener {
+        BoundSocket::bind(bind_address, 0)
             .unwrap()
             .listen()
             .unwrap()
     }
 
     #[test]
-    fn listen_address_is_unset_by_default() {
+    fn bind_address_is_unset_by_default() {
         let cli = TestCli::try_parse_from(["lite"]).unwrap();
-        assert_eq!(cli.lite.listen_address, None);
+        assert_eq!(cli.lite.bind_address, None);
     }
 
     #[rstest]
@@ -792,9 +792,9 @@ mod tests {
     #[case::ipv6_loopback("::1")]
     #[case::ipv4_loopback("127.0.0.1")]
     #[case::ipv6_global("2001:db8::1")]
-    fn listen_address_accepts_ip_addresses(#[case] arg: &str) {
-        let cli = TestCli::try_parse_from(["lite", "--listen-address", arg]).unwrap();
-        assert_eq!(cli.lite.listen_address, Some(arg.parse().unwrap()));
+    fn bind_address_accepts_ip_addresses(#[case] arg: &str) {
+        let cli = TestCli::try_parse_from(["lite", "--bind-address", arg]).unwrap();
+        assert_eq!(cli.lite.bind_address, Some(arg.parse().unwrap()));
     }
 
     #[rstest]
@@ -802,15 +802,15 @@ mod tests {
     #[case::hostname("localhost")]
     #[case::with_port("0.0.0.0:80")]
     #[case::empty("")]
-    fn listen_address_rejects_non_ip_values(#[case] arg: &str) {
-        assert!(TestCli::try_parse_from(["lite", "--listen-address", arg]).is_err());
+    fn bind_address_rejects_non_ip_values(#[case] arg: &str) {
+        assert!(TestCli::try_parse_from(["lite", "--bind-address", arg]).is_err());
     }
 
     #[rstest]
     #[case::default(None)]
     #[case::explicit(Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)))]
-    fn unspecified_ipv6_is_dual_stack(#[case] listen_address: Option<IpAddr>) {
-        let listener = listen_on(listen_address);
+    fn unspecified_ipv6_is_dual_stack(#[case] bind_address: Option<IpAddr>) {
+        let listener = listen_on(bind_address);
         let port = listener.local_addr().unwrap().port();
         TcpStream::connect((Ipv6Addr::LOCALHOST, port)).unwrap();
         TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
