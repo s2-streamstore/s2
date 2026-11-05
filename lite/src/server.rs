@@ -1,5 +1,6 @@
 use std::{
-    net::SocketAddr,
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -10,13 +11,14 @@ use bytesize::ByteSize;
 use http::header::AUTHORIZATION;
 use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
 use slatedb::object_store;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::time::Instant;
 use tower_http::{
     cors::CorsLayer,
     sensitive_headers::SetSensitiveRequestHeadersLayer,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{backend::Backend, dashboard, handlers, init};
 
@@ -90,6 +92,13 @@ pub struct LiteArgs {
     /// TLS configuration (defaults to plain HTTP if not specified).
     #[command(flatten)]
     pub tls: TlsConfig,
+
+    /// IP address to listen on [default: ::, or 0.0.0.0 if IPv6 is unavailable]
+    ///
+    /// :: listens on both IPv4 and IPv6. Use 0.0.0.0 to listen on IPv4 only, or
+    /// a specific address such as 127.0.0.1 or ::1 to listen on a single interface.
+    #[arg(long, value_name = "IP")]
+    pub bind_address: Option<IpAddr>,
 
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
     #[arg(long)]
@@ -199,12 +208,24 @@ impl ServerProtocol {
     }
 }
 
-fn cli_endpoint(protocol: ServerProtocol, port: u16) -> String {
-    format!("{}://localhost:{port}", protocol.scheme())
+fn cli_endpoint(protocol: ServerProtocol, ip: IpAddr, port: u16) -> String {
+    let scheme = protocol.scheme();
+    // `localhost` only stands for the wildcards and the two canonical loopback
+    // addresses. Any other loopback address (e.g. 127.0.0.2) must be printed as-is,
+    // or the hint points at a different address than the one the server bound.
+    let uses_localhost = ip.is_unspecified()
+        || ip == IpAddr::V4(Ipv4Addr::LOCALHOST)
+        || ip == IpAddr::V6(Ipv6Addr::LOCALHOST);
+    if uses_localhost {
+        format!("{scheme}://localhost:{port}")
+    } else {
+        // `SocketAddr` formatting brackets IPv6 addresses, e.g. `[2001:db8::1]:8080`.
+        format!("{scheme}://{}", SocketAddr::new(ip, port))
+    }
 }
 
-fn cli_env_hint(protocol: ServerProtocol, port: u16, dashboard: bool) -> String {
-    let endpoint = cli_endpoint(protocol, port);
+fn cli_env_hint(protocol: ServerProtocol, ip: IpAddr, port: u16, dashboard: bool) -> String {
+    let endpoint = cli_endpoint(protocol, ip, port);
     let mut lines = vec![
         "copy/paste into a new terminal to point the S2 CLI at this server:".to_string(),
         format!("export S2_ACCOUNT_ENDPOINT={endpoint}"),
@@ -229,8 +250,13 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let protocol = ServerProtocol::from_args(&args);
     let port = args.port.unwrap_or_else(|| protocol.default_port());
-    let addr = format!("0.0.0.0:{port}");
-    let cli_hint = cli_env_hint(protocol, port, !args.no_dashboard);
+
+    // Bind before opening the database, which fences out any other instance
+    // using the same store, so that a bad address or a port already in use fails
+    // first. Connections are only accepted once the server is ready to serve.
+    let socket = BoundSocket::bind(args.bind_address, port)?;
+    let addr = socket.addr;
+    let cli_hint = cli_env_hint(protocol, addr.ip(), port, !args.no_dashboard);
 
     let store_type = if let Some(bucket) = args.bucket {
         StoreType::S3Bucket(bucket)
@@ -283,6 +309,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
             .flush_interval
             .map(|d| d.as_millis().try_into().unwrap_or(u64::MAX)),
         tls: protocol.describe(),
+        bind_address: addr.ip(),
         port,
         cors: !args.no_cors,
         init_file: args.init_file.as_ref().map(|p| p.display().to_string()),
@@ -334,6 +361,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         app = app.layer(CorsLayer::very_permissive());
     }
 
+    let listener = socket.listen()?;
     let server_handle = axum_server::Handle::new();
     tokio::spawn(shutdown_signal(server_handle.clone()));
     match (
@@ -343,20 +371,20 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
     ) {
         (false, Some(cert_path), Some(key_path)) => {
             info!(
-                addr,
+                %addr,
                 ?cert_path,
                 "starting https server with provided certificate"
             );
             let rustls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
             info!("{}", cli_hint);
-            axum_server::bind_rustls(addr.parse()?, rustls_config)
+            axum_server::from_tcp_rustls(listener, rustls_config)?
                 .handle(server_handle)
                 .serve(app.into_make_service())
                 .await?;
         }
         (true, None, None) => {
             info!(
-                addr,
+                %addr,
                 "starting https server with self-signed certificate, clients will need to use --insecure"
             );
             let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed([
@@ -370,15 +398,15 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
             )
             .await?;
             info!("{}", cli_hint);
-            axum_server::bind_rustls(addr.parse()?, rustls_config)
+            axum_server::from_tcp_rustls(listener, rustls_config)?
                 .handle(server_handle)
                 .serve(app.into_make_service())
                 .await?;
         }
         (false, None, None) => {
-            info!(addr, "starting plain http server");
+            info!(%addr, "starting plain http server");
             info!("{}", cli_hint);
-            axum_server::bind(addr.parse()?)
+            axum_server::from_tcp(listener)?
                 .handle(server_handle)
                 .serve(app.into_make_service())
                 .await?;
@@ -555,6 +583,88 @@ impl WalS3Overrides {
     }
 }
 
+/// A TCP socket bound to the server address but not yet listening.
+///
+/// Until [`BoundSocket::listen`] is called, the kernel does not accept
+/// connections for it (Linux refuses them).
+#[derive(Debug)]
+struct BoundSocket {
+    socket: Socket,
+    addr: SocketAddr,
+}
+
+impl BoundSocket {
+    /// Binds `bind_address`, or `::` if not specified, falling back to
+    /// `0.0.0.0` when IPv6 is unavailable.
+    fn bind(bind_address: Option<IpAddr>, port: u16) -> eyre::Result<Self> {
+        let (ip, socket) = match bind_address {
+            // An IPv4-mapped address such as `::ffff:127.0.0.1` cannot be bound by
+            // an IPv6-only socket (Linux returns EINVAL), so bind it as IPv4.
+            Some(ip) => {
+                let ip = ip.to_canonical();
+                (ip, new_socket(ip))
+            }
+            None => {
+                let ip = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+                match new_socket(ip) {
+                    Ok(socket) => (ip, Ok(socket)),
+                    Err(error) => {
+                        warn!(%error, "IPv6 is unavailable, listening on IPv4 only");
+                        let ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+                        (ip, new_socket(ip))
+                    }
+                }
+            }
+        };
+        let addr = SocketAddr::new(ip, port);
+        socket
+            .and_then(|socket| {
+                socket.bind(&addr.into())?;
+                Ok(Self { socket, addr })
+            })
+            .map_err(|error| listen_error(addr, error))
+    }
+
+    fn listen(self) -> eyre::Result<std::net::TcpListener> {
+        let Self { socket, addr } = self;
+        let listen = || -> io::Result<()> {
+            socket.listen(1024)?;
+            // `axum_server::from_tcp` hands the listener to tokio as-is, which
+            // requires it to be non-blocking.
+            socket.set_nonblocking(true)
+        };
+        listen().map_err(|error| listen_error(addr, error))?;
+        Ok(socket.into())
+    }
+}
+
+/// Creates a TCP socket for `ip`.
+///
+/// For `::`, `IPV6_V6ONLY` is cleared so the socket also accepts IPv4
+/// connections regardless of the platform default (such as Linux's
+/// `net.ipv6.bindv6only` sysctl).
+fn new_socket(ip: IpAddr) -> io::Result<Socket> {
+    let domain = if ip.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    if ip.is_ipv6() {
+        socket.set_only_v6(!ip.is_unspecified())?;
+    }
+    // Matches what tokio and std do when binding listeners on Unix.
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    Ok(socket)
+}
+
+// The CLI only prints the outermost error, so include the OS error: "address
+// in use" vs. "cannot assign address" matters to the user.
+fn listen_error(addr: SocketAddr, error: io::Error) -> eyre::Report {
+    eyre::eyre!("failed to listen on {addr}: {error}")
+}
+
 async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.expect("ctrl-c");
@@ -647,7 +757,146 @@ impl object_store::CredentialProvider for S3CredentialProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerProtocol, WalS3Overrides, cli_endpoint, cli_env_hint};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
+
+    use clap::Parser;
+    use rstest::rstest;
+
+    use super::{
+        BoundSocket, LiteArgs, ServerProtocol, WalS3Overrides, cli_endpoint, cli_env_hint,
+    };
+
+    const ANY_V4: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        lite: LiteArgs,
+    }
+
+    fn listen_on(bind_address: Option<IpAddr>) -> TcpListener {
+        BoundSocket::bind(bind_address, 0)
+            .unwrap()
+            .listen()
+            .unwrap()
+    }
+
+    #[test]
+    fn bind_address_is_unset_by_default() {
+        let cli = TestCli::try_parse_from(["lite"]).unwrap();
+        assert_eq!(cli.lite.bind_address, None);
+    }
+
+    #[rstest]
+    #[case::ipv6_unspecified("::")]
+    #[case::ipv6_loopback("::1")]
+    #[case::ipv4_loopback("127.0.0.1")]
+    #[case::ipv6_global("2001:db8::1")]
+    fn bind_address_accepts_ip_addresses(#[case] arg: &str) {
+        let cli = TestCli::try_parse_from(["lite", "--bind-address", arg]).unwrap();
+        assert_eq!(cli.lite.bind_address, Some(arg.parse().unwrap()));
+    }
+
+    #[rstest]
+    #[case::bracketed("[::1]")]
+    #[case::hostname("localhost")]
+    #[case::with_port("0.0.0.0:80")]
+    #[case::empty("")]
+    fn bind_address_rejects_non_ip_values(#[case] arg: &str) {
+        assert!(TestCli::try_parse_from(["lite", "--bind-address", arg]).is_err());
+    }
+
+    #[rstest]
+    #[case::default(None)]
+    #[case::explicit(Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)))]
+    fn unspecified_ipv6_is_dual_stack(#[case] bind_address: Option<IpAddr>) {
+        let listener = listen_on(bind_address);
+        let port = listener.local_addr().unwrap().port();
+        TcpStream::connect((Ipv6Addr::LOCALHOST, port)).unwrap();
+        TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    }
+
+    #[test]
+    fn listen_on_ipv4() {
+        let listener = listen_on(Some(Ipv4Addr::LOCALHOST.into()));
+        TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn listen_on_specific_ipv6() {
+        let listener = listen_on(Some(Ipv6Addr::LOCALHOST.into()));
+        TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn listen_on_ipv4_mapped_address_binds_as_ipv4() {
+        let listener = listen_on(Some("::ffff:127.0.0.1".parse().unwrap()));
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        TcpStream::connect(addr).unwrap();
+    }
+
+    #[test]
+    fn listener_is_non_blocking() {
+        let error = listen_on(Some(Ipv4Addr::LOCALHOST.into()))
+            .accept()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bound_socket_refuses_connections_until_listening() {
+        let bound = BoundSocket::bind(Some(Ipv4Addr::LOCALHOST.into()), 0).unwrap();
+        let addr = bound.socket.local_addr().unwrap().as_socket().unwrap();
+        let error = TcpStream::connect(addr).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        let _listener = bound.listen().unwrap();
+        TcpStream::connect(addr).unwrap();
+    }
+
+    #[test]
+    fn bind_error_names_the_address() {
+        let first = listen_on(Some(Ipv4Addr::LOCALHOST.into()));
+        let addr = first.local_addr().unwrap();
+        let error = BoundSocket::bind(Some(addr.ip()), addr.port())
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with(&format!("failed to listen on {addr}: ")));
+    }
+
+    #[rstest]
+    #[case::ipv4_unspecified("0.0.0.0")]
+    #[case::ipv6_unspecified("::")]
+    #[case::ipv4_loopback("127.0.0.1")]
+    #[case::ipv6_loopback("::1")]
+    fn cli_endpoint_uses_localhost_for_wildcard_and_canonical_loopback(#[case] host: &str) {
+        assert_eq!(
+            cli_endpoint(ServerProtocol::Http, host.parse().unwrap(), 8080),
+            "http://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn cli_endpoint_uses_specific_host_address() {
+        // 127.0.0.2 is loopback but not `localhost`; the hint must name it.
+        assert_eq!(
+            cli_endpoint(ServerProtocol::Http, "127.0.0.2".parse().unwrap(), 8080),
+            "http://127.0.0.2:8080"
+        );
+        assert_eq!(
+            cli_endpoint(ServerProtocol::Http, "192.0.2.10".parse().unwrap(), 8080),
+            "http://192.0.2.10:8080"
+        );
+        assert_eq!(
+            cli_endpoint(
+                ServerProtocol::Https { self_signed: false },
+                "2001:db8::1".parse().unwrap(),
+                8443
+            ),
+            "https://[2001:db8::1]:8443"
+        );
+    }
 
     fn wal_config(values: &[(&str, &str)]) -> eyre::Result<WalS3Overrides> {
         WalS3Overrides::from_getter(|name| {
@@ -678,11 +927,11 @@ mod tests {
     #[test]
     fn cli_endpoint_uses_localhost_with_explicit_port() {
         assert_eq!(
-            cli_endpoint(ServerProtocol::Http, 80),
+            cli_endpoint(ServerProtocol::Http, ANY_V4, 80),
             "http://localhost:80"
         );
         assert_eq!(
-            cli_endpoint(ServerProtocol::Https { self_signed: false }, 443),
+            cli_endpoint(ServerProtocol::Https { self_signed: false }, ANY_V4, 443),
             "https://localhost:443"
         );
     }
@@ -690,7 +939,7 @@ mod tests {
     #[test]
     fn cli_env_hint_includes_exports_for_http() {
         assert_eq!(
-            cli_env_hint(ServerProtocol::Http, 8080, true),
+            cli_env_hint(ServerProtocol::Http, ANY_V4, 8080, true),
             concat!(
                 "copy/paste into a new terminal to point the S2 CLI at this server:\n",
                 "export S2_ACCOUNT_ENDPOINT=http://localhost:8080\n",
@@ -705,7 +954,12 @@ mod tests {
     #[test]
     fn cli_env_hint_includes_ssl_no_verify_for_self_signed_tls() {
         assert_eq!(
-            cli_env_hint(ServerProtocol::Https { self_signed: true }, 8443, false),
+            cli_env_hint(
+                ServerProtocol::Https { self_signed: true },
+                ANY_V4,
+                8443,
+                false
+            ),
             concat!(
                 "copy/paste into a new terminal to point the S2 CLI at this server:\n",
                 "export S2_ACCOUNT_ENDPOINT=https://localhost:8443\n",

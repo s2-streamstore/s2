@@ -51,6 +51,7 @@ s2-storage = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "zstd"] }
+socket2 = "0.6.5"
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde", "formatting", "parsing"] }
