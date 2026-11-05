@@ -220,7 +220,7 @@ fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, St
     authority.parse().map_err(|e| {
         // A bare IPv6 address has several colons, which `Authority` cannot tell
         // apart from the port separator.
-        if !authority.starts_with('[') && authority.matches(':').count() > 1 {
+        if !authority.contains('[') && authority.matches(':').count() > 1 {
             format!(
                 "invalid {kind} endpoint authority: {e}; IPv6 addresses must be enclosed in \
                  brackets, e.g. [::1]:8080"
@@ -4112,9 +4112,11 @@ mod tests {
         assert!(error.0.contains("must be enclosed in brackets"));
     }
 
-    #[test]
-    fn endpoint_invalid_authority_without_ipv6_has_no_bracket_hint() {
-        let error = "http://bad host".parse::<AccountEndpoint>().unwrap_err();
+    #[rstest]
+    #[case::not_ipv6("http://bad host")]
+    #[case::bracketed_ipv6("http://{basin}.[::1]:8080")]
+    fn endpoint_invalid_authority_has_no_bracket_hint(#[case] input: &str) {
+        let error = input.parse::<AccountEndpoint>().unwrap_err();
         assert!(!error.0.contains("brackets"));
     }
 
