@@ -64,6 +64,12 @@ service:
   # External-DNS example (automatic DNS record creation):
   #   external-dns.alpha.kubernetes.io/hostname: "s2-lite.example.com"
   annotations: {}
+  # IP families for dual-stack clusters. Leave unset to use the cluster default.
+  # Example:
+  #   ipFamilyPolicy: PreferDualStack
+  #   ipFamilies: [IPv6, IPv4]
+  ipFamilyPolicy: ""
+  ipFamilies: []
 
 # ------------------------------------------------------------------------------
 # TLS Configuration

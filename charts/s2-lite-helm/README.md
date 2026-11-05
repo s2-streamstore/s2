@@ -131,6 +131,8 @@ Common configurations:
 | `service.type` | Service type | `ClusterIP` |
 | `service.port` | Service port | `80` |
 | `service.targetPort` | Container port | `8080` |
+| `service.ipFamilyPolicy` | Service IP family policy (`SingleStack`, `PreferDualStack`, `RequireDualStack`) | `""` (cluster default) |
+| `service.ipFamilies` | Service IP families, e.g. `[IPv6, IPv4]` | `[]` (cluster default) |
 | `tls.enabled` | Enable TLS | `false` |
 | `tls.selfSigned` | Use auto-generated self-signed certificate | `false` |
 | `tls.cert` | Path to TLS certificate (when using provided cert) | `""` |
