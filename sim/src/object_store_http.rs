@@ -41,7 +41,12 @@ impl HttpService for TurmoilHttpService {
         // Under message loss an in-flight request on an established connection
         // can stall forever (turmoil does not retransmit); time out so the
         // object_store retry layer kicks in. Simulated time, so deterministic.
-        const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+        //
+        // Keep this well below the SDK's 5s request timeout. Otherwise one lost
+        // message stalls a WAL flush past every pending append's deadline, each
+        // becomes an indefinite failure, and the resulting histories are too
+        // ambiguous for the linearizability checker to finish.
+        const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
         tokio::time::timeout(REQUEST_TIMEOUT, self.call_inner(req))
             .await
             .map_err(|_| {
