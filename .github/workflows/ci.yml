@@ -194,9 +194,6 @@ jobs:
     env:
       # Required so turmoil can seed tokio's internal RNG for determinism.
       RUSTFLAGS: --cfg tokio_unstable
-      # The Go linearizability checker must be built from the same rev as the
-      # s2-verification dependency pinned in sim/Cargo.toml.
-      S2_VERIFICATION_REV: b4af8c8ef4965d9b335101c422eadb33f3169004
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -225,10 +222,13 @@ jobs:
         with:
           go-version: stable
           cache: false
+      # Built from the s2-verification rev the simulator's history collector
+      # is locked to, so the history format matches.
       - name: Build s2-porcupine checker
         run: |
+          rev=$(sed -n 's|^source = "git+https://github.com/s2-streamstore/s2-verification?rev=[0-9a-f]*#\([0-9a-f]*\)"$|\1|p' sim/Cargo.lock)
           git clone https://github.com/s2-streamstore/s2-verification /tmp/s2-verification
-          git -C /tmp/s2-verification checkout "$S2_VERIFICATION_REV"
+          git -C /tmp/s2-verification checkout "$rev"
           cd /tmp/s2-verification/golang/s2-porcupine
           go build -o /tmp/s2-porcupine .
 
@@ -237,19 +237,17 @@ jobs:
       # which cancels the job and skips uploading the histories.
       - name: Linearizability tests
         run: |
-          for seed in 1 2 3; do
-            echo "starting"
-            ./sim/target/sim/sim linearizable --seed "$seed" --clients 3 --ops-per-client 50
+          check() {
+            seed=$1
+            shift
+            echo "::group::seed $seed $*"
+            ./sim/target/sim/sim "$@" linearizable --seed "$seed" --clients 3 --ops-per-client 50
             timeout 5m /tmp/s2-porcupine -file="history.$seed.jsonl"
-            echo "finished"
-          done
+            echo "::endgroup::"
+          }
+          for seed in $(seq 1 5); do check "$seed"; done
           # And under network chaos (message loss).
-          for seed in 4 5; do
-            echo "starting"
-            ./sim/target/sim/sim --fail-rate 0.005 linearizable --seed "$seed" --clients 3 --ops-per-client 50
-            timeout 5m /tmp/s2-porcupine -file="history.$seed.jsonl"
-            echo "finished"
-          done
+          for seed in $(seq 6 25); do check "$seed" --fail-rate 0.005; done
 
       - name: Upload histories on failure
         if: failure()

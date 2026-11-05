@@ -3714,7 +3714,7 @@ dependencies = [
 [[package]]
 name = "s2-verification"
 version = "0.4.0"
-source = "git+https://github.com/s2-streamstore/s2-verification?rev=b4af8c8ef4965d9b335101c422eadb33f3169004#b4af8c8ef4965d9b335101c422eadb33f3169004"
+source = "git+https://github.com/s2-streamstore/s2-verification?rev=1c88de1f747527592143dbfa2d9eaef35f6071a9#1c88de1f747527592143dbfa2d9eaef35f6071a9"
 dependencies = [
  "antithesis_sdk",
  "clap",
