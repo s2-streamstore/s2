@@ -97,9 +97,7 @@ pub struct LiteArgs {
     ///
     /// :: listens on both IPv4 and IPv6. Use 0.0.0.0 to listen on IPv4 only, or
     /// a specific address such as 127.0.0.1 or ::1 to listen on a single interface.
-    ///
-    /// Can also be set via S2LITE_LISTEN_ADDRESS environment variable.
-    #[arg(long, env = "S2LITE_LISTEN_ADDRESS", value_name = "IP")]
+    #[arg(long, value_name = "IP")]
     pub listen_address: Option<IpAddr>,
 
     /// Port to listen on [default: 443 if HTTPS configured, otherwise 80 for HTTP]
