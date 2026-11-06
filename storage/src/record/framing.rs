@@ -574,7 +574,7 @@ mod test {
         let record = StoredRecord::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::new()).unwrap(),
         ));
-        let metered = Metered::with_size(metered_size, record.clone());
+        let metered = Metered::with_size(metered_size, record);
         let encoded = encode_stored_record(metered.as_ref());
 
         assert_eq!(encoded.len(), 1 + varlen + 1);
