@@ -6,14 +6,20 @@
 //! a `LabeledEvent` at every operation start and finish. Appends that fail
 //! *indefinitely* (the client cannot know whether the records became durable)
 //! are deferred and flushed only after all clients finish — the checker treats
-//! them as "may or may not have happened".
+//! them as "may or may not have happened". A final read of the whole stream then
+//! lets the checker settle which of them took effect.
 //!
 //! The resulting `history.<seed>.jsonl` is verified offline by the Porcupine
 //! model in s2-verification (`s2-porcupine -file=...`).
 
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
-use s2_verification::history::{LabeledEvent, client, fencing_token_client, match_seq_num_client};
+use s2_verification::history::{
+    LabeledEvent, client, fencing_token_client, final_read, match_seq_num_client,
+};
 use tokio::sync::{Barrier, mpsc::UnboundedSender};
 use tracing::info;
 
@@ -70,5 +76,14 @@ pub async fn workload(
     for task in tasks {
         task.await??;
     }
+
+    final_read(
+        history_tx,
+        &stream,
+        client_ids.fetch_add(1, Ordering::Relaxed),
+        op_ids.fetch_add(1, Ordering::Relaxed),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
