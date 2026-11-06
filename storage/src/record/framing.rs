@@ -213,11 +213,12 @@ impl WireEncode for Metered<&StoredRecord> {
 }
 
 fn magic_byte(record: &Metered<&StoredRecord>) -> MagicByte {
-    let metered_size = record.metered_size();
-    let metered_size_varlen = 8 - (metered_size.leading_zeros() / 8) as u8;
-    if metered_size_varlen > 3 {
-        panic!("illegal metered size varlen {metered_size} for record")
-    }
+    let metered_size_varlen = match record.metered_size() {
+        0..=0xFF => 1,
+        0x100..=0xFFFF => 2,
+        0x1_0000..=0xFF_FFFF => 3,
+        metered_size => panic!("illegal metered size {metered_size} for record"),
+    };
     MagicByte {
         record_type: record.record_type(),
         metered_size_varlen,
@@ -560,6 +561,25 @@ mod test {
 
         assert_eq!(decoded.metered_size(), 99);
         assert_eq!(decoded.into_inner(), record);
+    }
+
+    #[rstest]
+    #[case(0, 1)]
+    #[case(0xFF, 1)]
+    #[case(0x100, 2)]
+    #[case(0xFFFF, 2)]
+    #[case(0x1_0000, 3)]
+    #[case(0xFF_FFFF, 3)]
+    fn metered_size_prefix_width(#[case] metered_size: usize, #[case] varlen: usize) {
+        let record = StoredRecord::from(Record::Envelope(
+            EnvelopeRecord::try_from_parts(vec![], Bytes::new()).unwrap(),
+        ));
+        let metered = Metered::with_size(metered_size, record.clone());
+        let encoded = encode_stored_record(metered.as_ref());
+
+        assert_eq!(encoded.len(), 1 + varlen + 1);
+        assert_eq!(stored_record_encoded_size(metered.as_ref()), encoded.len());
+        assert_eq!(decode_stored_record(encoded).unwrap(), metered);
     }
 
     #[test]
