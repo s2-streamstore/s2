@@ -48,7 +48,7 @@ serde_urlencoded = "0.7"
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { version = "1.53", features = ["time", "macros", "io-util", "sync"] }
-tokio-muxt = "0.7"
+tokio-muxt = "0.8.1"
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["rt", "codec"] }
 tracing = { workspace = true }

@@ -6168,9 +6168,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-muxt"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f79eac432d68f5cc5ca99654adddb6ffc9501618bc267303d18a1f768ea01e7c"
+checksum = "a08b20f8324114e2639a1a251692cc8a4154aa311bee55a83bdc82826b09a3b1"
 dependencies = [
  "pin-project",
  "tokio",
