@@ -17,8 +17,8 @@ pub mod extract {
     pub enum HeaderRejection {
         #[error("Missing header `{0}`")]
         MissingHeader(&'static http::HeaderName),
-        #[error("Invalid header `{0}`: not UTF-8")]
-        InvalidUtf8(&'static http::HeaderName),
+        #[error("Invalid header `{0}`: not visible ASCII")]
+        NotVisibleAscii(&'static http::HeaderName),
         #[error("Invalid header `{0}`: {1}")]
         InvalidHeaderValue(&'static http::HeaderName, String),
     }
@@ -40,7 +40,7 @@ pub mod extract {
         };
         let value_str = value
             .to_str()
-            .map_err(|_| HeaderRejection::InvalidUtf8(name))?;
+            .map_err(|_| HeaderRejection::NotVisibleAscii(name))?;
         let parsed = value_str
             .parse::<T>()
             .map_err(|e| HeaderRejection::InvalidHeaderValue(name, e.to_string()))?;
