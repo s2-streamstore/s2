@@ -43,13 +43,24 @@ jobs:
 
       # A new block of seeds each night, so coverage accumulates. Only failing
       # seeds keep their logs and histories, for replaying with the same seed.
+      #
+      # Each seed is bounded in wall-clock time (the simulator's own limit counts
+      # simulated time), and no new seed starts after 30 minutes, so the step
+      # ends before the job timeout, which would cancel the job and skip the
+      # upload.
       - name: Sweep seeds under message loss
         run: |
           first=$(( $(date -u +%s) / 86400 * 1000 ))
           last=$(( first + 499 ))
+          deadline=$(( SECONDS + 30 * 60 ))
           failed=()
           for seed in $(seq "$first" "$last"); do
-            if ./sim/target/sim/sim --fail-rate 0.005 linearizable --seed "$seed" --clients 3 --ops-per-client 50 > "sim.$seed.log" 2>&1 \
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::warning::out of time, stopping before seed $seed"
+              last=$(( seed - 1 ))
+              break
+            fi
+            if timeout 2m ./sim/target/sim/sim --fail-rate 0.005 linearizable --seed "$seed" --clients 3 --ops-per-client 50 > "sim.$seed.log" 2>&1 \
               && timeout 5m /tmp/s2-porcupine -file="history.$seed.jsonl" > "porcupine.$seed.log" 2>&1; then
               rm -f "sim.$seed.log" "porcupine.$seed.log" "history.$seed.jsonl" porcupine-outputs/history."$seed"-*.html
             else
