@@ -694,7 +694,7 @@ async fn run_session(
         return Ok(SessionOutcome::Closed);
     }
 
-    let timer = MuxTimer::<N_TIMER_VARIANTS>::default();
+    let timer = MuxTimer::<N_TIMER_VARIANTS>::new();
     tokio::pin!(timer);
 
     let mut declined_advice = false;
@@ -820,7 +820,7 @@ async fn resend(
     let mut resend_index = 0;
     let mut resend_finished = false;
 
-    let timer = MuxTimer::<N_TIMER_VARIANTS>::default();
+    let timer = MuxTimer::<N_TIMER_VARIANTS>::new();
     tokio::pin!(timer);
 
     while !state.inflight_appends.is_empty() {

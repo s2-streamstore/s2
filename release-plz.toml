@@ -8,18 +8,26 @@ pr_labels = ["release"]
 [[package]]
 name = "s2-api"
 git_release_enable = false
+version_group = "s2"
 
 [[package]]
 name = "s2-common"
 git_release_enable = false
+version_group = "s2"
 
 [[package]]
 name = "s2-resource-spec"
 git_release_enable = false
+version_group = "s2"
 
 [[package]]
 name = "s2-storage"
 git_release_enable = false
+version_group = "s2"
+
+[[package]]
+name = "s2-sdk"
+version_group = "s2"
 
 [[package]]
 name = "s2-cli"
