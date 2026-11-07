@@ -67,12 +67,12 @@ rkyv = "0.8"
 rpassword = "7.5"
 rstest = "0.28"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
-s2-api = { path = "api", version = "0.32.2" }
-s2-common = { path = "common", version = "0.43.0" }
-s2-lite = { path = "lite", version = "0.44.0" }
-s2-resource-spec = { path = "resource-spec", version = "0.3.1" }
-s2-sdk = { path = "sdk", version = "0.35.4" }
-s2-storage = { path = "storage", version = "0.2.8" }
+s2-api = { path = "api", version = "0.44.1" }
+s2-common = { path = "common", version = "0.44.1" }
+s2-lite = { path = "lite", version = "0.44.1" }
+s2-resource-spec = { path = "resource-spec", version = "0.44.1" }
+s2-sdk = { path = "sdk", version = "0.44.1" }
+s2-storage = { path = "storage", version = "0.44.1" }
 schemars = "1.2"
 secrecy = "0.10.3"
 semver = "1.0"
