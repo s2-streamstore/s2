@@ -46,38 +46,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
 
-      # release-plz gives a crate only a patch release when a workspace dependency had a
-      # breaking one, but our libraries use each other's types in their public APIs.
-      - name: Propagate breaking bumps in release PR
-        env:
-          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
-          RELEASE_PR: ${{ steps.release-plz.outputs.pr }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "$RELEASE_PR" || "$RELEASE_PR" == "null" ]]; then
-            exit 0
-          fi
-
-          pr_number="$(jq -r '.number // empty' <<<"$RELEASE_PR")"
-          if [[ -z "$pr_number" ]]; then
-            exit 0
-          fi
-
-          gh pr checkout "$pr_number"
-          python3 .github/scripts/internal_crate_versions.py breaking-bumps \
-            --base "$(git merge-base HEAD origin/main)" --apply
-
-          if git diff --quiet; then
-            exit 0
-          fi
-
-          # Must stay a [bot] identity: release-plz closes and reopens release PRs with non-bot commits.
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore: propagate breaking version bumps to dependent crates"
-          git push
-
       - name: Refresh simulator lockfile in release PR
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
