@@ -2,7 +2,7 @@
 passthrough = ["S2_BUILD_CHANNEL", "S2_GIT_REV"]
 
 [target.x86_64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:b21940afb5d20705a9b0b9f95f033a50efb0480eb0cf19a0588a252e0ce46989"
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:fa3864a88bf2d8c5db8cb6403b803c3692b445b87a563c3be2e4c36ec6816e2e"
 
 [target.aarch64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:13c8c2839a4ca78706d6885add4f836f9d1d5756518b29954d1e35821b4ffea8"
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:4664c353d6be72ac7ffbf163ebc546060fb4c7bf5e527ff9b18b823727646400"
