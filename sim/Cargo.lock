@@ -1463,7 +1463,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3241,7 +3241,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3567,7 +3567,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3625,7 +3625,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3660,7 +3660,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.44.2"
+version = "0.44.3"
 dependencies = [
  "axum",
  "base64ct",
@@ -3685,7 +3685,7 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.44.2"
+version = "0.44.3"
 dependencies = [
  "axum",
  "base64ct",
@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "s2-lite"
-version = "0.44.2"
+version = "0.44.3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3749,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "s2-resource-spec"
-version = "0.44.2"
+version = "0.44.3"
 dependencies = [
  "compact_str",
  "humantime",
@@ -3761,7 +3761,7 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.44.2"
+version = "0.44.3"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -3833,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "s2-storage"
-version = "0.44.2"
+version = "0.44.3"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -5225,7 +5225,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
