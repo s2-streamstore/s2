@@ -151,7 +151,7 @@ impl Backend {
                 .await?;
         } else {
             let meta = outcome.inner();
-            txn.put(&meta_key, kv::basin_meta::ser_value(meta))?;
+            txn.put_bytes(meta_key, kv::basin_meta::ser_value(meta))?;
 
             db_txn_commit_durable(txn).await?;
         }
@@ -196,7 +196,7 @@ impl Backend {
 
         meta.config = meta.config.reconfigure(reconfig);
 
-        txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
+        txn.put_bytes(meta_key, kv::basin_meta::ser_value(&meta))?;
 
         db_txn_commit_durable(txn).await?;
 
@@ -215,8 +215,8 @@ impl Backend {
         };
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
-            txn.put(&meta_key, kv::basin_meta::ser_value(&meta))?;
-            txn.put(
+            txn.put_bytes(meta_key, kv::basin_meta::ser_value(&meta))?;
+            txn.put_bytes(
                 kv::basin_deletion_pending::ser_key(&basin),
                 kv::basin_deletion_pending::ser_value(&StreamNameStartAfter::default()),
             )?;

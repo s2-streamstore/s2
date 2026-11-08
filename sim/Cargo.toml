@@ -46,7 +46,7 @@ s2-sdk = { path = "../sdk", features = ["_hidden"] }
 # The Go checker built in CI must be pinned to the same rev (see the
 # S2_VERIFICATION_REV env in .github/workflows/ci.yml).
 s2-verification = { git = "https://github.com/s2-streamstore/s2-verification", rev = "d5cf3b755083a62785c732e8a271ae3e54033d58", version = "0.4.0" }
-s3s = "0.15.0"
+s3s = "0.17.0"
 serde_json = "1.0"
 slatedb = { version = "0.18", features = ["lz4", "zstd"] }
 tokio = { version = "1.53", features = ["macros", "rt", "sync", "time", "io-util"] }

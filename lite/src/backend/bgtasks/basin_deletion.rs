@@ -115,7 +115,7 @@ impl Backend {
         cursor: &StreamNameStartAfter,
     ) -> Result<(), StorageError> {
         let mut batch = WriteBatch::new();
-        batch.put(
+        batch.put_bytes(
             kv::basin_deletion_pending::ser_key(basin),
             kv::basin_deletion_pending::ser_value(cursor),
         );
