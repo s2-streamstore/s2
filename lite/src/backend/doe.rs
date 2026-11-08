@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use super::{error::StorageError, kv, store::db_txn_get, timestamp::TimestampSecs};
@@ -111,12 +112,15 @@ pub(super) fn replace(
             txn.delete(kv::stream_doe_check::ser_key(stream_id, check))?;
         }
         if let Some(kv::stream_doe_state::State::Scheduled(check)) = next {
-            txn.put(kv::stream_doe_check::ser_key(stream_id, check), [])?;
+            txn.put_bytes(
+                kv::stream_doe_check::ser_key(stream_id, check),
+                Bytes::new(),
+            )?;
         }
     }
     let key = kv::stream_doe_state::ser_key(stream_id);
     match next {
-        Some(next) => txn.put(key, kv::stream_doe_state::ser_value(next))?,
+        Some(next) => txn.put_bytes(key, kv::stream_doe_state::ser_value(next))?,
         None if previous.is_some() => txn.delete(key)?,
         None => (),
     }

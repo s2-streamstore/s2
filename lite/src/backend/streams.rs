@@ -209,16 +209,16 @@ impl Backend {
         } else {
             let meta = outcome.inner();
 
-            txn.put(&stream_meta_key, kv::stream_meta::ser_value(meta))?;
+            txn.put_bytes(stream_meta_key, kv::stream_meta::ser_value(meta))?;
 
             let stream_id = StreamId::new(&basin, &stream);
 
             if matches!(&outcome, ProvisionResult::Created(_)) {
-                txn.put(
+                txn.put_bytes(
                     kv::stream_id_mapping::ser_key(stream_id),
                     kv::stream_id_mapping::ser_value(&basin, &stream),
                 )?;
-                txn.put(
+                txn.put_bytes(
                     kv::stream_tail_position::ser_key(stream_id),
                     kv::stream_tail_position::ser_value(StreamPosition::MIN),
                 )?;
@@ -306,7 +306,7 @@ impl Backend {
             basin_meta.config.default_stream_config,
         );
 
-        txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
+        txn.put_bytes(meta_key, kv::stream_meta::ser_value(&meta))?;
 
         self.commit_stream_config(txn, basin, stream, meta.config.clone(), Some(prior_doe))
             .await?;
@@ -410,7 +410,7 @@ impl Backend {
         })?;
         if meta.deleted_at.is_none() {
             meta.deleted_at = Some(OffsetDateTime::now_utc());
-            txn.put(&meta_key, kv::stream_meta::ser_value(&meta))?;
+            txn.put_bytes(meta_key, kv::stream_meta::ser_value(&meta))?;
             db_txn_commit_durable(txn).await?;
         } else {
             // The terminal trim is durable, but the metadata marker may not be yet.
