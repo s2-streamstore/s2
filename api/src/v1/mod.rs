@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod location;
 pub mod metrics;
+pub mod network_policy;
 pub mod stream;
 
 use s2_common::{

@@ -14,3 +14,8 @@ pub const RECORD_BATCH_MAX: crate::read_extent::CountOrBytes = crate::read_exten
     count: 1000,
     bytes: 1024 * 1024,
 };
+
+pub const MAX_NETWORK_POLICY_SLUG_LEN: usize = 96;
+/// CIDRs across both sets of a CIDR policy, or VPC endpoint IDs of a private network policy.
+pub const MAX_NETWORK_POLICY_IDENTIFIERS: usize = 100;
+pub const NETWORK_POLICY_NONCE_LEN: usize = 8;

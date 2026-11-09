@@ -485,6 +485,8 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
         expires_at,
         auto_prefix_streams,
         scope,
+        // Inherited from the issuer and immutable, so not part of the configuration diff.
+        network_policy: _,
     } = info;
     let scope: s2_common::access::AccessTokenScope = scope.try_into()?;
 

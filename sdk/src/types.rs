@@ -2122,6 +2122,14 @@ pub enum Operation {
     GetDefaultLocation,
     /// Set the default location.
     SetDefaultLocation,
+    /// List network policies.
+    ListNetworkPolicies,
+    /// Create a network policy.
+    CreateNetworkPolicy,
+    /// Get a network policy.
+    GetNetworkPolicy,
+    /// Delete a network policy.
+    DeleteNetworkPolicy,
 }
 
 impl From<Operation> for api::access::Operation {
@@ -2151,6 +2159,10 @@ impl From<Operation> for api::access::Operation {
             Operation::ListLocations => api::access::Operation::ListLocations,
             Operation::GetDefaultLocation => api::access::Operation::GetDefaultLocation,
             Operation::SetDefaultLocation => api::access::Operation::SetDefaultLocation,
+            Operation::ListNetworkPolicies => api::access::Operation::ListNetworkPolicies,
+            Operation::CreateNetworkPolicy => api::access::Operation::CreateNetworkPolicy,
+            Operation::GetNetworkPolicy => api::access::Operation::GetNetworkPolicy,
+            Operation::DeleteNetworkPolicy => api::access::Operation::DeleteNetworkPolicy,
         }
     }
 }
@@ -2182,6 +2194,10 @@ impl From<api::access::Operation> for Operation {
             api::access::Operation::ListLocations => Operation::ListLocations,
             api::access::Operation::GetDefaultLocation => Operation::GetDefaultLocation,
             api::access::Operation::SetDefaultLocation => Operation::SetDefaultLocation,
+            api::access::Operation::ListNetworkPolicies => Operation::ListNetworkPolicies,
+            api::access::Operation::CreateNetworkPolicy => Operation::CreateNetworkPolicy,
+            api::access::Operation::GetNetworkPolicy => Operation::GetNetworkPolicy,
+            api::access::Operation::DeleteNetworkPolicy => Operation::DeleteNetworkPolicy,
         }
     }
 }
@@ -2427,6 +2443,7 @@ impl From<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
             expires_at: value.expires_at.map(Into::into),
             auto_prefix_streams: value.auto_prefix_streams.then_some(true),
             scope: value.scope.into(),
+            network_policy: None,
         }
     }
 }

@@ -34,3 +34,11 @@ impl StrProps for StartAfterProps {
     const IS_PREFIX: bool = true;
     const FIELD_NAME: &'static str = "start-after";
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlugProps;
+
+impl StrProps for SlugProps {
+    const IS_PREFIX: bool = false;
+    const FIELD_NAME: &'static str = "slug";
+}
