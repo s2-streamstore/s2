@@ -9,7 +9,7 @@ use super::{
     stream::{StreamName, StreamNamePrefix},
     strings::{IdProps, PrefixProps, StartAfterProps, StrProps},
 };
-use crate::{caps, resources::ListItemsRequest};
+use crate::{caps, network_policy::NetworkPolicyRef, resources::ListItemsRequest};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
@@ -191,6 +191,10 @@ pub enum Operation {
     ListLocations = 22,
     GetDefaultLocation = 23,
     SetDefaultLocation = 24,
+    ListNetworkPolicies = 25,
+    CreateNetworkPolicy = 26,
+    GetNetworkPolicy = 27,
+    DeleteNetworkPolicy = 28,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -237,6 +241,7 @@ pub struct AccessTokenInfo {
     pub expires_at: Option<time::OffsetDateTime>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
+    pub network_policy: Option<NetworkPolicyRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +250,9 @@ pub struct IssueAccessTokenRequest {
     pub expires_at: Option<time::OffsetDateTime>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
+    /// Full reference of the policy the token is restricted by. A restricted issuer's own
+    /// policy is inherited when omitted.
+    pub network_policy: Option<NetworkPolicyRef>,
 }
 
 pub type ListAccessTokensRequest = ListItemsRequest<AccessTokenIdPrefix, AccessTokenIdStartAfter>;

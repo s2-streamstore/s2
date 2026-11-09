@@ -2,6 +2,7 @@ use s2_common::{
     self,
     access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
     basin::{BasinName, BasinNamePrefix},
+    network_policy::NetworkPolicyRef,
     stream::{StreamName, StreamNamePrefix},
 };
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,14 @@ pub enum Operation {
     GetDefaultLocation,
     /// Set the default location.
     SetDefaultLocation,
+    /// List network policies.
+    ListNetworkPolicies,
+    /// Create a network policy.
+    CreateNetworkPolicy,
+    /// Get a network policy.
+    GetNetworkPolicy,
+    /// Delete a network policy.
+    DeleteNetworkPolicy,
 }
 
 impl From<Operation> for s2_common::access::Operation {
@@ -126,6 +135,10 @@ impl From<Operation> for s2_common::access::Operation {
             Operation::ListLocations => Self::ListLocations,
             Operation::GetDefaultLocation => Self::GetDefaultLocation,
             Operation::SetDefaultLocation => Self::SetDefaultLocation,
+            Operation::ListNetworkPolicies => Self::ListNetworkPolicies,
+            Operation::CreateNetworkPolicy => Self::CreateNetworkPolicy,
+            Operation::GetNetworkPolicy => Self::GetNetworkPolicy,
+            Operation::DeleteNetworkPolicy => Self::DeleteNetworkPolicy,
         }
     }
 }
@@ -158,6 +171,10 @@ impl From<s2_common::access::Operation> for Operation {
             ListLocations => Self::ListLocations,
             GetDefaultLocation => Self::GetDefaultLocation,
             SetDefaultLocation => Self::SetDefaultLocation,
+            ListNetworkPolicies => Self::ListNetworkPolicies,
+            CreateNetworkPolicy => Self::CreateNetworkPolicy,
+            GetNetworkPolicy => Self::GetNetworkPolicy,
+            DeleteNetworkPolicy => Self::DeleteNetworkPolicy,
         }
     }
 }
@@ -175,6 +192,9 @@ pub struct AccessTokenInfo {
     pub auto_prefix_streams: bool,
     /// Access token scope.
     pub scope: AccessTokenScope,
+    /// Network policy the token is restricted by, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policy: Option<NetworkPolicyRef>,
 }
 
 impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
@@ -184,6 +204,7 @@ impl From<s2_common::access::AccessTokenInfo> for AccessTokenInfo {
             expires_at: value.expires_at,
             auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
+            network_policy: value.network_policy,
         }
     }
 }
@@ -206,6 +227,11 @@ pub struct IssueAccessTokenRequest {
     pub auto_prefix_streams: Option<bool>,
     /// Access token scope.
     pub scope: AccessTokenScope,
+    /// Full reference of a network policy to restrict the token by.
+    /// If the requestor's token is itself restricted, this must be omitted or name the same
+    /// policy, which the new token inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policy: Option<NetworkPolicyRef>,
 }
 
 impl TryFrom<IssueAccessTokenRequest> for s2_common::access::IssueAccessTokenRequest {
@@ -217,6 +243,7 @@ impl TryFrom<IssueAccessTokenRequest> for s2_common::access::IssueAccessTokenReq
             expires_at: value.expires_at,
             auto_prefix_streams: value.auto_prefix_streams.unwrap_or_default(),
             scope: value.scope.try_into()?,
+            network_policy: value.network_policy,
         })
     }
 }

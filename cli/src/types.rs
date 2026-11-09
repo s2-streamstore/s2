@@ -803,6 +803,10 @@ pub enum Operation {
     ListLocations,
     GetDefaultLocation,
     SetDefaultLocation,
+    ListNetworkPolicies,
+    CreateNetworkPolicy,
+    GetNetworkPolicy,
+    DeleteNetworkPolicy,
 }
 
 impl From<Operation> for sdk::types::Operation {
@@ -832,6 +836,10 @@ impl From<Operation> for sdk::types::Operation {
             Operation::Fence => sdk::types::Operation::Fence,
             Operation::Append => sdk::types::Operation::Append,
             Operation::Read => sdk::types::Operation::Read,
+            Operation::ListNetworkPolicies => sdk::types::Operation::ListNetworkPolicies,
+            Operation::CreateNetworkPolicy => sdk::types::Operation::CreateNetworkPolicy,
+            Operation::GetNetworkPolicy => sdk::types::Operation::GetNetworkPolicy,
+            Operation::DeleteNetworkPolicy => sdk::types::Operation::DeleteNetworkPolicy,
         }
     }
 }
@@ -863,6 +871,10 @@ impl From<sdk::types::Operation> for Operation {
             sdk::types::Operation::Fence => Operation::Fence,
             sdk::types::Operation::Append => Operation::Append,
             sdk::types::Operation::Read => Operation::Read,
+            sdk::types::Operation::ListNetworkPolicies => Operation::ListNetworkPolicies,
+            sdk::types::Operation::CreateNetworkPolicy => Operation::CreateNetworkPolicy,
+            sdk::types::Operation::GetNetworkPolicy => Operation::GetNetworkPolicy,
+            sdk::types::Operation::DeleteNetworkPolicy => Operation::DeleteNetworkPolicy,
         }
     }
 }
