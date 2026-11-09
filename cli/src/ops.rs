@@ -13,14 +13,17 @@ use s2_sdk::{
     types::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
         AppendInput, AppendRecord, AppendRecordBatch, BasinInfo, BasinMetricSet, BasinName,
-        BasinReconfiguration, CommandRecord, CreateBasinInput, CreateStreamInput, DeleteBasinInput,
-        DeleteStreamInput, EncryptionKey, FencingToken, GetAccountMetricsInput,
-        GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
-        ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric, ReadFrom, ReadInput,
-        ReadLimits, ReadSessionConfig, ReadStart, ReadStop, ReconfigureBasinInput,
-        ReconfigureStreamInput, S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet,
-        StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval,
+        BasinReconfiguration, CidrPolicy, CommandRecord, CreateBasinInput,
+        CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
+        EncryptionKey, FencingToken, GetAccountMetricsInput, GetBasinMetricsInput,
+        GetNetworkPolicyOutput, GetStreamMetricsInput, IssueAccessTokenInput,
+        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
+        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
+        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes,
+        Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicyRef, NetworkPolicySelector,
+        PrivateNetPolicy, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig, ReadStart, ReadStop,
+        ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime, SequencedRecord, StreamInfo,
+        StreamMetricSet, StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval,
     },
 };
 
@@ -38,10 +41,10 @@ fn stream_with_encryption(
 
 use crate::{
     cli::{
-        CreateBasinArgs, CreateStreamArgs, FenceArgs, GetAccountMetricsArgs, GetBasinMetricsArgs,
-        GetStreamMetricsArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
-        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs,
-        TimeRangeArgs, TrimArgs,
+        CreateBasinArgs, CreateNetworkPolicyArgs, CreateStreamArgs, FenceArgs,
+        GetAccountMetricsArgs, GetBasinMetricsArgs, GetStreamMetricsArgs, IssueAccessTokenArgs,
+        ListAccessTokensArgs, ListBasinsArgs, ListNetworkPoliciesArgs, ListStreamsArgs, ReadArgs,
+        ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs, TimeRangeArgs, TrimArgs,
     },
     error::{CliError, OpKind},
     types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
@@ -275,6 +278,9 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
     if args.auto_prefix_streams {
         input = input.with_auto_prefix_streams(true);
     }
+    if let Some(network_policy) = args.network_policy {
+        input = input.with_network_policy(network_policy);
+    }
 
     s2.issue_access_token(input)
         .await
@@ -285,6 +291,96 @@ pub async fn revoke_access_token(s2: &S2, id: AccessTokenId) -> Result<(), CliEr
     s2.revoke_access_token(id)
         .await
         .map_err(|e| CliError::op(OpKind::RevokeAccessToken, e))
+}
+
+/// List network policies, returning items and whether there are more.
+pub async fn list_network_policies(
+    s2: &S2,
+    args: ListNetworkPoliciesArgs,
+) -> Result<(Vec<NetworkPolicyInfo>, bool), CliError> {
+    let ListNetworkPoliciesArgs {
+        prefix,
+        start_after,
+        limit,
+        no_auto_paginate,
+    } = args;
+
+    if no_auto_paginate {
+        let mut input = ListNetworkPoliciesInput::new();
+        if let Some(p) = prefix {
+            input = input.with_prefix(p);
+        }
+        if let Some(s) = start_after {
+            input = input.with_start_after(s);
+        }
+        if let Some(l) = limit {
+            input = input.with_limit(l);
+        }
+
+        let page = s2
+            .list_network_policies(input)
+            .await
+            .map_err(|e| CliError::op(OpKind::ListNetworkPolicies, e))?;
+
+        Ok((page.values, page.has_more))
+    } else {
+        let mut input = ListAllNetworkPoliciesInput::new();
+        if let Some(p) = prefix {
+            input = input.with_prefix(p);
+        }
+        if let Some(s) = start_after {
+            input = input.with_start_after(s);
+        }
+
+        let items: Vec<_> = s2
+            .list_all_network_policies(input)
+            .take(limit.unwrap_or(usize::MAX))
+            .try_collect()
+            .await
+            .map_err(|e| CliError::op(OpKind::ListNetworkPolicies, e))?;
+
+        Ok((items, false))
+    }
+}
+
+pub async fn create_network_policy(
+    s2: &S2,
+    args: CreateNetworkPolicyArgs,
+) -> Result<NetworkPolicyInfo, CliError> {
+    let CreateNetworkPolicyArgs {
+        slug,
+        allow_cidr,
+        deny_cidr,
+        vpce,
+    } = args;
+
+    let invalid = |e| CliError::InvalidArgs(miette::miette!("{e}"));
+    let policy = if vpce.is_empty() {
+        let allow = (!allow_cidr.is_empty()).then_some(allow_cidr);
+        let deny = (!deny_cidr.is_empty()).then_some(deny_cidr);
+        NetworkPolicy::Cidr(CidrPolicy::new(allow, deny).map_err(invalid)?)
+    } else {
+        NetworkPolicy::PrivateNet(PrivateNetPolicy::new(vpce).map_err(invalid)?)
+    };
+
+    s2.create_network_policy(CreateNetworkPolicyInput::new(slug, policy))
+        .await
+        .map_err(|e| CliError::op(OpKind::CreateNetworkPolicy, e))
+}
+
+pub async fn get_network_policy(
+    s2: &S2,
+    selector: NetworkPolicySelector,
+) -> Result<GetNetworkPolicyOutput, CliError> {
+    s2.get_network_policy(selector)
+        .await
+        .map_err(|e| CliError::op(OpKind::GetNetworkPolicy, e))
+}
+
+pub async fn delete_network_policy(s2: &S2, id: NetworkPolicyRef) -> Result<(), CliError> {
+    s2.delete_network_policy(id)
+        .await
+        .map_err(|e| CliError::op(OpKind::DeleteNetworkPolicy, e))
 }
 
 /// List locations.

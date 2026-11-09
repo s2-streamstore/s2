@@ -701,6 +701,7 @@ pub struct AccessTokenInfo {
     pub expires_at: Option<String>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
+    pub network_policy: Option<String>,
 }
 
 impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
@@ -710,6 +711,7 @@ impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
             expires_at: info.expires_at.map(|expires_at| expires_at.to_string()),
             auto_prefix_streams: info.auto_prefix_streams,
             scope: info.scope.into(),
+            network_policy: info.network_policy.map(|policy| policy.to_string()),
         }
     }
 }
@@ -731,7 +733,7 @@ impl AccessTokenInfo {
 
         let scope = &self.scope;
         let detail = format!(
-            "  basins={}  streams={}  tokens={}  perms={}  ops={}",
+            "  basins={}  streams={}  tokens={}  perms={}  ops={}  network={}",
             matcher_summary(scope.basins.as_ref().map(BasinMatcher::summary)),
             matcher_summary(scope.streams.as_ref().map(StreamMatcher::summary)),
             matcher_summary(
@@ -745,7 +747,100 @@ impl AccessTokenInfo {
                 .as_ref()
                 .map_or_else(|| "none".to_owned(), PermittedOperationGroups::summary),
             scope.ops.len(),
+            self.network_policy
+                .as_deref()
+                .map_or_else(|| "any".dimmed().to_string(), |policy| policy.to_owned()),
         );
+
+        format!("{header}\n{detail}")
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkPolicyInfo {
+    pub id: String,
+    pub created_at: String,
+    pub policy: NetworkPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    Cidr {
+        allow: Option<Vec<String>>,
+        deny: Option<Vec<String>>,
+    },
+    PrivateNet {
+        vpce_ids: Vec<String>,
+    },
+}
+
+impl From<sdk::types::NetworkPolicy> for NetworkPolicy {
+    fn from(policy: sdk::types::NetworkPolicy) -> Self {
+        let to_strings = |items: &[_]| items.iter().map(ToString::to_string).collect::<Vec<_>>();
+        match policy {
+            sdk::types::NetworkPolicy::Cidr(cidr) => NetworkPolicy::Cidr {
+                allow: cidr.allow().map(to_strings),
+                deny: cidr.deny().map(to_strings),
+            },
+            sdk::types::NetworkPolicy::PrivateNet(private_net) => NetworkPolicy::PrivateNet {
+                vpce_ids: private_net
+                    .vpce_ids()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            },
+        }
+    }
+}
+
+impl From<sdk::types::NetworkPolicyInfo> for NetworkPolicyInfo {
+    fn from(info: sdk::types::NetworkPolicyInfo) -> Self {
+        NetworkPolicyInfo {
+            id: info.id.to_string(),
+            created_at: info.created_at.to_string(),
+            policy: info.policy.into(),
+            token_count: None,
+        }
+    }
+}
+
+impl NetworkPolicyInfo {
+    pub fn with_token_count(self, token_count: u64) -> Self {
+        Self {
+            token_count: Some(token_count),
+            ..self
+        }
+    }
+
+    /// Two-line compact summary for `s2 list-network-policies`, in the style of
+    /// [`AccessTokenInfo::summary_block`].
+    pub fn summary_block(&self, id_width: usize) -> String {
+        let padding = " ".repeat(id_width.saturating_sub(self.id.len()));
+        let header = format!(
+            "{}{padding}  created {}",
+            self.id.bold(),
+            self.created_at.green()
+        );
+
+        let list = |items: Option<&Vec<String>>| match items {
+            Some(items) if !items.is_empty() => items.join(","),
+            _ => "none".dimmed().to_string(),
+        };
+        let detail = match &self.policy {
+            NetworkPolicy::Cidr { allow, deny } => {
+                let allow = match allow {
+                    Some(allow) if !allow.is_empty() => allow.join(","),
+                    _ => "any".dimmed().to_string(),
+                };
+                format!("  cidr  allow={allow}  deny={}", list(deny.as_ref()))
+            }
+            NetworkPolicy::PrivateNet { vpce_ids } => {
+                format!("  private-net  vpce={}", list(Some(vpce_ids)))
+            }
+        };
 
         format!("{header}\n{detail}")
     }
@@ -962,13 +1057,14 @@ mod tests {
             id: "tok".to_owned(),
             expires_at: None,
             auto_prefix_streams: false,
+            network_policy: None,
             scope: scope.into(),
         };
 
         assert_eq!(
             info.summary_block(3),
             "tok  expires never\n\
-             \x20 basins=∅  streams=∅  tokens=∅  perms=none  ops=0"
+             \x20 basins=∅  streams=∅  tokens=∅  perms=none  ops=0  network=any"
         );
         let json = serde_json::to_value(&info.scope).unwrap();
         assert!(json["basins"].is_null(), "{json}");
@@ -1015,6 +1111,7 @@ mod tests {
             id: "tok".to_owned(),
             expires_at: None,
             auto_prefix_streams: false,
+            network_policy: None,
             scope: AccessTokenScope {
                 basins: Some(BasinMatcher::Prefix("".parse().unwrap())),
                 streams: Some(StreamMatcher::Prefix("tenant/".parse().unwrap())),
@@ -1032,7 +1129,7 @@ mod tests {
         assert_eq!(
             info.summary_block(8),
             "tok       expires never\n\
-             \x20 basins=*  streams=tenant/*  tokens=∅  perms=a:r  ops=0"
+             \x20 basins=*  streams=tenant/*  tokens=∅  perms=a:r  ops=0  network=any"
         );
     }
 
@@ -1044,6 +1141,7 @@ mod tests {
             id: "prod".to_owned(),
             expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
             auto_prefix_streams: false,
+            network_policy: None,
             scope: AccessTokenScope {
                 basins: None,
                 streams: None,
@@ -1056,7 +1154,7 @@ mod tests {
         assert_eq!(
             info.summary_block(4),
             "prod  expires 2030-01-01T00:00:00Z\n\
-             \x20 basins=∅  streams=∅  tokens=root  perms=none  ops=2"
+             \x20 basins=∅  streams=∅  tokens=root  perms=none  ops=2  network=any"
         );
     }
 

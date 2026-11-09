@@ -111,6 +111,13 @@ pub enum CliError {
     ))]
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
+    #[error("{}: {}", .0, .1)]
+    #[diagnostic(help(
+        "The access token is bound to a network policy that does not permit requests from this \
+         network. Retry from a permitted network, or use a token without that restriction."
+    ))]
+    NetworkPolicyDenied(OpKind, #[source] SdkError),
+
     #[error("S2 Lite server error: {0}")]
     #[diagnostic(help("{}", HELP))]
     LiteServer(String),
@@ -149,6 +156,9 @@ impl CliError {
 
     pub fn with_token_source(self, token_source: Option<TokenSource>) -> Self {
         match (self, token_source) {
+            (CliError::Operation(kind, source), _) if is_network_policy_denied(&source) => {
+                CliError::NetworkPolicyDenied(kind, source)
+            }
             (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
                 CliError::UnauthorizedAccessToken(kind, source, token_source)
             }
@@ -173,6 +183,10 @@ pub enum OpKind {
     ListAccessTokens,
     IssueAccessToken,
     RevokeAccessToken,
+    ListNetworkPolicies,
+    CreateNetworkPolicy,
+    GetNetworkPolicy,
+    DeleteNetworkPolicy,
     ListLocations,
     GetDefaultLocation,
     SetDefaultLocation,
@@ -241,6 +255,12 @@ fn is_auth_error(err: &SdkError) -> bool {
     err.server_error()
         .and_then(ServerError::known_code)
         .is_some_and(ErrorCode::is_auth_error)
+}
+
+fn is_network_policy_denied(err: &SdkError) -> bool {
+    err.server_error()
+        .and_then(ServerError::known_code)
+        .is_some_and(|code| matches!(code, ErrorCode::NetworkPolicyDenied))
 }
 
 fn is_malformed_access_token(err: &SdkError) -> bool {
