@@ -7,6 +7,7 @@ pub mod basins;
 mod error;
 pub mod locations;
 pub mod metrics;
+pub mod network_policies;
 pub mod paths;
 pub mod records;
 pub mod streams;
@@ -27,6 +28,7 @@ pub fn router() -> axum::Router<Backend> {
         .merge(records::router())
         .merge(locations::router())
         .merge(access_tokens::router())
+        .merge(network_policies::router())
         .merge(metrics::router())
         .route_layer((
             CompressionLayer::new().compress_when(compress_when),

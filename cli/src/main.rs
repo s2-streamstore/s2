@@ -50,7 +50,9 @@ use strum::VariantNames;
 use tabled::{Table, Tabled};
 use tokio::{io::AsyncWriteExt, select};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
-use types::{AccessTokenInfo, BasinConfig, S2BasinAndMaybeStreamUri, StreamConfig};
+use types::{
+    AccessTokenInfo, BasinConfig, NetworkPolicyInfo, S2BasinAndMaybeStreamUri, StreamConfig,
+};
 
 fn install_rustls_crypto_provider() {
     rustls::crypto::aws_lc_rs::default_provider()
@@ -517,6 +519,40 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             eprintln!(
                 "{}",
                 format!("✓ Access token '{}' revoked", id).green().bold()
+            );
+        }
+
+        Command::ListNetworkPolicies(args) => {
+            let (policies, _) = ops::list_network_policies(&s2, args).await?;
+            let policies: Vec<NetworkPolicyInfo> =
+                policies.into_iter().map(NetworkPolicyInfo::from).collect();
+            let id_width = policies.iter().map(|info| info.id.len()).max().unwrap_or(0);
+            let blocks: Vec<String> = policies
+                .iter()
+                .map(|info| info.summary_block(id_width))
+                .collect();
+            if !blocks.is_empty() {
+                println!("{}", blocks.join("\n\n"));
+            }
+        }
+
+        Command::CreateNetworkPolicy(args) => {
+            let info = ops::create_network_policy(&s2, args).await?;
+            eprintln!("{}", "✓ Network policy created".green().bold());
+            println!("{}", info.id);
+        }
+
+        Command::GetNetworkPolicy { id } => {
+            let output = ops::get_network_policy(&s2, id).await?;
+            let info = NetworkPolicyInfo::from(output.info).with_token_count(output.token_count);
+            println!("{}", json_to_table(&serde_json::to_value(&info)?));
+        }
+
+        Command::DeleteNetworkPolicy { id } => {
+            ops::delete_network_policy(&s2, id.clone()).await?;
+            eprintln!(
+                "{}",
+                format!("✓ Network policy '{}' deleted", id).green().bold()
             );
         }
 

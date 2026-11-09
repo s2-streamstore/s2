@@ -154,6 +154,12 @@ impl Default for NetworkPolicySlugStartAfter {
     }
 }
 
+impl From<NetworkPolicySlug> for NetworkPolicySlugStartAfter {
+    fn from(value: NetworkPolicySlug) -> Self {
+        Self(value.0, PhantomData)
+    }
+}
+
 /// Random suffix that distinguishes successive policies created under the same slug.
 /// It is not a secret.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -330,6 +336,15 @@ impl FromStr for NetworkPolicySelector {
             s.parse().map(Self::Ref)
         } else {
             s.parse().map(Self::Slug)
+        }
+    }
+}
+
+impl fmt::Display for NetworkPolicySelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Slug(slug) => fmt::Display::fmt(slug, f),
+            Self::Ref(reference) => fmt::Display::fmt(reference, f),
         }
     }
 }

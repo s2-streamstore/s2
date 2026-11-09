@@ -49,6 +49,33 @@ pub use s2_common::basin::BasinNameStartAfter;
 /// **Note:** It must be between 1 and 64 characters in length and can only comprise ASCII
 /// letters, numbers, colons, hyphens, and periods.
 pub use s2_common::location::LocationName;
+/// IP network in CIDR notation, e.g. `203.0.113.0/24`. Host bits must be zero.
+pub use s2_common::network_policy::Cidr;
+/// Network policy restricting a token to public clients by source address.
+///
+/// See [`NetworkPolicy::Cidr`].
+pub use s2_common::network_policy::CidrPolicy;
+/// Restriction a network policy applies to the tokens bound to it.
+pub use s2_common::network_policy::NetworkPolicy;
+/// Full network policy reference, `<slug>.<nonce>`, which access tokens are bound to.
+pub use s2_common::network_policy::NetworkPolicyRef;
+/// Network policy slug or full reference, accepted by read-only operations.
+pub use s2_common::network_policy::NetworkPolicySelector;
+/// Network policy slug.
+///
+/// **Note:** It must be unique to the account and between 1 and 96 bytes in length, and can
+/// only comprise ASCII letters, numbers, hyphens, and underscores.
+pub use s2_common::network_policy::NetworkPolicySlug;
+/// See [`ListNetworkPoliciesInput::prefix`].
+pub use s2_common::network_policy::NetworkPolicySlugPrefix;
+/// See [`ListNetworkPoliciesInput::start_after`].
+pub use s2_common::network_policy::NetworkPolicySlugStartAfter;
+/// Network policy restricting a token to connections through AWS VPC endpoints.
+///
+/// See [`NetworkPolicy::PrivateNet`].
+pub use s2_common::network_policy::PrivateNetPolicy;
+/// AWS VPC endpoint ID, e.g. `vpce-0a1b2c3d4e5f67890`.
+pub use s2_common::network_policy::VpcEndpointId;
 /// Stream name.
 ///
 /// **Note:** It must be unique to the basin and between 1 and 512 bytes in length, and must
@@ -1853,6 +1880,8 @@ pub struct AccessTokenInfo {
     pub auto_prefix_streams: bool,
     /// Scope of the access token.
     pub scope: AccessTokenScope,
+    /// Network policy the token is restricted by, if any.
+    pub network_policy: Option<NetworkPolicyRef>,
 }
 
 impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
@@ -1865,6 +1894,170 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
             expires_at,
             auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
+            network_policy: value.network_policy,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+/// Input for [`list_network_policies`](crate::S2::list_network_policies) operation.
+pub struct ListNetworkPoliciesInput {
+    /// Filter network policies whose slugs begin with this value.
+    ///
+    /// Defaults to `""`.
+    pub prefix: NetworkPolicySlugPrefix,
+    /// Filter network policies whose slugs are lexicographically greater than this value.
+    ///
+    /// Defaults to `""`.
+    pub start_after: NetworkPolicySlugStartAfter,
+    /// Number of network policies to return in a page. Will be clamped to a maximum of `1000`.
+    ///
+    /// Defaults to `1000`.
+    pub limit: Option<usize>,
+}
+
+impl ListNetworkPoliciesInput {
+    /// Create a new [`ListNetworkPoliciesInput`] with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the prefix used to filter network policies whose slugs begin with this value.
+    pub fn with_prefix(self, prefix: NetworkPolicySlugPrefix) -> Self {
+        Self { prefix, ..self }
+    }
+
+    /// Set the value used to filter network policies whose slugs are lexicographically greater
+    /// than this value.
+    pub fn with_start_after(self, start_after: NetworkPolicySlugStartAfter) -> Self {
+        Self {
+            start_after,
+            ..self
+        }
+    }
+
+    /// Set the limit on number of network policies to return in a page.
+    pub fn with_limit(self, limit: usize) -> Self {
+        Self {
+            limit: Some(limit),
+            ..self
+        }
+    }
+}
+
+impl From<ListNetworkPoliciesInput> for api::network_policy::ListNetworkPoliciesRequest {
+    fn from(value: ListNetworkPoliciesInput) -> Self {
+        Self {
+            prefix: Some(value.prefix),
+            start_after: Some(value.start_after),
+            limit: value.limit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+/// Input for [`list_all_network_policies`](crate::S2::list_all_network_policies) operation.
+pub struct ListAllNetworkPoliciesInput {
+    /// Filter network policies whose slugs begin with this value.
+    ///
+    /// Defaults to `""`.
+    pub prefix: NetworkPolicySlugPrefix,
+    /// Filter network policies whose slugs are lexicographically greater than this value.
+    ///
+    /// Defaults to `""`.
+    pub start_after: NetworkPolicySlugStartAfter,
+}
+
+impl ListAllNetworkPoliciesInput {
+    /// Create a new [`ListAllNetworkPoliciesInput`] with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the prefix used to filter network policies whose slugs begin with this value.
+    pub fn with_prefix(self, prefix: NetworkPolicySlugPrefix) -> Self {
+        Self { prefix, ..self }
+    }
+
+    /// Set the value used to filter network policies whose slugs are lexicographically greater
+    /// than this value.
+    pub fn with_start_after(self, start_after: NetworkPolicySlugStartAfter) -> Self {
+        Self {
+            start_after,
+            ..self
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+/// Input for [`create_network_policy`](crate::S2::create_network_policy) operation.
+pub struct CreateNetworkPolicyInput {
+    /// Slug, unique to the account.
+    pub slug: NetworkPolicySlug,
+    /// The restriction. Policies are immutable; create a new one to change it.
+    pub policy: NetworkPolicy,
+}
+
+impl CreateNetworkPolicyInput {
+    /// Create a new [`CreateNetworkPolicyInput`] with the given slug and policy.
+    pub fn new(slug: NetworkPolicySlug, policy: NetworkPolicy) -> Self {
+        Self { slug, policy }
+    }
+}
+
+impl From<CreateNetworkPolicyInput> for api::network_policy::CreateNetworkPolicyRequest {
+    fn from(value: CreateNetworkPolicyInput) -> Self {
+        Self {
+            slug: value.slug,
+            policy: value.policy.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+/// Network policy information.
+pub struct NetworkPolicyInfo {
+    /// Full reference, `<slug>.<nonce>`, which access tokens are bound to.
+    pub id: NetworkPolicyRef,
+    /// Creation time.
+    pub created_at: S2DateTime,
+    /// The restriction.
+    pub policy: NetworkPolicy,
+}
+
+impl TryFrom<api::network_policy::NetworkPolicyInfo> for NetworkPolicyInfo {
+    type Error = ValidationError;
+
+    fn try_from(value: api::network_policy::NetworkPolicyInfo) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            created_at: value.created_at.try_into()?,
+            policy: value.policy.try_into()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+/// Output of [`get_network_policy`](crate::S2::get_network_policy) operation.
+pub struct GetNetworkPolicyOutput {
+    /// Network policy information.
+    pub info: NetworkPolicyInfo,
+    /// Access tokens within the caller's scope that are bound to this policy, including expired
+    /// tokens that have not yet been removed. Deletion requires zero.
+    pub token_count: u64,
+}
+
+impl TryFrom<api::network_policy::GetNetworkPolicyResponse> for GetNetworkPolicyOutput {
+    type Error = ValidationError;
+
+    fn try_from(value: api::network_policy::GetNetworkPolicyResponse) -> Result<Self, Self::Error> {
+        Ok(Self {
+            info: value.info.try_into()?,
+            token_count: value.token_count,
         })
     }
 }
@@ -2405,6 +2598,13 @@ pub struct IssueAccessTokenInput {
     pub auto_prefix_streams: bool,
     /// Scope of the token.
     pub scope: AccessTokenScopeInput,
+    /// Full reference of a network policy to restrict the token by.
+    ///
+    /// If the requestor's token is itself restricted, this must be `None` or name the same
+    /// policy, which the new token inherits.
+    ///
+    /// Defaults to `None`.
+    pub network_policy: Option<NetworkPolicyRef>,
 }
 
 impl IssueAccessTokenInput {
@@ -2415,6 +2615,15 @@ impl IssueAccessTokenInput {
             expires_at: None,
             auto_prefix_streams: false,
             scope,
+            network_policy: None,
+        }
+    }
+
+    /// Set the network policy to restrict the token by.
+    pub fn with_network_policy(self, network_policy: NetworkPolicyRef) -> Self {
+        Self {
+            network_policy: Some(network_policy),
+            ..self
         }
     }
 
@@ -2443,7 +2652,7 @@ impl From<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
             expires_at: value.expires_at.map(Into::into),
             auto_prefix_streams: value.auto_prefix_streams.then_some(true),
             scope: value.scope.into(),
-            network_policy: None,
+            network_policy: value.network_policy,
         }
     }
 }

@@ -26,6 +26,10 @@ use s2_api::v1::{
     metrics::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
     },
+    network_policy::{
+        CreateNetworkPolicyRequest, GetNetworkPolicyResponse, ListNetworkPoliciesRequest,
+        ListNetworkPoliciesResponse, NetworkPolicyInfo,
+    },
     stream::{
         AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
         ReadEnd, ReadStart, StreamInfo, TailResponse,
@@ -49,7 +53,8 @@ use crate::{
     retry::{AppendRetryError, RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
-        Compression, EncryptionKey, LocationName, RetryConfig, S2Config, S2Endpoints, StreamName,
+        Compression, EncryptionKey, LocationName, NetworkPolicyRef, NetworkPolicySelector,
+        RetryConfig, S2Config, S2Endpoints, StreamName,
     },
 };
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
@@ -106,6 +111,49 @@ impl AccountClient {
 
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), ApiError> {
         let url = self.uri(format!("v1/access-tokens/{}", urlencoding::encode(&id)));
+        let request = self.delete(url).build()?;
+        let _response = self.request(request).send().await?;
+        Ok(())
+    }
+
+    pub async fn list_network_policies(
+        &self,
+        request: ListNetworkPoliciesRequest,
+    ) -> Result<ListNetworkPoliciesResponse, ApiError> {
+        let url = self.uri("v1/network-policies");
+        let request = self.get(url).query(&request).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<ListNetworkPoliciesResponse>()?)
+    }
+
+    pub async fn create_network_policy(
+        &self,
+        request: CreateNetworkPolicyRequest,
+    ) -> Result<NetworkPolicyInfo, ApiError> {
+        let url = self.uri("v1/network-policies");
+        let request = self.post(url).json(&request).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<NetworkPolicyInfo>()?)
+    }
+
+    pub async fn get_network_policy(
+        &self,
+        selector: NetworkPolicySelector,
+    ) -> Result<GetNetworkPolicyResponse, ApiError> {
+        let url = self.uri(format!(
+            "v1/network-policies/{}",
+            urlencoding::encode(&selector.to_string())
+        ));
+        let request = self.get(url).build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<GetNetworkPolicyResponse>()?)
+    }
+
+    pub async fn delete_network_policy(&self, id: NetworkPolicyRef) -> Result<(), ApiError> {
+        let url = self.uri(format!(
+            "v1/network-policies/{}",
+            urlencoding::encode(&id.to_string())
+        ));
         let request = self.delete(url).build()?;
         let _response = self.request(request).send().await?;
         Ok(())

@@ -9,13 +9,16 @@ use crate::{
     },
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
-        EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
-        GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
-        ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
-        ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig,
-        StreamInfo, StreamName, StreamPosition, Streaming,
+        CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput,
+        DeleteStreamInput, EncryptionKey, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
+        GetAccountMetricsInput, GetBasinMetricsInput, GetNetworkPolicyOutput,
+        GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
+        ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
+        ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
+        LocationInfo, LocationName, Metric, NetworkPolicyInfo, NetworkPolicyRef,
+        NetworkPolicySelector, Page, ReadBatch, ReadInput, ReadSessionConfig,
+        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
+        StreamName, StreamPosition, Streaming,
     },
 };
 
@@ -231,6 +234,77 @@ impl S2 {
     /// Revoke an access token.
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), RequestError> {
         Ok(self.client.revoke_access_token(id).await?)
+    }
+
+    /// List a page of network policies.
+    ///
+    /// See [`list_all_network_policies`](crate::S2::list_all_network_policies) for automatic
+    /// pagination.
+    pub async fn list_network_policies(
+        &self,
+        input: ListNetworkPoliciesInput,
+    ) -> Result<Page<NetworkPolicyInfo>, RequestError> {
+        let response = self.client.list_network_policies(input.into()).await?;
+        Ok(Page::new(
+            response
+                .network_policies
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            response.has_more,
+        ))
+    }
+
+    /// List all network policies, paginating automatically.
+    pub fn list_all_network_policies(
+        &self,
+        input: ListAllNetworkPoliciesInput,
+    ) -> Streaming<NetworkPolicyInfo> {
+        let s2 = self.clone();
+        let prefix = input.prefix;
+        let start_after = input.start_after;
+        let mut input = ListNetworkPoliciesInput::new()
+            .with_prefix(prefix)
+            .with_start_after(start_after);
+        Box::pin(async_stream::try_stream! {
+            loop {
+                let page = s2.list_network_policies(input.clone()).await?;
+
+                let start_after = page.values.last().map(|info| info.id.slug().clone().into());
+                for info in page.values {
+                    yield info;
+                }
+
+                if page.has_more && let Some(start_after) = start_after {
+                    input = input.with_start_after(start_after);
+                } else {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// Create a network policy.
+    pub async fn create_network_policy(
+        &self,
+        input: CreateNetworkPolicyInput,
+    ) -> Result<NetworkPolicyInfo, RequestError> {
+        let response = self.client.create_network_policy(input.into()).await?;
+        Ok(response.try_into()?)
+    }
+
+    /// Get a network policy by slug or full reference.
+    pub async fn get_network_policy(
+        &self,
+        selector: NetworkPolicySelector,
+    ) -> Result<GetNetworkPolicyOutput, RequestError> {
+        let response = self.client.get_network_policy(selector).await?;
+        Ok(response.try_into()?)
+    }
+
+    /// Delete a network policy. It must not be bound to any access token.
+    pub async fn delete_network_policy(&self, id: NetworkPolicyRef) -> Result<(), RequestError> {
+        Ok(self.client.delete_network_policy(id).await?)
     }
 
     /// List locations.

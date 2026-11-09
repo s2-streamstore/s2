@@ -4,8 +4,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum, builder::styling};
 use compact_str::CompactString;
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamName,
-    StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, Cidr, EncryptionAlgorithm, EncryptionKey, FencingToken, NetworkPolicyRef,
+    NetworkPolicySelector, NetworkPolicySlug, NetworkPolicySlugPrefix, NetworkPolicySlugStartAfter,
+    StreamName, StreamNamePrefix, StreamNameStartAfter, VpcEndpointId,
 };
 
 use crate::{
@@ -92,6 +93,24 @@ pub enum Command {
     RevokeAccessToken {
         /// ID of the access token to revoke.
         id: AccessTokenId,
+    },
+
+    /// List network policies.
+    ListNetworkPolicies(ListNetworkPoliciesArgs),
+
+    /// Create a network policy.
+    CreateNetworkPolicy(CreateNetworkPolicyArgs),
+
+    /// Get a network policy.
+    GetNetworkPolicy {
+        /// Network policy slug, or full `<slug>.<nonce>` reference.
+        id: NetworkPolicySelector,
+    },
+
+    /// Delete a network policy. It must not be bound to any access token.
+    DeleteNetworkPolicy {
+        /// Full `<slug>.<nonce>` reference of the network policy to delete.
+        id: NetworkPolicyRef,
     },
 
     /// Compare two basins, streams, or access tokens.
@@ -530,6 +549,55 @@ pub struct IssueAccessTokenArgs {
     /// A union of allowed operations and groups is used as an effective set of allowed operations.
     #[arg(long, value_delimiter = ',')]
     pub ops: Vec<Operation>,
+
+    /// Full `<slug>.<nonce>` reference of a network policy to restrict the token by.
+    /// If the issuing token is itself restricted, the new token inherits its policy.
+    #[arg(long)]
+    pub network_policy: Option<NetworkPolicyRef>,
+}
+
+#[derive(Args, Debug)]
+pub struct ListNetworkPoliciesArgs {
+    /// List network policies whose slugs begin with this prefix.
+    #[arg(short = 'p', long)]
+    pub prefix: Option<NetworkPolicySlugPrefix>,
+
+    /// Only return network policies whose slugs lexicographically start after this slug.
+    #[arg(short = 's', long)]
+    pub start_after: Option<NetworkPolicySlugStartAfter>,
+
+    /// Limit the number of network policies to return. Acts as page size (max 1000) when using
+    /// --no-auto-paginate.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+
+    /// Returns only a single page of network policies instead of auto-paginating.
+    #[arg(long, default_value_t = false)]
+    pub no_auto_paginate: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(
+    group(clap::ArgGroup::new("policy").required(true).multiple(true)),
+    group(clap::ArgGroup::new("cidr").multiple(true))
+)]
+pub struct CreateNetworkPolicyArgs {
+    /// Slug, unique to the account. Up to 96 characters of letters, digits, `-` and `_`.
+    pub slug: NetworkPolicySlug,
+
+    /// Source CIDR that may use bound tokens, e.g. `203.0.113.0/24`. Repeatable.
+    /// When omitted, any source not denied may.
+    #[arg(long, value_delimiter = ',', group = "policy", group = "cidr")]
+    pub allow_cidr: Vec<Cidr>,
+
+    /// Source CIDR that may not use bound tokens, even if allowed. Repeatable.
+    #[arg(long, value_delimiter = ',', group = "policy", group = "cidr")]
+    pub deny_cidr: Vec<Cidr>,
+
+    /// AWS VPC endpoint ID through which bound tokens may be used, e.g. `vpce-0a1b2c3d4e5f67890`.
+    /// Repeatable. Mutually exclusive with CIDR rules.
+    #[arg(long, value_delimiter = ',', group = "policy", conflicts_with = "cidr")]
+    pub vpce: Vec<VpcEndpointId>,
 }
 
 #[derive(Args, Debug)]
