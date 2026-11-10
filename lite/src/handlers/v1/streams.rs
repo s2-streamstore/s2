@@ -5,6 +5,7 @@ use s2_api::{
     v1 as v1t,
 };
 use s2_common::{
+    ValidationError,
     basin::BasinName,
     config::{OptionalStreamConfig, StreamReconfiguration},
     http::extract::{Header, HeaderOpt},
@@ -118,6 +119,9 @@ pub async fn create_stream(
     ),
     ServiceError,
 > {
+    if request.fork.is_some() {
+        return Err(ValidationError("stream forking is not supported".to_owned()).into());
+    }
     let config: OptionalStreamConfig = request
         .config
         .map(TryInto::try_into)

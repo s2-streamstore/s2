@@ -2982,6 +2982,36 @@ impl TryFrom<api::stream::StreamInfo> for StreamInfo {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+/// Fork point for a stream created as a fork of another stream.
+pub struct StreamFork {
+    /// Name of the stream to fork from.
+    pub origin: StreamName,
+    /// Sequence number at which the fork diverges from the origin.
+    ///
+    /// Defaults to the origin's tail.
+    pub seq_num: Option<u64>,
+}
+
+impl StreamFork {
+    /// Create a new [`StreamFork`] at the tail of the given origin stream.
+    pub fn new(origin: StreamName) -> Self {
+        Self {
+            origin,
+            seq_num: None,
+        }
+    }
+
+    /// Set the sequence number at which the fork diverges from the origin.
+    pub fn with_seq_num(self, seq_num: u64) -> Self {
+        Self {
+            seq_num: Some(seq_num),
+            ..self
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 /// Input for [`create_stream`](crate::S2Basin::create_stream) operation.
 pub struct CreateStreamInput {
     /// Stream name.
@@ -2990,6 +3020,8 @@ pub struct CreateStreamInput {
     ///
     /// See [`StreamConfig`] for defaults.
     pub config: Option<StreamConfig>,
+    /// Create the stream as a fork of another stream in the same basin.
+    pub fork: Option<StreamFork>,
     idempotency_token: String,
 }
 
@@ -2999,7 +3031,16 @@ impl CreateStreamInput {
         Self {
             name,
             config: None,
+            fork: None,
             idempotency_token: idempotency_token(),
+        }
+    }
+
+    /// Create the stream as a fork of another stream in the same basin.
+    pub fn with_fork(self, fork: StreamFork) -> Self {
+        Self {
+            fork: Some(fork),
+            ..self
         }
     }
 
@@ -3018,6 +3059,10 @@ impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
             api::stream::CreateStreamRequest {
                 stream: value.name,
                 config: value.config.map(Into::into),
+                fork: value.fork.map(|fork| api::stream::StreamFork {
+                    origin: fork.origin,
+                    seq_num: fork.seq_num,
+                }),
             },
             value.idempotency_token,
         )

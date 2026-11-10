@@ -89,6 +89,21 @@ pub struct CreateStreamRequest {
     pub stream: StreamName,
     /// Stream configuration.
     pub config: Option<StreamConfig>,
+    /// Create the stream as a fork of another stream in the same basin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<StreamFork>,
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct StreamFork {
+    /// Name of the stream to fork from.
+    pub origin: StreamName,
+    /// Sequence number at which the fork diverges from the origin.
+    /// The fork inherits the origin's records below it, and its own first record is assigned this sequence number.
+    /// Defaults to the origin's tail.
+    pub seq_num: Option<record::SeqNum>,
 }
 
 #[rustfmt::skip]
