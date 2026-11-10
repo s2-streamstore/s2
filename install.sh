@@ -48,7 +48,7 @@ needs_musl() {
         return 0
     fi
     # Check glibc version
-    GLIBC_VERSION=$(ldd --version 2>/dev/null | sed -n '1s/.* \\([0-9][0-9]*\\.[0-9][0-9]*\\)$/\\1/p')
+    GLIBC_VERSION=$(ldd --version 2>/dev/null | sed -n '1s/.* \([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
     [ -n "${GLIBC_VERSION}" ] || GLIBC_VERSION="0.0"
     GLIBC_MAJOR=$(echo "${GLIBC_VERSION}" | cut -d. -f1)
     GLIBC_MINOR=$(echo "${GLIBC_VERSION}" | cut -d. -f2)
@@ -104,6 +104,13 @@ then
     echo_white "It looks like this platform is not supported. We're sorry about that.
 Visit https://github.com/s2-streamstore/s2 to file an issue, and build
 from source."
+    exit 1
+fi
+
+if ! command -v unzip >/dev/null 2>&1
+then
+    echo_red "unzip is required but was not found."
+    echo_white "Install it with your package manager (e.g. apt-get install unzip) and try again."
     exit 1
 fi
 
@@ -199,18 +206,18 @@ if [ -z "${EXISTING_S2_PATH}" ] || [ -n "${NEEDS_PATH_UPDATE}" ]; then
     fi
 
     if [ -n "${PROFILE_FILE}" ]; then
-        LINE_TO_ADD="export PATH=\"${BIN_PATH}:\\$PATH\""
+        LINE_TO_ADD="export PATH=\"${BIN_PATH}:\$PATH\""
         if ! grep -q "${BIN_PATH}" "${PROFILE_FILE}"; then
-            echo_white "Adding ${BIN_PATH} to \\$PATH in ${PROFILE_FILE}"
+            echo_white "Adding ${BIN_PATH} to \$PATH in ${PROFILE_FILE}"
             printf "\\n# add S2 to the PATH\\n%s\\n" "${LINE_TO_ADD}" >> "${PROFILE_FILE}"
         else
             echo_yellow "WARNING: ${BIN_PATH} is already in your PATH."
             [ -n "${EXISTING_S2_PATH}" ] && echo_em "Ensure ${BIN_PATH} appears before ${EXISTING_S2_PATH}"
         fi
 
-        echo_yellow "WARNING: Please restart your shell or add ${BIN_PATH} to your \\$PATH"
+        echo_yellow "WARNING: Please restart your shell or add ${BIN_PATH} to your \$PATH"
     else
-        echo_yellow "WARNING: Please add ${BIN_PATH} to your \\$PATH"
+        echo_yellow "WARNING: Please add ${BIN_PATH} to your \$PATH"
     fi
 fi
 
