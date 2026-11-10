@@ -65,7 +65,7 @@ cargo install --locked s2-cli
 ```bash
 curl -fsSL https://raw.githubusercontent.com/s2-streamstore/s2/main/install.sh | bash
 ```
-Or specify a version with `VERSION=x.y.z` before the command. See all [releases](https://github.com/s2-streamstore/s2/releases).
+Requires `curl` and `unzip`. Or specify a version with `VERSION=x.y.z` before the command. See all [releases](https://github.com/s2-streamstore/s2/releases).
 
 ### Docker
 ```bash
