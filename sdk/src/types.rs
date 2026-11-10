@@ -3588,6 +3588,7 @@ impl From<AppendInput> for api::stream::proto::AppendInput {
             records: value.records.iter().cloned().map(Into::into).collect(),
             match_seq_num: value.match_seq_num,
             fencing_token: value.fencing_token.map(|t| t.to_string()),
+            producer: None,
         }
     }
 }

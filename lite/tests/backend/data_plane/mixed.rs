@@ -34,6 +34,7 @@ async fn test_operations_on_nonexistent_basin() {
         records: create_test_record_batch(vec![Bytes::from_static(b"test data")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
     let append_result = append(
         &backend,
@@ -83,6 +84,7 @@ async fn test_concurrent_appends_to_same_stream() {
                 records: create_test_record_batch(vec![Bytes::from(body)]),
                 match_seq_num: None,
                 fencing_token: None,
+                producer: None,
             };
             append(&backend, basin_name, stream_name, input, None).await
         });

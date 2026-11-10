@@ -482,6 +482,7 @@ mod tests {
                 records: vec![record].try_into().unwrap(),
                 match_seq_num: None,
                 fencing_token: None,
+                producer: None,
             })
             .await
             .unwrap();

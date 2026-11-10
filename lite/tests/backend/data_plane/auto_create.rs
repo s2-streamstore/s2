@@ -59,6 +59,7 @@ async fn test_backend_append_auto_creates_stream() {
         records: create_test_record_batch(vec![Bytes::from_static(b"should fail")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
 
     let ack = append(
@@ -97,6 +98,7 @@ async fn test_backend_append_auto_creates_stream_with_basin_cipher() {
         records: create_test_record_batch(vec![Bytes::from_static(b"secret")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
 
     let ack = append(
@@ -174,6 +176,7 @@ async fn test_backend_append_auto_create_applies_stream_config() {
         records: create_test_record_batch(vec![Bytes::from_static(b"hello")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
     let ack = backend
         .open_for_append(&basin_name, &stream_name, None, requested_stream_config())
@@ -216,6 +219,7 @@ async fn test_backend_append_ignores_stream_config_for_existing_stream() {
         records: create_test_record_batch(vec![Bytes::from_static(b"hello")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
     backend
         .open_for_append(&basin_name, &stream_name, None, requested_stream_config())
@@ -275,6 +279,7 @@ async fn test_backend_append_without_auto_create_returns_not_found() {
         records: create_test_record_batch(vec![Bytes::from_static(b"should fail")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
 
     let result = append(&backend, basin_name.clone(), stream_name, input, None).await;
@@ -425,6 +430,7 @@ async fn test_backend_append_auto_create_is_race_safe() {
                 records: create_test_record_batch(vec![Bytes::from(body)]),
                 match_seq_num: None,
                 fencing_token: None,
+                producer: None,
             };
             for _ in 0..MAX_AUTO_CREATE_ATTEMPTS {
                 match append(

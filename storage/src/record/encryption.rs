@@ -274,6 +274,7 @@ pub fn encrypt_append_input(
         records,
         match_seq_num,
         fencing_token,
+        producer,
     } = input;
     let records = records
         .into_iter()
@@ -292,6 +293,7 @@ pub fn encrypt_append_input(
             .expect("record encryption preserves append batch limits"),
         match_seq_num,
         fencing_token,
+        producer,
     }
 }
 

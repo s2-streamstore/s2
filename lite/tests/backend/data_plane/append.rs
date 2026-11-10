@@ -33,6 +33,7 @@ async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &Encrypt
                 records: create_test_record_batch(vec![Bytes::copy_from_slice(body)]),
                 match_seq_num: None,
                 fencing_token: None,
+                producer: None,
             })
             .collect::<Vec<_>>(),
     );
@@ -103,6 +104,7 @@ async fn issue_fencing_command(
                 records: create_test_record_batch(vec![Bytes::from_static(b"matched token")]),
                 match_seq_num: None,
                 fencing_token: Some(matching_token.clone()),
+                producer: None,
             };
 
             let ack = append_with_optional_encryption(
@@ -129,6 +131,7 @@ async fn issue_fencing_command(
         records: command_batch,
         match_seq_num: command_match_seq_num,
         fencing_token: Some(matching_token.clone()),
+        producer: None,
     };
 
     let command_ack = append_with_optional_encryption(
@@ -180,6 +183,7 @@ async fn assert_fencing_command_controls_stream_state(
         records: create_test_record_batch(vec![Bytes::from_static(b"mismatched token")]),
         match_seq_num: Some(command_ack.end.seq_num),
         fencing_token: Some(matching_token.clone()),
+        producer: None,
     };
 
     let result = append_with_optional_encryption(
@@ -206,6 +210,7 @@ async fn assert_fencing_command_controls_stream_state(
         records: create_test_record_batch(vec![Bytes::from_static(b"updated token accepted")]),
         match_seq_num: Some(command_ack.end.seq_num),
         fencing_token: Some(new_token.clone()),
+        producer: None,
     };
 
     let refreshed_ack = append_with_optional_encryption(
@@ -281,6 +286,7 @@ async fn test_append_requires_timestamp() {
         records: create_test_record_batch(vec![Bytes::from_static(b"missing timestamp")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
 
     let result = append(
@@ -301,6 +307,7 @@ async fn test_append_requires_timestamp() {
         )]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
 
     let ack = append(&backend, basin_name, stream_name, with_timestamp, None)
@@ -320,6 +327,7 @@ async fn test_append_with_seq_num_match() {
         records: create_test_record_batch(vec![Bytes::from_static(b"first record")]),
         match_seq_num: Some(0),
         fencing_token: None,
+        producer: None,
     };
 
     let ack = append(
@@ -338,6 +346,7 @@ async fn test_append_with_seq_num_match() {
         records: create_test_record_batch(vec![Bytes::from_static(b"second record")]),
         match_seq_num: Some(1),
         fencing_token: None,
+        producer: None,
     };
 
     let ack2 = append(
@@ -366,6 +375,7 @@ async fn test_append_with_seq_num_mismatch() {
         records: create_test_record_batch(vec![Bytes::from_static(b"first record")]),
         match_seq_num: Some(0),
         fencing_token: None,
+        producer: None,
     };
 
     append(
@@ -382,6 +392,7 @@ async fn test_append_with_seq_num_mismatch() {
         records: create_test_record_batch(vec![Bytes::from_static(b"second record")]),
         match_seq_num: Some(0),
         fencing_token: None,
+        producer: None,
     };
 
     let result = append(
@@ -427,6 +438,7 @@ async fn test_append_session_survives_streamer_dormancy_between_inputs() {
             records: create_test_record_batch(vec![Bytes::from_static(b"first")]),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         })
         .expect("first input should send");
         tokio::time::sleep(Duration::from_secs(61)).await;
@@ -434,6 +446,7 @@ async fn test_append_session_survives_streamer_dormancy_between_inputs() {
             records: create_test_record_batch(vec![Bytes::from_static(b"second")]),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         })
         .expect("second input should send");
     });
@@ -516,6 +529,7 @@ async fn test_append_session_multiple_records_per_batch() {
             ]),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         },
         AppendInput {
             records: create_test_record_batch(vec![
@@ -525,6 +539,7 @@ async fn test_append_session_multiple_records_per_batch() {
             ]),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         },
     ]);
 
@@ -589,11 +604,13 @@ async fn test_append_session_with_seq_num_conditions() {
             records: create_test_record_batch(vec![Bytes::from_static(b"batch 1")]),
             match_seq_num: Some(0),
             fencing_token: None,
+            producer: None,
         },
         AppendInput {
             records: create_test_record_batch(vec![Bytes::from_static(b"batch 2")]),
             match_seq_num: Some(1),
             fencing_token: None,
+            producer: None,
         },
     ]);
 
@@ -638,6 +655,7 @@ async fn test_append_session_seq_num_mismatch() {
         records: create_test_record_batch(vec![Bytes::from_static(b"batch 1")]),
         match_seq_num: Some(0),
         fencing_token: None,
+        producer: None,
     }]);
 
     let session = append_session(&backend, basin_name, stream_name, None, inputs)
@@ -663,16 +681,19 @@ async fn test_append_session_stops_after_condition_failure() {
             records: create_test_record_batch(vec![Bytes::from_static(b"first")]),
             match_seq_num: Some(0),
             fencing_token: None,
+            producer: None,
         },
         AppendInput {
             records: create_test_record_batch(vec![Bytes::from_static(b"bad")]),
             match_seq_num: Some(0),
             fencing_token: None,
+            producer: None,
         },
         AppendInput {
             records: create_test_record_batch(vec![Bytes::from_static(b"after-error")]),
             match_seq_num: Some(1),
             fencing_token: None,
+            producer: None,
         },
     ]);
 
@@ -733,11 +754,13 @@ async fn test_append_session_with_fencing_token() {
             records: create_test_record_batch(vec![Bytes::from_static(b"batch 1")]),
             match_seq_num: None,
             fencing_token: Some(token.clone()),
+            producer: None,
         },
         AppendInput {
             records: create_test_record_batch(vec![Bytes::from_static(b"batch 2")]),
             match_seq_num: None,
             fencing_token: Some(token.clone()),
+            producer: None,
         },
     ]);
 
@@ -779,6 +802,7 @@ async fn test_append_session_large_batches() {
             records: create_test_record_batch(vec![Bytes::from(large_record.clone())]),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         }
     }));
 
@@ -825,6 +849,7 @@ async fn test_append_session_pipeline_preserves_ack_tail_and_read_order() {
             records: create_test_record_batch(vec![Bytes::copy_from_slice(body)]),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         })
         .collect();
     let inputs = futures::stream::iter(inputs);

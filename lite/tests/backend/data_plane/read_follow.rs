@@ -785,6 +785,7 @@ async fn test_follow_mode_with_bytes_limit_truncates_live_batch() {
             ]),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         };
         append(&backend_clone, basin_clone, stream_clone, input, None)
             .await

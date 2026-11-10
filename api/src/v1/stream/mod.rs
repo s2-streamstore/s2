@@ -392,6 +392,35 @@ pub struct AppendInput {
     pub match_seq_num: Option<record::SeqNum>,
     /// Enforce a fencing token, which starts out as an empty string that can be overridden by a `fence` command record.
     pub fencing_token: Option<record::FencingToken>,
+    /// Tag the batch so that a retry of it is recognized and not appended again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<Producer>,
+}
+
+#[rustfmt::skip]
+/// Identifies an append batch for deduplicating retries. It is not returned by reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct Producer {
+    /// Identifier of the writer, chosen by the client.
+    pub id: String,
+    /// Position of this batch among the writer's batches, increasing by one per batch.
+    pub seq: u64,
+    /// The writer has received the acknowledgement of every batch with a `seq` below this.
+    #[serde(default)]
+    pub acked: u64,
+}
+
+impl TryFrom<Producer> for s2_common::stream::Producer {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(Producer { id, seq, acked }: Producer) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: id.parse()?,
+            seq,
+            acked,
+        })
+    }
 }
 
 impl AppendInput {
@@ -409,6 +438,7 @@ impl AppendInput {
             records: s2_common::stream::AppendRecordBatch::try_from(records)?,
             match_seq_num: self.match_seq_num,
             fencing_token: self.fencing_token,
+            producer: self.producer.map(TryInto::try_into).transpose()?,
         })
     }
 }

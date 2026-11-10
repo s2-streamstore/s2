@@ -339,7 +339,7 @@ pub mod extract {
         use super::*;
         use crate::v1::{
             config::{BasinReconfiguration, StreamReconfiguration},
-            stream::{AppendInput, AppendRecord, Header},
+            stream::{AppendInput, AppendRecord, Header, Producer},
         };
 
         fn parse_json<T: DeserializeOwned>(json: &[u8]) -> Result<T, JsonExtractionRejection> {
@@ -452,6 +452,7 @@ pub mod extract {
                 records: vec![],
                 match_seq_num: None,
                 fencing_token: None,
+                producer: None,
             });
             assert_roundtrip(&AppendInput {
                 records: vec![AppendRecord {
@@ -461,6 +462,11 @@ pub mod extract {
                 }],
                 match_seq_num: Some(42),
                 fencing_token: Some("token".parse().unwrap()),
+                producer: Some(Producer {
+                    id: "writer-1".into(),
+                    seq: 7,
+                    acked: 5,
+                }),
             });
 
             // StreamReconfiguration: exercises Maybe<T> in all three states

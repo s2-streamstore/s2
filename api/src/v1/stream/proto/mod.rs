@@ -51,6 +51,7 @@ impl TryFrom<AppendInput> for s2_common::stream::AppendInput {
             records,
             match_seq_num,
             fencing_token,
+            producer,
         }: AppendInput,
     ) -> Result<Self, Self::Error> {
         let records = records
@@ -64,6 +65,15 @@ impl TryFrom<AppendInput> for s2_common::stream::AppendInput {
             fencing_token: fencing_token
                 .as_deref()
                 .map(|s| s.to_compact_string().try_into())
+                .transpose()?,
+            producer: producer
+                .map(|Producer { id, seq, acked }| {
+                    Ok::<_, s2_common::ValidationError>(s2_common::stream::Producer {
+                        id: id.parse()?,
+                        seq,
+                        acked,
+                    })
+                })
                 .transpose()?,
         })
     }

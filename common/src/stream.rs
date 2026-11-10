@@ -290,11 +290,62 @@ impl<T> IntoIterator for AppendRecordBatch<T> {
     }
 }
 
+pub const MAX_PRODUCER_ID_LENGTH: usize = 36;
+
+/// Identifies a writer for deduplicating retried appends.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProducerId(CompactString);
+
+impl TryFrom<CompactString> for ProducerId {
+    type Error = ValidationError;
+
+    fn try_from(id: CompactString) -> Result<Self, Self::Error> {
+        if id.is_empty() || id.len() > MAX_PRODUCER_ID_LENGTH {
+            return Err(format!(
+                "producer id must be between 1 and {MAX_PRODUCER_ID_LENGTH} bytes in length"
+            )
+            .into());
+        }
+        Ok(Self(id))
+    }
+}
+
+impl FromStr for ProducerId {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.to_compact_string().try_into()
+    }
+}
+
+impl AsRef<str> for ProducerId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProducerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Tags an append batch so that a retry of it can be recognized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Producer {
+    pub id: ProducerId,
+    /// Position of the batch among the producer's batches.
+    pub seq: u64,
+    /// The producer has received the acknowledgement of every batch with a `seq` below this.
+    pub acked: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppendInput<T = Record> {
     pub records: AppendRecordBatch<T>,
     pub match_seq_num: Option<SeqNum>,
     pub fencing_token: Option<FencingToken>,
+    pub producer: Option<Producer>,
 }
 
 #[derive(Debug, Clone)]

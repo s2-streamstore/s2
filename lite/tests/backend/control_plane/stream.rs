@@ -781,6 +781,7 @@ async fn test_stream_config_updates_active_streamer(#[case] ensure: bool, #[case
                 records: create_test_record_batch(vec![Bytes::from_static(b"no timestamp")]),
                 match_seq_num: None,
                 fencing_token: None,
+                producer: None,
             };
             match append(&backend, basin.clone(), stream.clone(), input, None).await {
                 Err(AppendError::TimestampMissing(_)) => tokio::task::yield_now().await,
@@ -990,6 +991,7 @@ async fn test_delete_stream_blocks_data_operations() {
         records: create_test_record_batch(vec![Bytes::from_static(b"should fail")]),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
     let append_result = append(
         &backend,

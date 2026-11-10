@@ -283,6 +283,7 @@ pub async fn append_payloads_with_encryption(
         records: create_test_record_batch(bodies),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
     backend
         .open_for_append(
@@ -308,6 +309,7 @@ pub async fn append_timestamped_payloads(
         records: create_test_record_batch_with_timestamps(payloads),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     };
     backend
         .open_for_append(basin, stream, None, OptionalStreamConfig::default())

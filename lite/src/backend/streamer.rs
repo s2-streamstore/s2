@@ -337,6 +337,8 @@ impl Streamer {
             records,
             match_seq_num,
             fencing_token,
+            // Not supported yet: the batch is appended without deduplication.
+            producer: _,
         }: StoredAppendInput,
     ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
         if let Some(provided_token) = fencing_token
@@ -921,6 +923,7 @@ fn terminal_trim_input() -> StoredAppendInput {
         records: vec![record].try_into().expect("valid append batch"),
         match_seq_num: None,
         fencing_token: None,
+        producer: None,
     }
 }
 
@@ -1456,6 +1459,7 @@ mod tests {
                 .expect("valid batch"),
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         }
     }
 

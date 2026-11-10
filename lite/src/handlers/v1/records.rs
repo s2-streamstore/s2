@@ -604,6 +604,7 @@ mod tests {
             records,
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         }
     }
 
@@ -787,6 +788,7 @@ mod tests {
             }],
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         };
 
         let response = send(
@@ -882,6 +884,7 @@ mod tests {
             }],
             match_seq_num: None,
             fencing_token: None,
+            producer: None,
         }
     }
 
