@@ -36,6 +36,9 @@ pub struct StreamInfo {
     pub deleted_at: Option<OffsetDateTime>,
     /// Encryption algorithm for this stream, if encryption is enabled.
     pub cipher: Option<EncryptionAlgorithm>,
+    /// What this stream was forked from, if it was created as a fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkInfo>,
 }
 
 impl From<s2_common::stream::StreamInfo> for StreamInfo {
@@ -45,6 +48,27 @@ impl From<s2_common::stream::StreamInfo> for StreamInfo {
             created_at: value.created_at,
             deleted_at: value.deleted_at,
             cipher: value.cipher.map(Into::into),
+            fork: value.fork.map(Into::into),
+        }
+    }
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct ForkInfo {
+    /// Name of the stream this stream was forked from, at the time of the fork.
+    /// The origin may since have been deleted, and its name reused.
+    pub origin: StreamName,
+    /// Fork point: the sequence number of the first record that is this stream's own.
+    pub seq_num: record::SeqNum,
+}
+
+impl From<s2_common::stream::ForkInfo> for ForkInfo {
+    fn from(value: s2_common::stream::ForkInfo) -> Self {
+        Self {
+            origin: value.origin,
+            seq_num: value.seq_num,
         }
     }
 }
@@ -89,6 +113,40 @@ pub struct CreateStreamRequest {
     pub stream: StreamName,
     /// Stream configuration.
     pub config: Option<StreamConfig>,
+}
+
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct ForkStreamRequest {
+    /// Name of the new stream, unique to the basin of the origin.
+    /// It can be between 1 and 512 bytes in length, and must not contain NUL bytes.
+    pub stream: StreamName,
+    /// Stream configuration. Fields that are not set are taken from the origin.
+    pub config: Option<StreamConfig>,
+    /// Fork at a sequence number of the origin.
+    pub seq_num: Option<record::SeqNum>,
+    /// Fork at the first record of the origin with a timestamp at or above this.
+    pub timestamp: Option<record::Timestamp>,
+    /// Fork this many records before the tail of the origin.
+    pub tail_offset: Option<u64>,
+}
+
+impl ForkStreamRequest {
+    /// The fork point as requested. With none given, the fork is at the tail.
+    pub fn fork_point(&self) -> Result<s2_common::stream::ReadFrom, s2_common::ValidationError> {
+        match (self.seq_num, self.timestamp, self.tail_offset) {
+            (Some(seq_num), None, None) => Ok(s2_common::stream::ReadFrom::SeqNum(seq_num)),
+            (None, Some(timestamp), None) => Ok(s2_common::stream::ReadFrom::Timestamp(timestamp)),
+            (None, None, Some(tail_offset)) => {
+                Ok(s2_common::stream::ReadFrom::TailOffset(tail_offset))
+            }
+            (None, None, None) => Ok(s2_common::stream::ReadFrom::TailOffset(0)),
+            _ => Err(s2_common::ValidationError(
+                "only one of seq_num, timestamp, or tail_offset can be provided".to_owned(),
+            )),
+        }
+    }
 }
 
 #[rustfmt::skip]

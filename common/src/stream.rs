@@ -173,6 +173,14 @@ pub struct StreamInfo {
     pub created_at: OffsetDateTime,
     pub deleted_at: Option<OffsetDateTime>,
     pub cipher: Option<EncryptionAlgorithm>,
+    pub fork: Option<ForkInfo>,
+}
+
+/// What a stream was forked from. A record of the fork, not a live reference to the origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkInfo {
+    pub origin: StreamName,
+    pub seq_num: SeqNum,
 }
 
 #[derive(Debug, Clone)]

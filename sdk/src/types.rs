@@ -2965,6 +2965,8 @@ pub struct StreamInfo {
     pub deleted_at: Option<S2DateTime>,
     /// Encryption algorithm for this stream, if encryption is enabled.
     pub cipher: Option<EncryptionAlgorithm>,
+    /// What this stream was forked from, if it was created as a fork.
+    pub fork: Option<ForkInfo>,
 }
 
 impl TryFrom<api::stream::StreamInfo> for StreamInfo {
@@ -2976,7 +2978,87 @@ impl TryFrom<api::stream::StreamInfo> for StreamInfo {
             created_at: value.created_at.try_into()?,
             deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
             cipher: value.cipher.map(Into::into),
+            fork: value.fork.map(|fork| ForkInfo {
+                origin: fork.origin,
+                seq_num: fork.seq_num,
+            }),
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+/// What a stream was forked from.
+pub struct ForkInfo {
+    /// Name of the origin at the time of the fork. It may since have been deleted.
+    pub origin: StreamName,
+    /// Fork point: the sequence number of the first record that is the fork's own.
+    pub seq_num: u64,
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+/// Input for [`fork_stream`](crate::S2Basin::fork_stream) operation.
+pub struct ForkStreamInput {
+    /// Name of the stream to fork.
+    pub origin: StreamName,
+    /// Name of the new stream.
+    pub name: StreamName,
+    /// Configuration for the new stream. Fields that are not set are taken from the origin.
+    pub config: Option<StreamConfig>,
+    /// Fork point. Defaults to the origin's tail.
+    pub at: Option<ReadFrom>,
+    idempotency_token: String,
+}
+
+impl ForkStreamInput {
+    /// Create a new [`ForkStreamInput`] that forks `origin` at its tail into `name`.
+    pub fn new(origin: StreamName, name: StreamName) -> Self {
+        Self {
+            origin,
+            name,
+            config: None,
+            at: None,
+            idempotency_token: idempotency_token(),
+        }
+    }
+
+    /// Set the configuration for the new stream.
+    pub fn with_config(self, config: StreamConfig) -> Self {
+        Self {
+            config: Some(config),
+            ..self
+        }
+    }
+
+    /// Set the fork point.
+    pub fn with_at(self, at: ReadFrom) -> Self {
+        Self {
+            at: Some(at),
+            ..self
+        }
+    }
+}
+
+impl From<ForkStreamInput> for (StreamName, api::stream::ForkStreamRequest, String) {
+    fn from(value: ForkStreamInput) -> Self {
+        let (seq_num, timestamp, tail_offset) = match value.at {
+            Some(ReadFrom::SeqNum(n)) => (Some(n), None, None),
+            Some(ReadFrom::Timestamp(t)) => (None, Some(t), None),
+            Some(ReadFrom::TailOffset(o)) => (None, None, Some(o)),
+            None => (None, None, None),
+        };
+        (
+            value.origin,
+            api::stream::ForkStreamRequest {
+                stream: value.name,
+                config: value.config.map(Into::into),
+                seq_num,
+                timestamp,
+                tail_offset,
+            },
+            value.idempotency_token,
+        )
     }
 }
 

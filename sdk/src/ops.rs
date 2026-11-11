@@ -10,7 +10,7 @@ use crate::{
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput, EncryptionKey,
-        EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
+        EnsureBasinInput, EnsureOutput, EnsureStreamInput, ForkStreamInput, GetAccountMetricsInput,
         GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
         ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
@@ -360,6 +360,19 @@ impl S2Basin {
         let info = self
             .client
             .create_stream(request, idempotency_token)
+            .await?;
+        Ok(info.try_into()?)
+    }
+
+    /// Fork a stream.
+    ///
+    /// Creates a new stream in this basin that starts with the origin's records below the fork
+    /// point, without copying them, and then takes its own appends.
+    pub async fn fork_stream(&self, input: ForkStreamInput) -> Result<StreamInfo, RequestError> {
+        let (origin, request, idempotency_token) = input.into();
+        let info = self
+            .client
+            .fork_stream(origin, request, idempotency_token)
             .await?;
         Ok(info.try_into()?)
     }

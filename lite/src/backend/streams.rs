@@ -87,6 +87,7 @@ impl Backend {
                 created_at: meta.created_at,
                 deleted_at: meta.deleted_at,
                 cipher: meta.cipher,
+                fork: None,
             });
         }
         Ok(Page::new(streams, has_more))
@@ -154,6 +155,7 @@ impl Backend {
                         created_at: existing.created_at,
                         deleted_at: None,
                         cipher: existing.cipher,
+                        fork: None,
                     }))
                 } else {
                     Err(StreamAlreadyExistsError { basin, stream }.into())
@@ -239,6 +241,7 @@ impl Backend {
             created_at: meta.created_at,
             deleted_at: None,
             cipher: meta.cipher,
+            fork: None,
         }))
     }
 

@@ -27,8 +27,8 @@ use s2_api::v1::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
     },
     stream::{
-        AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
-        ReadEnd, ReadStart, StreamInfo, TailResponse,
+        AppendConditionFailed, CreateStreamRequest, ForkStreamRequest, ListStreamsRequest,
+        ListStreamsResponse, ReadEnd, ReadStart, StreamInfo, TailResponse,
         proto::{AppendAck, AppendInput, ReadBatch},
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
@@ -310,6 +310,22 @@ impl BasinClient {
         idempotency_token: String,
     ) -> Result<StreamInfo, ApiError> {
         let url = self.uri("v1/streams");
+        let request = self
+            .post(url)
+            .header(S2_REQUEST_TOKEN, idempotency_token)
+            .json(&request)
+            .build()?;
+        let response = self.request(request).send().await?;
+        Ok(response.json::<StreamInfo>()?)
+    }
+
+    pub async fn fork_stream(
+        &self,
+        origin: StreamName,
+        request: ForkStreamRequest,
+        idempotency_token: String,
+    ) -> Result<StreamInfo, ApiError> {
+        let url = self.uri(format!("v1/streams/{}/fork", urlencoding::encode(&origin)));
         let request = self
             .post(url)
             .header(S2_REQUEST_TOKEN, idempotency_token)
