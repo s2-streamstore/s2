@@ -7,7 +7,7 @@ use std::{
 };
 
 use futures_core::Stream;
-use futures_util::{StreamExt, stream};
+use futures_util::{FutureExt, StreamExt, stream};
 use s2_common::{
     caps::RECORD_BATCH_MAX,
     read_extent::CountOrBytes,
@@ -112,7 +112,8 @@ impl BatchingConfig {
         Self::default()
     }
 
-    /// Set the duration for how long to wait for more records before flushing a batch.
+    /// Set the duration for how long to wait for more records before flushing a batch. With
+    /// zero, a batch flushes as soon as no more records are waiting.
     ///
     /// Defaults to `5ms`.
     pub fn with_linger(self, linger: Duration) -> Self {
@@ -307,36 +308,41 @@ fn append_record_batches(
             batch.push(first_record);
 
             while !is_batch_full(&config.limits, &batch) && overflowed_record.is_none() {
-                if batch.len() == 1 {
-                    linger_deadline
-                        .as_mut()
-                        .reset(Instant::now() + config.linger);
-                }
-
-                tokio::select! {
-                    next_record = records.next() => {
-                        match next_record {
-                            Some(record) => {
-                                let record = Metered::from(record.into());
-                                if would_overflow_batch(&config.limits, &batch, &record) {
-                                    overflowed_record = Some(record);
-                                } else {
-                                    batch.push(record);
-                                }
-                            }
-                            None => {
-                                yield AppendRecordBatch::from(std::mem::replace(
-                                    &mut batch,
-                                    Metered::with_capacity(config.limits.max_batch_records),
-                                ));
-                                break 'outer;
-                            }
-                        }
-                    },
-                    _ = &mut linger_deadline, if !batch.is_empty() => {
-                        break;
+                let next_record = if config.linger.is_zero() {
+                    // A timer set for now still waits for the timer's next tick, so take only
+                    // the records already waiting.
+                    match records.next().now_or_never() {
+                        Some(next_record) => next_record,
+                        None => break,
+                    }
+                } else {
+                    if batch.len() == 1 {
+                        linger_deadline
+                            .as_mut()
+                            .reset(Instant::now() + config.linger);
+                    }
+                    tokio::select! {
+                        next_record = records.next() => next_record,
+                        _ = &mut linger_deadline => break,
                     }
                 };
+                match next_record {
+                    Some(record) => {
+                        let record = Metered::from(record.into());
+                        if would_overflow_batch(&config.limits, &batch, &record) {
+                            overflowed_record = Some(record);
+                        } else {
+                            batch.push(record);
+                        }
+                    }
+                    None => {
+                        yield AppendRecordBatch::from(std::mem::replace(
+                            &mut batch,
+                            Metered::with_capacity(config.limits.max_batch_records),
+                        ));
+                        break 'outer;
+                    }
+                }
             }
 
             yield AppendRecordBatch::from(std::mem::replace(
@@ -408,6 +414,24 @@ mod tests {
         assert_eq!(batches[2].metered_bytes(), max_batch_bytes);
         assert_eq!(batches[3].metered_bytes(), single_record_bytes);
 
+        Ok(())
+    }
+
+    /// With no linger, a batch flushes as soon as no more records are waiting, rather than on the
+    /// timer's next tick.
+    #[tokio::test(start_paused = true)]
+    async fn zero_linger_flushes_without_waiting_for_the_timer() -> Result<(), ValidationError> {
+        // Between ticks, where a timer set for now waits for the next one.
+        tokio::time::advance(Duration::from_micros(500)).await;
+        let records = futures_util::stream::iter([AppendRecord::new("record")?])
+            .chain(futures_util::stream::pending());
+        let config = BatchingConfig::default().with_linger(Duration::ZERO);
+        let mut batches = AppendRecordBatches::from_stream(records, config);
+
+        let start = Instant::now();
+        let batch = batches.next().await.unwrap()?;
+        assert_eq!(batch.len(), 1);
+        assert_eq!(start.elapsed(), Duration::ZERO);
         Ok(())
     }
 
