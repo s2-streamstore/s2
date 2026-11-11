@@ -17,6 +17,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
+    batching::BatchingConfig,
     error::ProducerError,
     producer::{IndexedAppendAck, ProducerConfig},
     types::{
@@ -45,6 +46,19 @@ const LATENCY_TABLE_COLUMN_WIDTH: usize = 44;
 const LATENCY_TABLE_GAP: &str = "    ";
 const LATENCY_TABLE_SIDE_BY_SIDE_WIDTH: usize =
     LATENCY_TABLE_COLUMN_WIDTH * 2 + LATENCY_TABLE_GAP.len();
+/// Past this, S2 throttles a stream's appends from one connection.
+const MAX_BATCHES_PER_SEC: u32 = 200;
+
+/// No linger while each record can be a batch of its own, and otherwise the shortest one that
+/// stays within S2's batch rate.
+pub fn default_linger(target_mibps: NonZeroU64, record_size: u32) -> Duration {
+    let records_per_sec = target_mibps.get() * 1024 * 1024 / u64::from(record_size);
+    if records_per_sec <= u64::from(MAX_BATCHES_PER_SEC) {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(1) / MAX_BATCHES_PER_SEC
+    }
+}
 
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, ProducerError>)> + Send>>;
@@ -398,6 +412,7 @@ pub fn bench_write(
     stream: S2Stream,
     record_size: usize,
     target_mibps: NonZeroU64,
+    linger: Duration,
     stop: Arc<AtomicBool>,
     write_done_records: Arc<AtomicU64>,
     bench_start: Instant,
@@ -406,7 +421,9 @@ pub fn bench_write(
         new_record(Bytes::from(vec![0u8; body_size(record_size)]), 0, 0).metered_bytes();
     assert_eq!(metered_size, record_size);
 
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(
+        ProducerConfig::default().with_batching(BatchingConfig::new().with_linger(linger)),
+    );
 
     async_stream::stream! {
         let target_bps = target_mibps.get() as f64 * 1024.0 * 1024.0;
@@ -679,6 +696,7 @@ pub async fn run(
     stream: S2Stream,
     record_size: usize,
     target_mibps: NonZeroU64,
+    linger: Duration,
     duration: Duration,
     catchup_delay: Duration,
 ) -> Result<(), CliError> {
@@ -771,6 +789,7 @@ pub async fn run(
         stream.clone(),
         record_size,
         target_mibps,
+        linger,
         stop.clone(),
         write_done_records.clone(),
         bench_start,
