@@ -12,7 +12,11 @@ use std::{
 
 use bytes::Bytes;
 use colored::Colorize;
-use futures::{Stream, StreamExt, stream::FuturesUnordered};
+use futures::{
+    FutureExt, Stream, StreamExt,
+    future::{Fuse, FusedFuture},
+    stream::FuturesUnordered,
+};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
@@ -52,8 +56,8 @@ const MAX_BATCHES_PER_SEC: u32 = 200;
 /// No linger while each record can be a batch of its own, and otherwise the shortest one that
 /// stays within S2's batch rate.
 pub fn default_linger(target_mibps: NonZeroU64, record_size: u32) -> Duration {
-    let records_per_sec = target_mibps.get() * 1024 * 1024 / u64::from(record_size);
-    if records_per_sec <= u64::from(MAX_BATCHES_PER_SEC) {
+    let target_bytes_per_sec = u128::from(target_mibps.get()) * 1024 * 1024;
+    if target_bytes_per_sec <= u128::from(record_size) * u128::from(MAX_BATCHES_PER_SEC) {
         Duration::ZERO
     } else {
         Duration::from_secs(1) / MAX_BATCHES_PER_SEC
@@ -443,10 +447,18 @@ pub fn bench_write(
         let mut bytes_submitted: usize = 0;
 
         let stopping = || stop.load(Ordering::Relaxed);
+        // Started once stopping, so that the last batch need not wait out the linger.
+        let flush = Fuse::terminated();
+        tokio::pin!(flush);
+        let mut flush_started = false;
 
         loop {
             if stopping() && pending_acks.is_empty() {
                 break;
+            }
+            if stopping() && !flush_started {
+                flush_started = true;
+                flush.set(producer.flush().fuse());
             }
 
             // Rate limiting: calculate delay needed based on bytes submitted vs time elapsed
@@ -491,6 +503,13 @@ pub fn bench_write(
                             yield Err(CliError::op(OpKind::Bench, e));
                             return;
                         }
+                    }
+                }
+
+                res = flush.as_mut(), if !flush.is_terminated() => {
+                    if let Err(e) = res {
+                        yield Err(CliError::op(OpKind::Bench, e));
+                        return;
                     }
                 }
 
