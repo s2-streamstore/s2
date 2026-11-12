@@ -175,6 +175,8 @@ impl Stream for AppendInputs {
                     match_seq_num,
                     fencing_token: self.fencing_token.clone(),
                     stream_config: None,
+                    #[cfg(feature = "_hidden")]
+                    producer: None,
                 })))
             }
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),

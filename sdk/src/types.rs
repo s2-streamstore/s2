@@ -3544,6 +3544,19 @@ pub struct AppendInput {
     /// [`AppendSessionConfig::with_stream_config`](crate::append_session::AppendSessionConfig::with_stream_config)
     /// and [`ProducerConfig::with_stream_config`](crate::producer::ProducerConfig::with_stream_config).
     pub stream_config: Option<StreamConfig>,
+    #[cfg(feature = "_hidden")]
+    #[doc(hidden)]
+    pub producer: Option<ProducerTag>,
+}
+
+/// Identifies a batch among those of a producer, so that a retry of it is not appended again.
+#[cfg(feature = "_hidden")]
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerTag {
+    pub id: String,
+    pub seq: u64,
+    pub acked: u64,
 }
 
 impl AppendInput {
@@ -3554,6 +3567,17 @@ impl AppendInput {
             match_seq_num: None,
             fencing_token: None,
             stream_config: None,
+            #[cfg(feature = "_hidden")]
+            producer: None,
+        }
+    }
+
+    #[cfg(feature = "_hidden")]
+    #[doc(hidden)]
+    pub fn with_producer(self, producer: ProducerTag) -> Self {
+        Self {
+            producer: Some(producer),
+            ..self
         }
     }
 
@@ -3588,6 +3612,11 @@ impl From<AppendInput> for api::stream::proto::AppendInput {
             records: value.records.iter().cloned().map(Into::into).collect(),
             match_seq_num: value.match_seq_num,
             fencing_token: value.fencing_token.map(|t| t.to_string()),
+            #[cfg(feature = "_hidden")]
+            producer: value.producer.map(|ProducerTag { id, seq, acked }| {
+                api::stream::proto::Producer { id, seq, acked }
+            }),
+            #[cfg(not(feature = "_hidden"))]
             producer: None,
         }
     }
