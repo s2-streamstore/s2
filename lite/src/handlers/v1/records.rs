@@ -1083,6 +1083,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_encryption_does_not_auto_create_stream() {
+        for cipher in [EncryptionAlgorithm::Aegis256, EncryptionAlgorithm::Aes256Gcm] {
+            for accept in ["application/json", "text/event-stream", "s2s/proto"] {
+                for key in [None, Some("!!!!"), Some("AQIDBA==")] {
+                    let (app, backend, basin, stream) = setup_app_without_stream(
+                        "read-encryption-no-create",
+                        BasinConfig {
+                            create_stream_on_read: true,
+                            ..basin_config_with_stream_cipher(cipher)
+                        },
+                    )
+                    .await;
+                    assert_no_streams(&backend, &basin).await;
+                    let mut request = request_builder("GET", read_uri(&stream), &basin)
+                        .header(header::ACCEPT, accept);
+                    if let Some(key) = key {
+                        request = request.header(S2_ENCRYPTION_KEY_HEADER.as_str(), key);
+                    }
+                    let response = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        send(&app, request.body(Body::empty()).unwrap()),
+                    )
+                    .await
+                    .expect("read should reject encryption without waiting");
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    let info = response_json(response, "encryption error body").await;
+                    assert_eq!(info["code"], "bad_header");
+                    let streams = backend
+                        .list_streams(basin.clone(), ListStreamsRequest::default())
+                        .await
+                        .expect("list streams after rejection");
+                    assert!(
+                        streams.values.is_empty(),
+                        "rejected encrypted read created a stream: {cipher}, {accept}, {info}"
+                    );
+                    backend.close().await.expect("close backend");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_read_bounds_do_not_auto_create_stream() {
         let basin_config = BasinConfig {
             create_stream_on_read: true,
