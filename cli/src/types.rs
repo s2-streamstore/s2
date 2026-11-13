@@ -761,8 +761,6 @@ pub struct NetworkPolicyInfo {
     pub id: String,
     pub created_at: String,
     pub policy: NetworkPolicy,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -802,19 +800,11 @@ impl From<sdk::types::NetworkPolicyInfo> for NetworkPolicyInfo {
             id: info.id.to_string(),
             created_at: info.created_at.to_string(),
             policy: info.policy.into(),
-            token_count: None,
         }
     }
 }
 
 impl NetworkPolicyInfo {
-    pub fn with_token_count(self, token_count: u64) -> Self {
-        Self {
-            token_count: Some(token_count),
-            ..self
-        }
-    }
-
     /// Two-line compact summary for `s2 list-network-policies`, in the style of
     /// [`AccessTokenInfo::summary_block`].
     pub fn summary_block(&self, id_width: usize) -> String {

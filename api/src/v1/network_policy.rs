@@ -155,17 +155,6 @@ pub struct ListNetworkPoliciesResponse {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct GetNetworkPolicyResponse {
-    #[serde(flatten)]
-    pub info: NetworkPolicyInfo,
-    /// Access tokens within the caller's scope that are bound to this policy, including
-    /// expired tokens that have not yet been removed. Deletion requires zero.
-    pub token_count: u64,
-}
-
-#[rustfmt::skip]
 #[derive(Debug)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]

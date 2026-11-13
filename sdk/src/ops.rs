@@ -11,14 +11,13 @@ use crate::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput,
         DeleteStreamInput, EncryptionKey, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetNetworkPolicyOutput,
-        GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
-        ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
-        ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
-        LocationInfo, LocationName, Metric, NetworkPolicyInfo, NetworkPolicyRef,
-        NetworkPolicySelector, Page, ReadBatch, ReadInput, ReadSessionConfig,
-        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
-        StreamName, StreamPosition, Streaming,
+        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
+        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
+        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
+        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, Metric,
+        NetworkPolicyInfo, NetworkPolicyRef, NetworkPolicySelector, Page, ReadBatch, ReadInput,
+        ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig,
+        StreamInfo, StreamName, StreamPosition, Streaming,
     },
 };
 
@@ -297,7 +296,7 @@ impl S2 {
     pub async fn get_network_policy(
         &self,
         selector: NetworkPolicySelector,
-    ) -> Result<GetNetworkPolicyOutput, RequestError> {
+    ) -> Result<NetworkPolicyInfo, RequestError> {
         let response = self.client.get_network_policy(selector).await?;
         Ok(response.try_into()?)
     }

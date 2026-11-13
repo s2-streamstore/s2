@@ -27,8 +27,8 @@ use s2_api::v1::{
         AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
     },
     network_policy::{
-        CreateNetworkPolicyRequest, GetNetworkPolicyResponse, ListNetworkPoliciesRequest,
-        ListNetworkPoliciesResponse, NetworkPolicyInfo,
+        CreateNetworkPolicyRequest, ListNetworkPoliciesRequest, ListNetworkPoliciesResponse,
+        NetworkPolicyInfo,
     },
     stream::{
         AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
@@ -139,14 +139,14 @@ impl AccountClient {
     pub async fn get_network_policy(
         &self,
         selector: NetworkPolicySelector,
-    ) -> Result<GetNetworkPolicyResponse, ApiError> {
+    ) -> Result<NetworkPolicyInfo, ApiError> {
         let url = self.uri(format!(
             "v1/network-policies/{}",
             urlencoding::encode(&selector.to_string())
         ));
         let request = self.get(url).build()?;
         let response = self.request(request).send().await?;
-        Ok(response.json::<GetNetworkPolicyResponse>()?)
+        Ok(response.json::<NetworkPolicyInfo>()?)
     }
 
     pub async fn delete_network_policy(&self, id: NetworkPolicyRef) -> Result<(), ApiError> {

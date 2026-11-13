@@ -543,8 +543,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
 
         Command::GetNetworkPolicy { id } => {
-            let output = ops::get_network_policy(&s2, id).await?;
-            let info = NetworkPolicyInfo::from(output.info).with_token_count(output.token_count);
+            let info = NetworkPolicyInfo::from(ops::get_network_policy(&s2, id).await?);
             println!("{}", json_to_table(&serde_json::to_value(&info)?));
         }
 

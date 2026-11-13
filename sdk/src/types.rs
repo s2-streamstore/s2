@@ -2041,28 +2041,6 @@ impl TryFrom<api::network_policy::NetworkPolicyInfo> for NetworkPolicyInfo {
 }
 
 #[derive(Debug, Clone)]
-#[non_exhaustive]
-/// Output of [`get_network_policy`](crate::S2::get_network_policy) operation.
-pub struct GetNetworkPolicyOutput {
-    /// Network policy information.
-    pub info: NetworkPolicyInfo,
-    /// Access tokens within the caller's scope that are bound to this policy, including expired
-    /// tokens that have not yet been removed. Deletion requires zero.
-    pub token_count: u64,
-}
-
-impl TryFrom<api::network_policy::GetNetworkPolicyResponse> for GetNetworkPolicyOutput {
-    type Error = ValidationError;
-
-    fn try_from(value: api::network_policy::GetNetworkPolicyResponse) -> Result<Self, Self::Error> {
-        Ok(Self {
-            info: value.info.try_into()?,
-            token_count: value.token_count,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
 /// Pattern for matching basins.
 ///
 /// See [`AccessTokenScope::basins`].

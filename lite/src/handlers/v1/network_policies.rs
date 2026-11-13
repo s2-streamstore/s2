@@ -91,7 +91,7 @@ pub struct GetArgs {
     path = super::paths::network_policies::GET,
     tag = super::paths::network_policies::TAG,
     responses(
-        (status = StatusCode::OK, body = v1t::network_policy::GetNetworkPolicyResponse),
+        (status = StatusCode::OK, body = v1t::network_policy::NetworkPolicyInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -102,7 +102,7 @@ pub struct GetArgs {
 pub async fn get_network_policy(
     State(_backend): State<Backend>,
     GetArgs { .. }: GetArgs,
-) -> Result<Json<v1t::network_policy::GetNetworkPolicyResponse>, ServiceError> {
+) -> Result<Json<v1t::network_policy::NetworkPolicyInfo>, ServiceError> {
     Err(ServiceError::NotImplemented)
 }
 

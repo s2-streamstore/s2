@@ -384,6 +384,18 @@ impl Cidr {
         if cidr.network_of(addr) != addr {
             return Err(format!("CIDR {cidr} has host bits set").into());
         }
+        // Client addresses are matched in canonical form, where an IPv4-mapped address is IPv4,
+        // so a range inside `::ffff:0:0/96` would never match.
+        if let IpAddr::V6(v6) = addr
+            && prefix_len >= 96
+            && let Some(v4) = v6.to_ipv4_mapped()
+        {
+            return Err(format!(
+                "CIDR {cidr} is an IPv4-mapped IPv6 range; write it as {v4}/{}",
+                prefix_len - 96
+            )
+            .into());
+        }
         Ok(cidr)
     }
 
@@ -705,6 +717,7 @@ mod tests {
         assert!("203.0.113.0/33".parse::<Cidr>().is_err());
         assert!("2001:db8::1/64".parse::<Cidr>().is_err());
         assert!("203.0.113.0".parse::<Cidr>().is_err());
+        assert!("::ffff:203.0.113.0/120".parse::<Cidr>().is_err());
         assert_eq!(cidr("0.0.0.0/0").to_string(), "0.0.0.0/0");
         assert!(cidr("0.0.0.0/0").contains("198.51.100.1".parse().unwrap()));
         assert!(!cidr("0.0.0.0/0").contains("2001:db8::1".parse().unwrap()));

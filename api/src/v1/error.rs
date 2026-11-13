@@ -33,7 +33,6 @@ pub enum ErrorCode {
     HotServer,
     Invalid,
     NetworkPolicyDenied,
-    NetworkPolicyExists,
     NetworkPolicyInUse,
     NetworkPolicyNotFound,
     NotImplemented,
@@ -84,7 +83,6 @@ impl ErrorCode {
             | Self::StreamNotFound => http::StatusCode::NOT_FOUND,
             Self::RequestTimeout => http::StatusCode::REQUEST_TIMEOUT,
             Self::BasinDeletionPending
-            | Self::NetworkPolicyExists
             | Self::NetworkPolicyInUse
             | Self::ResourceAlreadyExists
             | Self::StreamDeletionPending
@@ -126,7 +124,6 @@ impl ErrorCode {
             | Self::DecryptionFailed
             | Self::Invalid
             | Self::NetworkPolicyDenied
-            | Self::NetworkPolicyExists
             | Self::NetworkPolicyInUse
             | Self::NetworkPolicyNotFound
             | Self::NotImplemented
@@ -155,7 +152,6 @@ impl ErrorCode {
             | Self::HotServer
             | Self::Invalid
             | Self::NetworkPolicyDenied
-            | Self::NetworkPolicyExists
             | Self::NetworkPolicyInUse
             | Self::NetworkPolicyNotFound
             | Self::NotImplemented

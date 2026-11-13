@@ -16,14 +16,14 @@ use s2_sdk::{
         BasinReconfiguration, CidrPolicy, CommandRecord, CreateBasinInput,
         CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
         EncryptionKey, FencingToken, GetAccountMetricsInput, GetBasinMetricsInput,
-        GetNetworkPolicyOutput, GetStreamMetricsInput, IssueAccessTokenInput,
-        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
-        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
-        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes,
-        Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicyRef, NetworkPolicySelector,
-        PrivateNetPolicy, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig, ReadStart, ReadStop,
-        ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime, SequencedRecord, StreamInfo,
-        StreamMetricSet, StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval,
+        GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
+        ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
+        ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
+        LocationInfo, LocationName, MeteredBytes, Metric, NetworkPolicy, NetworkPolicyInfo,
+        NetworkPolicyRef, NetworkPolicySelector, PrivateNetPolicy, ReadFrom, ReadInput, ReadLimits,
+        ReadSessionConfig, ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput,
+        S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition,
+        StreamReconfiguration, TimeRange, TimeRangeAndInterval,
     },
 };
 
@@ -371,7 +371,7 @@ pub async fn create_network_policy(
 pub async fn get_network_policy(
     s2: &S2,
     selector: NetworkPolicySelector,
-) -> Result<GetNetworkPolicyOutput, CliError> {
+) -> Result<NetworkPolicyInfo, CliError> {
     s2.get_network_policy(selector)
         .await
         .map_err(|e| CliError::op(OpKind::GetNetworkPolicy, e))
