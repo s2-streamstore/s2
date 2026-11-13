@@ -72,6 +72,7 @@ fn metric_has_data(metric: &Metric) -> bool {
         Metric::Accumulation(acc) => !acc.values.is_empty(),
         Metric::Gauge(gauge) => !gauge.values.is_empty(),
         Metric::Label(label) => !label.values.is_empty(),
+        Metric::Record(_) => true,
     }
 }
 

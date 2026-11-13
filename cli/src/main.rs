@@ -1130,6 +1130,12 @@ fn print_metrics(metrics: &[Metric]) {
                     println!("  {}", label);
                 }
             }
+            Metric::Record(m) => {
+                println!("{} @ {}:", m.name, format_timestamp(m.timestamp));
+                for (field, value) in &m.fields {
+                    println!("  {field}: {value}");
+                }
+            }
         }
     }
 }

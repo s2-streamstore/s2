@@ -1,4 +1,8 @@
+use std::collections::BTreeMap;
+
 use compact_str::CompactString;
+
+use crate::access::AccessTokenId;
 
 #[derive(Clone, Copy, Debug)]
 pub enum MetricUnit {
@@ -46,17 +50,26 @@ pub struct LabelMetric {
 }
 
 #[derive(Debug, Clone)]
+pub struct RecordMetric {
+    pub name: CompactString,
+    pub timestamp: u32,
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Metric {
     Scalar(ScalarMetric),
     Accumulation(AccumulationMetric),
     Gauge(GaugeMetric),
     Label(LabelMetric),
+    Record(RecordMetric),
 }
 
 pub enum AccountMetricSet {
     ActiveBasins,
     AccountOps,
     EstimatedBillableUsage,
+    TokenActivity,
 }
 
 pub struct AccountMetricsRequest {
@@ -64,6 +77,7 @@ pub struct AccountMetricsRequest {
     pub start: Option<u32>,
     pub end: Option<u32>,
     pub interval: Option<TimeseriesInterval>,
+    pub token_id: Option<AccessTokenId>,
 }
 
 pub enum BasinMetricSet {

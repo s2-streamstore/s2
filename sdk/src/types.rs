@@ -2563,6 +2563,7 @@ impl From<GetAccountMetricsInput> for api::metrics::AccountMetricSetRequest {
             start: Some(start),
             end: Some(end),
             interval: interval.map(Into::into),
+            token_id: None,
         }
     }
 }
@@ -2810,6 +2811,18 @@ pub struct LabelMetric {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
+/// Named set of string attributes observed at a point in time.
+pub struct RecordMetric {
+    /// Record name.
+    pub name: String,
+    /// Timestamp of the record in Unix epoch seconds.
+    pub timestamp: u32,
+    /// Named string attributes of the record.
+    pub fields: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
 /// Individual metric in a returned metric set.
 pub enum Metric {
     /// Single named value.
@@ -2821,6 +2834,8 @@ pub enum Metric {
     Gauge(GaugeMetric),
     /// Set of string labels.
     Label(LabelMetric),
+    /// Named set of string attributes observed at a point in time.
+    Record(RecordMetric),
 }
 
 impl From<api::metrics::Metric> for Metric {
@@ -2845,6 +2860,11 @@ impl From<api::metrics::Metric> for Metric {
             api::metrics::Metric::Label(lm) => Metric::Label(LabelMetric {
                 name: lm.name.into(),
                 values: lm.values,
+            }),
+            api::metrics::Metric::Record(rm) => Metric::Record(RecordMetric {
+                name: rm.name.into(),
+                timestamp: rm.timestamp,
+                fields: rm.fields,
             }),
         }
     }
