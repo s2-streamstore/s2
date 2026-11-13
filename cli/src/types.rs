@@ -778,6 +778,12 @@ pub struct CidrPolicy {
 
 #[derive(Debug, Serialize)]
 pub struct PrivateNetPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsPrivateNetPolicy>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AwsPrivateNetPolicy {
     pub vpce_ids: Vec<String>,
 }
 
@@ -788,11 +794,9 @@ impl From<sdk::types::NetworkPolicy> for NetworkPolicy {
                 allow: cidr.allow().iter().map(ToString::to_string).collect(),
             }),
             private_net: policy.private_net().map(|private_net| PrivateNetPolicy {
-                vpce_ids: private_net
-                    .vpce_ids()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
+                aws: private_net.aws().map(|aws| AwsPrivateNetPolicy {
+                    vpce_ids: aws.vpce_ids().iter().map(ToString::to_string).collect(),
+                }),
             }),
         }
     }
@@ -825,9 +829,15 @@ impl NetworkPolicyInfo {
             None => "none".dimmed().to_string(),
         };
         let detail = format!(
-            "  allow={}  vpce={}",
+            "  allow={}  aws-vpce={}",
             list(self.policy.cidr.as_ref().map(|cidr| &cidr.allow)),
-            list(self.policy.private_net.as_ref().map(|p| &p.vpce_ids)),
+            list(
+                self.policy
+                    .private_net
+                    .as_ref()
+                    .and_then(|private_net| private_net.aws.as_ref())
+                    .map(|aws| &aws.vpce_ids)
+            ),
         );
 
         format!("{header}\n{detail}")

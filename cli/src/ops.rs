@@ -12,11 +12,11 @@ use s2_sdk::{
     read_session::ReadSession,
     types::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
-        AppendInput, AppendRecord, AppendRecordBatch, BasinInfo, BasinMetricSet, BasinName,
-        BasinReconfiguration, CidrPolicy, CommandRecord, CreateBasinInput,
-        CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
-        EncryptionKey, FencingToken, GetAccountMetricsInput, GetBasinMetricsInput,
-        GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
+        AppendInput, AppendRecord, AppendRecordBatch, AwsPrivateNetPolicy, BasinInfo,
+        BasinMetricSet, BasinName, BasinReconfiguration, CidrPolicy, CommandRecord,
+        CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput,
+        DeleteStreamInput, EncryptionKey, FencingToken, GetAccountMetricsInput,
+        GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
         ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
         LocationInfo, LocationName, MeteredBytes, Metric, NetworkPolicy, NetworkPolicyInfo,
@@ -350,7 +350,7 @@ pub async fn create_network_policy(
     let CreateNetworkPolicyArgs {
         slug,
         allow_cidr,
-        vpce,
+        aws_vpce,
     } = args;
 
     let invalid = |e| CliError::InvalidArgs(miette::miette!("{e}"));
@@ -358,8 +358,8 @@ pub async fn create_network_policy(
         .then(|| CidrPolicy::new(allow_cidr))
         .transpose()
         .map_err(invalid)?;
-    let private_net = (!vpce.is_empty())
-        .then(|| PrivateNetPolicy::new(vpce))
+    let private_net = (!aws_vpce.is_empty())
+        .then(|| AwsPrivateNetPolicy::new(aws_vpce).map(PrivateNetPolicy::from))
         .transpose()
         .map_err(invalid)?;
     let policy = NetworkPolicy::new(cidr, private_net).map_err(invalid)?;

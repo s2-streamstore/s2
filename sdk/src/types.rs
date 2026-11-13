@@ -49,6 +49,10 @@ pub use s2_common::basin::BasinNameStartAfter;
 /// **Note:** It must be between 1 and 64 characters in length and can only comprise ASCII
 /// letters, numbers, colons, hyphens, and periods.
 pub use s2_common::location::LocationName;
+/// AWS VPC endpoints a token may be used through.
+///
+/// See [`PrivateNetPolicy`].
+pub use s2_common::network_policy::AwsPrivateNetPolicy;
 /// IP network in CIDR notation, e.g. `203.0.113.0/24`. Host bits must be zero.
 pub use s2_common::network_policy::Cidr;
 /// Source addresses a token may be used from over the public path.
@@ -72,7 +76,7 @@ pub use s2_common::network_policy::NetworkPolicySlug;
 pub use s2_common::network_policy::NetworkPolicySlugPrefix;
 /// See [`ListNetworkPoliciesInput::start_after`].
 pub use s2_common::network_policy::NetworkPolicySlugStartAfter;
-/// AWS VPC endpoints a token may be used through.
+/// Private networks a token may be used through, per cloud.
 ///
 /// See [`NetworkPolicy`].
 pub use s2_common::network_policy::PrivateNetPolicy;

@@ -20,10 +20,20 @@ pub struct CidrPolicy {
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct PrivateNetPolicy {
+pub struct AwsPrivateNetPolicy {
     /// AWS VPC endpoint IDs through which the token may be used.
     #[cfg_attr(feature = "utoipa", schema(min_items = 1, max_items = 32))]
     pub vpce_ids: Vec<VpcEndpointId>,
+}
+
+/// Private networks a token may be used through, per cloud. At least one cloud must be set.
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct PrivateNetPolicy {
+    /// AWS PrivateLink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsPrivateNetPolicy>,
 }
 
 /// What a token may be used from, per path. At least one of `cidr` and `private_net` must be set.
@@ -35,7 +45,7 @@ pub struct NetworkPolicy {
     /// When omitted, the token cannot be used over the public path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cidr: Option<CidrPolicy>,
-    /// Governs requests arriving through a private network, by VPC endpoint.
+    /// Governs requests arriving through a private network.
     /// When omitted, the token cannot be used through a private network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_net: Option<PrivateNetPolicy>,
@@ -51,7 +61,14 @@ impl TryFrom<NetworkPolicy> for s2_common::network_policy::NetworkPolicy {
                 .transpose()?,
             private_net
                 .map(|private_net| {
-                    s2_common::network_policy::PrivateNetPolicy::new(private_net.vpce_ids)
+                    s2_common::network_policy::PrivateNetPolicy::new(
+                        private_net
+                            .aws
+                            .map(|aws| {
+                                s2_common::network_policy::AwsPrivateNetPolicy::new(aws.vpce_ids)
+                            })
+                            .transpose()?,
+                    )
                 })
                 .transpose()?,
         )
@@ -65,7 +82,9 @@ impl From<s2_common::network_policy::NetworkPolicy> for NetworkPolicy {
                 allow: cidr.allow().to_vec(),
             }),
             private_net: value.private_net().map(|private_net| PrivateNetPolicy {
-                vpce_ids: private_net.vpce_ids().to_vec(),
+                aws: private_net.aws().map(|aws| AwsPrivateNetPolicy {
+                    vpce_ids: aws.vpce_ids().to_vec(),
+                }),
             }),
         }
     }

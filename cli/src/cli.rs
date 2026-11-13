@@ -590,7 +590,7 @@ pub struct CreateNetworkPolicyArgs {
     /// AWS VPC endpoint ID through which bound tokens may be used, e.g. `vpce-0a1b2c3d4e5f67890`.
     /// Repeatable. When omitted, bound tokens cannot be used through a private network.
     #[arg(long, value_delimiter = ',', group = "policy")]
-    pub vpce: Vec<VpcEndpointId>,
+    pub aws_vpce: Vec<VpcEndpointId>,
 }
 
 #[derive(Args, Debug)]

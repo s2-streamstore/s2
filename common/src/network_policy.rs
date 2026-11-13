@@ -647,17 +647,17 @@ impl CidrPolicy {
     }
 }
 
-/// The VPC endpoints a token may be used through.
+/// The AWS VPC endpoints a token may be used through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct PrivateNetPolicy {
+pub struct AwsPrivateNetPolicy {
     vpce_ids: Vec<VpcEndpointId>,
 }
 
-impl PrivateNetPolicy {
+impl AwsPrivateNetPolicy {
     pub fn new(vpce_ids: Vec<VpcEndpointId>) -> Result<Self, ValidationError> {
         if vpce_ids.is_empty() {
             return Err("private network policy must list at least one VPC endpoint ID".into());
@@ -674,6 +674,35 @@ impl PrivateNetPolicy {
 
     pub fn vpce_ids(&self) -> &[VpcEndpointId] {
         &self.vpce_ids
+    }
+}
+
+/// The private networks a token may be used through, per cloud. At least one cloud is listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct PrivateNetPolicy {
+    aws: Option<AwsPrivateNetPolicy>,
+}
+
+impl PrivateNetPolicy {
+    pub fn new(aws: Option<AwsPrivateNetPolicy>) -> Result<Self, ValidationError> {
+        if aws.is_none() {
+            return Err("private network policy must list a cloud".into());
+        }
+        Ok(Self { aws })
+    }
+
+    pub fn aws(&self) -> Option<&AwsPrivateNetPolicy> {
+        self.aws.as_ref()
+    }
+}
+
+impl From<AwsPrivateNetPolicy> for PrivateNetPolicy {
+    fn from(aws: AwsPrivateNetPolicy) -> Self {
+        Self { aws: Some(aws) }
     }
 }
 
@@ -727,12 +756,15 @@ impl NetworkPolicy {
                 .cidr
                 .as_ref()
                 .is_some_and(|policy| policy.allow.iter().any(|cidr| cidr.contains(ip))),
-            Some(private_net_id) => self.private_net.as_ref().is_some_and(|policy| {
-                policy
-                    .vpce_ids
-                    .iter()
-                    .any(|vpce_id| vpce_id.deref() == private_net_id)
-            }),
+            Some(private_net_id) => self
+                .private_net
+                .as_ref()
+                .and_then(|policy| policy.aws.as_ref())
+                .is_some_and(|aws| {
+                    aws.vpce_ids
+                        .iter()
+                        .any(|vpce_id| vpce_id.deref() == private_net_id)
+                }),
         }
     }
 }
@@ -796,7 +828,9 @@ mod tests {
     fn each_path_is_governed_by_its_own_kind_and_closed_without_one() {
         const LISTED: &str = "vpce-0123456789abcdef0";
         let public = CidrPolicy::new(vec![cidr("10.0.0.0/8")]).unwrap();
-        let private_net = PrivateNetPolicy::new(vec![LISTED.parse().unwrap()]).unwrap();
+        let private_net = PrivateNetPolicy::from(
+            AwsPrivateNetPolicy::new(vec![LISTED.parse().unwrap()]).unwrap(),
+        );
         let both = NetworkPolicy::new(Some(public.clone()), Some(private_net.clone())).unwrap();
         let cidr_only = NetworkPolicy::from(public);
         let private_net_only = NetworkPolicy::from(private_net);
@@ -823,7 +857,8 @@ mod tests {
         assert!(NetworkPolicy::new(None, None).is_err());
         assert!(CidrPolicy::new(vec![]).is_err());
         assert!(CidrPolicy::new(vec![cidr("10.0.0.0/8"); 33]).is_err());
-        assert!(PrivateNetPolicy::new(vec![]).is_err());
+        assert!(PrivateNetPolicy::new(None).is_err());
+        assert!(AwsPrivateNetPolicy::new(vec![]).is_err());
         assert!("vpce-".parse::<VpcEndpointId>().is_err());
         assert!("vpc-0123".parse::<VpcEndpointId>().is_err());
     }
