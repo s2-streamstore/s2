@@ -63,8 +63,13 @@ Create the name of the service account to use
 Create the image name
 */}}
 {{- define "s2-lite.image" -}}
-{{- $tag := .Values.image.tag | default .Chart.AppVersion }}
-{{- printf "%s:%s" .Values.image.repository $tag }}
+{{- if .Values.image.tag }}
+{{- printf "%s:%s" .Values.image.repository .Values.image.tag }}
+{{- else if .Values.image.digest }}
+{{- printf "%s:%s@%s" .Values.image.repository .Chart.AppVersion .Values.image.digest }}
+{{- else }}
+{{- printf "%s:%s" .Values.image.repository .Chart.AppVersion }}
+{{- end }}
 {{- end }}
 
 {{/*

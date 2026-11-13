@@ -12,6 +12,8 @@ image:
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
+  # Digest of the appVersion image, set on release. Ignored when tag is set.
+  digest: ""
 
 imagePullSecrets: []
 nameOverride: "s2-lite"

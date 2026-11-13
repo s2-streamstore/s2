@@ -25,6 +25,7 @@ jobs:
         with:
           app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          permission-contents: write
 
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -48,8 +49,13 @@ jobs:
           echo "CLI version: $VERSION"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Update Helm chart version and appVersion
+      - name: Update Helm chart version, appVersion and image digest
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          DIGEST: ${{ needs.create_manifest.outputs.digest }}
         run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "unexpected version: $VERSION"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest: $DIGEST"; exit 1; }
           # Get current chart version
           CURRENT_VERSION=$(grep '^version:' charts/s2-lite-helm/Chart.yaml | awk '{print $2}')
           if [ -z "$CURRENT_VERSION" ]; then
@@ -64,17 +70,21 @@ jobs:
 
           # Update both version and appVersion in Chart.yaml
           sed -i "s/^version: .*/version: $NEW_VERSION/" charts/s2-lite-helm/Chart.yaml
-          sed -i 's/^appVersion: ".*"$/appVersion: "${{ steps.version.outputs.value }}"/' charts/s2-lite-helm/Chart.yaml
+          sed -i "s/^appVersion: \".*\"\$/appVersion: \"$VERSION\"/" charts/s2-lite-helm/Chart.yaml
+          sed -i -E "s|^  digest: \".*\"$|  digest: \"$DIGEST\"|" charts/s2-lite-helm/values.yaml
+          grep -qxF "  digest: \"$DIGEST\"" charts/s2-lite-helm/values.yaml || { echo "could not set image digest"; exit 1; }
 
       - name: Commit and push
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-          git add charts/s2-lite-helm/Chart.yaml
+          git add charts/s2-lite-helm/Chart.yaml charts/s2-lite-helm/values.yaml
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Bump s2-lite-helm chart to appVersion ${{ steps.version.outputs.value }}"
+            git commit -m "Bump s2-lite-helm chart to appVersion $VERSION"
             git pull --rebase
             git push
           fi
@@ -231,6 +241,7 @@ jobs:
           field: package.version
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
@@ -243,10 +254,26 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-${{ matrix.arch }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
 
+      - name: Save image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest: $DIGEST"; exit 1; }
+          printf '%s' "$DIGEST" > image-digest
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: image_digest_${{ matrix.arch }}
+          path: image-digest
+          retention-days: 1
+
   create_manifest:
     name: Create multi-arch Docker manifest
     needs: build_images
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.verify.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -268,17 +295,49 @@ jobs:
           file: cli/Cargo.toml
           field: package.version
 
-      - name: Create and push versioned manifest
-        run: |
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }} \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-x86-64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-arm64
+      - name: Download image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: image_digest_*
+          path: image-digests
 
-      - name: Create and push latest manifest
+      - name: Create and push manifests
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
         run: |
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-x86-64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "unexpected version: $VERSION"; exit 1; }
+          image="$REGISTRY/$IMAGE_NAME"
+          sources=()
+          for f in image-digests/*/image-digest; do
+            d=$(cat "$f")
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest in $f"; exit 1; }
+            sources+=("$image@$d")
+          done
+          [ "${#sources[@]}" -eq 2 ] || { echo "expected 2 image digests, got ${#sources[@]}"; exit 1; }
+          docker buildx imagetools create -t "$image:$VERSION" "${sources[@]}"
+          docker buildx imagetools create -t "$image:latest" "${sources[@]}"
+
+      - name: Resolve manifest digest
+        id: verify
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          token=$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" "https://ghcr.io/token?scope=repository:$IMAGE_NAME:pull" | jq -r .token)
+          accept='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+          fetch() { curl -fsS -H "Authorization: Bearer $token" -H "Accept: $accept" -o "$2" "https://ghcr.io/v2/$IMAGE_NAME/manifests/$1"; }
+          sha() { echo "sha256:$(sha256sum "$1" | cut -d' ' -f1)"; }
+          expected=$(for f in image-digests/*/image-digest; do
+            d=$(cat "$f"); fetch "$d" part.json
+            [ "$(sha part.json)" = "$d" ] || exit 1
+            jq -r --arg d "$d" 'if .manifests then .manifests[].digest else $d end' part.json
+          done | sort -u)
+          fetch "$VERSION" index.json
+          actual=$(jq -r '.manifests[].digest' index.json | sort -u)
+          [ -n "$expected" ] && [ "$expected" = "$actual" ] || { echo "unexpected manifest for $VERSION"; exit 1; }
+          echo "digest=$(sha index.json)" >> "$GITHUB_OUTPUT"
 
   upload_release_artifacts:
     needs: [build_binaries, create_manifest]
@@ -344,6 +403,7 @@ jobs:
         with:
           app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          permission-contents: write
           owner: s2-streamstore
           repositories: homebrew-s2
       - name: Checkout homebrew repo
