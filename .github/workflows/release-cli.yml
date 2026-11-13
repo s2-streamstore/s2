@@ -18,6 +18,7 @@ jobs:
   update_helm_chart:
     needs: [create_manifest]
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - name: Generate GitHub token
         uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
@@ -82,6 +83,7 @@ jobs:
   build_binaries:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    environment: release
     strategy:
       fail-fast: true
       matrix:
@@ -315,6 +317,7 @@ jobs:
   update_homebrew:
     needs: upload_release_artifacts
     runs-on: ubuntu-22.04
+    environment: release
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

@@ -1,7 +1,7 @@
 name: release-crates
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
   workflow_dispatch:
 
@@ -15,6 +15,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'release'))
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - name: Generate GitHub token
         uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
