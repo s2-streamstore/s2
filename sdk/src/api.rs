@@ -11,6 +11,7 @@ use http::{
 };
 use prost::{self, Message};
 use s2_api::v1::{
+    MaybeKnown,
     access::{
         IssueAccessTokenRequest, IssueAccessTokenResponse, ListAccessTokensRequest,
         ListAccessTokensResponse,
@@ -405,7 +406,7 @@ impl BasinClient {
             .error_handler(|status, response| {
                 if status == StatusCode::PRECONDITION_FAILED {
                     Err(ApiError::AppendConditionFailed(
-                        response.json::<AppendConditionFailed>()?,
+                        response.json::<MaybeKnown<AppendConditionFailed>>()?,
                     ))
                 } else {
                     Err(ApiError::Server(
@@ -666,7 +667,7 @@ pub(crate) enum ApiError {
     #[error(transparent)]
     Compression(#[from] std::io::Error),
     #[error("append condition check failed")]
-    AppendConditionFailed(AppendConditionFailed),
+    AppendConditionFailed(MaybeKnown<AppendConditionFailed>),
     #[error(
         "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
     )]
@@ -752,12 +753,13 @@ impl From<TerminalMessage> for ApiError {
             Err(err) => return ApiError::TerminalDecode(err.into()),
         };
         if status == StatusCode::PRECONDITION_FAILED {
-            let condition_failed = match serde_json::from_str::<AppendConditionFailed>(&msg.body) {
-                Ok(condition_failed) => condition_failed,
-                Err(err) => {
-                    return ApiError::TerminalDecode(err.into());
-                }
-            };
+            let condition_failed =
+                match serde_json::from_str::<MaybeKnown<AppendConditionFailed>>(&msg.body) {
+                    Ok(condition_failed) => condition_failed,
+                    Err(err) => {
+                        return ApiError::TerminalDecode(err.into());
+                    }
+                };
             ApiError::AppendConditionFailed(condition_failed)
         } else if status == StatusCode::RANGE_NOT_SATISFIABLE {
             let tail = match serde_json::from_str::<TailResponse>(&msg.body) {
@@ -1690,8 +1692,15 @@ mod tests {
 
     #[rstest::rstest]
     #[case::condition_failed(
-        ApiError::AppendConditionFailed(AppendConditionFailed::SeqNumMismatch(42)),
+        ApiError::AppendConditionFailed(AppendConditionFailed::SeqNumMismatch(42).into()),
         "sequence number mismatch, expected: 42"
+    )]
+    #[case::unrecognized_condition(
+        ApiError::from(TerminalMessage {
+            status: 412,
+            body: r#"{"some_future_mismatch":7}"#.to_owned(),
+        }),
+        "unrecognized condition: some_future_mismatch"
     )]
     #[case::malformed_access_token(
         ApiError::MalformedAccessToken("invalid header".to_owned()),

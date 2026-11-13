@@ -1039,11 +1039,13 @@ fn format_timestamp(ts: u32) -> String {
     humantime::format_rfc3339_seconds(time).to_string()
 }
 
-fn format_unit(unit: s2_sdk::types::MetricUnit) -> &'static str {
+fn format_unit(unit: &s2_sdk::types::MetricUnit) -> &str {
     match unit {
         s2_sdk::types::MetricUnit::Bytes => "bytes",
         s2_sdk::types::MetricUnit::Operations => "operations",
         s2_sdk::types::MetricUnit::Usd => "usd",
+        s2_sdk::types::MetricUnit::Unknown(name) => name,
+        _ => "unknown",
     }
 }
 
@@ -1063,7 +1065,7 @@ fn print_metrics(metrics: &[Metric]) {
     for metric in metrics {
         match metric {
             Metric::Scalar(m) => {
-                println!("{}: {} {}", m.name, m.value, format_unit(m.unit));
+                println!("{}: {} {}", m.name, m.value, format_unit(&m.unit));
             }
             Metric::Accumulation(m) => {
                 let rows: Vec<AccumulationRow> = m
@@ -1084,7 +1086,7 @@ fn print_metrics(metrics: &[Metric]) {
                 );
 
                 let interval_col = "interval start time".to_string();
-                let count_col = format_unit(m.unit).to_string();
+                let count_col = format_unit(&m.unit).to_string();
                 table.with(
                     tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 0))
                         .with(tabled::settings::Format::content(|_| interval_col.clone())),
@@ -1107,7 +1109,7 @@ fn print_metrics(metrics: &[Metric]) {
                     })
                     .collect();
 
-                let count_col = format_unit(m.unit).to_string();
+                let count_col = format_unit(&m.unit).to_string();
                 println!("{}\n", m.name);
 
                 let mut table = Table::new(rows);
@@ -1130,6 +1132,10 @@ fn print_metrics(metrics: &[Metric]) {
                     println!("  {}", label);
                 }
             }
+            Metric::Unknown(kind) => {
+                println!("unrecognized metric kind: {kind}");
+            }
+            _ => {}
         }
     }
 }

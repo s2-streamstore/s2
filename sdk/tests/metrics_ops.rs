@@ -72,6 +72,7 @@ fn metric_has_data(metric: &Metric) -> bool {
         Metric::Accumulation(acc) => !acc.values.is_empty(),
         Metric::Gauge(gauge) => !gauge.values.is_empty(),
         Metric::Label(label) => !label.values.is_empty(),
+        _ => false,
     }
 }
 
@@ -746,10 +747,10 @@ async fn basin_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::er
     let range_with_interval = time_range_and_interval(1, None);
     let sets = [
         BasinMetricSet::Storage(range),
-        BasinMetricSet::AppendOps(range_with_interval),
-        BasinMetricSet::ReadOps(range_with_interval),
-        BasinMetricSet::ReadThroughput(range_with_interval),
-        BasinMetricSet::AppendThroughput(range_with_interval),
+        BasinMetricSet::AppendOps(range_with_interval.clone()),
+        BasinMetricSet::ReadOps(range_with_interval.clone()),
+        BasinMetricSet::ReadThroughput(range_with_interval.clone()),
+        BasinMetricSet::AppendThroughput(range_with_interval.clone()),
         BasinMetricSet::BasinOps(range_with_interval),
     ];
 

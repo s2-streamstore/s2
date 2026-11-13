@@ -23,7 +23,10 @@ use http::{
     uri::{Authority, Scheme},
 };
 use rand::RngExt;
-use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
+use s2_api::{
+    v1 as api,
+    v1::{MaybeKnown, stream::s2s::CompressionAlgorithm},
+};
 /// Validation error.
 pub use s2_common::ValidationError;
 /// Access token ID.
@@ -58,10 +61,7 @@ pub use s2_common::stream::StreamName;
 pub use s2_common::stream::StreamNamePrefix;
 /// See [`ListStreamsInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNameStartAfter;
-pub use s2_common::{
-    caps::RECORD_BATCH_MAX,
-    encryption::{EncryptionAlgorithm, EncryptionKey},
-};
+pub use s2_common::{caps::RECORD_BATCH_MAX, encryption::EncryptionKey};
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
@@ -874,17 +874,56 @@ impl<T> Page<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+/// Encryption algorithm.
+pub enum EncryptionAlgorithm {
+    /// AEGIS-256
+    Aegis256,
+    /// AES-256-GCM
+    Aes256Gcm,
+    /// An algorithm this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
+}
+
+impl From<MaybeKnown<api::config::EncryptionAlgorithm>> for EncryptionAlgorithm {
+    fn from(value: MaybeKnown<api::config::EncryptionAlgorithm>) -> Self {
+        match value {
+            MaybeKnown::Known(api::config::EncryptionAlgorithm::Aegis256) => Self::Aegis256,
+            MaybeKnown::Known(api::config::EncryptionAlgorithm::Aes256Gcm) => Self::Aes256Gcm,
+            MaybeKnown::Unknown(name) => Self::Unknown(name),
+        }
+    }
+}
+
+impl From<EncryptionAlgorithm> for MaybeKnown<api::config::EncryptionAlgorithm> {
+    fn from(value: EncryptionAlgorithm) -> Self {
+        match value {
+            EncryptionAlgorithm::Aegis256 => api::config::EncryptionAlgorithm::Aegis256.into(),
+            EncryptionAlgorithm::Aes256Gcm => api::config::EncryptionAlgorithm::Aes256Gcm.into(),
+            EncryptionAlgorithm::Unknown(name) => Self::Unknown(name),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 /// Retention policy for records in a stream.
 pub enum RetentionPolicy {
     /// Age in seconds. Records older than this age are automatically trimmed.
     Age(u64),
     /// Records are retained indefinitely unless explicitly trimmed.
     Infinite,
+    /// A policy this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
-impl From<api::config::RetentionPolicy> for RetentionPolicy {
-    fn from(value: api::config::RetentionPolicy) -> Self {
+impl From<MaybeKnown<api::config::RetentionPolicy>> for RetentionPolicy {
+    fn from(value: MaybeKnown<api::config::RetentionPolicy>) -> Self {
+        let value = match value {
+            MaybeKnown::Known(value) => value,
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+        };
         match value {
             api::config::RetentionPolicy::Age(secs) => RetentionPolicy::Age(secs),
             api::config::RetentionPolicy::Infinite(_) => RetentionPolicy::Infinite,
@@ -892,18 +931,21 @@ impl From<api::config::RetentionPolicy> for RetentionPolicy {
     }
 }
 
-impl From<RetentionPolicy> for api::config::RetentionPolicy {
+impl From<RetentionPolicy> for MaybeKnown<api::config::RetentionPolicy> {
     fn from(value: RetentionPolicy) -> Self {
-        match value {
+        let known = match value {
             RetentionPolicy::Age(secs) => api::config::RetentionPolicy::Age(secs),
             RetentionPolicy::Infinite => {
                 api::config::RetentionPolicy::Infinite(api::config::InfiniteRetention {})
             }
-        }
+            RetentionPolicy::Unknown(name) => return Self::Unknown(name),
+        };
+        Self::Known(known)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 /// Timestamping mode for appends that influences how timestamps are handled.
 pub enum TimestampingMode {
     /// Prefer client-specified timestamp if present otherwise use arrival time.
@@ -912,10 +954,16 @@ pub enum TimestampingMode {
     ClientRequire,
     /// Use the arrival time and ignore any client-specified timestamp.
     Arrival,
+    /// A mode this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
-impl From<api::config::TimestampingMode> for TimestampingMode {
-    fn from(value: api::config::TimestampingMode) -> Self {
+impl From<MaybeKnown<api::config::TimestampingMode>> for TimestampingMode {
+    fn from(value: MaybeKnown<api::config::TimestampingMode>) -> Self {
+        let value = match value {
+            MaybeKnown::Known(value) => value,
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+        };
         match value {
             api::config::TimestampingMode::ClientPrefer => TimestampingMode::ClientPrefer,
             api::config::TimestampingMode::ClientRequire => TimestampingMode::ClientRequire,
@@ -924,17 +972,19 @@ impl From<api::config::TimestampingMode> for TimestampingMode {
     }
 }
 
-impl From<TimestampingMode> for api::config::TimestampingMode {
+impl From<TimestampingMode> for MaybeKnown<api::config::TimestampingMode> {
     fn from(value: TimestampingMode) -> Self {
-        match value {
+        let known = match value {
             TimestampingMode::ClientPrefer => api::config::TimestampingMode::ClientPrefer,
             TimestampingMode::ClientRequire => api::config::TimestampingMode::ClientRequire,
             TimestampingMode::Arrival => api::config::TimestampingMode::Arrival,
-        }
+            TimestampingMode::Unknown(name) => return Self::Unknown(name),
+        };
+        Self::Known(known)
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 /// Configuration for timestamping behavior.
 pub struct TimestampingConfig {
@@ -1870,6 +1920,7 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 /// Pattern for matching basins.
 ///
 /// See [`AccessTokenScope::basins`].
@@ -1880,9 +1931,12 @@ pub enum BasinMatcher {
     Exact(BasinName),
     /// Match all basins with this prefix.
     Prefix(BasinNamePrefix),
+    /// A kind of pattern this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 /// Pattern for matching streams.
 ///
 /// See [`AccessTokenScope::streams`].
@@ -1893,9 +1947,12 @@ pub enum StreamMatcher {
     Exact(StreamName),
     /// Match all streams with this prefix.
     Prefix(StreamNamePrefix),
+    /// A kind of pattern this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 /// Pattern for matching access tokens.
 ///
 /// See [`AccessTokenScope::access_tokens`].
@@ -1906,6 +1963,8 @@ pub enum AccessTokenMatcher {
     Exact(AccessTokenId),
     /// Match all access tokens with this prefix.
     Prefix(AccessTokenIdPrefix),
+    /// A kind of pattern this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2069,7 +2128,8 @@ impl From<api::access::PermittedOperationGroups> for OperationGroupPermissions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 /// Individual operation that can be permitted.
 ///
 /// See [`AccessTokenScope::ops`].
@@ -2122,11 +2182,13 @@ pub enum Operation {
     GetDefaultLocation,
     /// Set the default location.
     SetDefaultLocation,
+    /// An operation this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
-impl From<Operation> for api::access::Operation {
+impl From<Operation> for MaybeKnown<api::access::Operation> {
     fn from(value: Operation) -> Self {
-        match value {
+        let known = match value {
             Operation::ListBasins => api::access::Operation::ListBasins,
             Operation::CreateBasin => api::access::Operation::CreateBasin,
             Operation::DeleteBasin => api::access::Operation::DeleteBasin,
@@ -2151,12 +2213,18 @@ impl From<Operation> for api::access::Operation {
             Operation::ListLocations => api::access::Operation::ListLocations,
             Operation::GetDefaultLocation => api::access::Operation::GetDefaultLocation,
             Operation::SetDefaultLocation => api::access::Operation::SetDefaultLocation,
-        }
+            Operation::Unknown(name) => return Self::Unknown(name),
+        };
+        Self::Known(known)
     }
 }
 
-impl From<api::access::Operation> for Operation {
-    fn from(value: api::access::Operation) -> Self {
+impl From<MaybeKnown<api::access::Operation>> for Operation {
+    fn from(value: MaybeKnown<api::access::Operation>) -> Self {
+        let value = match value {
+            MaybeKnown::Known(value) => value,
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+        };
         match value {
             api::access::Operation::ListBasins => Operation::ListBasins,
             api::access::Operation::CreateBasin => Operation::CreateBasin,
@@ -2291,33 +2359,33 @@ pub struct AccessTokenScope {
 
 impl From<api::access::AccessTokenScope> for AccessTokenScope {
     fn from(value: api::access::AccessTokenScope) -> Self {
+        use api::access::{MaybeEmpty, ResourceSet};
         Self {
             basins: value.basins.map(|rs| match rs {
-                api::access::ResourceSet::Exact(api::access::MaybeEmpty::NonEmpty(e)) => {
+                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
                     BasinMatcher::Exact(e)
                 }
-                api::access::ResourceSet::Exact(api::access::MaybeEmpty::Empty) => {
-                    BasinMatcher::None
-                }
-                api::access::ResourceSet::Prefix(p) => BasinMatcher::Prefix(p),
+                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => BasinMatcher::None,
+                MaybeKnown::Known(ResourceSet::Prefix(p)) => BasinMatcher::Prefix(p),
+                MaybeKnown::Unknown(name) => BasinMatcher::Unknown(name),
             }),
             streams: value.streams.map(|rs| match rs {
-                api::access::ResourceSet::Exact(api::access::MaybeEmpty::NonEmpty(e)) => {
+                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
                     StreamMatcher::Exact(e)
                 }
-                api::access::ResourceSet::Exact(api::access::MaybeEmpty::Empty) => {
-                    StreamMatcher::None
-                }
-                api::access::ResourceSet::Prefix(p) => StreamMatcher::Prefix(p),
+                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => StreamMatcher::None,
+                MaybeKnown::Known(ResourceSet::Prefix(p)) => StreamMatcher::Prefix(p),
+                MaybeKnown::Unknown(name) => StreamMatcher::Unknown(name),
             }),
             access_tokens: value.access_tokens.map(|rs| match rs {
-                api::access::ResourceSet::Exact(api::access::MaybeEmpty::NonEmpty(e)) => {
+                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
                     AccessTokenMatcher::Exact(e)
                 }
-                api::access::ResourceSet::Exact(api::access::MaybeEmpty::Empty) => {
+                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => {
                     AccessTokenMatcher::None
                 }
-                api::access::ResourceSet::Prefix(p) => AccessTokenMatcher::Prefix(p),
+                MaybeKnown::Known(ResourceSet::Prefix(p)) => AccessTokenMatcher::Prefix(p),
+                MaybeKnown::Unknown(name) => AccessTokenMatcher::Unknown(name),
             }),
             op_group_perms: value.op_groups.map(Into::into),
             ops: value
@@ -2330,33 +2398,25 @@ impl From<api::access::AccessTokenScope> for AccessTokenScope {
 
 impl From<AccessTokenScopeInput> for api::access::AccessTokenScope {
     fn from(value: AccessTokenScopeInput) -> Self {
+        use api::access::{MaybeEmpty, ResourceSet};
         Self {
             basins: value.basins.map(|rs| match rs {
-                BasinMatcher::None => {
-                    api::access::ResourceSet::Exact(api::access::MaybeEmpty::Empty)
-                }
-                BasinMatcher::Exact(e) => {
-                    api::access::ResourceSet::Exact(api::access::MaybeEmpty::NonEmpty(e))
-                }
-                BasinMatcher::Prefix(p) => api::access::ResourceSet::Prefix(p),
+                BasinMatcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
+                BasinMatcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
+                BasinMatcher::Prefix(p) => ResourceSet::Prefix(p).into(),
+                BasinMatcher::Unknown(name) => MaybeKnown::Unknown(name),
             }),
             streams: value.streams.map(|rs| match rs {
-                StreamMatcher::None => {
-                    api::access::ResourceSet::Exact(api::access::MaybeEmpty::Empty)
-                }
-                StreamMatcher::Exact(e) => {
-                    api::access::ResourceSet::Exact(api::access::MaybeEmpty::NonEmpty(e))
-                }
-                StreamMatcher::Prefix(p) => api::access::ResourceSet::Prefix(p),
+                StreamMatcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
+                StreamMatcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
+                StreamMatcher::Prefix(p) => ResourceSet::Prefix(p).into(),
+                StreamMatcher::Unknown(name) => MaybeKnown::Unknown(name),
             }),
             access_tokens: value.access_tokens.map(|rs| match rs {
-                AccessTokenMatcher::None => {
-                    api::access::ResourceSet::Exact(api::access::MaybeEmpty::Empty)
-                }
-                AccessTokenMatcher::Exact(e) => {
-                    api::access::ResourceSet::Exact(api::access::MaybeEmpty::NonEmpty(e))
-                }
-                AccessTokenMatcher::Prefix(p) => api::access::ResourceSet::Prefix(p),
+                AccessTokenMatcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
+                AccessTokenMatcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
+                AccessTokenMatcher::Prefix(p) => ResourceSet::Prefix(p).into(),
+                AccessTokenMatcher::Unknown(name) => MaybeKnown::Unknown(name),
             }),
             op_groups: value.op_group_perms.map(Into::into),
             ops: if value.ops.is_empty() {
@@ -2431,7 +2491,8 @@ impl From<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 /// Interval to accumulate over for timeseries metric sets.
 pub enum TimeseriesInterval {
     /// Minute.
@@ -2440,20 +2501,28 @@ pub enum TimeseriesInterval {
     Hour,
     /// Day.
     Day,
+    /// An interval this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
-impl From<TimeseriesInterval> for api::metrics::TimeseriesInterval {
+impl From<TimeseriesInterval> for MaybeKnown<api::metrics::TimeseriesInterval> {
     fn from(value: TimeseriesInterval) -> Self {
-        match value {
+        let known = match value {
             TimeseriesInterval::Minute => api::metrics::TimeseriesInterval::Minute,
             TimeseriesInterval::Hour => api::metrics::TimeseriesInterval::Hour,
             TimeseriesInterval::Day => api::metrics::TimeseriesInterval::Day,
-        }
+            TimeseriesInterval::Unknown(name) => return Self::Unknown(name),
+        };
+        Self::Known(known)
     }
 }
 
-impl From<api::metrics::TimeseriesInterval> for TimeseriesInterval {
-    fn from(value: api::metrics::TimeseriesInterval) -> Self {
+impl From<MaybeKnown<api::metrics::TimeseriesInterval>> for TimeseriesInterval {
+    fn from(value: MaybeKnown<api::metrics::TimeseriesInterval>) -> Self {
+        let value = match value {
+            MaybeKnown::Known(value) => value,
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+        };
         match value {
             api::metrics::TimeseriesInterval::Minute => TimeseriesInterval::Minute,
             api::metrics::TimeseriesInterval::Hour => TimeseriesInterval::Hour,
@@ -2479,7 +2548,7 @@ impl TimeRange {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 /// Time range as Unix epoch seconds and accumulation interval.
 pub struct TimeRangeAndInterval {
@@ -2512,7 +2581,7 @@ impl TimeRangeAndInterval {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 /// Account metric set to return.
 pub enum AccountMetricSet {
     /// Returns a [`LabelMetric`] representing all basins which had at least one stream within the
@@ -2567,7 +2636,7 @@ impl From<GetAccountMetricsInput> for api::metrics::AccountMetricSetRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 /// Basin metric set to return.
 pub enum BasinMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes across all streams
@@ -2681,7 +2750,7 @@ impl From<GetBasinMetricsInput> for (BasinName, api::metrics::BasinMetricSetRequ
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 /// Stream metric set to return.
 pub enum StreamMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes for the stream,
@@ -2736,7 +2805,8 @@ impl From<GetStreamMetricsInput> for (BasinName, StreamName, api::metrics::Strea
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 /// Unit in which metric values are measured.
 pub enum MetricUnit {
     /// Size in bytes.
@@ -2745,10 +2815,16 @@ pub enum MetricUnit {
     Operations,
     /// US dollars.
     Usd,
+    /// A unit this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
-impl From<api::metrics::MetricUnit> for MetricUnit {
-    fn from(value: api::metrics::MetricUnit) -> Self {
+impl From<MaybeKnown<api::metrics::MetricUnit>> for MetricUnit {
+    fn from(value: MaybeKnown<api::metrics::MetricUnit>) -> Self {
+        let value = match value {
+            MaybeKnown::Known(value) => value,
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+        };
         match value {
             api::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
             api::metrics::MetricUnit::Operations => MetricUnit::Operations,
@@ -2810,6 +2886,7 @@ pub struct LabelMetric {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 /// Individual metric in a returned metric set.
 pub enum Metric {
     /// Single named value.
@@ -2821,10 +2898,16 @@ pub enum Metric {
     Gauge(GaugeMetric),
     /// Set of string labels.
     Label(LabelMetric),
+    /// A kind of metric this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
-impl From<api::metrics::Metric> for Metric {
-    fn from(value: api::metrics::Metric) -> Self {
+impl From<MaybeKnown<api::metrics::Metric>> for Metric {
+    fn from(value: MaybeKnown<api::metrics::Metric>) -> Self {
+        let value = match value {
+            MaybeKnown::Known(value) => value,
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+        };
         match value {
             api::metrics::Metric::Scalar(sm) => Metric::Scalar(ScalarMetric {
                 name: sm.name.into(),
@@ -4280,8 +4363,9 @@ mod tests {
     #[rstest]
     #[case::age(RetentionPolicy::Age(3600))]
     #[case::infinite(RetentionPolicy::Infinite)]
+    #[case::unknown(RetentionPolicy::Unknown("size".to_owned()))]
     fn retention_policy_roundtrip(#[case] sdk: RetentionPolicy) {
-        let api: api::config::RetentionPolicy = sdk.into();
+        let api: MaybeKnown<api::config::RetentionPolicy> = sdk.clone().into();
         let back: RetentionPolicy = api.into();
         assert_eq!(back, sdk);
     }
@@ -4302,8 +4386,8 @@ mod tests {
         #[case] sdk: TimestampingMode,
         #[case] expected_api: api::config::TimestampingMode,
     ) {
-        let converted: api::config::TimestampingMode = sdk.into();
-        assert_eq!(converted, expected_api);
+        let converted: MaybeKnown<api::config::TimestampingMode> = sdk.clone().into();
+        assert_eq!(converted, MaybeKnown::Known(expected_api));
         let back: TimestampingMode = converted.into();
         assert_eq!(back, sdk);
     }
@@ -4316,7 +4400,7 @@ mod tests {
             mode: Some(TimestampingMode::Arrival),
             uncapped: Some(true),
         };
-        let api: api::config::TimestampingConfig = sdk.into();
+        let api: api::config::TimestampingConfig = sdk.clone().into();
         let back: TimestampingConfig = api.into();
         assert_eq!(back, sdk);
     }
@@ -4609,9 +4693,10 @@ mod tests {
             Operation::ListLocations,
             Operation::GetDefaultLocation,
             Operation::SetDefaultLocation,
+            Operation::Unknown("some-future-op".to_owned()),
         ];
         for op in variants {
-            let api_op: api::access::Operation = op.into();
+            let api_op: MaybeKnown<api::access::Operation> = op.clone().into();
             let back: Operation = api_op.into();
             assert_eq!(back, op);
         }
@@ -4622,11 +4707,11 @@ mod tests {
     #[test]
     fn metric_unit_conversion() {
         assert_eq!(
-            MetricUnit::from(api::metrics::MetricUnit::Bytes),
+            MetricUnit::from(MaybeKnown::Known(api::metrics::MetricUnit::Bytes)),
             MetricUnit::Bytes
         );
         assert_eq!(
-            MetricUnit::from(api::metrics::MetricUnit::Operations),
+            MetricUnit::from(MaybeKnown::Known(api::metrics::MetricUnit::Operations)),
             MetricUnit::Operations
         );
     }
