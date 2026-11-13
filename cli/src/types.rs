@@ -764,32 +764,36 @@ pub struct NetworkPolicyInfo {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkPolicy {
-    Cidr {
-        allow: Option<Vec<String>>,
-        deny: Option<Vec<String>>,
-    },
-    PrivateNet {
-        vpce_ids: Vec<String>,
-    },
+pub struct NetworkPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cidr: Option<CidrPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_net: Option<PrivateNetPolicy>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CidrPolicy {
+    pub allow: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrivateNetPolicy {
+    pub vpce_ids: Vec<String>,
 }
 
 impl From<sdk::types::NetworkPolicy> for NetworkPolicy {
     fn from(policy: sdk::types::NetworkPolicy) -> Self {
-        let to_strings = |items: &[_]| items.iter().map(ToString::to_string).collect::<Vec<_>>();
-        match policy {
-            sdk::types::NetworkPolicy::Cidr(cidr) => NetworkPolicy::Cidr {
-                allow: cidr.allow().map(to_strings),
-                deny: cidr.deny().map(to_strings),
-            },
-            sdk::types::NetworkPolicy::PrivateNet(private_net) => NetworkPolicy::PrivateNet {
+        NetworkPolicy {
+            cidr: policy.cidr().map(|cidr| CidrPolicy {
+                allow: cidr.allow().iter().map(ToString::to_string).collect(),
+            }),
+            private_net: policy.private_net().map(|private_net| PrivateNetPolicy {
                 vpce_ids: private_net
                     .vpce_ids()
                     .iter()
                     .map(ToString::to_string)
                     .collect(),
-            },
+            }),
         }
     }
 }
@@ -815,22 +819,16 @@ impl NetworkPolicyInfo {
             self.created_at.green()
         );
 
+        // A path with no rule is closed.
         let list = |items: Option<&Vec<String>>| match items {
-            Some(items) if !items.is_empty() => items.join(","),
-            _ => "none".dimmed().to_string(),
+            Some(items) => items.join(","),
+            None => "none".dimmed().to_string(),
         };
-        let detail = match &self.policy {
-            NetworkPolicy::Cidr { allow, deny } => {
-                let allow = match allow {
-                    Some(allow) if !allow.is_empty() => allow.join(","),
-                    _ => "any".dimmed().to_string(),
-                };
-                format!("  cidr  allow={allow}  deny={}", list(deny.as_ref()))
-            }
-            NetworkPolicy::PrivateNet { vpce_ids } => {
-                format!("  private-net  vpce={}", list(Some(vpce_ids)))
-            }
-        };
+        let detail = format!(
+            "  allow={}  vpce={}",
+            list(self.policy.cidr.as_ref().map(|cidr| &cidr.allow)),
+            list(self.policy.private_net.as_ref().map(|p| &p.vpce_ids)),
+        );
 
         format!("{header}\n{detail}")
     }

@@ -51,11 +51,13 @@ pub use s2_common::basin::BasinNameStartAfter;
 pub use s2_common::location::LocationName;
 /// IP network in CIDR notation, e.g. `203.0.113.0/24`. Host bits must be zero.
 pub use s2_common::network_policy::Cidr;
-/// Network policy restricting a token to public clients by source address.
+/// Source addresses a token may be used from over the public path.
 ///
-/// See [`NetworkPolicy::Cidr`].
+/// See [`NetworkPolicy`].
 pub use s2_common::network_policy::CidrPolicy;
-/// Restriction a network policy applies to the tokens bound to it.
+/// Restriction a network policy applies to the tokens bound to it: a [`CidrPolicy`] for the
+/// public path, a [`PrivateNetPolicy`] for private networks, or both. A path without one is
+/// closed.
 pub use s2_common::network_policy::NetworkPolicy;
 /// Full network policy reference, `<slug>.<nonce>`, which access tokens are bound to.
 pub use s2_common::network_policy::NetworkPolicyRef;
@@ -70,9 +72,9 @@ pub use s2_common::network_policy::NetworkPolicySlug;
 pub use s2_common::network_policy::NetworkPolicySlugPrefix;
 /// See [`ListNetworkPoliciesInput::start_after`].
 pub use s2_common::network_policy::NetworkPolicySlugStartAfter;
-/// Network policy restricting a token to connections through AWS VPC endpoints.
+/// AWS VPC endpoints a token may be used through.
 ///
-/// See [`NetworkPolicy::PrivateNet`].
+/// See [`NetworkPolicy`].
 pub use s2_common::network_policy::PrivateNetPolicy;
 /// AWS VPC endpoint ID, e.g. `vpce-0a1b2c3d4e5f67890`.
 pub use s2_common::network_policy::VpcEndpointId;

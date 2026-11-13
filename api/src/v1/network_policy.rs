@@ -12,14 +12,9 @@ use time::OffsetDateTime;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CidrPolicy {
-    /// Source addresses that may use the token. When omitted, any address not denied may.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "utoipa", schema(min_items = 1, max_items = 100))]
-    pub allow: Option<Vec<Cidr>>,
-    /// Source addresses that may not use the token, even if allowed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "utoipa", schema(min_items = 1, max_items = 100))]
-    pub deny: Option<Vec<Cidr>>,
+    /// Source addresses that may use the token.
+    #[cfg_attr(feature = "utoipa", schema(min_items = 1, max_items = 32))]
+    pub allow: Vec<Cidr>,
 }
 
 #[rustfmt::skip]
@@ -27,49 +22,51 @@ pub struct CidrPolicy {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PrivateNetPolicy {
     /// AWS VPC endpoint IDs through which the token may be used.
-    #[cfg_attr(feature = "utoipa", schema(min_items = 1, max_items = 100))]
+    #[cfg_attr(feature = "utoipa", schema(min_items = 1, max_items = 32))]
     pub vpce_ids: Vec<VpcEndpointId>,
 }
 
+/// What a token may be used from, per path. At least one of `cidr` and `private_net` must be set.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkPolicy {
-    /// Restrict the token to public clients by source address.
-    /// Connections through a private network are rejected.
-    Cidr(CidrPolicy),
-    /// Restrict the token to connections through the listed VPC endpoints.
-    PrivateNet(PrivateNetPolicy),
+pub struct NetworkPolicy {
+    /// Governs requests arriving over the public path, by source address.
+    /// When omitted, the token cannot be used over the public path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cidr: Option<CidrPolicy>,
+    /// Governs requests arriving through a private network, by VPC endpoint.
+    /// When omitted, the token cannot be used through a private network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_net: Option<PrivateNetPolicy>,
 }
 
 impl TryFrom<NetworkPolicy> for s2_common::network_policy::NetworkPolicy {
     type Error = s2_common::ValidationError;
 
     fn try_from(value: NetworkPolicy) -> Result<Self, Self::Error> {
-        Ok(match value {
-            NetworkPolicy::Cidr(CidrPolicy { allow, deny }) => {
-                Self::Cidr(s2_common::network_policy::CidrPolicy::new(allow, deny)?)
-            }
-            NetworkPolicy::PrivateNet(PrivateNetPolicy { vpce_ids }) => {
-                Self::PrivateNet(s2_common::network_policy::PrivateNetPolicy::new(vpce_ids)?)
-            }
-        })
+        let NetworkPolicy { cidr, private_net } = value;
+        Self::new(
+            cidr.map(|cidr| s2_common::network_policy::CidrPolicy::new(cidr.allow))
+                .transpose()?,
+            private_net
+                .map(|private_net| {
+                    s2_common::network_policy::PrivateNetPolicy::new(private_net.vpce_ids)
+                })
+                .transpose()?,
+        )
     }
 }
 
 impl From<s2_common::network_policy::NetworkPolicy> for NetworkPolicy {
     fn from(value: s2_common::network_policy::NetworkPolicy) -> Self {
-        match value {
-            s2_common::network_policy::NetworkPolicy::Cidr(policy) => Self::Cidr(CidrPolicy {
-                allow: policy.allow().map(<[Cidr]>::to_vec),
-                deny: policy.deny().map(<[Cidr]>::to_vec),
+        Self {
+            cidr: value.cidr().map(|cidr| CidrPolicy {
+                allow: cidr.allow().to_vec(),
             }),
-            s2_common::network_policy::NetworkPolicy::PrivateNet(policy) => {
-                Self::PrivateNet(PrivateNetPolicy {
-                    vpce_ids: policy.vpce_ids().to_vec(),
-                })
-            }
+            private_net: value.private_net().map(|private_net| PrivateNetPolicy {
+                vpce_ids: private_net.vpce_ids().to_vec(),
+            }),
         }
     }
 }

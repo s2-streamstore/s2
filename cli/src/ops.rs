@@ -350,18 +350,19 @@ pub async fn create_network_policy(
     let CreateNetworkPolicyArgs {
         slug,
         allow_cidr,
-        deny_cidr,
         vpce,
     } = args;
 
     let invalid = |e| CliError::InvalidArgs(miette::miette!("{e}"));
-    let policy = if vpce.is_empty() {
-        let allow = (!allow_cidr.is_empty()).then_some(allow_cidr);
-        let deny = (!deny_cidr.is_empty()).then_some(deny_cidr);
-        NetworkPolicy::Cidr(CidrPolicy::new(allow, deny).map_err(invalid)?)
-    } else {
-        NetworkPolicy::PrivateNet(PrivateNetPolicy::new(vpce).map_err(invalid)?)
-    };
+    let cidr = (!allow_cidr.is_empty())
+        .then(|| CidrPolicy::new(allow_cidr))
+        .transpose()
+        .map_err(invalid)?;
+    let private_net = (!vpce.is_empty())
+        .then(|| PrivateNetPolicy::new(vpce))
+        .transpose()
+        .map_err(invalid)?;
+    let policy = NetworkPolicy::new(cidr, private_net).map_err(invalid)?;
 
     s2.create_network_policy(CreateNetworkPolicyInput::new(slug, policy))
         .await

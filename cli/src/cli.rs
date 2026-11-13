@@ -577,26 +577,19 @@ pub struct ListNetworkPoliciesArgs {
 }
 
 #[derive(Args, Debug)]
-#[command(
-    group(clap::ArgGroup::new("policy").required(true).multiple(true)),
-    group(clap::ArgGroup::new("cidr").multiple(true))
-)]
+#[command(group(clap::ArgGroup::new("policy").required(true).multiple(true)))]
 pub struct CreateNetworkPolicyArgs {
     /// Slug, unique to the account. Up to 96 characters of letters, digits, `-` and `_`.
     pub slug: NetworkPolicySlug,
 
-    /// Source CIDR that may use bound tokens, e.g. `203.0.113.0/24`. Repeatable.
-    /// When omitted, any source not denied may.
-    #[arg(long, value_delimiter = ',', group = "policy", group = "cidr")]
+    /// Source CIDR that may use bound tokens over the public path, e.g. `203.0.113.0/24`.
+    /// Repeatable. When omitted, bound tokens cannot be used over the public path.
+    #[arg(long, value_delimiter = ',', group = "policy")]
     pub allow_cidr: Vec<Cidr>,
 
-    /// Source CIDR that may not use bound tokens, even if allowed. Repeatable.
-    #[arg(long, value_delimiter = ',', group = "policy", group = "cidr")]
-    pub deny_cidr: Vec<Cidr>,
-
     /// AWS VPC endpoint ID through which bound tokens may be used, e.g. `vpce-0a1b2c3d4e5f67890`.
-    /// Repeatable. Mutually exclusive with CIDR rules.
-    #[arg(long, value_delimiter = ',', group = "policy", conflicts_with = "cidr")]
+    /// Repeatable. When omitted, bound tokens cannot be used through a private network.
+    #[arg(long, value_delimiter = ',', group = "policy")]
     pub vpce: Vec<VpcEndpointId>,
 }
 

@@ -617,62 +617,37 @@ impl fmt::Display for VpcEndpointId {
     }
 }
 
-/// Restricts a token to public clients by source address.
-///
-/// At least one set is present and no present set is empty. Deny wins, so "allow 10.0.0.0/8
-/// except 10.1.2.0/24" is expressible. Connections through a private network are rejected: their
-/// source address is a private address in the customer's own VPC, which many customers share.
+/// The source addresses a token may be used from over the public path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct CidrPolicy {
-    allow: Option<Vec<Cidr>>,
-    deny: Option<Vec<Cidr>>,
+    allow: Vec<Cidr>,
 }
 
 impl CidrPolicy {
-    pub fn new(allow: Option<Vec<Cidr>>, deny: Option<Vec<Cidr>>) -> Result<Self, ValidationError> {
-        if allow.as_ref().is_some_and(Vec::is_empty) || deny.as_ref().is_some_and(Vec::is_empty) {
-            return Err("CIDR policy sets must not be empty; omit a set instead".into());
+    pub fn new(allow: Vec<Cidr>) -> Result<Self, ValidationError> {
+        if allow.is_empty() {
+            return Err("CIDR policy must allow at least one CIDR".into());
         }
-        if allow.is_none() && deny.is_none() {
-            return Err("CIDR policy must have an allow set or a deny set".into());
-        }
-        let identifiers = allow.as_ref().map_or(0, Vec::len) + deny.as_ref().map_or(0, Vec::len);
-        if identifiers > caps::MAX_NETWORK_POLICY_IDENTIFIERS {
+        if allow.len() > caps::MAX_NETWORK_POLICY_CIDRS {
             return Err(format!(
                 "network policy must not have more than {} CIDRs",
-                caps::MAX_NETWORK_POLICY_IDENTIFIERS
+                caps::MAX_NETWORK_POLICY_CIDRS
             )
             .into());
         }
-        Ok(Self { allow, deny })
+        Ok(Self { allow })
     }
 
-    pub fn allow(&self) -> Option<&[Cidr]> {
-        self.allow.as_deref()
-    }
-
-    pub fn deny(&self) -> Option<&[Cidr]> {
-        self.deny.as_deref()
-    }
-
-    fn permits(&self, ip: IpAddr) -> bool {
-        let denied = self
-            .deny
-            .as_ref()
-            .is_some_and(|deny| deny.iter().any(|cidr| cidr.contains(ip)));
-        let allowed = self
-            .allow
-            .as_ref()
-            .is_none_or(|allow| allow.iter().any(|cidr| cidr.contains(ip)));
-        !denied && allowed
+    pub fn allow(&self) -> &[Cidr] {
+        &self.allow
     }
 }
 
-/// Restricts a token to connections arriving through one of the listed VPC endpoints.
+/// The VPC endpoints a token may be used through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "rkyv",
@@ -687,10 +662,10 @@ impl PrivateNetPolicy {
         if vpce_ids.is_empty() {
             return Err("private network policy must list at least one VPC endpoint ID".into());
         }
-        if vpce_ids.len() > caps::MAX_NETWORK_POLICY_IDENTIFIERS {
+        if vpce_ids.len() > caps::MAX_NETWORK_POLICY_VPC_ENDPOINTS {
             return Err(format!(
                 "network policy must not have more than {} VPC endpoint IDs",
-                caps::MAX_NETWORK_POLICY_IDENTIFIERS
+                caps::MAX_NETWORK_POLICY_VPC_ENDPOINTS
             )
             .into());
         }
@@ -702,31 +677,80 @@ impl PrivateNetPolicy {
     }
 }
 
-/// A network policy is exactly one kind of restriction. New kinds are added as new variants,
-/// never as extra restricting fields on an existing variant, so an older server that recognizes
-/// a variant also enforces all of it.
+/// A network policy lists what is allowed on each path a request can arrive by, and at least
+/// one path is listed. A path that is not listed is closed.
+///
+/// Every part of a policy only ever allows. A new kind of rule must do the same, opening a path
+/// of its own, so that a server which does not know it enforces a narrower policy, never a wider
+/// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub enum NetworkPolicy {
-    Cidr(CidrPolicy),
-    PrivateNet(PrivateNetPolicy),
+pub struct NetworkPolicy {
+    cidr: Option<CidrPolicy>,
+    private_net: Option<PrivateNetPolicy>,
 }
 
 impl NetworkPolicy {
+    pub fn new(
+        cidr: Option<CidrPolicy>,
+        private_net: Option<PrivateNetPolicy>,
+    ) -> Result<Self, ValidationError> {
+        if cidr.is_none() && private_net.is_none() {
+            return Err(
+                "network policy must have a CIDR policy or a private network policy".into(),
+            );
+        }
+        Ok(Self { cidr, private_net })
+    }
+
+    /// Governs requests arriving over the public path.
+    pub fn cidr(&self) -> Option<&CidrPolicy> {
+        self.cidr.as_ref()
+    }
+
+    /// Governs requests arriving through a private network.
+    pub fn private_net(&self) -> Option<&PrivateNetPolicy> {
+        self.private_net.as_ref()
+    }
+
     /// Whether a client at `ip`, connected through `private_net_id` if any, may use a token
     /// carrying this policy.
+    ///
+    /// A private connection is matched by its endpoint alone: its source address is a private
+    /// address in the customer's own VPC, which many customers share.
     pub fn permits(&self, ip: IpAddr, private_net_id: Option<&str>) -> bool {
-        match (self, private_net_id) {
-            (Self::Cidr(policy), None) => policy.permits(ip),
-            (Self::Cidr(_), Some(_)) => false,
-            (Self::PrivateNet(_), None) => false,
-            (Self::PrivateNet(policy), Some(private_net_id)) => policy
-                .vpce_ids
-                .iter()
-                .any(|vpce_id| vpce_id.deref() == private_net_id),
+        match private_net_id {
+            None => self
+                .cidr
+                .as_ref()
+                .is_some_and(|policy| policy.allow.iter().any(|cidr| cidr.contains(ip))),
+            Some(private_net_id) => self.private_net.as_ref().is_some_and(|policy| {
+                policy
+                    .vpce_ids
+                    .iter()
+                    .any(|vpce_id| vpce_id.deref() == private_net_id)
+            }),
+        }
+    }
+}
+
+impl From<CidrPolicy> for NetworkPolicy {
+    fn from(cidr: CidrPolicy) -> Self {
+        Self {
+            cidr: Some(cidr),
+            private_net: None,
+        }
+    }
+}
+
+impl From<PrivateNetPolicy> for NetworkPolicy {
+    fn from(private_net: PrivateNetPolicy) -> Self {
+        Self {
+            cidr: None,
+            private_net: Some(private_net),
         }
     }
 }
@@ -769,36 +793,36 @@ mod tests {
     }
 
     #[test]
-    fn cidr_policy_deny_wins_and_rejects_private_connections() {
-        let policy = NetworkPolicy::Cidr(
-            CidrPolicy::new(
-                Some(vec![cidr("10.0.0.0/8")]),
-                Some(vec![cidr("10.1.2.0/24")]),
-            )
-            .unwrap(),
-        );
-        assert!(policy.permits("10.7.7.7".parse().unwrap(), None));
-        assert!(!policy.permits("10.1.2.3".parse().unwrap(), None));
-        assert!(!policy.permits("192.0.2.1".parse().unwrap(), None));
-        assert!(!policy.permits("10.7.7.7".parse().unwrap(), Some("vpce-0123456789abcdef0")));
+    fn each_path_is_governed_by_its_own_kind_and_closed_without_one() {
+        const LISTED: &str = "vpce-0123456789abcdef0";
+        let public = CidrPolicy::new(vec![cidr("10.0.0.0/8")]).unwrap();
+        let private_net = PrivateNetPolicy::new(vec![LISTED.parse().unwrap()]).unwrap();
+        let both = NetworkPolicy::new(Some(public.clone()), Some(private_net.clone())).unwrap();
+        let cidr_only = NetworkPolicy::from(public);
+        let private_net_only = NetworkPolicy::from(private_net);
 
-        let deny_only =
-            NetworkPolicy::Cidr(CidrPolicy::new(None, Some(vec![cidr("10.1.2.0/24")])).unwrap());
-        assert!(deny_only.permits("192.0.2.1".parse().unwrap(), None));
-        assert!(!deny_only.permits("10.1.2.3".parse().unwrap(), None));
+        let allowed_ip: IpAddr = "10.7.7.7".parse().unwrap();
+        let other_ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let unlisted = "vpce-0fedcba9876543210";
 
-        assert!(CidrPolicy::new(None, None).is_err());
-        assert!(CidrPolicy::new(Some(vec![]), Some(vec![cidr("10.1.2.0/24")])).is_err());
-    }
+        // (public allowed IP, public other IP, listed endpoint, unlisted endpoint from allowed IP)
+        for (policy, expected) in [
+            (&both, [true, false, true, false]),
+            (&cidr_only, [true, false, false, false]),
+            (&private_net_only, [false, false, true, false]),
+        ] {
+            let actual = [
+                policy.permits(allowed_ip, None),
+                policy.permits(other_ip, None),
+                policy.permits(other_ip, Some(LISTED)),
+                policy.permits(allowed_ip, Some(unlisted)),
+            ];
+            assert_eq!(actual, expected, "{policy:?}");
+        }
 
-    #[test]
-    fn private_net_policy_requires_a_listed_endpoint() {
-        let policy = NetworkPolicy::PrivateNet(
-            PrivateNetPolicy::new(vec!["vpce-0123456789abcdef0".parse().unwrap()]).unwrap(),
-        );
-        assert!(policy.permits("10.0.0.1".parse().unwrap(), Some("vpce-0123456789abcdef0")));
-        assert!(!policy.permits("10.0.0.1".parse().unwrap(), Some("vpce-0fedcba9876543210")));
-        assert!(!policy.permits("203.0.113.1".parse().unwrap(), None));
+        assert!(NetworkPolicy::new(None, None).is_err());
+        assert!(CidrPolicy::new(vec![]).is_err());
+        assert!(CidrPolicy::new(vec![cidr("10.0.0.0/8"); 33]).is_err());
         assert!(PrivateNetPolicy::new(vec![]).is_err());
         assert!("vpce-".parse::<VpcEndpointId>().is_err());
         assert!("vpc-0123".parse::<VpcEndpointId>().is_err());
