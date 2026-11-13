@@ -7,7 +7,6 @@ use miette::IntoDiagnostic;
 use s2_common::{
     basin::BasinName,
     config::{RetentionPolicy, StreamConfig, TimestampingMode},
-    encryption::EncryptionAlgorithm,
     stream::StreamName,
 };
 use s2_sdk::{
@@ -24,7 +23,7 @@ fn basin_config_to_sdk(config: s2_resource_spec::BasinConfig) -> s2_sdk::types::
             sdk_config.with_default_stream_config(stream_config_to_sdk(default_stream_config));
     }
     if let Some(stream_cipher) = config.stream_cipher {
-        sdk_config = sdk_config.with_stream_cipher(stream_cipher.into());
+        sdk_config = sdk_config.with_stream_cipher(encryption_algorithm_to_sdk(stream_cipher));
     }
     if let Some(create_stream_on_append) = config.create_stream_on_append {
         sdk_config = sdk_config.with_create_stream_on_append(create_stream_on_append);
@@ -50,6 +49,19 @@ fn stream_config_to_sdk(config: s2_resource_spec::StreamConfig) -> s2_sdk::types
         sdk_config = sdk_config.with_delete_on_empty(delete_on_empty);
     }
     sdk_config
+}
+
+fn encryption_algorithm_to_sdk(
+    algorithm: s2_resource_spec::EncryptionAlgorithm,
+) -> s2_sdk::types::EncryptionAlgorithm {
+    match algorithm {
+        s2_resource_spec::EncryptionAlgorithm::Aegis256 => {
+            s2_sdk::types::EncryptionAlgorithm::Aegis256
+        }
+        s2_resource_spec::EncryptionAlgorithm::Aes256Gcm => {
+            s2_sdk::types::EncryptionAlgorithm::Aes256Gcm
+        }
+    }
 }
 
 fn retention_policy_to_sdk(
@@ -96,10 +108,12 @@ fn delete_on_empty_to_sdk(
         .map(|min_age| s2_sdk::types::DeleteOnEmptyConfig::new().with_min_age(min_age.0))
 }
 
-fn format_encryption_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
+fn format_encryption_algorithm(algorithm: &s2_sdk::types::EncryptionAlgorithm) -> &str {
     match algorithm {
-        EncryptionAlgorithm::Aegis256 => "aegis-256",
-        EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm",
+        s2_sdk::types::EncryptionAlgorithm::Aegis256 => "aegis-256",
+        s2_sdk::types::EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm",
+        s2_sdk::types::EncryptionAlgorithm::Unknown(name) => name,
+        _ => "unknown",
     }
 }
 
@@ -282,11 +296,13 @@ fn diff_basin_config(
             field: "stream_cipher",
             old: existing
                 .stream_cipher
+                .as_ref()
                 .map(format_encryption_algorithm)
                 .unwrap_or("none")
                 .to_string(),
             new: desired
                 .stream_cipher
+                .as_ref()
                 .map(format_encryption_algorithm)
                 .unwrap_or("none")
                 .to_string(),
@@ -393,11 +409,11 @@ fn diff_stream_configs(existing: &StreamConfig, desired: &StreamConfig) -> Vec<F
 fn spec_basin_fields(spec: &s2_resource_spec::BasinConfig) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
 
-    if let Some(algorithm) = spec.stream_cipher.clone().map(EncryptionAlgorithm::from) {
+    if let Some(algorithm) = spec.stream_cipher.clone().map(encryption_algorithm_to_sdk) {
         fields.push(FieldDiff {
             field: "stream_cipher",
             old: String::new(),
-            new: format_encryption_algorithm(algorithm).to_string(),
+            new: format_encryption_algorithm(&algorithm).to_string(),
         });
     }
     if let Some(v) = spec.create_stream_on_append {

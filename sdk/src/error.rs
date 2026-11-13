@@ -5,8 +5,8 @@
 //! the complete error hierarchy.
 
 pub use http::StatusCode;
-use s2_api::v1 as api;
 pub use s2_api::v1::error::ErrorCode;
+use s2_api::v1::{self as api, MaybeKnown};
 
 pub use crate::session::{
     append::AppendSessionError,
@@ -178,10 +178,17 @@ pub enum AppendConditionFailed {
     /// Sequence number did not match. Contains the expected sequence number.
     #[error("sequence number mismatch, expected: {0}")]
     SeqNumMismatch(u64),
+    /// A condition this version of the SDK does not recognize, by its wire name.
+    #[error("unrecognized condition: {0}")]
+    Unknown(String),
 }
 
-impl From<api::stream::AppendConditionFailed> for AppendConditionFailed {
-    fn from(value: api::stream::AppendConditionFailed) -> Self {
+impl From<MaybeKnown<api::stream::AppendConditionFailed>> for AppendConditionFailed {
+    fn from(value: MaybeKnown<api::stream::AppendConditionFailed>) -> Self {
+        let value = match value {
+            MaybeKnown::Known(value) => value,
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+        };
         match value {
             api::stream::AppendConditionFailed::FencingTokenMismatch(token) => {
                 Self::FencingTokenMismatch(FencingToken::from_server(token.to_string()))

@@ -6,8 +6,8 @@ use compact_str::CompactString;
 use s2_sdk::{
     self as sdk,
     types::{
-        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, EncryptionAlgorithm,
-        StreamName, StreamNamePrefix, TimeseriesInterval,
+        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, StreamName,
+        StreamNamePrefix, TimeseriesInterval,
     },
 };
 use serde::Serialize;
@@ -213,11 +213,52 @@ pub fn resolve_stream_config(
 pub use sdk::types::LocationName;
 
 #[derive(ValueEnum, Debug, Clone, Serialize)]
+pub enum EncryptionAlgorithm {
+    /// AEGIS-256
+    #[value(name = "aegis-256")]
+    #[serde(rename = "aegis-256")]
+    Aegis256,
+    /// AES-256-GCM
+    #[value(name = "aes-256-gcm")]
+    #[serde(rename = "aes-256-gcm")]
+    Aes256Gcm,
+    /// Not recognized by this version of the CLI; only ever seen in output.
+    #[value(skip)]
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+impl From<EncryptionAlgorithm> for sdk::types::EncryptionAlgorithm {
+    fn from(algorithm: EncryptionAlgorithm) -> Self {
+        match algorithm {
+            EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
+            EncryptionAlgorithm::Unknown(name) => Self::Unknown(name),
+        }
+    }
+}
+
+impl From<sdk::types::EncryptionAlgorithm> for EncryptionAlgorithm {
+    fn from(algorithm: sdk::types::EncryptionAlgorithm) -> Self {
+        match algorithm {
+            sdk::types::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
+            sdk::types::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
+            sdk::types::EncryptionAlgorithm::Unknown(name) => Self::Unknown(name),
+            other => Self::Unknown(format!("{other:?}")),
+        }
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TimestampingMode {
     ClientPrefer,
     ClientRequire,
     Arrival,
+    /// Not recognized by this version of the CLI; only ever seen in output.
+    #[value(skip)]
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 #[derive(Parser, Debug, Clone, Serialize)]
@@ -235,6 +276,9 @@ pub struct TimestampingConfig {
 pub enum RetentionPolicy {
     Age(#[serde(serialize_with = "serialize_duration_humantime")] Duration),
     Infinite,
+    /// Not recognized by this version of the CLI; only ever seen in output.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 impl TryFrom<&str> for RetentionPolicy {
@@ -292,7 +336,7 @@ impl From<BasinConfig> for sdk::types::BasinConfig {
         let mut basin_config = sdk::types::BasinConfig::new()
             .with_default_stream_config(config.default_stream_config.into());
         if let Some(algorithm) = config.stream_cipher {
-            basin_config = basin_config.with_stream_cipher(algorithm);
+            basin_config = basin_config.with_stream_cipher(algorithm.into());
         }
         basin_config
             .with_create_stream_on_append(config.create_stream_on_append)
@@ -325,6 +369,7 @@ impl From<TimestampingMode> for sdk::types::TimestampingMode {
             TimestampingMode::ClientPrefer => sdk::types::TimestampingMode::ClientPrefer,
             TimestampingMode::ClientRequire => sdk::types::TimestampingMode::ClientRequire,
             TimestampingMode::Arrival => sdk::types::TimestampingMode::Arrival,
+            TimestampingMode::Unknown(name) => sdk::types::TimestampingMode::Unknown(name),
         }
     }
 }
@@ -335,6 +380,8 @@ impl From<sdk::types::TimestampingMode> for TimestampingMode {
             sdk::types::TimestampingMode::ClientPrefer => TimestampingMode::ClientPrefer,
             sdk::types::TimestampingMode::ClientRequire => TimestampingMode::ClientRequire,
             sdk::types::TimestampingMode::Arrival => TimestampingMode::Arrival,
+            sdk::types::TimestampingMode::Unknown(name) => TimestampingMode::Unknown(name),
+            other => TimestampingMode::Unknown(format!("{other:?}")),
         }
     }
 }
@@ -366,6 +413,7 @@ impl From<RetentionPolicy> for sdk::types::RetentionPolicy {
         match policy {
             RetentionPolicy::Age(d) => sdk::types::RetentionPolicy::Age(d.as_secs()),
             RetentionPolicy::Infinite => sdk::types::RetentionPolicy::Infinite,
+            RetentionPolicy::Unknown(name) => sdk::types::RetentionPolicy::Unknown(name),
         }
     }
 }
@@ -377,6 +425,8 @@ impl From<sdk::types::RetentionPolicy> for RetentionPolicy {
                 RetentionPolicy::Age(Duration::from_secs(secs))
             }
             sdk::types::RetentionPolicy::Infinite => RetentionPolicy::Infinite,
+            sdk::types::RetentionPolicy::Unknown(name) => RetentionPolicy::Unknown(name),
+            other => RetentionPolicy::Unknown(format!("{other:?}")),
         }
     }
 }
@@ -388,7 +438,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
                 .default_stream_config
                 .map(Into::into)
                 .unwrap_or_default(),
-            stream_cipher: config.stream_cipher,
+            stream_cipher: config.stream_cipher.map(Into::into),
             create_stream_on_append: config.create_stream_on_append,
             create_stream_on_read: config.create_stream_on_read,
         }
@@ -446,6 +496,9 @@ pub enum BasinMatcher {
     Exact(BasinName),
     #[serde(serialize_with = "serialize_display")]
     Prefix(BasinNamePrefix),
+    /// Not recognized by this version of the CLI.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -455,6 +508,9 @@ pub enum StreamMatcher {
     Exact(StreamName),
     #[serde(serialize_with = "serialize_display")]
     Prefix(StreamNamePrefix),
+    /// Not recognized by this version of the CLI.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -464,6 +520,9 @@ pub enum AccessTokenMatcher {
     Exact(AccessTokenId),
     #[serde(serialize_with = "serialize_display")]
     Prefix(AccessTokenIdPrefix),
+    /// Not recognized by this version of the CLI.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 fn serialize_display<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
@@ -488,6 +547,8 @@ impl BasinMatcher {
             sdk::types::BasinMatcher::Exact(v) => Some(BasinMatcher::Exact(v)),
             sdk::types::BasinMatcher::Prefix(v) => Some(BasinMatcher::Prefix(v)),
             sdk::types::BasinMatcher::None => None,
+            sdk::types::BasinMatcher::Unknown(kind) => Some(BasinMatcher::Unknown(kind)),
+            other => Some(BasinMatcher::Unknown(format!("{other:?}"))),
         }
     }
 }
@@ -499,6 +560,8 @@ impl StreamMatcher {
             sdk::types::StreamMatcher::Exact(v) => Some(StreamMatcher::Exact(v)),
             sdk::types::StreamMatcher::Prefix(v) => Some(StreamMatcher::Prefix(v)),
             sdk::types::StreamMatcher::None => None,
+            sdk::types::StreamMatcher::Unknown(kind) => Some(StreamMatcher::Unknown(kind)),
+            other => Some(StreamMatcher::Unknown(format!("{other:?}"))),
         }
     }
 }
@@ -510,6 +573,10 @@ impl AccessTokenMatcher {
             sdk::types::AccessTokenMatcher::Exact(v) => Some(AccessTokenMatcher::Exact(v)),
             sdk::types::AccessTokenMatcher::Prefix(v) => Some(AccessTokenMatcher::Prefix(v)),
             sdk::types::AccessTokenMatcher::None => None,
+            sdk::types::AccessTokenMatcher::Unknown(kind) => {
+                Some(AccessTokenMatcher::Unknown(kind))
+            }
+            other => Some(AccessTokenMatcher::Unknown(format!("{other:?}"))),
         }
     }
 }
@@ -526,6 +593,7 @@ macro_rules! impl_matcher_summary {
                 match self {
                     Self::Exact(name) => name.to_string(),
                     Self::Prefix(prefix) => format!("{prefix}*"),
+                    Self::Unknown(kind) => format!("<{kind}>"),
                 }
             }
         }
@@ -803,6 +871,11 @@ pub enum Operation {
     ListLocations,
     GetDefaultLocation,
     SetDefaultLocation,
+    /// Not recognized by this version of the CLI; only ever seen in output.
+    #[value(skip)]
+    #[serde(untagged)]
+    #[strum(default)]
+    Unknown(String),
 }
 
 impl From<Operation> for sdk::types::Operation {
@@ -832,6 +905,7 @@ impl From<Operation> for sdk::types::Operation {
             Operation::Fence => sdk::types::Operation::Fence,
             Operation::Append => sdk::types::Operation::Append,
             Operation::Read => sdk::types::Operation::Read,
+            Operation::Unknown(name) => sdk::types::Operation::Unknown(name),
         }
     }
 }
@@ -863,6 +937,8 @@ impl From<sdk::types::Operation> for Operation {
             sdk::types::Operation::Fence => Operation::Fence,
             sdk::types::Operation::Append => Operation::Append,
             sdk::types::Operation::Read => Operation::Read,
+            sdk::types::Operation::Unknown(name) => Operation::Unknown(name),
+            other => Operation::Unknown(format!("{other:?}")),
         }
     }
 }

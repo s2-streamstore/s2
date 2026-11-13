@@ -6,6 +6,8 @@ use s2_common::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::MaybeKnown;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum MaybeEmpty<T> {
@@ -226,17 +228,20 @@ impl TryFrom<IssueAccessTokenRequest> for s2_common::access::IssueAccessTokenReq
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AccessTokenScope {
     /// Basin names allowed.
-    pub basins: Option<ResourceSet<MaybeEmpty<BasinName>, BasinNamePrefix>>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<ResourceSet<MaybeEmpty<BasinName>, BasinNamePrefix>>))]
+    pub basins: Option<MaybeKnown<ResourceSet<MaybeEmpty<BasinName>, BasinNamePrefix>>>,
     /// Stream names allowed.
-    pub streams: Option<ResourceSet<MaybeEmpty<StreamName>, StreamNamePrefix>>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<ResourceSet<MaybeEmpty<StreamName>, StreamNamePrefix>>))]
+    pub streams: Option<MaybeKnown<ResourceSet<MaybeEmpty<StreamName>, StreamNamePrefix>>>,
     /// Token IDs allowed.
-    pub access_tokens:  Option<ResourceSet<MaybeEmpty<AccessTokenId>, AccessTokenIdPrefix>>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<ResourceSet<MaybeEmpty<AccessTokenId>, AccessTokenIdPrefix>>))]
+    pub access_tokens: Option<MaybeKnown<ResourceSet<MaybeEmpty<AccessTokenId>, AccessTokenIdPrefix>>>,
     /// Access permissions at operation group level.
     pub op_groups: Option<PermittedOperationGroups>,
     /// Operations allowed for the token.
     /// A union of allowed operations and groups is used as an effective set of allowed operations.
-    #[cfg_attr(feature = "utoipa", schema(required = false))]
-    pub ops: Option<Vec<Operation>>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Vec<Operation>>, required = false))]
+    pub ops: Option<Vec<MaybeKnown<Operation>>>,
 }
 
 impl TryFrom<AccessTokenScope> for s2_common::access::AccessTokenScope {
@@ -252,17 +257,27 @@ impl TryFrom<AccessTokenScope> for s2_common::access::AccessTokenScope {
         } = value;
 
         Ok(Self {
-            basins: basins.map(Into::into).unwrap_or_default(),
-            streams: streams.map(Into::into).unwrap_or_default(),
-            access_tokens: access_tokens.map(Into::into).unwrap_or_default(),
+            basins: basins
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into)
+                .unwrap_or_default(),
+            streams: streams
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into)
+                .unwrap_or_default(),
+            access_tokens: access_tokens
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into)
+                .unwrap_or_default(),
             op_groups: op_groups.map(Into::into).unwrap_or_default(),
             ops: ops
-                .map(|o| {
-                    o.into_iter()
-                        .map(s2_common::access::Operation::from)
-                        .collect()
-                })
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into_iter()
+                .map(|op| op.known().map(s2_common::access::Operation::from))
+                .collect::<Result<_, _>>()?,
         })
     }
 }
@@ -278,11 +293,15 @@ impl From<s2_common::access::AccessTokenScope> for AccessTokenScope {
         } = value;
 
         Self {
-            basins: ResourceSet::to_opt(basins),
-            streams: ResourceSet::to_opt(streams),
-            access_tokens: ResourceSet::to_opt(access_tokens),
+            basins: ResourceSet::to_opt(basins).map(Into::into),
+            streams: ResourceSet::to_opt(streams).map(Into::into),
+            access_tokens: ResourceSet::to_opt(access_tokens).map(Into::into),
             op_groups: Some(op_groups.into()),
-            ops: Some(ops.into_iter().map(Operation::from).collect()),
+            ops: Some(
+                ops.into_iter()
+                    .map(|op| Operation::from(op).into())
+                    .collect(),
+            ),
         }
     }
 }
