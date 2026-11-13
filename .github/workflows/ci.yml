@@ -284,6 +284,17 @@ jobs:
       - name: Test with TLS provided cert
         run: helm template test-release charts/s2-lite-helm --set tls.enabled=true --set tls.cert=/etc/tls/tls.crt --set tls.key=/etc/tls/tls.key --dry-run > /dev/null
 
+      - name: Test image reference
+        run: |
+          set -euo pipefail
+          image() { helm template test-release charts/s2-lite-helm --show-only templates/deployment.yaml "$@" | sed -n 's/^ *image: *//p' | head -1; }
+          repo=ghcr.io/s2-streamstore/s2
+          version=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' charts/s2-lite-helm/Chart.yaml)
+          digest="sha256:$(printf '%064d' 0)"
+          [ "$(image --set image.digest=)" = "$repo:$version" ]
+          [ "$(image --set image.digest="$digest")" = "$repo:$version@$digest" ]
+          [ "$(image --set image.digest="$digest" --set image.tag=custom)" = "$repo:custom" ]
+
       - name: Test with S3 object storage
         run: helm template test-release charts/s2-lite-helm --set objectStorage.enabled=true --set objectStorage.bucket=test-bucket --dry-run > /dev/null
 
