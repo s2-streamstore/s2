@@ -2576,13 +2576,14 @@ pub struct IssueAccessTokenInput {
     pub auto_prefix_streams: bool,
     /// Scope of the token.
     pub scope: AccessTokenScopeInput,
-    /// Full reference of a network policy to restrict the token by.
+    /// Slug or full reference of a network policy to restrict the token by. A slug binds the
+    /// token to the policy that currently holds it.
     ///
     /// If the requestor's token is itself restricted, this must be `None` or name the same
     /// policy, which the new token inherits.
     ///
     /// Defaults to `None`.
-    pub network_policy: Option<NetworkPolicyRef>,
+    pub network_policy: Option<NetworkPolicySelector>,
 }
 
 impl IssueAccessTokenInput {
@@ -2598,9 +2599,9 @@ impl IssueAccessTokenInput {
     }
 
     /// Set the network policy to restrict the token by.
-    pub fn with_network_policy(self, network_policy: NetworkPolicyRef) -> Self {
+    pub fn with_network_policy(self, network_policy: impl Into<NetworkPolicySelector>) -> Self {
         Self {
-            network_policy: Some(network_policy),
+            network_policy: Some(network_policy.into()),
             ..self
         }
     }

@@ -53,8 +53,8 @@ use crate::{
     retry::{AppendRetryError, RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
-        Compression, EncryptionKey, LocationName, NetworkPolicyRef, NetworkPolicySelector,
-        RetryConfig, S2Config, S2Endpoints, StreamName,
+        Compression, EncryptionKey, LocationName, NetworkPolicySelector, RetryConfig, S2Config,
+        S2Endpoints, StreamName,
     },
 };
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
@@ -149,10 +149,13 @@ impl AccountClient {
         Ok(response.json::<NetworkPolicyInfo>()?)
     }
 
-    pub async fn delete_network_policy(&self, id: NetworkPolicyRef) -> Result<(), ApiError> {
+    pub async fn delete_network_policy(
+        &self,
+        selector: NetworkPolicySelector,
+    ) -> Result<(), ApiError> {
         let url = self.uri(format!(
             "v1/network-policies/{}",
-            urlencoding::encode(&id.to_string())
+            urlencoding::encode(&selector.to_string())
         ));
         let request = self.delete(url).build()?;
         let _response = self.request(request).send().await?;

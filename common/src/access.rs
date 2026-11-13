@@ -9,7 +9,11 @@ use super::{
     stream::{StreamName, StreamNamePrefix},
     strings::{IdProps, PrefixProps, StartAfterProps, StrProps},
 };
-use crate::{caps, network_policy::NetworkPolicyRef, resources::ListItemsRequest};
+use crate::{
+    caps,
+    network_policy::{NetworkPolicyRef, NetworkPolicySelector},
+    resources::ListItemsRequest,
+};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
@@ -250,9 +254,9 @@ pub struct IssueAccessTokenRequest {
     pub expires_at: Option<time::OffsetDateTime>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
-    /// Full reference of the policy the token is restricted by. A restricted issuer's own
-    /// policy is inherited when omitted.
-    pub network_policy: Option<NetworkPolicyRef>,
+    /// The policy the token is restricted by. A restricted issuer's own policy is inherited
+    /// when omitted.
+    pub network_policy: Option<NetworkPolicySelector>,
 }
 
 pub type ListAccessTokensRequest = ListItemsRequest<AccessTokenIdPrefix, AccessTokenIdStartAfter>;

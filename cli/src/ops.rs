@@ -20,7 +20,7 @@ use s2_sdk::{
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
         ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
         LocationInfo, LocationName, MeteredBytes, Metric, NetworkPolicy, NetworkPolicyInfo,
-        NetworkPolicyRef, NetworkPolicySelector, PrivateNetPolicy, ReadFrom, ReadInput, ReadLimits,
+        NetworkPolicySelector, PrivateNetPolicy, ReadFrom, ReadInput, ReadLimits,
         ReadSessionConfig, ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput,
         S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet, StreamPosition,
         StreamReconfiguration, TimeRange, TimeRangeAndInterval,
@@ -377,7 +377,7 @@ pub async fn get_network_policy(
         .map_err(|e| CliError::op(OpKind::GetNetworkPolicy, e))
 }
 
-pub async fn delete_network_policy(s2: &S2, id: NetworkPolicyRef) -> Result<(), CliError> {
+pub async fn delete_network_policy(s2: &S2, id: NetworkPolicySelector) -> Result<(), CliError> {
     s2.delete_network_policy(id)
         .await
         .map_err(|e| CliError::op(OpKind::DeleteNetworkPolicy, e))

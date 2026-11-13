@@ -1,7 +1,7 @@
 use axum::extract::{FromRequest, Path, Query, State};
 use http::StatusCode;
 use s2_api::{data::Json, v1 as v1t};
-use s2_common::network_policy::{NetworkPolicyRef, NetworkPolicySelector};
+use s2_common::network_policy::NetworkPolicySelector;
 
 use crate::{backend::Backend, handlers::v1::error::ServiceError};
 
@@ -110,10 +110,10 @@ pub async fn get_network_policy(
 #[from_request(rejection(ServiceError))]
 pub struct DeleteArgs {
     #[from_request(via(Path))]
-    _id: NetworkPolicyRef,
+    _selector: NetworkPolicySelector,
 }
 
-/// Delete a network policy. It must not be bound to any access token.
+/// Delete a network policy by slug or full reference. It must not be bound to any access token.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     delete,
     path = super::paths::network_policies::DELETE,
@@ -126,7 +126,7 @@ pub struct DeleteArgs {
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
     ),
-    params(v1t::network_policy::NetworkPolicyRefPathSegment),
+    params(v1t::network_policy::NetworkPolicySelectorPathSegment),
 ))]
 pub async fn delete_network_policy(
     State(_backend): State<Backend>,

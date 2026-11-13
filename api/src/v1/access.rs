@@ -2,7 +2,7 @@ use s2_common::{
     self,
     access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
     basin::{BasinName, BasinNamePrefix},
-    network_policy::NetworkPolicyRef,
+    network_policy::{NetworkPolicyRef, NetworkPolicySelector},
     stream::{StreamName, StreamNamePrefix},
 };
 use serde::{Deserialize, Serialize};
@@ -227,11 +227,12 @@ pub struct IssueAccessTokenRequest {
     pub auto_prefix_streams: Option<bool>,
     /// Access token scope.
     pub scope: AccessTokenScope,
-    /// Full reference of a network policy to restrict the token by.
+    /// Slug or full `<slug>.<nonce>` reference of a network policy to restrict the token by.
+    /// A slug binds the token to the policy that currently holds it.
     /// If the requestor's token is itself restricted, this must be omitted or name the same
     /// policy, which the new token inherits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_policy: Option<NetworkPolicyRef>,
+    pub network_policy: Option<NetworkPolicySelector>,
 }
 
 impl TryFrom<IssueAccessTokenRequest> for s2_common::access::IssueAccessTokenRequest {

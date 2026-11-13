@@ -163,12 +163,3 @@ pub struct NetworkPolicySelectorPathSegment {
     #[cfg_attr(feature = "utoipa", param(value_type = String))]
     pub id: NetworkPolicySelector,
 }
-
-#[rustfmt::skip]
-#[derive(Debug)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
-#[cfg_attr(feature = "utoipa", into_params(parameter_in = Path))]
-pub struct NetworkPolicyRefPathSegment {
-    /// Full `<slug>.<nonce>` network policy reference.
-    pub id: NetworkPolicyRef,
-}

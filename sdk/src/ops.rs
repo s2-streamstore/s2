@@ -15,9 +15,9 @@ use crate::{
         ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
         ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
         ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, Metric,
-        NetworkPolicyInfo, NetworkPolicyRef, NetworkPolicySelector, Page, ReadBatch, ReadInput,
-        ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig,
-        StreamInfo, StreamName, StreamPosition, Streaming,
+        NetworkPolicyInfo, NetworkPolicySelector, Page, ReadBatch, ReadInput, ReadSessionConfig,
+        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
+        StreamName, StreamPosition, Streaming,
     },
 };
 
@@ -301,9 +301,13 @@ impl S2 {
         Ok(response.try_into()?)
     }
 
-    /// Delete a network policy. It must not be bound to any access token.
-    pub async fn delete_network_policy(&self, id: NetworkPolicyRef) -> Result<(), RequestError> {
-        Ok(self.client.delete_network_policy(id).await?)
+    /// Delete a network policy by slug or full reference. It must not be bound to any access
+    /// token.
+    pub async fn delete_network_policy(
+        &self,
+        selector: NetworkPolicySelector,
+    ) -> Result<(), RequestError> {
+        Ok(self.client.delete_network_policy(selector).await?)
     }
 
     /// List locations.

@@ -220,8 +220,9 @@ impl fmt::Display for NetworkPolicyNonce {
 
 /// Full reference to one version of a policy, written `<slug>.<nonce>`.
 ///
-/// Issuing a token against a policy and deleting a policy take the full reference, so a
-/// recreated slug cannot silently bind a token to rules nobody reviewed.
+/// Tokens are bound to the full reference. A request made with it fails if the slug has since
+/// been recreated, so a caller holding a stale copy cannot bind a token to, or delete, rules it
+/// never saw.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
     feature = "rkyv",
@@ -304,13 +305,40 @@ impl fmt::Display for NetworkPolicyRef {
     }
 }
 
-/// How a read-only request names a policy. Reads accept a bare slug, since reading cannot
-/// bind a token to the wrong version.
+/// How a request names a policy. A bare slug selects whichever policy currently holds it; a
+/// full reference selects only that version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkPolicySelector {
     Slug(NetworkPolicySlug),
     Ref(NetworkPolicyRef),
 }
+
+impl From<NetworkPolicySlug> for NetworkPolicySelector {
+    fn from(slug: NetworkPolicySlug) -> Self {
+        Self::Slug(slug)
+    }
+}
+
+impl From<NetworkPolicyRef> for NetworkPolicySelector {
+    fn from(reference: NetworkPolicyRef) -> Self {
+        Self::Ref(reference)
+    }
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::PartialSchema for NetworkPolicySelector {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::Object::builder()
+            .schema_type(utoipa::openapi::Type::String)
+            .description(Some(
+                "Network policy slug, or full `<slug>.<nonce>` reference.",
+            ))
+            .into()
+    }
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::ToSchema for NetworkPolicySelector {}
 
 impl NetworkPolicySelector {
     pub fn slug(&self) -> &NetworkPolicySlug {
@@ -324,6 +352,13 @@ impl NetworkPolicySelector {
         match self {
             Self::Slug(_) => None,
             Self::Ref(reference) => Some(reference.nonce()),
+        }
+    }
+
+    pub fn selects(&self, id: &NetworkPolicyRef) -> bool {
+        match self {
+            Self::Slug(slug) => slug == id.slug(),
+            Self::Ref(reference) => reference == id,
         }
     }
 }
@@ -346,6 +381,15 @@ impl fmt::Display for NetworkPolicySelector {
             Self::Slug(slug) => fmt::Display::fmt(slug, f),
             Self::Ref(reference) => fmt::Display::fmt(reference, f),
         }
+    }
+}
+
+impl serde::Serialize for NetworkPolicySelector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
     }
 }
 

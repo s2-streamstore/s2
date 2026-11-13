@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum, builder::styling};
 use compact_str::CompactString;
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
-    BasinNameStartAfter, Cidr, EncryptionAlgorithm, EncryptionKey, FencingToken, NetworkPolicyRef,
+    BasinNameStartAfter, Cidr, EncryptionAlgorithm, EncryptionKey, FencingToken,
     NetworkPolicySelector, NetworkPolicySlug, NetworkPolicySlugPrefix, NetworkPolicySlugStartAfter,
     StreamName, StreamNamePrefix, StreamNameStartAfter, VpcEndpointId,
 };
@@ -109,8 +109,8 @@ pub enum Command {
 
     /// Delete a network policy. It must not be bound to any access token.
     DeleteNetworkPolicy {
-        /// Full `<slug>.<nonce>` reference of the network policy to delete.
-        id: NetworkPolicyRef,
+        /// Network policy slug, or full `<slug>.<nonce>` reference.
+        id: NetworkPolicySelector,
     },
 
     /// Compare two basins, streams, or access tokens.
@@ -550,10 +550,10 @@ pub struct IssueAccessTokenArgs {
     #[arg(long, value_delimiter = ',')]
     pub ops: Vec<Operation>,
 
-    /// Full `<slug>.<nonce>` reference of a network policy to restrict the token by.
+    /// Slug or full `<slug>.<nonce>` reference of a network policy to restrict the token by.
     /// If the issuing token is itself restricted, the new token inherits its policy.
     #[arg(long)]
-    pub network_policy: Option<NetworkPolicyRef>,
+    pub network_policy: Option<NetworkPolicySelector>,
 }
 
 #[derive(Args, Debug)]
