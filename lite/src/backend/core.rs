@@ -365,7 +365,8 @@ impl Backend {
         stream: &StreamName,
         auto_create_on: AutoCreateOn,
         stream_config: OptionalStreamConfig,
-        resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
+        resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>
+        + Clone,
     ) -> Result<StreamHandle, E>
     where
         E: From<StreamerError>
@@ -388,16 +389,25 @@ impl Backend {
                     return Err(e.into());
                 }
                 if let Err(e) = self
-                    .provision_stream(
+                    .provision_stream_with_check(
                         basin.clone(),
                         stream.clone(),
                         stream_config,
                         ProvisionMode::CreateOnly {
                             request_token: None,
                         },
+                        |cipher| {
+                            resolve_encryption.clone()(cipher)
+                                .map(|_| ())
+                                .map_err(AutoCreateError::Admission)
+                        },
                     )
                     .await
                 {
+                    let e = match e {
+                        AutoCreateError::Admission(e) => return Err(e),
+                        AutoCreateError::Provision(e) => e,
+                    };
                     match e {
                         ProvisionStreamError::Storage(e) => Err(e)?,
                         ProvisionStreamError::TransactionConflict(e) => Err(e)?,
@@ -419,6 +429,17 @@ impl Backend {
             encryption: resolve_encryption(client.cipher())?,
             client,
         })
+    }
+}
+
+enum AutoCreateError<E> {
+    Provision(ProvisionStreamError),
+    Admission(E),
+}
+
+impl<E> From<ProvisionStreamError> for AutoCreateError<E> {
+    fn from(e: ProvisionStreamError) -> Self {
+        Self::Provision(e)
     }
 }
 

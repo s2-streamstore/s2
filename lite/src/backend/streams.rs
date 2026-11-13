@@ -1,6 +1,7 @@
 use s2_common::{
     basin::BasinName,
     config::{DeleteOnEmptyConfig, OptionalStreamConfig, StreamConfig, StreamReconfiguration},
+    encryption::EncryptionAlgorithm,
     record::{NonZeroSeqNum, StreamPosition},
     resources::{Page, ProvisionMode, ProvisionResult, RequestToken},
     stream::{ListStreamsRequest, StreamInfo, StreamName},
@@ -102,20 +103,38 @@ impl Backend {
         config: OptionalStreamConfig,
         mode: ProvisionMode,
     ) -> Result<ProvisionResult<StreamInfo>, ProvisionStreamError> {
-        let txn = self.db.begin(IsolationLevel::SerializableSnapshot)?;
+        self.provision_stream_with_check(basin, stream, config, mode, |_| Ok(()))
+            .await
+    }
+
+    /// Check admission against the same basin snapshot used to create the stream.
+    /// A concurrent change to that snapshot conflicts with the creation commit.
+    pub(super) async fn provision_stream_with_check<E: From<ProvisionStreamError>>(
+        &self,
+        basin: BasinName,
+        stream: StreamName,
+        config: OptionalStreamConfig,
+        mode: ProvisionMode,
+        check_create: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<(), E>,
+    ) -> Result<ProvisionResult<StreamInfo>, E> {
+        let txn = self
+            .db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .map_err(ProvisionStreamError::from)?;
 
         let Some(basin_meta) = db_txn_get(
             &txn,
             kv::basin_meta::ser_key(&basin),
             kv::basin_meta::deser_value,
         )
-        .await?
+        .await
+        .map_err(ProvisionStreamError::from)?
         else {
-            return Err(BasinNotFoundError { basin }.into());
+            return Err(ProvisionStreamError::from(BasinNotFoundError { basin }).into());
         };
 
         if basin_meta.deleted_at.is_some() {
-            return Err(BasinDeletionPendingError { basin }.into());
+            return Err(ProvisionStreamError::from(BasinDeletionPendingError { basin }).into());
         }
 
         let stream_meta_key = kv::stream_meta::ser_key(&basin, &stream);
@@ -125,16 +144,23 @@ impl Backend {
         let (existing_meta, existing_seq) = db_txn_get_with(&txn, &stream_meta_key, |entry| {
             Ok((kv::stream_meta::deser_value(entry.value)?, entry.seq))
         })
-        .await?
+        .await
+        .map_err(ProvisionStreamError::from)?
         .unzip();
         if existing_meta
             .as_ref()
             .is_some_and(|meta| meta.deleted_at.is_some())
-            || has_terminal_trim(&txn, StreamId::new(&basin, &stream)).await?
+            || has_terminal_trim(&txn, StreamId::new(&basin, &stream))
+                .await
+                .map_err(ProvisionStreamError::from)?
         {
-            return Err(ProvisionStreamError::StreamDeletionPending(
-                StreamDeletionPendingError,
-            ));
+            return Err(
+                ProvisionStreamError::StreamDeletionPending(StreamDeletionPendingError).into(),
+            );
+        }
+
+        if existing_meta.is_none() {
+            check_create(basin_meta.config.stream_cipher)?;
         }
 
         let prior_doe = existing_meta
@@ -156,11 +182,15 @@ impl Backend {
                         cipher: existing.cipher,
                     }))
                 } else {
-                    Err(StreamAlreadyExistsError { basin, stream }.into())
+                    Err(
+                        ProvisionStreamError::from(StreamAlreadyExistsError { basin, stream })
+                            .into(),
+                    )
                 };
                 drop(txn);
                 self.await_durable_seq(existing_seq.expect("existing meta was read"))
-                    .await?;
+                    .await
+                    .map_err(ProvisionStreamError::from)?;
                 return result;
             }
             (Some(existing), ProvisionMode::Ensure) => {
@@ -205,11 +235,13 @@ impl Backend {
         if matches!(&outcome, ProvisionResult::Noop(_)) {
             drop(txn);
             self.await_durable_seq(existing_seq.expect("noop implies existing meta"))
-                .await?;
+                .await
+                .map_err(ProvisionStreamError::from)?;
         } else {
             let meta = outcome.inner();
 
-            txn.put_bytes(stream_meta_key, kv::stream_meta::ser_value(meta))?;
+            txn.put_bytes(stream_meta_key, kv::stream_meta::ser_value(meta))
+                .map_err(ProvisionStreamError::from)?;
 
             let stream_id = StreamId::new(&basin, &stream);
 
@@ -217,11 +249,13 @@ impl Backend {
                 txn.put_bytes(
                     kv::stream_id_mapping::ser_key(stream_id),
                     kv::stream_id_mapping::ser_value(&basin, &stream),
-                )?;
+                )
+                .map_err(ProvisionStreamError::from)?;
                 txn.put_bytes(
                     kv::stream_tail_position::ser_key(stream_id),
                     kv::stream_tail_position::ser_value(StreamPosition::MIN),
-                )?;
+                )
+                .map_err(ProvisionStreamError::from)?;
             }
 
             self.commit_stream_config(
@@ -231,7 +265,8 @@ impl Backend {
                 meta.config.clone(),
                 prior_doe,
             )
-            .await?;
+            .await
+            .map_err(ProvisionStreamError::from)?;
         }
 
         Ok(outcome.map(|meta| StreamInfo {
