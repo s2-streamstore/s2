@@ -6,6 +6,7 @@ on:
 jobs:
   bump_chart_version:
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     steps:
