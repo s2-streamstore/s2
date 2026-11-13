@@ -587,6 +587,105 @@ mod tests {
         backend.close().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_create_conflicts_with_concurrent_cipher_change() {
+        use std::sync::Mutex;
+
+        use s2_common::{config::BasinReconfiguration, maybe::Maybe, stream::ListStreamsRequest};
+
+        use crate::backend::error::ReadError;
+
+        for cipher in [
+            EncryptionAlgorithm::Aegis256,
+            EncryptionAlgorithm::Aes256Gcm,
+        ] {
+            let backend = new_test_backend().await;
+            let basin: BasinName = "cipher-change".parse().unwrap();
+            let stream: StreamName = "stream".parse().unwrap();
+            backend
+                .provision_basin(
+                    basin.clone(),
+                    BasinConfig {
+                        create_stream_on_read: true,
+                        ..Default::default()
+                    },
+                    ProvisionMode::Ensure,
+                )
+                .await
+                .unwrap();
+            let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+            let admitted_tx = Arc::new(Mutex::new(Some(admitted_tx)));
+            let (updated_tx, updated_rx) = std::sync::mpsc::channel();
+            let updated_rx = Arc::new(Mutex::new(updated_rx));
+            let update = tokio::spawn({
+                let backend = backend.clone();
+                let basin = basin.clone();
+                async move {
+                    admitted_rx.await.unwrap();
+                    backend
+                        .reconfigure_basin(
+                            basin,
+                            BasinReconfiguration {
+                                stream_cipher: Maybe::Specified(Some(cipher)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    updated_tx.send(()).unwrap();
+                }
+            });
+            let result = backend
+                .stream_handle_with_auto_create::<ReadError>(
+                    &basin,
+                    &stream,
+                    AutoCreateOn::Read,
+                    OptionalStreamConfig::default(),
+                    move |cipher| {
+                        if let Some(tx) = admitted_tx.lock().unwrap().take() {
+                            assert_eq!(cipher, None);
+                            tx.send(()).unwrap();
+                            updated_rx
+                                .lock()
+                                .unwrap()
+                                .recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap();
+                        }
+                        Ok(EncryptionSpec::resolve(cipher, None)?)
+                    },
+                )
+                .await;
+            update.await.unwrap();
+            assert!(
+                matches!(result, Err(ReadError::TransactionConflict(_))),
+                "auto-creation did not conflict with the concurrent basin update"
+            );
+            assert!(
+                backend
+                    .list_streams(basin.clone(), ListStreamsRequest::default())
+                    .await
+                    .unwrap()
+                    .values
+                    .is_empty()
+            );
+            assert!(matches!(
+                backend
+                    .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+                    .await,
+                Err(ReadError::EncryptionSpecResolution(_))
+            ));
+            assert!(
+                backend
+                    .list_streams(basin, ListStreamsRequest::default())
+                    .await
+                    .unwrap()
+                    .values
+                    .is_empty()
+            );
+            backend.close().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn config_notification_does_not_start_streamer() {
         let backend = new_test_backend().await;
