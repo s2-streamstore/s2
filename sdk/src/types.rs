@@ -2563,7 +2563,7 @@ impl From<GetAccountMetricsInput> for api::metrics::AccountMetricSetRequest {
             start: Some(start),
             end: Some(end),
             interval: interval.map(Into::into),
-            token_id: None,
+            token_ids: Vec::new(),
         }
     }
 }

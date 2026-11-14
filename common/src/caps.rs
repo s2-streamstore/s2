@@ -7,6 +7,9 @@ pub const MAX_STREAM_NAME_LEN: usize = 512;
 
 pub const MAX_ACCESS_TOKEN_ID_LEN: usize = 96;
 
+/// Most access tokens a single `token-activity` metrics request may look up.
+pub const MAX_TOKEN_ACTIVITY_LOOKUPS: usize = 50;
+
 /// All record batches in the system are limited to 1000 records.
 /// Batches are limited to a collective size of 1 MiB, which is also the maximum size of a single
 /// record.
