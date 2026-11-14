@@ -624,26 +624,26 @@ impl fmt::Display for VpcEndpointId {
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct CidrPolicy {
-    allow: Vec<Cidr>,
+    ranges: Vec<Cidr>,
 }
 
 impl CidrPolicy {
-    pub fn new(allow: Vec<Cidr>) -> Result<Self, ValidationError> {
-        if allow.is_empty() {
-            return Err("CIDR policy must allow at least one CIDR".into());
+    pub fn new(ranges: Vec<Cidr>) -> Result<Self, ValidationError> {
+        if ranges.is_empty() {
+            return Err("CIDR policy must list at least one CIDR".into());
         }
-        if allow.len() > caps::MAX_NETWORK_POLICY_CIDRS {
+        if ranges.len() > caps::MAX_NETWORK_POLICY_CIDRS {
             return Err(format!(
                 "network policy must not have more than {} CIDRs",
                 caps::MAX_NETWORK_POLICY_CIDRS
             )
             .into());
         }
-        Ok(Self { allow })
+        Ok(Self { ranges })
     }
 
-    pub fn allow(&self) -> &[Cidr] {
-        &self.allow
+    pub fn ranges(&self) -> &[Cidr] {
+        &self.ranges
     }
 }
 
@@ -755,7 +755,7 @@ impl NetworkPolicy {
             None => self
                 .cidr
                 .as_ref()
-                .is_some_and(|policy| policy.allow.iter().any(|cidr| cidr.contains(ip))),
+                .is_some_and(|policy| policy.ranges.iter().any(|cidr| cidr.contains(ip))),
             Some(private_net_id) => self
                 .private_net
                 .as_ref()

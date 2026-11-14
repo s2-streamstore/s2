@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 pub struct CidrPolicy {
     /// Source addresses that may use the token.
     #[cfg_attr(feature = "utoipa", schema(min_items = 1, max_items = 32))]
-    pub allow: Vec<Cidr>,
+    pub ranges: Vec<Cidr>,
 }
 
 #[rustfmt::skip]
@@ -57,7 +57,7 @@ impl TryFrom<NetworkPolicy> for s2_common::network_policy::NetworkPolicy {
     fn try_from(value: NetworkPolicy) -> Result<Self, Self::Error> {
         let NetworkPolicy { cidr, private_net } = value;
         Self::new(
-            cidr.map(|cidr| s2_common::network_policy::CidrPolicy::new(cidr.allow))
+            cidr.map(|cidr| s2_common::network_policy::CidrPolicy::new(cidr.ranges))
                 .transpose()?,
             private_net
                 .map(|private_net| {
@@ -79,7 +79,7 @@ impl From<s2_common::network_policy::NetworkPolicy> for NetworkPolicy {
     fn from(value: s2_common::network_policy::NetworkPolicy) -> Self {
         Self {
             cidr: value.cidr().map(|cidr| CidrPolicy {
-                allow: cidr.allow().to_vec(),
+                ranges: cidr.ranges().to_vec(),
             }),
             private_net: value.private_net().map(|private_net| PrivateNetPolicy {
                 aws: private_net.aws().map(|aws| AwsPrivateNetPolicy {

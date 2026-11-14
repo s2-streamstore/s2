@@ -773,7 +773,7 @@ pub struct NetworkPolicy {
 
 #[derive(Debug, Serialize)]
 pub struct CidrPolicy {
-    pub allow: Vec<String>,
+    pub ranges: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -791,7 +791,7 @@ impl From<sdk::types::NetworkPolicy> for NetworkPolicy {
     fn from(policy: sdk::types::NetworkPolicy) -> Self {
         NetworkPolicy {
             cidr: policy.cidr().map(|cidr| CidrPolicy {
-                allow: cidr.allow().iter().map(ToString::to_string).collect(),
+                ranges: cidr.ranges().iter().map(ToString::to_string).collect(),
             }),
             private_net: policy.private_net().map(|private_net| PrivateNetPolicy {
                 aws: private_net.aws().map(|aws| AwsPrivateNetPolicy {
@@ -830,7 +830,7 @@ impl NetworkPolicyInfo {
         };
         let detail = format!(
             "  allow={}  aws-vpce={}",
-            list(self.policy.cidr.as_ref().map(|cidr| &cidr.allow)),
+            list(self.policy.cidr.as_ref().map(|cidr| &cidr.ranges)),
             list(
                 self.policy
                     .private_net
