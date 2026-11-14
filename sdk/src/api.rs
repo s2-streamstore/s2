@@ -1956,4 +1956,27 @@ mod tests {
             "expected a connect error, got: {err}"
         );
     }
+
+    #[test]
+    fn account_metrics_query_repeats_token_id() {
+        let request = AccountMetricSetRequest {
+            set: s2_api::v1::metrics::AccountMetricSet::TokenActivity,
+            start: None,
+            end: None,
+            interval: None,
+            token_ids: vec!["a,b".parse().unwrap(), "c&d".parse().unwrap()],
+        };
+
+        let query = serde_urlencoded::to_string(&request).unwrap();
+        assert_eq!(query, "set=token-activity&token_id=a%2Cb&token_id=c%26d");
+
+        let parsed: AccountMetricSetRequest = serde_urlencoded::from_str(&query).unwrap();
+        assert_eq!(parsed.token_ids, request.token_ids);
+        assert!(
+            serde_urlencoded::from_str::<AccountMetricSetRequest>(
+                "set=token-activity&set=account-ops"
+            )
+            .is_err()
+        );
+    }
 }

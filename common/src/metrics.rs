@@ -77,7 +77,7 @@ pub struct AccountMetricsRequest {
     pub start: Option<u32>,
     pub end: Option<u32>,
     pub interval: Option<TimeseriesInterval>,
-    pub token_id: Option<AccessTokenId>,
+    pub token_ids: Vec<AccessTokenId>,
 }
 
 pub enum BasinMetricSet {

@@ -35,7 +35,7 @@ impl From<s2_common::metrics::TimeseriesInterval> for TimeseriesInterval {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema, utoipa::IntoParams))]
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct AccountMetricSetRequest {
@@ -47,9 +47,101 @@ pub struct AccountMetricSetRequest {
     pub end: Option<u32>,
     /// Interval to aggregate over for timeseries metric sets.
     pub interval: Option<TimeseriesInterval>,
-    /// Access token ID. Required for the `token-activity` metric set.
-    #[cfg_attr(feature = "utoipa", param(value_type = Option<String>))]
-    pub token_id: Option<AccessTokenId>,
+    /// Access token IDs, as a repeated parameter. Between 1 and 50 are required for the `token-activity` metric set.
+    #[cfg_attr(feature = "utoipa", param(rename = "token_id", value_type = Vec<String>, max_items = 50, required = false))]
+    pub token_ids: Vec<AccessTokenId>,
+}
+
+// Hand-written because `token_id` repeats, which derived query (de)serialization rejects.
+impl Serialize for AccountMetricSetRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("set", &self.set)?;
+        if let Some(start) = &self.start {
+            map.serialize_entry("start", start)?;
+        }
+        if let Some(end) = &self.end {
+            map.serialize_entry("end", end)?;
+        }
+        if let Some(interval) = &self.interval {
+            map.serialize_entry("interval", interval)?;
+        }
+        for token_id in &self.token_ids {
+            map.serialize_entry("token_id", token_id)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AccountMetricSetRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Set,
+            Start,
+            End,
+            Interval,
+            TokenId,
+            #[serde(other)]
+            Other,
+        }
+
+        fn set_once<'de, A: MapAccess<'de>, T: Deserialize<'de>>(
+            map: &mut A,
+            slot: &mut Option<T>,
+            field: &'static str,
+        ) -> Result<(), A::Error> {
+            if slot.is_some() {
+                return Err(A::Error::duplicate_field(field));
+            }
+            *slot = Some(map.next_value()?);
+            Ok(())
+        }
+
+        struct RequestVisitor;
+
+        impl<'de> Visitor<'de> for RequestVisitor {
+            type Value = AccountMetricSetRequest;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("account metric set parameters")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut set = None;
+                let mut start = None;
+                let mut end = None;
+                let mut interval = None;
+                let mut token_ids = Vec::new();
+                while let Some(field) = map.next_key()? {
+                    match field {
+                        Field::Set => set_once(&mut map, &mut set, "set")?,
+                        Field::Start => set_once(&mut map, &mut start, "start")?,
+                        Field::End => set_once(&mut map, &mut end, "end")?,
+                        Field::Interval => set_once(&mut map, &mut interval, "interval")?,
+                        Field::TokenId => token_ids.push(map.next_value()?),
+                        Field::Other => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(AccountMetricSetRequest {
+                    set: set.ok_or_else(|| A::Error::missing_field("set"))?,
+                    start: start.flatten(),
+                    end: end.flatten(),
+                    interval: interval.flatten(),
+                    token_ids,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(RequestVisitor)
+    }
 }
 
 impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest {
@@ -70,7 +162,7 @@ impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest
             start: value.start,
             end: value.end,
             interval: value.interval.map(Into::into),
-            token_id: value.token_id,
+            token_ids: value.token_ids,
         }
     }
 }
@@ -89,7 +181,8 @@ pub enum AccountMetricSet {
     AccountOps,
     /// Estimated USD billable usage by dimension, plus a total.
     EstimatedBillableUsage,
-    /// Most recent use of the access token given by `token_id`.
+    /// Most recent use of each access token given by `token_id`, as one record per token.
+    /// Tokens with no recorded use are omitted.
     TokenActivity,
 }
 
