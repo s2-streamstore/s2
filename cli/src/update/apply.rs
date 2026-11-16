@@ -344,7 +344,9 @@ async fn report_status(channel: InstallChannel, current: &Version) -> Result<(),
 
 /// Download, verify, and swap the binary in place.
 async fn in_place_update(channel: InstallChannel, target: &Version) -> Result<(), UpdateError> {
-    let exe = std::env::current_exe().map_err(UpdateError::CurrentExe)?;
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(UpdateError::CurrentExe)?;
     let asset = asset_name();
     let base = format!(
         "https://github.com/{repo}/releases/download/{CLI_TAG_PREFIX}{target}",

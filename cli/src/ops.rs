@@ -20,7 +20,7 @@ use s2_sdk::{
         ListStreamsInput, LocationInfo, LocationName, MeteredBytes, Metric, ReadFrom, ReadInput,
         ReadLimits, ReadSessionConfig, ReadStart, ReadStop, ReconfigureBasinInput,
         ReconfigureStreamInput, S2DateTime, SequencedRecord, StreamInfo, StreamMetricSet,
-        StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval,
+        StreamNamePrefix, StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval,
     },
 };
 
@@ -390,12 +390,25 @@ pub async fn get_stream_metrics(
         .map_err(|e| CliError::op(OpKind::GetStreamMetrics, e))
 }
 
+fn list_streams_prefix(
+    uri_prefix: Option<StreamNamePrefix>,
+    prefix: Option<StreamNamePrefix>,
+) -> Result<Option<StreamNamePrefix>, CliError> {
+    match (uri_prefix, prefix) {
+        (Some(_), Some(_)) => Err(CliError::InvalidArgs(miette::miette!(
+            help = "Make sure to provide the prefix once either using '--prefix' opt or in URI like 's2://basin-name/prefix'",
+            "Multiple prefixes provided"
+        ))),
+        (uri_prefix, prefix) => Ok(uri_prefix.or(prefix)),
+    }
+}
+
 /// List streams, returning items and whether there are more.
 pub async fn list_streams(
     s2: &S2,
     args: ListStreamsArgs,
 ) -> Result<(Vec<StreamInfo>, bool), CliError> {
-    let prefix = args.uri.stream.or(args.prefix);
+    let prefix = list_streams_prefix(args.uri.stream, args.prefix)?;
     let basin = s2.basin(args.uri.basin);
 
     if args.no_auto_paginate {
@@ -780,4 +793,21 @@ fn time_range_and_interval(
         range = range.with_interval(interval.into());
     }
     range
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_streams_prefix_rejects_uri_and_flag_prefix() {
+        let prefix = |s: &str| Some(s.parse::<StreamNamePrefix>().unwrap());
+        assert!(matches!(
+            list_streams_prefix(prefix("a"), prefix("b")),
+            Err(CliError::InvalidArgs(_))
+        ));
+        assert_eq!(list_streams_prefix(prefix("a"), None).unwrap(), prefix("a"));
+        assert_eq!(list_streams_prefix(None, prefix("b")).unwrap(), prefix("b"));
+        assert_eq!(list_streams_prefix(None, None).unwrap(), None);
+    }
 }
