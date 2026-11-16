@@ -41,7 +41,7 @@ jobs:
 
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@1528104d2ca23787631a1c1f022abb64b34c1e11 # v0.5.128
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release-pr
         env:
