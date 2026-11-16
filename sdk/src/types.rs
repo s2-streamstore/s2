@@ -23,8 +23,6 @@ use http::{
     uri::{Authority, Scheme},
 };
 use rand::RngExt;
-/// A variant this version of the SDK does not recognize, kept as the service returned it.
-pub use s2_api::v1::UnknownVariant;
 use s2_api::{
     v1 as api,
     v1::{MaybeKnown, stream::s2s::CompressionAlgorithm},
@@ -893,7 +891,7 @@ impl From<MaybeKnown<api::config::EncryptionAlgorithm>> for EncryptionAlgorithm 
         match value {
             MaybeKnown::Known(api::config::EncryptionAlgorithm::Aegis256) => Self::Aegis256,
             MaybeKnown::Known(api::config::EncryptionAlgorithm::Aes256Gcm) => Self::Aes256Gcm,
-            MaybeKnown::Unknown(name) => Self::Unknown(name.into()),
+            MaybeKnown::Unknown(name) => Self::Unknown(name),
         }
     }
 }
@@ -903,7 +901,7 @@ impl From<EncryptionAlgorithm> for MaybeKnown<api::config::EncryptionAlgorithm> 
         match value {
             EncryptionAlgorithm::Aegis256 => api::config::EncryptionAlgorithm::Aegis256.into(),
             EncryptionAlgorithm::Aes256Gcm => api::config::EncryptionAlgorithm::Aes256Gcm.into(),
-            EncryptionAlgorithm::Unknown(name) => Self::Unknown(name.into()),
+            EncryptionAlgorithm::Unknown(name) => Self::Unknown(name),
         }
     }
 }
@@ -916,8 +914,8 @@ pub enum RetentionPolicy {
     Age(u64),
     /// Records are retained indefinitely unless explicitly trimmed.
     Infinite,
-    /// A policy this version of the SDK does not recognize.
-    Unknown(UnknownVariant),
+    /// A policy this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
 impl From<MaybeKnown<api::config::RetentionPolicy>> for RetentionPolicy {
@@ -964,7 +962,7 @@ impl From<MaybeKnown<api::config::TimestampingMode>> for TimestampingMode {
     fn from(value: MaybeKnown<api::config::TimestampingMode>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
-            MaybeKnown::Unknown(name) => return Self::Unknown(name.into()),
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
             api::config::TimestampingMode::ClientPrefer => TimestampingMode::ClientPrefer,
@@ -980,7 +978,7 @@ impl From<TimestampingMode> for MaybeKnown<api::config::TimestampingMode> {
             TimestampingMode::ClientPrefer => api::config::TimestampingMode::ClientPrefer,
             TimestampingMode::ClientRequire => api::config::TimestampingMode::ClientRequire,
             TimestampingMode::Arrival => api::config::TimestampingMode::Arrival,
-            TimestampingMode::Unknown(name) => return Self::Unknown(name.into()),
+            TimestampingMode::Unknown(name) => return Self::Unknown(name),
         };
         Self::Known(known)
     }
@@ -1933,8 +1931,8 @@ pub enum BasinMatcher {
     Exact(BasinName),
     /// Match all basins with this prefix.
     Prefix(BasinNamePrefix),
-    /// A kind of pattern this version of the SDK does not recognize.
-    Unknown(UnknownVariant),
+    /// A kind of pattern this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1949,8 +1947,8 @@ pub enum StreamMatcher {
     Exact(StreamName),
     /// Match all streams with this prefix.
     Prefix(StreamNamePrefix),
-    /// A kind of pattern this version of the SDK does not recognize.
-    Unknown(UnknownVariant),
+    /// A kind of pattern this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1965,8 +1963,8 @@ pub enum AccessTokenMatcher {
     Exact(AccessTokenId),
     /// Match all access tokens with this prefix.
     Prefix(AccessTokenIdPrefix),
-    /// A kind of pattern this version of the SDK does not recognize.
-    Unknown(UnknownVariant),
+    /// A kind of pattern this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2215,7 +2213,7 @@ impl From<Operation> for MaybeKnown<api::access::Operation> {
             Operation::ListLocations => api::access::Operation::ListLocations,
             Operation::GetDefaultLocation => api::access::Operation::GetDefaultLocation,
             Operation::SetDefaultLocation => api::access::Operation::SetDefaultLocation,
-            Operation::Unknown(name) => return Self::Unknown(name.into()),
+            Operation::Unknown(name) => return Self::Unknown(name),
         };
         Self::Known(known)
     }
@@ -2225,7 +2223,7 @@ impl From<MaybeKnown<api::access::Operation>> for Operation {
     fn from(value: MaybeKnown<api::access::Operation>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
-            MaybeKnown::Unknown(name) => return Self::Unknown(name.into()),
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
             api::access::Operation::ListBasins => Operation::ListBasins,
@@ -2513,7 +2511,7 @@ impl From<TimeseriesInterval> for MaybeKnown<api::metrics::TimeseriesInterval> {
             TimeseriesInterval::Minute => api::metrics::TimeseriesInterval::Minute,
             TimeseriesInterval::Hour => api::metrics::TimeseriesInterval::Hour,
             TimeseriesInterval::Day => api::metrics::TimeseriesInterval::Day,
-            TimeseriesInterval::Unknown(name) => return Self::Unknown(name.into()),
+            TimeseriesInterval::Unknown(name) => return Self::Unknown(name),
         };
         Self::Known(known)
     }
@@ -2523,7 +2521,7 @@ impl From<MaybeKnown<api::metrics::TimeseriesInterval>> for TimeseriesInterval {
     fn from(value: MaybeKnown<api::metrics::TimeseriesInterval>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
-            MaybeKnown::Unknown(name) => return Self::Unknown(name.into()),
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
             api::metrics::TimeseriesInterval::Minute => TimeseriesInterval::Minute,
@@ -2825,7 +2823,7 @@ impl From<MaybeKnown<api::metrics::MetricUnit>> for MetricUnit {
     fn from(value: MaybeKnown<api::metrics::MetricUnit>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
-            MaybeKnown::Unknown(name) => return Self::Unknown(name.into()),
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
             api::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
@@ -2908,7 +2906,7 @@ impl From<MaybeKnown<api::metrics::Metric>> for Metric {
     fn from(value: MaybeKnown<api::metrics::Metric>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
-            MaybeKnown::Unknown(name) => return Self::Unknown(name.into()),
+            MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
             api::metrics::Metric::Scalar(sm) => Metric::Scalar(ScalarMetric {

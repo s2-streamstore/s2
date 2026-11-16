@@ -413,7 +413,7 @@ impl From<RetentionPolicy> for sdk::types::RetentionPolicy {
         match policy {
             RetentionPolicy::Age(d) => sdk::types::RetentionPolicy::Age(d.as_secs()),
             RetentionPolicy::Infinite => sdk::types::RetentionPolicy::Infinite,
-            RetentionPolicy::Unknown(name) => sdk::types::RetentionPolicy::Unknown(name.into()),
+            RetentionPolicy::Unknown(name) => sdk::types::RetentionPolicy::Unknown(name),
         }
     }
 }
@@ -425,7 +425,7 @@ impl From<sdk::types::RetentionPolicy> for RetentionPolicy {
                 RetentionPolicy::Age(Duration::from_secs(secs))
             }
             sdk::types::RetentionPolicy::Infinite => RetentionPolicy::Infinite,
-            sdk::types::RetentionPolicy::Unknown(name) => RetentionPolicy::Unknown(name.into()),
+            sdk::types::RetentionPolicy::Unknown(name) => RetentionPolicy::Unknown(name),
             other => RetentionPolicy::Unknown(format!("{other:?}")),
         }
     }
@@ -555,7 +555,7 @@ impl BasinMatcher {
             sdk::types::BasinMatcher::Exact(v) => Some(BasinMatcher::Exact(v)),
             sdk::types::BasinMatcher::Prefix(v) => Some(BasinMatcher::Prefix(v)),
             sdk::types::BasinMatcher::None => None,
-            sdk::types::BasinMatcher::Unknown(kind) => Some(BasinMatcher::Unknown(kind.into())),
+            sdk::types::BasinMatcher::Unknown(kind) => Some(BasinMatcher::Unknown(kind)),
             other => Some(BasinMatcher::Unknown(format!("{other:?}"))),
         }
     }
@@ -568,7 +568,7 @@ impl StreamMatcher {
             sdk::types::StreamMatcher::Exact(v) => Some(StreamMatcher::Exact(v)),
             sdk::types::StreamMatcher::Prefix(v) => Some(StreamMatcher::Prefix(v)),
             sdk::types::StreamMatcher::None => None,
-            sdk::types::StreamMatcher::Unknown(kind) => Some(StreamMatcher::Unknown(kind.into())),
+            sdk::types::StreamMatcher::Unknown(kind) => Some(StreamMatcher::Unknown(kind)),
             other => Some(StreamMatcher::Unknown(format!("{other:?}"))),
         }
     }
@@ -582,7 +582,7 @@ impl AccessTokenMatcher {
             sdk::types::AccessTokenMatcher::Prefix(v) => Some(AccessTokenMatcher::Prefix(v)),
             sdk::types::AccessTokenMatcher::None => None,
             sdk::types::AccessTokenMatcher::Unknown(kind) => {
-                Some(AccessTokenMatcher::Unknown(kind.into()))
+                Some(AccessTokenMatcher::Unknown(kind))
             }
             other => Some(AccessTokenMatcher::Unknown(format!("{other:?}"))),
         }
