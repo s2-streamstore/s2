@@ -57,6 +57,7 @@ type PendingAck =
 pub struct BenchWriteSample {
     pub bytes: u64,
     pub records: u64,
+    pub batches: u64,
     pub elapsed: Duration,
     pub ack_latencies: Vec<Duration>,
     pub chain_hash: Option<u64>,
@@ -75,19 +76,31 @@ trait BenchSample {
     fn records(&self) -> u64;
     fn elapsed(&self) -> Duration;
 
-    fn mib_per_sec(&self) -> f64 {
-        let mib = self.bytes() as f64 / (1024.0 * 1024.0);
-        let secs = self.elapsed().as_secs_f64();
-        if secs > 0.0 { mib / secs } else { 0.0 }
+    fn batches(&self) -> Option<u64> {
+        None
     }
 
-    fn records_per_sec(&self) -> f64 {
+    fn per_sec(&self, amount: f64) -> f64 {
         let secs = self.elapsed().as_secs_f64();
-        if secs > 0.0 {
-            self.records() as f64 / secs
-        } else {
-            0.0
-        }
+        if secs > 0.0 { amount / secs } else { 0.0 }
+    }
+
+    fn summary(&self) -> String {
+        let (batch_rate, batch_count) = match self.batches() {
+            Some(batches) => (
+                format!(", {:.0} batches/s", self.per_sec(batches as f64)),
+                format!(", {batches} batches"),
+            ),
+            None => Default::default(),
+        };
+        format!(
+            "{:.2} MiB/s, {:.0} records/s{batch_rate} ({} bytes, {} records{batch_count} in {:.2}s)",
+            self.per_sec(self.bytes() as f64 / (1024.0 * 1024.0)),
+            self.per_sec(self.records() as f64),
+            self.bytes(),
+            self.records(),
+            self.elapsed().as_secs_f64(),
+        )
     }
 }
 
@@ -100,6 +113,9 @@ impl BenchSample for BenchWriteSample {
     }
     fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+    fn batches(&self) -> Option<u64> {
+        Some(self.batches)
     }
 }
 
@@ -421,6 +437,7 @@ pub fn bench_write(
 
         let mut total_bytes: u64 = 0;
         let mut total_records: u64 = 0;
+        let mut total_batches: u64 = 0;
         let throughput_start = Instant::now();
         let mut last_yield = Instant::now();
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -473,6 +490,9 @@ pub fn bench_write(
                             ack_latencies.push(latency);
                             total_bytes += record_size as u64;
                             total_records += 1;
+                            if ack.seq_num == ack.batch.start.seq_num {
+                                total_batches += 1;
+                            }
                             next_seq_num = ack.seq_num + 1;
 
                             if last_yield.elapsed() >= Duration::from_millis(100) {
@@ -480,6 +500,7 @@ pub fn bench_write(
                                 yield Ok(BenchWriteSample {
                                     bytes: total_bytes,
                                     records: total_records,
+                                    batches: total_batches,
                                     elapsed: throughput_start.elapsed(),
                                     ack_latencies: std::mem::take(&mut ack_latencies),
                                     chain_hash: None,
@@ -532,6 +553,7 @@ pub fn bench_write(
         yield Ok(BenchWriteSample {
             bytes: total_bytes,
             records: total_records,
+            batches: total_batches,
             elapsed: throughput_start.elapsed(),
             ack_latencies,
             chain_hash: Some(prev_hash),
@@ -745,14 +767,7 @@ pub async fn run(
         label: impl std::fmt::Display,
         sample: &T,
     ) {
-        bar.set_message(format!(
-            "{label}: {:.2} MiB/s, {:.0} records/s ({} bytes, {} records in {:.2}s)",
-            sample.mib_per_sec(),
-            sample.records_per_sec(),
-            sample.bytes(),
-            sample.records(),
-            sample.elapsed().as_secs_f64(),
-        ));
+        bar.set_message(format!("{label}: {}", sample.summary()));
     }
 
     fn finish_live_bars(bars: &[&ProgressBar], latency_tables: &LiveLatencyTables) {
@@ -934,26 +949,10 @@ pub async fn run(
 
     eprintln!();
     if let Some(sample) = &write_sample {
-        eprintln!(
-            "{}: {:.2} MiB/s, {:.0} records/s ({} bytes, {} records in {:.2}s)",
-            "Write".bold().blue(),
-            sample.mib_per_sec(),
-            sample.records_per_sec(),
-            sample.bytes,
-            sample.records,
-            sample.elapsed.as_secs_f64()
-        );
+        eprintln!("{}: {}", "Write".bold().blue(), sample.summary());
     }
     if let Some(sample) = &read_sample {
-        eprintln!(
-            "{}: {:.2} MiB/s, {:.0} records/s ({} bytes, {} records in {:.2}s)",
-            "Read".bold().green(),
-            sample.mib_per_sec(),
-            sample.records_per_sec(),
-            sample.bytes,
-            sample.records,
-            sample.elapsed.as_secs_f64()
-        );
+        eprintln!("{}: {}", "Read".bold().green(), sample.summary());
     }
 
     let ack_latency_snapshot = ack_latency_stats.snapshot();
@@ -1039,15 +1038,7 @@ pub async fn run(
 
     catchup_bar.finish_and_clear();
     if let Some(sample) = &catchup_sample {
-        eprintln!(
-            "{}: {:.2} MiB/s, {:.0} records/s ({} bytes, {} records in {:.2}s)",
-            "Catchup".bold().cyan(),
-            sample.mib_per_sec(),
-            sample.records_per_sec(),
-            sample.bytes,
-            sample.records,
-            sample.elapsed.as_secs_f64()
-        );
+        eprintln!("{}: {}", "Catchup".bold().cyan(), sample.summary());
     } else {
         eprintln!(
             "{}: no records available for catchup read",
@@ -1098,7 +1089,43 @@ fn print_latency_stats(
 mod tests {
     use std::time::Duration;
 
-    use super::{LatencyTableLayout, StreamingLatencyStats, format_latency_tables};
+    use super::{
+        BenchReadSample, BenchSample as _, BenchWriteSample, LatencyTableLayout,
+        StreamingLatencyStats, format_latency_tables,
+    };
+
+    #[test]
+    fn write_summary_includes_batches() {
+        let sample = BenchWriteSample {
+            bytes: 2 * 1024 * 1024,
+            records: 256,
+            batches: 128,
+            elapsed: Duration::from_secs(2),
+            ack_latencies: Vec::new(),
+            chain_hash: None,
+        };
+
+        assert_eq!(
+            sample.summary(),
+            "1.00 MiB/s, 128 records/s, 64 batches/s (2097152 bytes, 256 records, 128 batches in 2.00s)"
+        );
+    }
+
+    #[test]
+    fn read_summary_omits_batches() {
+        let sample = BenchReadSample {
+            bytes: 2 * 1024 * 1024,
+            records: 256,
+            elapsed: Duration::from_secs(2),
+            e2e_latencies: Vec::new(),
+            chain_hash: None,
+        };
+
+        assert_eq!(
+            sample.summary(),
+            "1.00 MiB/s, 128 records/s (2097152 bytes, 256 records in 2.00s)"
+        );
+    }
 
     #[test]
     fn streaming_latency_stats_tracks_percentiles() {
