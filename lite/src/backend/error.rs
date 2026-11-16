@@ -395,6 +395,18 @@ pub enum BasinDeletionError {
     DeleteStream(#[from] DeleteStreamError),
 }
 
+impl BasinDeletionError {
+    pub(super) fn is_transaction_conflict(&self) -> bool {
+        match self {
+            Self::Storage(err) | Self::DeleteStream(DeleteStreamError::Storage(err)) => {
+                err.is_transaction_conflict()
+            }
+            Self::DeleteStream(DeleteStreamError::TransactionConflict(_)) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum StreamDeleteOnEmptyError {
     #[error(transparent)]

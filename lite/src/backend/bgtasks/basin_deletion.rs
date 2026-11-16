@@ -34,7 +34,7 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            progress.record(result?);
+            progress.record_item_result(result, BasinDeletionError::is_transaction_conflict)?;
         }
         Ok(progress.should_continue())
     }
@@ -146,7 +146,12 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
-    use crate::backend::{Backend, kv, test_util::DbWriteTestExt as _};
+    use crate::backend::{
+        Backend,
+        error::{BasinDeletionError, DeleteStreamError, StorageError, TransactionConflictError},
+        kv,
+        test_util::DbWriteTestExt as _,
+    };
 
     fn basin_meta(deleted_at: Option<OffsetDateTime>) -> kv::basin_meta::BasinMeta {
         kv::basin_meta::BasinMeta {
@@ -205,6 +210,33 @@ mod tests {
             );
         }
         backend.db.write(batch).assert_durable().await;
+    }
+
+    #[tokio::test]
+    async fn transaction_conflicts_are_classified() {
+        let backend = test_backend().await;
+        let txn = backend
+            .db
+            .begin(slatedb::IsolationLevel::SerializableSnapshot)
+            .unwrap();
+        txn.get(b"key").await.unwrap();
+        txn.put(b"key", b"txn").unwrap();
+        backend.db.put(b"key", b"concurrent").assert_durable().await;
+        let conflict = StorageError::from(txn.commit().await.unwrap_err());
+
+        assert!(BasinDeletionError::Storage(conflict.clone()).is_transaction_conflict());
+        assert!(
+            BasinDeletionError::DeleteStream(DeleteStreamError::Storage(conflict))
+                .is_transaction_conflict()
+        );
+        assert!(
+            BasinDeletionError::DeleteStream(TransactionConflictError.into())
+                .is_transaction_conflict()
+        );
+        assert!(
+            !BasinDeletionError::Storage(StorageError::InvariantViolation("test".into()))
+                .is_transaction_conflict()
+        );
     }
 
     #[tokio::test]

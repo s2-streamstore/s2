@@ -61,6 +61,19 @@ impl PageProgress {
         }
     }
 
+    fn record_item_result<E>(
+        &mut self,
+        result: Result<ItemProgress, E>,
+        is_conflict: fn(&E) -> bool,
+    ) -> Result<(), E> {
+        match result {
+            Ok(item) => self.record(item),
+            Err(err) if is_conflict(&err) => self.record(ItemProgress::Blocked),
+            Err(err) => return Err(err),
+        }
+        Ok(())
+    }
+
     fn should_continue(&self) -> bool {
         self.has_more && self.any_progressed
     }
@@ -237,5 +250,25 @@ mod tests {
         assert!(!progress.should_continue());
         progress.record(ItemProgress::Completed);
         assert!(progress.should_continue());
+    }
+
+    #[test]
+    fn conflicted_item_is_blocked() {
+        let is_conflict: fn(&bool) -> bool = |conflict| *conflict;
+        let mut progress = PageProgress::new(true);
+        progress.record_item_result(Err(true), is_conflict).unwrap();
+        progress
+            .record_item_result(Ok(ItemProgress::Blocked), is_conflict)
+            .unwrap();
+        assert!(!progress.should_continue());
+        progress
+            .record_item_result(Ok(ItemProgress::Completed), is_conflict)
+            .unwrap();
+        assert!(progress.should_continue());
+        assert!(
+            progress
+                .record_item_result(Err(false), is_conflict)
+                .is_err()
+        );
     }
 }
