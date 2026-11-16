@@ -2,7 +2,7 @@
 
 use colored::Colorize;
 use compact_str::CompactString;
-use s2_api::v1::access::AccessTokenInfo as ApiAccessTokenInfo;
+use s2_api::v1::{MaybeKnown, access::AccessTokenInfo as ApiAccessTokenInfo};
 use s2_common::{
     access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet},
     config::StreamConfig,
@@ -484,9 +484,20 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
         id: _,
         expires_at,
         auto_prefix_streams,
-        scope,
+        mut scope,
     } = info;
+    // Operations this version does not recognize cannot be canonicalized, only named.
+    let (known_ops, unknown_ops): (Vec<_>, Vec<_>) = scope
+        .ops
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .partition(|op| matches!(op, MaybeKnown::Known(_)));
+    scope.ops = Some(known_ops);
     let scope: s2_common::access::AccessTokenScope = scope.try_into()?;
+    let mut scope = AccessTokenScopeView::from(scope);
+    scope.ops.extend(unknown_ops.into_iter().map(wire_name));
+    scope.ops.sort();
 
     Ok(serde_json::to_value(AccessTokenInfoView {
         expires_at: match expires_at {
@@ -494,7 +505,7 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
             Some(at) => humantime::format_rfc3339_seconds(at.into()).to_string(),
         },
         auto_prefix_streams,
-        scope: scope.into(),
+        scope,
     })?)
 }
 
@@ -864,7 +875,7 @@ mod tests {
                 "streams": null,
                 "access_tokens": null,
                 "op_groups": {"account": {"read": true, "write": false}},
-                "ops": ["read", "get-stream-config", "account-metrics"]
+                "ops": ["read", "some-future-op", "get-stream-config", "account-metrics"]
             }
         }))
         .expect("left access token deserializes");
@@ -877,7 +888,7 @@ mod tests {
                 "streams": null,
                 "access_tokens": null,
                 "op_groups": {"account": {"read": true, "write": false}},
-                "ops": ["account-metrics", "read", "get-stream-config"]
+                "ops": ["account-metrics", "read", "get-stream-config", "some-future-op"]
             }
         }))
         .expect("right access token deserializes");
@@ -889,7 +900,12 @@ mod tests {
         assert_eq!(left, right);
         assert_eq!(
             left["scope"]["ops"],
-            json!(["account-metrics", "get-stream-config", "read"])
+            json!([
+                "account-metrics",
+                "get-stream-config",
+                "read",
+                "some-future-op"
+            ])
         );
         assert_eq!(left["scope"]["basins"], json!("prefix: \"prod-\""));
         assert_eq!(left["scope"]["op_groups"]["account"], json!("r"));

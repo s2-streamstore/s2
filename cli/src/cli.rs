@@ -4,8 +4,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum, builder::styling};
 use compact_str::CompactString;
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamName,
-    StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionKey, FencingToken, StreamName, StreamNamePrefix,
+    StreamNameStartAfter,
 };
 
 use crate::{
@@ -14,8 +14,9 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        BasinConfig, Interval, LocationName, Operation, PermittedOperationGroups,
-        S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri, StreamConfig,
+        BasinConfig, EncryptionAlgorithm, Interval, LocationName, Operation,
+        PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
+        StreamConfig,
     },
 };
 

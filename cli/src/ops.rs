@@ -140,7 +140,7 @@ pub async fn reconfigure_basin(
         reconfig = reconfig.with_default_stream_config(args.default_stream_config.into());
     }
     if let Some(algorithm) = args.stream_cipher {
-        reconfig = reconfig.with_stream_cipher(algorithm);
+        reconfig = reconfig.with_stream_cipher(algorithm.into());
     }
     if let Some(val) = args.create_stream_on_append {
         reconfig = reconfig.with_create_stream_on_append(val);

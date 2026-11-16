@@ -19,7 +19,10 @@ use s2_common::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::config::{EncryptionAlgorithm, StreamConfig};
+use super::{
+    MaybeKnown,
+    config::{EncryptionAlgorithm, StreamConfig},
+};
 use crate::{data::Format, mime::JsonOrProto};
 
 #[rustfmt::skip]
@@ -35,7 +38,8 @@ pub struct StreamInfo {
     #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
     /// Encryption algorithm for this stream, if encryption is enabled.
-    pub cipher: Option<EncryptionAlgorithm>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<EncryptionAlgorithm>))]
+    pub cipher: Option<MaybeKnown<EncryptionAlgorithm>>,
 }
 
 impl From<s2_common::stream::StreamInfo> for StreamInfo {
@@ -44,7 +48,9 @@ impl From<s2_common::stream::StreamInfo> for StreamInfo {
             name: value.name,
             created_at: value.created_at,
             deleted_at: value.deleted_at,
-            cipher: value.cipher.map(Into::into),
+            cipher: value
+                .cipher
+                .map(|cipher| EncryptionAlgorithm::from(cipher).into()),
         }
     }
 }

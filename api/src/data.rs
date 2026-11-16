@@ -480,7 +480,7 @@ pub mod extract {
                 storage_class: Maybe::Specified(Some("express".into())),
                 retention_policy: Maybe::Specified(None),
                 timestamping: Maybe::Specified(Some(TimestampingReconfiguration {
-                    mode: Maybe::Specified(Some(TimestampingMode::ClientRequire)),
+                    mode: Maybe::Specified(Some(TimestampingMode::ClientRequire.into())),
                     uncapped: Maybe::Specified(Some(true)),
                 })),
                 delete_on_empty: Maybe::Unspecified,

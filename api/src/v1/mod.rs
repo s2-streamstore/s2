@@ -3,9 +3,11 @@ pub mod basin;
 pub mod config;
 pub mod error;
 pub mod location;
+mod maybe_known;
 pub mod metrics;
 pub mod stream;
 
+pub use maybe_known::MaybeKnown;
 use s2_common::{
     access::AccessTokenId, basin::BasinName, resources::RequestToken, stream::StreamName,
 };

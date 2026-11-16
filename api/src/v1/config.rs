@@ -5,6 +5,8 @@ use http::{HeaderName, HeaderValue};
 use s2_common::{http::ParseableHeader, maybe::Maybe};
 use serde::{Deserialize, Serialize};
 
+use super::MaybeKnown;
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -82,7 +84,8 @@ impl From<s2_common::config::TimestampingMode> for TimestampingMode {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct TimestampingConfig {
     /// Timestamping mode for appends that influences how timestamps are handled.
-    pub mode: Option<TimestampingMode>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<TimestampingMode>))]
+    pub mode: Option<MaybeKnown<TimestampingMode>>,
     /// Allow client-specified timestamps to exceed the arrival time.
     /// If this is `false` or not set, client timestamps will be capped at the arrival time.
     pub uncapped: Option<bool>,
@@ -91,7 +94,7 @@ pub struct TimestampingConfig {
 impl TimestampingConfig {
     pub fn to_opt(config: s2_common::config::OptionalTimestampingConfig) -> Option<Self> {
         let config = TimestampingConfig {
-            mode: config.mode.map(Into::into),
+            mode: config.mode.map(|mode| TimestampingMode::from(mode).into()),
             uncapped: config.uncapped,
         };
         if config == Self::default() {
@@ -105,7 +108,7 @@ impl TimestampingConfig {
 impl From<s2_common::config::TimestampingConfig> for TimestampingConfig {
     fn from(value: s2_common::config::TimestampingConfig) -> Self {
         Self {
-            mode: Some(value.mode.into()),
+            mode: Some(TimestampingMode::from(value.mode).into()),
             uncapped: Some(value.uncapped),
         }
     }
@@ -114,18 +117,24 @@ impl From<s2_common::config::TimestampingConfig> for TimestampingConfig {
 impl From<s2_common::config::OptionalTimestampingConfig> for TimestampingConfig {
     fn from(value: s2_common::config::OptionalTimestampingConfig) -> Self {
         Self {
-            mode: value.mode.map(Into::into),
+            mode: value.mode.map(|mode| TimestampingMode::from(mode).into()),
             uncapped: value.uncapped,
         }
     }
 }
 
-impl From<TimestampingConfig> for s2_common::config::OptionalTimestampingConfig {
-    fn from(value: TimestampingConfig) -> Self {
-        Self {
-            mode: value.mode.map(Into::into),
+impl TryFrom<TimestampingConfig> for s2_common::config::OptionalTimestampingConfig {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(value: TimestampingConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            mode: value
+                .mode
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into),
             uncapped: value.uncapped,
-        }
+        })
     }
 }
 
@@ -136,26 +145,32 @@ pub struct TimestampingReconfiguration {
     /// Timestamping mode for appends that influences how timestamps are handled.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<TimestampingMode>))]
-    pub mode: Maybe<Option<TimestampingMode>>,
+    pub mode: Maybe<Option<MaybeKnown<TimestampingMode>>>,
     /// Allow client-specified timestamps to exceed the arrival time.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<bool>))]
     pub uncapped: Maybe<Option<bool>>,
 }
 
-impl From<TimestampingReconfiguration> for s2_common::config::TimestampingReconfiguration {
-    fn from(value: TimestampingReconfiguration) -> Self {
-        Self {
-            mode: value.mode.map_opt(Into::into),
+impl TryFrom<TimestampingReconfiguration> for s2_common::config::TimestampingReconfiguration {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(value: TimestampingReconfiguration) -> Result<Self, Self::Error> {
+        Ok(Self {
+            mode: value
+                .mode
+                .try_map_opt(|mode| mode.known().map(Into::into))?,
             uncapped: value.uncapped,
-        }
+        })
     }
 }
 
 impl From<s2_common::config::TimestampingReconfiguration> for TimestampingReconfiguration {
     fn from(value: s2_common::config::TimestampingReconfiguration) -> Self {
         Self {
-            mode: value.mode.map_opt(Into::into),
+            mode: value
+                .mode
+                .map_opt(|mode| TimestampingMode::from(mode).into()),
             uncapped: value.uncapped,
         }
     }
@@ -276,7 +291,8 @@ pub struct StreamConfig {
     pub storage_class: Option<CompactString>,
     /// Retention policy for the stream.
     /// If unspecified, the default is to retain records for 7 days.
-    pub retention_policy: Option<RetentionPolicy>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<RetentionPolicy>))]
+    pub retention_policy: Option<MaybeKnown<RetentionPolicy>>,
     /// Timestamping behavior.
     pub timestamping: Option<TimestampingConfig>,
     /// Delete-on-empty configuration.
@@ -295,7 +311,7 @@ impl StreamConfig {
 
         let config = StreamConfig {
             storage_class,
-            retention_policy: retention_policy.map(Into::into),
+            retention_policy: retention_policy.map(|policy| RetentionPolicy::from(policy).into()),
             timestamping: TimestampingConfig::to_opt(timestamping),
             delete_on_empty: DeleteOnEmptyConfig::to_opt(delete_on_empty),
         };
@@ -324,7 +340,7 @@ impl From<s2_common::config::StreamConfig> for StreamConfig {
 
         Self {
             storage_class,
-            retention_policy: Some(retention_policy.into()),
+            retention_policy: Some(RetentionPolicy::from(retention_policy).into()),
             timestamping: Some(timestamping.into()),
             delete_on_empty: Some(delete_on_empty.into()),
         }
@@ -368,13 +384,16 @@ impl TryFrom<StreamConfig> for s2_common::config::OptionalStreamConfig {
 
         let retention_policy = match retention_policy {
             None => None,
-            Some(policy) => Some(policy.try_into()?),
+            Some(policy) => Some(policy.known()?.try_into()?),
         };
 
         let config = Self {
             storage_class,
             retention_policy,
-            timestamping: timestamping.map(Into::into).unwrap_or_default(),
+            timestamping: timestamping
+                .map(TryInto::try_into)
+                .transpose()?
+                .unwrap_or_default(),
             delete_on_empty: delete_on_empty.map(Into::into).unwrap_or_default(),
         };
         config.validate()?;
@@ -394,7 +413,7 @@ pub struct StreamReconfiguration {
     /// If unspecified, the default is to retain records for 7 days.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<RetentionPolicy>))]
-    pub retention_policy: Maybe<Option<RetentionPolicy>>,
+    pub retention_policy: Maybe<Option<MaybeKnown<RetentionPolicy>>>,
     /// Timestamping behavior.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<TimestampingReconfiguration>))]
@@ -418,8 +437,8 @@ impl TryFrom<StreamReconfiguration> for s2_common::config::StreamReconfiguration
 
         Ok(Self {
             storage_class,
-            retention_policy: retention_policy.try_map_opt(TryInto::try_into)?,
-            timestamping: timestamping.map_opt(Into::into),
+            retention_policy: retention_policy.try_map_opt(|policy| policy.known()?.try_into())?,
+            timestamping: timestamping.try_map_opt(TryInto::try_into)?,
             delete_on_empty: delete_on_empty.map_opt(Into::into),
         })
     }
@@ -436,7 +455,8 @@ impl From<s2_common::config::StreamReconfiguration> for StreamReconfiguration {
 
         Self {
             storage_class,
-            retention_policy: retention_policy.map_opt(Into::into),
+            retention_policy: retention_policy
+                .map_opt(|policy| RetentionPolicy::from(policy).into()),
             timestamping: timestamping.map_opt(Into::into),
             delete_on_empty: delete_on_empty.map_opt(Into::into),
         }
@@ -450,7 +470,8 @@ pub struct BasinConfig {
     /// Default stream configuration.
     pub default_stream_config: Option<StreamConfig>,
     /// Encryption algorithm to apply to newly created streams in the basin.
-    pub stream_cipher: Option<EncryptionAlgorithm>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<EncryptionAlgorithm>))]
+    pub stream_cipher: Option<MaybeKnown<EncryptionAlgorithm>>,
     /// Create stream on append if it doesn't exist, using the default stream configuration.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(default = false))]
@@ -477,7 +498,10 @@ impl TryFrom<BasinConfig> for s2_common::config::BasinConfig {
                 Some(config) => config.try_into()?,
                 None => Default::default(),
             },
-            stream_cipher: stream_cipher.map(Into::into),
+            stream_cipher: stream_cipher
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into),
             create_stream_on_append,
             create_stream_on_read,
         };
@@ -497,7 +521,7 @@ impl From<s2_common::config::BasinConfig> for BasinConfig {
 
         Self {
             default_stream_config: StreamConfig::to_opt(default_stream_config),
-            stream_cipher: stream_cipher.map(Into::into),
+            stream_cipher: stream_cipher.map(|cipher| EncryptionAlgorithm::from(cipher).into()),
             create_stream_on_append,
             create_stream_on_read,
         }
@@ -515,7 +539,7 @@ pub struct BasinReconfiguration {
     /// Encryption algorithm to apply to newly created streams in the basin.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<EncryptionAlgorithm>))]
-    pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
+    pub stream_cipher: Maybe<Option<MaybeKnown<EncryptionAlgorithm>>>,
     /// Create a stream on append.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<bool>))]
@@ -539,7 +563,7 @@ impl TryFrom<BasinReconfiguration> for s2_common::config::BasinReconfiguration {
 
         Ok(Self {
             default_stream_config: default_stream_config.try_map_opt(TryInto::try_into)?,
-            stream_cipher: stream_cipher.map_opt(Into::into),
+            stream_cipher: stream_cipher.try_map_opt(|cipher| cipher.known().map(Into::into))?,
             create_stream_on_append: create_stream_on_append.map(Into::into),
             create_stream_on_read: create_stream_on_read.map(Into::into),
         })
@@ -557,7 +581,7 @@ impl From<s2_common::config::BasinReconfiguration> for BasinReconfiguration {
 
         Self {
             default_stream_config: default_stream_config.map_opt(Into::into),
-            stream_cipher: stream_cipher.map_opt(Into::into),
+            stream_cipher: stream_cipher.map_opt(|cipher| EncryptionAlgorithm::from(cipher).into()),
             create_stream_on_append: create_stream_on_append.map(Into::into),
             create_stream_on_read: create_stream_on_read.map(Into::into),
         }
@@ -594,7 +618,10 @@ mod tests {
             proptest::option::of(gen_timestamping_mode()),
             proptest::option::of(any::<bool>()),
         )
-            .prop_map(|(mode, uncapped)| TimestampingConfig { mode, uncapped })
+            .prop_map(|(mode, uncapped)| TimestampingConfig {
+                mode: mode.map(Into::into),
+                uncapped,
+            })
     }
 
     fn gen_delete_on_empty_config() -> impl Strategy<Value = DeleteOnEmptyConfig> {
@@ -618,7 +645,7 @@ mod tests {
             .prop_map(
                 |(storage_class, retention_policy, timestamping, delete_on_empty)| StreamConfig {
                     storage_class,
-                    retention_policy,
+                    retention_policy: retention_policy.map(Into::into),
                     timestamping,
                     delete_on_empty,
                 },
@@ -641,7 +668,7 @@ mod tests {
                 )| {
                     BasinConfig {
                         default_stream_config,
-                        stream_cipher,
+                        stream_cipher: stream_cipher.map(Into::into),
                         create_stream_on_append,
                         create_stream_on_read,
                     }
@@ -670,7 +697,7 @@ mod tests {
                 |(storage_class, retention_policy, timestamping, delete_on_empty)| {
                     StreamReconfiguration {
                         storage_class,
-                        retention_policy,
+                        retention_policy: retention_policy.map_opt(Into::into),
                         timestamping,
                         delete_on_empty,
                     }
@@ -679,8 +706,12 @@ mod tests {
     }
 
     fn gen_timestamping_reconfiguration() -> impl Strategy<Value = TimestampingReconfiguration> {
-        (gen_maybe(gen_timestamping_mode()), gen_maybe(any::<bool>()))
-            .prop_map(|(mode, uncapped)| TimestampingReconfiguration { mode, uncapped })
+        (gen_maybe(gen_timestamping_mode()), gen_maybe(any::<bool>())).prop_map(
+            |(mode, uncapped)| TimestampingReconfiguration {
+                mode: mode.map_opt(Into::into),
+                uncapped,
+            },
+        )
     }
 
     fn gen_delete_on_empty_reconfiguration() -> impl Strategy<Value = DeleteOnEmptyReconfiguration>
@@ -710,7 +741,7 @@ mod tests {
                     create_stream_on_read,
                 )| BasinReconfiguration {
                     default_stream_config,
-                    stream_cipher,
+                    stream_cipher: stream_cipher.map_opt(Into::into),
                     create_stream_on_append,
                     create_stream_on_read,
                 },
@@ -751,7 +782,7 @@ mod tests {
     proptest! {
         #[test]
         fn stream_config_conversion_validates(config in gen_stream_config()) {
-            let has_zero_age = matches!(config.retention_policy, Some(RetentionPolicy::Age(0)));
+            let has_zero_age = matches!(config.retention_policy, Some(MaybeKnown::Known(RetentionPolicy::Age(0))));
             let result: Result<s2_common::config::OptionalStreamConfig, _> = config.try_into();
 
             if has_zero_age {
@@ -764,7 +795,7 @@ mod tests {
         #[test]
         fn basin_config_conversion_validates(config in gen_basin_config()) {
             let has_invalid_config = config.default_stream_config.as_ref().is_some_and(|sc| {
-                matches!(sc.retention_policy, Some(RetentionPolicy::Age(0)))
+                matches!(sc.retention_policy, Some(MaybeKnown::Known(RetentionPolicy::Age(0))))
             });
 
             let result: Result<s2_common::config::BasinConfig, _> = config.try_into();
@@ -780,7 +811,7 @@ mod tests {
         fn stream_reconfiguration_conversion_validates(reconfig in gen_stream_reconfiguration()) {
             let has_zero_age = matches!(
                 reconfig.retention_policy,
-                Maybe::Specified(Some(RetentionPolicy::Age(0)))
+                Maybe::Specified(Some(MaybeKnown::Known(RetentionPolicy::Age(0))))
             );
             let result: Result<s2_common::config::StreamReconfiguration, _> = reconfig.try_into();
 
@@ -906,7 +937,7 @@ mod tests {
                 &reconfig.default_stream_config,
                 Maybe::Specified(Some(sr)) if matches!(
                     sr.retention_policy,
-                    Maybe::Specified(Some(RetentionPolicy::Age(0)))
+                    Maybe::Specified(Some(MaybeKnown::Known(RetentionPolicy::Age(0))))
                 )
             );
             let result: Result<s2_common::config::BasinReconfiguration, _> = reconfig.try_into();
@@ -1110,9 +1141,9 @@ mod tests {
     fn stream_config_header_value_roundtrips() {
         let config = StreamConfig {
             storage_class: Some("express".into()),
-            retention_policy: Some(RetentionPolicy::Infinite(InfiniteRetention {})),
+            retention_policy: Some(RetentionPolicy::Infinite(InfiniteRetention {}).into()),
             timestamping: Some(TimestampingConfig {
-                mode: Some(TimestampingMode::ClientRequire),
+                mode: Some(TimestampingMode::ClientRequire.into()),
                 uncapped: Some(true),
             }),
             delete_on_empty: Some(DeleteOnEmptyConfig { min_age_secs: 60 }),

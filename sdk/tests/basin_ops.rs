@@ -714,8 +714,8 @@ async fn create_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<(), R
 
     for mode in modes {
         let stream_name = unique_stream_name();
-        let config =
-            StreamConfig::new().with_timestamping(TimestampingConfig::new().with_mode(mode));
+        let config = StreamConfig::new()
+            .with_timestamping(TimestampingConfig::new().with_mode(mode.clone()));
 
         basin
             .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config))
@@ -985,7 +985,7 @@ async fn reconfigure_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<
             .reconfigure_stream(ReconfigureStreamInput::new(
                 stream_name.clone(),
                 StreamReconfiguration::new()
-                    .with_timestamping(TimestampingReconfiguration::new().with_mode(mode)),
+                    .with_timestamping(TimestampingReconfiguration::new().with_mode(mode.clone())),
             ))
             .await?;
 

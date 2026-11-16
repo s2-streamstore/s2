@@ -1,6 +1,8 @@
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
+use super::MaybeKnown;
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -43,12 +45,15 @@ pub struct AccountMetricSetRequest {
     /// End timestamp as Unix epoch seconds, if applicable for the metric set.
     pub end: Option<u32>,
     /// Interval to aggregate over for timeseries metric sets.
-    pub interval: Option<TimeseriesInterval>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<TimeseriesInterval>), param(value_type = Option<TimeseriesInterval>))]
+    pub interval: Option<MaybeKnown<TimeseriesInterval>>,
 }
 
-impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest {
-    fn from(value: AccountMetricSetRequest) -> Self {
-        Self {
+impl TryFrom<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(value: AccountMetricSetRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
             set: match value.set {
                 AccountMetricSet::ActiveBasins => {
                     s2_common::metrics::AccountMetricSet::ActiveBasins
@@ -60,8 +65,12 @@ impl From<AccountMetricSetRequest> for s2_common::metrics::AccountMetricsRequest
             },
             start: value.start,
             end: value.end,
-            interval: value.interval.map(Into::into),
-        }
+            interval: value
+                .interval
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into),
+        })
     }
 }
 
@@ -93,12 +102,15 @@ pub struct BasinMetricSetRequest {
     /// End timestamp as Unix epoch seconds, if applicable for the metric set.
     pub end: Option<u32>,
     /// Interval to aggregate over for timeseries metric sets.
-    pub interval: Option<TimeseriesInterval>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<TimeseriesInterval>), param(value_type = Option<TimeseriesInterval>))]
+    pub interval: Option<MaybeKnown<TimeseriesInterval>>,
 }
 
-impl From<BasinMetricSetRequest> for s2_common::metrics::BasinMetricsRequest {
-    fn from(value: BasinMetricSetRequest) -> Self {
-        Self {
+impl TryFrom<BasinMetricSetRequest> for s2_common::metrics::BasinMetricsRequest {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(value: BasinMetricSetRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
             set: match value.set {
                 BasinMetricSet::AppendOps => s2_common::metrics::BasinMetricSet::AppendOps,
                 BasinMetricSet::AppendThroughput => {
@@ -113,8 +125,12 @@ impl From<BasinMetricSetRequest> for s2_common::metrics::BasinMetricsRequest {
             },
             start: value.start,
             end: value.end,
-            interval: value.interval.map(Into::into),
-        }
+            interval: value
+                .interval
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into),
+        })
     }
 }
 
@@ -149,19 +165,26 @@ pub struct StreamMetricSetRequest {
     /// End timestamp as Unix epoch seconds, if applicable for metric set.
     pub end: Option<u32>,
     /// Interval to aggregate over for timeseries metric sets.
-    pub interval: Option<TimeseriesInterval>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<TimeseriesInterval>), param(value_type = Option<TimeseriesInterval>))]
+    pub interval: Option<MaybeKnown<TimeseriesInterval>>,
 }
 
-impl From<StreamMetricSetRequest> for s2_common::metrics::StreamMetricsRequest {
-    fn from(value: StreamMetricSetRequest) -> Self {
-        Self {
+impl TryFrom<StreamMetricSetRequest> for s2_common::metrics::StreamMetricsRequest {
+    type Error = s2_common::ValidationError;
+
+    fn try_from(value: StreamMetricSetRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
             set: match value.set {
                 StreamMetricSet::Storage => s2_common::metrics::StreamMetricSet::Storage,
             },
             start: value.start,
             end: value.end,
-            interval: value.interval.map(Into::into),
-        }
+            interval: value
+                .interval
+                .map(MaybeKnown::known)
+                .transpose()?
+                .map(Into::into),
+        })
     }
 }
 
@@ -203,7 +226,8 @@ pub struct ScalarMetric {
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Unit of the metric.
-    pub unit: MetricUnit,
+    #[cfg_attr(feature = "utoipa", schema(value_type = MetricUnit))]
+    pub unit: MaybeKnown<MetricUnit>,
     /// Metric value.
     pub value: f64,
 }
@@ -212,7 +236,7 @@ impl From<s2_common::metrics::ScalarMetric> for ScalarMetric {
     fn from(value: s2_common::metrics::ScalarMetric) -> Self {
         Self {
             name: value.name,
-            unit: value.unit.into(),
+            unit: MetricUnit::from(value.unit).into(),
             value: value.value,
         }
     }
@@ -226,9 +250,11 @@ pub struct AccumulationMetric {
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Unit of the metric.
-    pub unit: MetricUnit,
+    #[cfg_attr(feature = "utoipa", schema(value_type = MetricUnit))]
+    pub unit: MaybeKnown<MetricUnit>,
     /// The interval at which data points are accumulated.
-    pub interval: TimeseriesInterval,
+    #[cfg_attr(feature = "utoipa", schema(value_type = TimeseriesInterval))]
+    pub interval: MaybeKnown<TimeseriesInterval>,
     /// Timeseries values.
     /// Each element is a tuple of a timestamp in Unix epoch seconds and a data point.
     /// The data point represents the accumulated value for the time period starting at the timestamp, spanning one `interval`.
@@ -239,8 +265,8 @@ impl From<s2_common::metrics::AccumulationMetric> for AccumulationMetric {
     fn from(value: s2_common::metrics::AccumulationMetric) -> Self {
         Self {
             name: value.name,
-            unit: value.unit.into(),
-            interval: value.interval.into(),
+            unit: MetricUnit::from(value.unit).into(),
+            interval: TimeseriesInterval::from(value.interval).into(),
             values: value.values,
         }
     }
@@ -254,7 +280,8 @@ pub struct GaugeMetric {
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub name: CompactString,
     /// Unit of the metric.
-    pub unit: MetricUnit,
+    #[cfg_attr(feature = "utoipa", schema(value_type = MetricUnit))]
+    pub unit: MaybeKnown<MetricUnit>,
     /// Timeseries values.
     /// Each element is a tuple of a timestamp in Unix epoch seconds and a data point.
     /// The data point represents the value at the instant of the timestamp.
@@ -265,7 +292,7 @@ impl From<s2_common::metrics::GaugeMetric> for GaugeMetric {
     fn from(value: s2_common::metrics::GaugeMetric) -> Self {
         Self {
             name: value.name,
-            unit: value.unit.into(),
+            unit: MetricUnit::from(value.unit).into(),
             values: value.values,
         }
     }
@@ -324,13 +351,18 @@ impl From<s2_common::metrics::Metric> for Metric {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct MetricSetResponse {
     /// Metrics comprising the set.
-    pub values: Vec<Metric>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<Metric>))]
+    pub values: Vec<MaybeKnown<Metric>>,
 }
 
 impl From<s2_common::metrics::MetricsResponse> for MetricSetResponse {
     fn from(value: s2_common::metrics::MetricsResponse) -> Self {
         Self {
-            values: value.values.into_iter().map(Into::into).collect(),
+            values: value
+                .values
+                .into_iter()
+                .map(|metric| Metric::from(metric).into())
+                .collect(),
         }
     }
 }
