@@ -154,7 +154,7 @@ fn pipe<T>(pipe: Option<T>) -> eyre::Result<T> {
 struct StreamComparison {
     name: &'static str,
     first_mismatch: Option<Mismatch>,
-    /// Lines read from the first stream.
+    /// Lines compared, counting a line read from either stream.
     lines: usize,
 }
 
@@ -201,9 +201,7 @@ fn compare_streams(
         if read_a == 0 && read_b == 0 {
             break;
         }
-        if read_a > 0 {
-            lines += 1;
-        }
+        lines += 1;
         if line_a != line_b {
             return Ok(StreamComparison {
                 name,
@@ -265,4 +263,20 @@ fn history_file_names(dir: &Path) -> eyre::Result<BTreeSet<String>> {
         }
     }
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_streams;
+
+    #[test]
+    fn mismatch_line_counts_lines_from_either_stream() {
+        let short: &[u8] = b"x\n";
+        let long: &[u8] = b"x\ny\n";
+        for (a, b) in [(short, long), (long, short)] {
+            let cmp = compare_streams("test", a, b).unwrap();
+            assert_eq!(cmp.first_mismatch.unwrap().line, 2);
+            assert_eq!(cmp.lines, 2);
+        }
+    }
 }
