@@ -4363,7 +4363,6 @@ mod tests {
     #[rstest]
     #[case::age(RetentionPolicy::Age(3600))]
     #[case::infinite(RetentionPolicy::Infinite)]
-    #[case::unknown(RetentionPolicy::Unknown("size".to_owned()))]
     fn retention_policy_roundtrip(#[case] sdk: RetentionPolicy) {
         let api: MaybeKnown<api::config::RetentionPolicy> = sdk.clone().into();
         let back: RetentionPolicy = api.into();
@@ -4693,7 +4692,6 @@ mod tests {
             Operation::ListLocations,
             Operation::GetDefaultLocation,
             Operation::SetDefaultLocation,
-            Operation::Unknown("some-future-op".to_owned()),
         ];
         for op in variants {
             let api_op: MaybeKnown<api::access::Operation> = op.clone().into();

@@ -277,7 +277,7 @@ pub enum RetentionPolicy {
     Age(#[serde(serialize_with = "serialize_duration_humantime")] Duration),
     Infinite,
     /// Not recognized by this version of the CLI; only ever seen in output.
-    #[serde(untagged)]
+    #[serde(untagged, serialize_with = "serialize_unknown_kind")]
     Unknown(String),
 }
 
@@ -531,6 +531,14 @@ where
     S: serde::Serializer,
 {
     serializer.serialize_str(&value.to_string())
+}
+
+/// Renders as `<kind>`, like an unrecognized matcher, so it does not read as a value.
+fn serialize_unknown_kind<S>(kind: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format!("<{kind}>"))
 }
 
 fn serialize_duration_humantime<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
@@ -874,7 +882,6 @@ pub enum Operation {
     /// Not recognized by this version of the CLI; only ever seen in output.
     #[value(skip)]
     #[serde(untagged)]
-    #[strum(default)]
     Unknown(String),
 }
 
