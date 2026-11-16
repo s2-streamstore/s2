@@ -154,7 +154,7 @@ fn pipe<T>(pipe: Option<T>) -> eyre::Result<T> {
 struct StreamComparison {
     name: &'static str,
     first_mismatch: Option<Mismatch>,
-    /// Lines read from the first stream.
+    /// Lines compared, counting a line read from either stream.
     lines: usize,
 }
 
@@ -201,9 +201,7 @@ fn compare_streams(
         if read_a == 0 && read_b == 0 {
             break;
         }
-        if read_a > 0 {
-            lines += 1;
-        }
+        lines += 1;
         if line_a != line_b {
             return Ok(StreamComparison {
                 name,
