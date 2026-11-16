@@ -410,7 +410,15 @@ impl Backend {
                         }
                     }
                 }
-                self.streamer_client_guarded(basin, stream).await?
+                // The stream now exists durably, but this may join an initialization whose
+                // snapshot predates its creation. That initialization vacates its slot before
+                // reporting, so the retry uses one that began after the creation.
+                match self.streamer_client_guarded(basin, stream).await {
+                    Err(StreamerError::StreamNotFound(_)) => {
+                        self.streamer_client_guarded(basin, stream).await?
+                    }
+                    result => result?,
+                }
             }
             Err(e) => return Err(e.into()),
         };
@@ -445,6 +453,7 @@ mod tests {
     use std::str::FromStr as _;
 
     use bytes::Bytes;
+    use rstest::rstest;
     use s2_common::{
         config::{BasinConfig, OptionalStreamConfig, StreamConfig, TimestampingMode},
         record::{Metered, MeteredExt as _, Record, StreamPosition},
@@ -699,6 +708,122 @@ mod tests {
             }
             _ => panic!("expected initializing slot to remain unchanged"),
         }
+    }
+
+    async fn flush_until_finished<T>(backend: &Backend, task: tokio::task::JoinHandle<T>) -> T {
+        while !task.is_finished() {
+            backend.db.flush().await.unwrap();
+            tokio::task::yield_now().await;
+        }
+        task.await.unwrap()
+    }
+
+    #[rstest]
+    #[case::append(AutoCreateOn::Append)]
+    #[case::read(AutoCreateOn::Read)]
+    #[tokio::test]
+    async fn auto_create_ignores_initialization_that_predates_creation(
+        #[case] auto_create_on: AutoCreateOn,
+    ) {
+        // Without background flushes, the creating commit waits until the test flushes.
+        let db = slatedb::Db::builder("test", Arc::new(object_store::memory::InMemory::new()))
+            .with_settings(slatedb::config::Settings {
+                flush_interval: None,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let backend = Backend::new(db, ByteSize::b(1));
+        let basin = BasinName::from_str("autocreate-stale-init").unwrap();
+        let stream = StreamName::from_str("fresh").unwrap();
+        let stream_id = StreamId::new(&basin, &stream);
+
+        let provision = tokio::spawn({
+            let backend = backend.clone();
+            let basin = basin.clone();
+            async move {
+                backend
+                    .provision_basin(
+                        basin,
+                        BasinConfig {
+                            create_stream_on_append: true,
+                            create_stream_on_read: true,
+                            ..BasinConfig::default()
+                        },
+                        ProvisionMode::Ensure,
+                    )
+                    .await
+            }
+        });
+        flush_until_finished(&backend, provision).await.unwrap();
+
+        // Another caller's initialization snapshots the stream before it exists.
+        let stale_generation_id = StreamerGenerationId::next();
+        let stale_result = backend
+            .start_streamer(stale_generation_id, basin.clone(), stream.clone())
+            .await;
+        assert!(matches!(
+            stale_result,
+            Err(StreamerError::StreamNotFound(_))
+        ));
+
+        let opener = tokio::spawn({
+            let backend = backend.clone();
+            let basin = basin.clone();
+            let stream = stream.clone();
+            async move {
+                match auto_create_on {
+                    AutoCreateOn::Append => backend
+                        .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                        .await
+                        .map(drop)
+                        .map_err(|e| format!("{e:?}")),
+                    AutoCreateOn::Read => backend
+                        .open_for_check_tail(&basin, &stream)
+                        .await
+                        .map(drop)
+                        .map_err(|e| format!("{e:?}")),
+                }
+            }
+        });
+
+        // The opener finds no stream and commits its creation, which waits for a flush.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let meta_key = kv::stream_meta::ser_key(&basin, &stream);
+            while backend.db.get(&meta_key).await.unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // The stale initialization holds the slot when the opener looks the stream up again.
+        // Like a real one, it vacates the slot before its result is observed.
+        let stale_init = {
+            let backend = backend.clone();
+            async move {
+                backend.streamer_finish_initialization(
+                    stream_id,
+                    stale_generation_id,
+                    &stale_result,
+                );
+                stale_result
+            }
+        };
+        let replaced = backend.streamer_slots.insert(
+            stream_id,
+            StreamerClientSlot::Initializing {
+                generation_id: stale_generation_id,
+                future: stale_init.boxed().shared(),
+                pending_config: None,
+            },
+        );
+        assert!(replaced.is_none());
+
+        let opened = flush_until_finished(&backend, opener).await;
+        assert!(opened.is_ok(), "{opened:?}");
+        backend.close().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
