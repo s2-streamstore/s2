@@ -134,7 +134,7 @@ impl schemars::JsonSchema for RetentionPolicy {
             "type": "string",
             "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically \
                 trim records older than the given duration (e.g. \"7days\", \"1week\"). \
-                Age durations must be greater than 0 seconds.",
+                Age durations must be a whole number of seconds greater than 0.",
             "examples": ["infinite", "7days", "1week"]
         })
     }
@@ -502,6 +502,17 @@ mod tests {
         let err = validate(&spec).unwrap_err();
         assert!(err.contains("stream \"events\" in basin \"my-basin\""));
         assert!(err.contains("age must be greater than 0 seconds"));
+    }
+
+    #[test]
+    fn validate_rejects_sub_second_retention_policy() {
+        for retention_policy in ["500ms", "1s 500ms"] {
+            let spec = parse_spec(&format!(
+                r#"{{"basins":[{{"name":"my-basin","streams":[{{"name":"events","config":{{"retention_policy":"{retention_policy}"}}}}]}}]}}"#
+            ));
+            let err = validate(&spec).unwrap_err();
+            assert!(err.contains("age must be a whole number of seconds"));
+        }
     }
 
     #[test]
