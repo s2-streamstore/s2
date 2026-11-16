@@ -78,8 +78,8 @@ pub enum CliError {
 
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help(
-        "Token loaded from {1}. Verify it does not contain invalid characters.\n\
-         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`.\n\n{}",
+        "Token loaded from {1}. Verify it does not contain invalid characters.\n{}\n\n{}",
+        .1.recovery_command(),
         HELP
     ))]
     MalformedAccessToken(#[source] SdkError, TokenSource),
@@ -106,8 +106,8 @@ pub enum CliError {
 
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
-        "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
-         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`."
+        "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n{}",
+        .2.recovery_command()
     ))]
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
@@ -224,6 +224,18 @@ pub enum TokenSource {
     BrowserLogin,
     StoredAccessToken,
     ConfigFile,
+}
+
+impl TokenSource {
+    pub fn recovery_command(self) -> &'static str {
+        match self {
+            TokenSource::BrowserLogin => "Run `s2 login` again.",
+            TokenSource::Environment => "Set S2_ACCESS_TOKEN to a valid access token.",
+            TokenSource::StoredAccessToken | TokenSource::ConfigFile => {
+                "Run `s2 auth access-token set` to replace it."
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for TokenSource {
@@ -360,5 +372,34 @@ impl From<config::ConfigError> for CliConfigError {
     fn from(_error: config::ConfigError) -> Self {
         // Parser errors can include source excerpts containing a legacy plaintext token.
         Self::Load
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::browser_login(TokenSource::BrowserLogin, "s2 login")]
+    #[case::environment(TokenSource::Environment, "S2_ACCESS_TOKEN")]
+    #[case::stored_access_token(TokenSource::StoredAccessToken, "s2 auth access-token set")]
+    #[case::config_file(TokenSource::ConfigFile, "s2 auth access-token set")]
+    fn token_error_help_matches_token_source(
+        #[case] token_source: TokenSource,
+        #[case] expected: &str,
+    ) {
+        let sdk_error = || SdkError::Request(RequestError::MalformedAccessToken("bad".into()));
+        for error in [
+            CliError::UnauthorizedAccessToken(OpKind::ListBasins, sdk_error(), token_source),
+            CliError::MalformedAccessToken(sdk_error(), token_source),
+        ] {
+            let help = error.help().expect("help").to_string();
+            assert!(help.contains(expected), "{help}");
+            if matches!(token_source, TokenSource::BrowserLogin) {
+                assert!(!help.contains("access-token set"), "{help}");
+            }
+        }
     }
 }

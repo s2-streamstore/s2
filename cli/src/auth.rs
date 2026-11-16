@@ -83,7 +83,7 @@ pub async fn status() -> Result<ExitCode, CliError> {
                 "  {}",
                 format!("✗ Authentication failed for {label}").red().bold()
             );
-            eprintln!("  - {}", recovery_command(credential.source()));
+            eprintln!("  - {}", credential.source().recovery_command());
             ExitCode::FAILURE
         }
         Err(error) => {
@@ -240,15 +240,5 @@ fn print_configured_credentials(config: &CliConfig, active: Option<TokenSource>)
             "{}",
             "  ! Credentials are stored in a private plaintext file.".yellow()
         );
-    }
-}
-
-fn recovery_command(source: TokenSource) -> &'static str {
-    match source {
-        TokenSource::BrowserLogin => "Run `s2 login` again.",
-        TokenSource::Environment => "Set S2_ACCESS_TOKEN to a valid access token.",
-        TokenSource::StoredAccessToken | TokenSource::ConfigFile => {
-            "Run `s2 auth access-token set` to replace it."
-        }
     }
 }

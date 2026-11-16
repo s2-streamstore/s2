@@ -394,13 +394,6 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     stream: uri_prefix,
                 } = uri.clone();
 
-                if uri_prefix.is_some() && args.prefix.is_some() {
-                    return Err(CliError::InvalidArgs(miette::miette!(
-                        help = "Make sure to provide the prefix once either using '--prefix' opt or in URI like 's2://basin-name/prefix'",
-                        "Multiple prefixes provided"
-                    )));
-                }
-
                 let list_streams_args = ListStreamsArgs {
                     uri: S2BasinAndMaybeStreamUri {
                         basin: basin.clone(),
@@ -879,7 +872,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 humantime::format_duration(linger),
             );
 
-            bench::run(
+            let bench_result = bench::run(
                 basin.stream(stream_name.clone()),
                 args.record_size as usize,
                 args.target_mibps,
@@ -887,12 +880,14 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 *args.duration,
                 *args.catchup_delay,
             )
-            .await?;
+            .await;
 
-            basin
+            let delete_result = basin
                 .delete_stream(DeleteStreamInput::new(stream_name))
                 .await
-                .map_err(|e| CliError::op(OpKind::Bench, e))?;
+                .map_err(|e| CliError::op(OpKind::Bench, e));
+            bench_result?;
+            delete_result?;
         }
         }
         Ok(())
