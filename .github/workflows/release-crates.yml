@@ -39,3 +39,6 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+          # Each crate depends on workspace crates published seconds earlier in this run,
+          # which the dependency cooldown in .cargo/config.toml would otherwise reject.
+          CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE: allow
