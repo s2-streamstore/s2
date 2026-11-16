@@ -302,39 +302,18 @@ impl Producer {
                         .reserve()
                         .await
                 }, if stashed_submission.is_some() => {
-                    let submission = stashed_submission
+                    stashed_submission
                         .take()
-                        .expect("stashed_submission should not be None");
-                    pending_record_acks.push_back(PendingRecordAck {
-                        ack_tx: submission.ack_tx,
-                        _permit: submission.permit,
-                    });
-                    record_tx_permit
-                        .expect("record_rx should not be closed")
-                        .send(submission.record);
+                        .expect("stashed_submission should not be None")
+                        .forward(
+                            record_tx_permit.expect("record_rx should not be closed"),
+                            &mut pending_record_acks,
+                        );
                 }
 
                 cmd = cmd_rx.recv(), if stashed_submission.is_none() && control.flush_tx.is_none() => {
                     match cmd {
-                        Some(Command::Submit { record, ack_tx, permit }) => {
-                            if control.close_tx.is_some() {
-                                let _ = ack_tx.send(
-                                    Err(ProducerError::ProducerClosing)
-                                );
-                            } else {
-                                stashed_submission = Some(StashedSubmission { record, ack_tx, permit });
-                            }
-                        }
-                        Some(Command::Close { done_tx }) => {
-                            control.close_tx = Some(done_tx);
-                        }
-                        Some(Command::Flush { done_tx }) => {
-                            if control.close_tx.is_some() {
-                                let _ = done_tx.send(Err(ProducerError::ProducerClosing));
-                            } else {
-                                control.flush_tx = Some(done_tx);
-                            }
-                        }
+                        Some(cmd) => accept_command(cmd, &mut control, &mut stashed_submission),
                         None => {
                             terminate_producer(
                                 ProducerError::ProducerDropped,
@@ -428,6 +407,16 @@ impl Producer {
                         return;
                     }
                 }
+            }
+
+            if let Some(record_tx) = record_tx.as_ref() {
+                forward_queued_submissions(
+                    &mut cmd_rx,
+                    record_tx,
+                    &mut control,
+                    &mut stashed_submission,
+                    &mut pending_record_acks,
+                );
             }
 
             if (control.flush_tx.is_some() || control.close_tx.is_some()) && record_tx.is_some() {
@@ -550,10 +539,87 @@ struct StashedSubmission {
     permit: AppendPermit,
 }
 
+impl StashedSubmission {
+    fn forward(
+        self,
+        record_tx_permit: mpsc::Permit<'_, AppendRecord>,
+        pending_record_acks: &mut VecDeque<PendingRecordAck>,
+    ) {
+        pending_record_acks.push_back(PendingRecordAck {
+            ack_tx: self.ack_tx,
+            _permit: self.permit,
+        });
+        record_tx_permit.send(self.record);
+    }
+}
+
 #[derive(Default)]
 struct PendingControl {
     flush_tx: Option<oneshot::Sender<Result<(), ProducerError>>>,
     close_tx: Option<oneshot::Sender<Result<(), ProducerError>>>,
+}
+
+fn accept_command(
+    cmd: Command,
+    control: &mut PendingControl,
+    stashed_submission: &mut Option<StashedSubmission>,
+) {
+    match cmd {
+        Command::Submit {
+            record,
+            ack_tx,
+            permit,
+        } => {
+            if control.close_tx.is_some() {
+                let _ = ack_tx.send(Err(ProducerError::ProducerClosing));
+            } else {
+                *stashed_submission = Some(StashedSubmission {
+                    record,
+                    ack_tx,
+                    permit,
+                });
+            }
+        }
+        Command::Close { done_tx } => {
+            control.close_tx = Some(done_tx);
+        }
+        Command::Flush { done_tx } => {
+            if control.close_tx.is_some() {
+                let _ = done_tx.send(Err(ProducerError::ProducerClosing));
+            } else {
+                control.flush_tx = Some(done_tx);
+            }
+        }
+    }
+}
+
+/// Forwards the submissions already queued to the batcher together, rather than one per turn of
+/// the run loop, so that with a zero linger they still share a batch.
+fn forward_queued_submissions(
+    cmd_rx: &mut mpsc::Receiver<Command>,
+    record_tx: &mpsc::Sender<AppendRecord>,
+    control: &mut PendingControl,
+    stashed_submission: &mut Option<StashedSubmission>,
+    pending_record_acks: &mut VecDeque<PendingRecordAck>,
+) {
+    loop {
+        if let Some(submission) = stashed_submission.take() {
+            match record_tx.try_reserve() {
+                Ok(record_tx_permit) => submission.forward(record_tx_permit, pending_record_acks),
+                Err(_) => {
+                    *stashed_submission = Some(submission);
+                    return;
+                }
+            }
+        }
+        if control.flush_tx.is_some() {
+            return;
+        }
+        match cmd_rx.try_recv() {
+            Ok(cmd) => accept_command(cmd, control, stashed_submission),
+            Err(_) => return,
+        }
+    }
 }
 
 struct PendingRecordAck {
@@ -635,5 +701,115 @@ async fn terminate_producer(
     cmd_rx.close();
     while let Some(cmd) = cmd_rx.recv().await {
         cmd.reject(err.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Harness {
+        cmd_tx: mpsc::Sender<Command>,
+        cmd_rx: mpsc::Receiver<Command>,
+        record_tx: mpsc::Sender<AppendRecord>,
+        record_rx: mpsc::Receiver<AppendRecord>,
+        permits: AppendPermits,
+        control: PendingControl,
+        stashed_submission: Option<StashedSubmission>,
+        pending_record_acks: VecDeque<PendingRecordAck>,
+    }
+
+    impl Harness {
+        fn new(record_capacity: usize) -> Self {
+            let (cmd_tx, cmd_rx) = mpsc::channel(10);
+            let (record_tx, record_rx) = mpsc::channel(record_capacity);
+            Self {
+                cmd_tx,
+                cmd_rx,
+                record_tx,
+                record_rx,
+                permits: AppendPermits::new(None, ONE_MIB),
+                control: PendingControl::default(),
+                stashed_submission: None,
+                pending_record_acks: VecDeque::new(),
+            }
+        }
+
+        async fn submit(&self, body: &'static str) {
+            let (ack_tx, _) = oneshot::channel();
+            let cmd = Command::Submit {
+                record: AppendRecord::new(body).unwrap(),
+                ack_tx,
+                permit: self.permits.acquire(1).await,
+            };
+            assert!(self.cmd_tx.try_send(cmd).is_ok());
+        }
+
+        fn flush(&self) {
+            let (done_tx, _) = oneshot::channel();
+            assert!(self.cmd_tx.try_send(Command::Flush { done_tx }).is_ok());
+        }
+
+        fn forward(&mut self) {
+            forward_queued_submissions(
+                &mut self.cmd_rx,
+                &self.record_tx,
+                &mut self.control,
+                &mut self.stashed_submission,
+                &mut self.pending_record_acks,
+            );
+        }
+
+        fn forwarded(&mut self) -> Vec<Vec<u8>> {
+            std::iter::from_fn(|| self.record_rx.try_recv().ok())
+                .map(|record| record.body().to_vec())
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_submissions_are_forwarded_together() {
+        let mut harness = Harness::new(10);
+        for body in ["a", "b", "c"] {
+            harness.submit(body).await;
+        }
+
+        harness.forward();
+
+        assert_eq!(harness.forwarded(), [b"a", b"b", b"c"]);
+        assert_eq!(harness.pending_record_acks.len(), 3);
+        assert!(harness.stashed_submission.is_none());
+    }
+
+    #[tokio::test]
+    async fn forwarding_stops_at_a_flush() {
+        let mut harness = Harness::new(10);
+        harness.submit("a").await;
+        harness.flush();
+        harness.submit("b").await;
+
+        harness.forward();
+
+        assert_eq!(harness.forwarded(), [b"a"]);
+        assert!(harness.control.flush_tx.is_some());
+        assert!(harness.stashed_submission.is_none());
+        assert_eq!(harness.cmd_rx.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn forwarding_stashes_a_submission_the_batcher_has_no_room_for() {
+        let mut harness = Harness::new(1);
+        for body in ["a", "b", "c"] {
+            harness.submit(body).await;
+        }
+
+        harness.forward();
+
+        assert_eq!(harness.forwarded(), [b"a"]);
+        assert_eq!(
+            harness.stashed_submission.as_ref().unwrap().record.body(),
+            b"b"
+        );
+        assert_eq!(harness.cmd_rx.len(), 1);
     }
 }
