@@ -7,7 +7,7 @@ mod maybe_known;
 pub mod metrics;
 pub mod stream;
 
-pub use maybe_known::MaybeKnown;
+pub use maybe_known::{MaybeKnown, UnknownVariant};
 use s2_common::{
     access::AccessTokenId, basin::BasinName, resources::RequestToken, stream::StreamName,
 };

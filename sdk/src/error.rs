@@ -187,7 +187,7 @@ impl From<MaybeKnown<api::stream::AppendConditionFailed>> for AppendConditionFai
     fn from(value: MaybeKnown<api::stream::AppendConditionFailed>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
-            MaybeKnown::Unknown(name) => return Self::Unknown(name),
+            MaybeKnown::Unknown(name) => return Self::Unknown(name.into()),
         };
         match value {
             api::stream::AppendConditionFailed::FencingTokenMismatch(token) => {
