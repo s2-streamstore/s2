@@ -256,15 +256,9 @@ pub mod extract {
         type Rejection = JsonExtractionRejection;
 
         async fn from_request(req: Request, state: &S) -> Result<Option<Self>, Self::Rejection> {
-            let Some(ctype) = req.headers().get(http::header::CONTENT_TYPE) else {
-                return Ok(None);
-            };
-            if !crate::mime::parse(ctype)
+            let is_json = crate::mime::content_type(req.headers())
                 .as_ref()
-                .is_some_and(crate::mime::is_json)
-            {
-                return Err(JsonExtractionRejection::MissingContentType);
-            }
+                .is_some_and(crate::mime::is_json);
             let bytes = Bytes::from_request(req, state).await.map_err(|e| {
                 JsonExtractionRejection::Other {
                     status: e.status(),
@@ -273,6 +267,9 @@ pub mod extract {
             })?;
             if bytes.is_empty() {
                 return Ok(None);
+            }
+            if !is_json {
+                return Err(JsonExtractionRejection::MissingContentType);
             }
             serde_json::from_slice(&bytes)
                 .map(|v| Some(Self(v)))

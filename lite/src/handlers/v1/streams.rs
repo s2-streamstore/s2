@@ -466,6 +466,65 @@ mod test {
         backend.close().await.expect("close backend");
     }
 
+    async fn ensure_stream(
+        app: &axum::Router,
+        basin: &BasinName,
+        name: &str,
+        content_type: Option<&str>,
+        body: Body,
+    ) -> Response {
+        let mut request = Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/streams/{name}"))
+            .header(BASIN_HEADER.as_str(), basin.as_ref());
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        send(app, request.body(body).unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn ensure_stream_rejects_json_body_without_content_type() {
+        let (app, backend, basin) = setup_app("ensure-no-ctype").await;
+        let config = serde_json::json!({ "retention_policy": { "age": 3600 } }).to_string();
+
+        let response = ensure_stream(
+            &app,
+            &basin,
+            "s",
+            Some("application/json"),
+            Body::from(config),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let reconfig = serde_json::json!({ "retention_policy": { "age": 60 } }).to_string();
+        let response = ensure_stream(&app, &basin, "s", None, Body::from(reconfig)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response_json(response).await["code"], "bad_json");
+
+        let response = send(
+            &app,
+            Request::builder()
+                .method("GET")
+                .uri("/v1/streams/s")
+                .header(BASIN_HEADER.as_str(), basin.as_ref())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["retention_policy"]["age"],
+            3600
+        );
+
+        let response = ensure_stream(&app, &basin, "t", None, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        backend.close().await.expect("close backend");
+    }
+
     #[rstest]
     #[case::prefix("prefix=a%00b", "stream prefix must not contain NUL bytes")]
     #[case::start_after("start_after=a%00b", "stream start-after must not contain NUL bytes")]
