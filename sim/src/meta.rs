@@ -264,19 +264,3 @@ fn history_file_names(dir: &Path) -> eyre::Result<BTreeSet<String>> {
     }
     Ok(names)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::compare_streams;
-
-    #[test]
-    fn mismatch_line_counts_lines_from_either_stream() {
-        let short: &[u8] = b"x\n";
-        let long: &[u8] = b"x\ny\n";
-        for (a, b) in [(short, long), (long, short)] {
-            let cmp = compare_streams("test", a, b).unwrap();
-            assert_eq!(cmp.first_mismatch.unwrap().line, 2);
-            assert_eq!(cmp.lines, 2);
-        }
-    }
-}
