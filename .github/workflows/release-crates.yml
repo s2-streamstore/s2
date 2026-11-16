@@ -1,8 +1,9 @@
 name: release-crates
 
 on:
-  pull_request_target:
-    types: [closed]
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -13,7 +14,7 @@ jobs:
   release_plz:
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'release'))
+      startsWith(github.event.head_commit.message, 'chore: release')
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -39,3 +40,5 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+          # Crates in this workspace depend on versions published moments earlier in the same run.
+          CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE: allow
