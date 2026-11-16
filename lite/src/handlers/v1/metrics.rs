@@ -26,9 +26,21 @@ pub struct AccountArgs {
     tag = super::paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_query`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::metrics::AccountMetricSetRequest)
 ))]
@@ -55,9 +67,21 @@ pub struct BasinArgs {
     tag = super::paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_path`, or `bad_query`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::metrics::BasinMetricSetRequest, v1t::BasinNamePathSegment),
 ))]
@@ -84,9 +108,21 @@ pub struct StreamArgs {
     tag = super::paths::metrics::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::metrics::MetricSetResponse),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_path`, or `bad_query`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::metrics::StreamMetricSetRequest, v1t::BasinNamePathSegment, v1t::StreamNamePathSegment),
 ))]

@@ -44,10 +44,26 @@ pub struct ListArgs {
     tag = super::paths::streams::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::stream::ListStreamsResponse),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_query`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::stream::ListStreamsRequest),
     servers(
@@ -88,12 +104,36 @@ pub struct CreateArgs {
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::stream::CreateStreamRequest,
     responses(
-        (status = StatusCode::CREATED, body = v1t::stream::StreamInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::CREATED,
+            description = "Stream created (`s2-provision-result: created`), or an idempotent retry of the original create request (`s2-provision-result: noop`).",
+            body = v1t::stream::StreamInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`resource_already_exists`: a stream with this name exists; `stream_deletion_pending` / `basin_deletion_pending`: the stream or basin is still being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     servers(
         (url = super::paths::cloud_endpoints::BASIN, variables(
@@ -160,11 +200,31 @@ pub struct GetConfigArgs {
     tag = super::paths::streams::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::config::StreamConfig),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found` or `stream_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_path`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`stream_deletion_pending`: the stream is being deleted.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::StreamNamePathSegment),
     servers(
@@ -200,13 +260,41 @@ pub struct EnsureArgs {
     request_body = Option<v1t::config::StreamConfig>,
     params(v1t::StreamNamePathSegment),
     responses(
-        (status = StatusCode::OK, body = v1t::stream::StreamInfo),
-        (status = StatusCode::CREATED, body = v1t::stream::StreamInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::OK,
+            description = "Stream already existed; `s2-provision-result` is `updated` if its config changed, otherwise `noop`.",
+            body = v1t::stream::StreamInfo,
+        ),
+        (
+            status = StatusCode::CREATED,
+            description = "Stream created; `s2-provision-result: created`.",
+            body = v1t::stream::StreamInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_path`, or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`stream_deletion_pending` / `basin_deletion_pending`: the stream or basin is still being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     servers(
         (url = super::paths::cloud_endpoints::BASIN, variables(
@@ -266,12 +354,32 @@ pub struct DeleteArgs {
     path = super::paths::streams::DELETE,
     tag = super::paths::streams::TAG,
     responses(
-        (status = StatusCode::ACCEPTED),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (status = StatusCode::ACCEPTED, description = "Deletion accepted and completes asynchronously; until then the stream reports `stream_deletion_pending`."),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found` or `stream_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header` or `bad_path`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::StreamNamePathSegment),
     servers(
@@ -309,11 +417,31 @@ pub struct ReconfigureArgs {
     request_body = v1t::config::StreamReconfiguration,
     responses(
         (status = StatusCode::OK, body = v1t::config::StreamConfig),
-        (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
-        (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
-        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
-        (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
-        (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::NOT_FOUND,
+            description = "`basin_not_found` or `stream_not_found`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::BAD_REQUEST,
+            description = "`bad_header`, `bad_path`, or `bad_json`.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::FORBIDDEN,
+            description = "`permission_denied`: the access token does not grant this operation.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::CONFLICT,
+            description = "`stream_deletion_pending` / `basin_deletion_pending`: the stream or basin is being deleted; `transaction_conflict`: retryable.",
+            body = v1t::error::ErrorInfo,
+        ),
+        (
+            status = StatusCode::REQUEST_TIMEOUT,
+            description = "`request_timeout`: retry with backoff; the request may or may not have taken effect.",
+            body = v1t::error::ErrorInfo,
+        ),
     ),
     params(v1t::StreamNamePathSegment),
     servers(
