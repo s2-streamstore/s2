@@ -689,7 +689,8 @@ pub struct AppendArgs {
     #[arg(short = 'i', long, value_parser = parse_records_input_source, default_value = "-")]
     pub input: RecordsIn,
 
-    /// How long to wait for more records before flushing a batch.
+    /// Minimum time from the last flush until a batch that isn't full flushes. A record arriving
+    /// at least this long after the last flush is flushed at once.
     #[arg(long, default_value = "5ms")]
     pub linger: humantime::Duration,
 
@@ -879,11 +880,11 @@ pub struct BenchArgs {
     #[arg(short = 'w', long, default_value = "20s")]
     pub catchup_delay: humantime::Duration,
 
-    /// How long to wait for more records before sending a batch. Ack and end-to-end latencies
-    /// include it. Defaults to none when the target is at most 200 records per second, and
-    /// otherwise to 5ms, since S2 throttles a stream past 200 batches per second.
-    #[arg(long)]
-    pub linger: Option<humantime::Duration>,
+    /// Minimum time from the last batch sent until a batch that isn't full is sent. A record
+    /// arriving at least this long after the last batch is sent at once. Ack and end-to-end
+    /// latencies include any wait for it.
+    #[arg(long, default_value = "5ms")]
+    pub linger: humantime::Duration,
 }
 
 /// Time range args for gauge metrics (no interval).

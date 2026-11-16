@@ -50,19 +50,6 @@ const LATENCY_TABLE_COLUMN_WIDTH: usize = 44;
 const LATENCY_TABLE_GAP: &str = "    ";
 const LATENCY_TABLE_SIDE_BY_SIDE_WIDTH: usize =
     LATENCY_TABLE_COLUMN_WIDTH * 2 + LATENCY_TABLE_GAP.len();
-/// Past this, S2 throttles a stream's appends from one connection.
-const MAX_BATCHES_PER_SEC: u32 = 200;
-
-/// No linger while each record can be a batch of its own, and otherwise the shortest one that
-/// stays within S2's batch rate.
-pub fn default_linger(target_mibps: NonZeroU64, record_size: u32) -> Duration {
-    let target_bytes_per_sec = u128::from(target_mibps.get()) * 1024 * 1024;
-    if target_bytes_per_sec <= u128::from(record_size) * u128::from(MAX_BATCHES_PER_SEC) {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(1) / MAX_BATCHES_PER_SEC
-    }
-}
 
 type PendingAck =
     Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, ProducerError>)> + Send>>;

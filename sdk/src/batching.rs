@@ -19,6 +19,8 @@ use crate::types::{AppendInput, AppendRecord, AppendRecordBatch, FencingToken, V
 
 const RECORD_BATCH_MIN: CountOrBytes = CountOrBytes { count: 1, bytes: 8 };
 
+const MIN_LINGER: Duration = Duration::from_millis(1);
+
 #[derive(Debug, Clone)]
 /// Limits for batching [`AppendRecord`]s.
 pub struct BatchLimits {
@@ -112,14 +114,20 @@ impl BatchingConfig {
         Self::default()
     }
 
-    /// Set the duration for how long to wait for more records before flushing a batch.
+    /// Set the minimum time from the last flush, or from when batching starts, until a batch that
+    /// isn't full flushes.
     ///
-    /// With zero, a batch takes the records already waiting and flushes at once. Any other linger
-    /// ends on the timer's next millisecond tick, so it can run up to `1ms` longer than set.
+    /// A record arriving at least this long after the last flush is flushed at once, along with any
+    /// records already waiting. Otherwise its batch collects records until this long after the last
+    /// flush, or until it is full. Since timers fire on millisecond ticks, that wait can run up to
+    /// `1ms` longer, and a linger below `1ms` is raised to it.
     ///
     /// Defaults to `5ms`.
     pub fn with_linger(self, linger: Duration) -> Self {
-        Self { linger, ..self }
+        Self {
+            linger: linger.max(MIN_LINGER),
+            ..self
+        }
     }
 
     /// Set the batch limits.
@@ -284,11 +292,13 @@ fn append_record_batches(
     mut records: impl Stream<Item = impl Into<AppendRecord> + Send> + Send + Unpin + 'static,
     config: BatchingConfig,
 ) -> impl Stream<Item = Result<AppendRecordBatch, ValidationError>> + Send + 'static {
+    let started = Instant::now();
     async_stream::try_stream! {
         let mut batch = Metered::with_capacity(config.limits.max_batch_records);
         let mut overflowed_record: Option<Metered<AppendRecord>> = None;
+        let mut last_flush = started;
 
-        let linger_deadline = (!config.linger.is_zero()).then(|| tokio::time::sleep(config.linger));
+        let linger_deadline = tokio::time::sleep(config.linger);
         tokio::pin!(linger_deadline);
 
         'outer: loop {
@@ -309,23 +319,24 @@ fn append_record_batches(
             }
             batch.push(first_record);
 
+            let deadline = last_flush + config.linger;
+            let lingering = deadline > Instant::now();
+            if lingering {
+                linger_deadline.as_mut().reset(deadline);
+            }
+
             while !is_batch_full(&config.limits, &batch) && overflowed_record.is_none() {
-                let next_record = match linger_deadline.as_mut().as_pin_mut() {
-                    // A timer set for now still waits for the timer's next tick, so take only
-                    // the records already waiting. Exempt from Tokio's cooperative budget, which
-                    // would otherwise report waiting records as not ready.
-                    None => match tokio::task::coop::unconstrained(records.next()).now_or_never() {
+                let next_record = if lingering {
+                    tokio::select! {
+                        next_record = records.next() => next_record,
+                        _ = &mut linger_deadline => break,
+                    }
+                } else {
+                    // Take only the records already waiting, exempt from Tokio's cooperative
+                    // budget, which would otherwise report them as not ready.
+                    match tokio::task::coop::unconstrained(records.next()).now_or_never() {
                         Some(next_record) => next_record,
                         None => break,
-                    },
-                    Some(mut deadline) => {
-                        if batch.len() == 1 {
-                            deadline.as_mut().reset(Instant::now() + config.linger);
-                        }
-                        tokio::select! {
-                            next_record = records.next() => next_record,
-                            _ = deadline => break,
-                        }
                     }
                 };
                 match next_record {
@@ -347,6 +358,7 @@ fn append_record_batches(
                 }
             }
 
+            last_flush = Instant::now();
             yield AppendRecordBatch::from(std::mem::replace(
                 &mut batch,
                 Metered::with_capacity(config.limits.max_batch_records),
@@ -419,16 +431,21 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn linger_is_at_least_a_millisecond() {
+        let config = BatchingConfig::new().with_linger(Duration::ZERO);
+        assert_eq!(config.linger, Duration::from_millis(1));
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn zero_linger_flushes_without_waiting_for_the_timer() -> Result<(), ValidationError> {
-        // Between ticks, where a timer set for now waits for the next one.
-        tokio::time::advance(Duration::from_micros(500)).await;
+    async fn records_after_a_quiet_linger_flush_at_once() -> Result<(), ValidationError> {
         let records: Vec<_> = (0..3)
             .map(|i| AppendRecord::new(format!("record{i}")))
             .collect::<Result<_, _>>()?;
         let records = futures_util::stream::iter(records).chain(futures_util::stream::pending());
-        let config = BatchingConfig::default().with_linger(Duration::ZERO);
-        let mut batches = AppendRecordBatches::from_stream(records, config);
+        let mut batches = AppendRecordBatches::from_stream(records, BatchingConfig::default());
+        // Past the linger, and between ticks, where a timer set for now waits for the next one.
+        tokio::time::advance(Duration::from_micros(5_500)).await;
 
         let start = Instant::now();
         let batch = batches.next().await.unwrap()?;
@@ -437,8 +454,29 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn zero_linger_takes_more_waiting_records_than_the_coop_budget()
+    #[tokio::test(start_paused = true)]
+    async fn partial_batches_flush_a_linger_apart() -> Result<(), ValidationError> {
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let mut batches = AppendRecordBatches::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+            BatchingConfig::default(),
+        );
+        tokio::time::advance(Duration::from_millis(5)).await;
+
+        tx.try_send(AppendRecord::new("a")?).unwrap();
+        let first_flush = Instant::now();
+        assert_eq!(batches.next().await.unwrap()?.len(), 1);
+        assert_eq!(first_flush.elapsed(), Duration::ZERO);
+
+        tx.try_send(AppendRecord::new("b")?).unwrap();
+        tx.try_send(AppendRecord::new("c")?).unwrap();
+        assert_eq!(batches.next().await.unwrap()?.len(), 2);
+        assert_eq!(first_flush.elapsed(), Duration::from_millis(5));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_at_once_takes_more_waiting_records_than_the_coop_budget()
     -> Result<(), ValidationError> {
         let (tx, rx) = tokio::sync::mpsc::channel(RECORD_BATCH_MAX.count);
         for i in 0..500 {
@@ -446,14 +484,13 @@ mod tests {
                 .unwrap();
         }
         drop(tx);
-        let config = BatchingConfig::default().with_linger(Duration::ZERO);
-        let batches: Vec<_> = AppendRecordBatches::from_stream(
+        let batches = AppendRecordBatches::from_stream(
             tokio_stream::wrappers::ReceiverStream::new(rx),
-            config,
-        )
-        .try_collect()
-        .await?;
+            BatchingConfig::default(),
+        );
+        tokio::time::advance(Duration::from_millis(5)).await;
 
+        let batches: Vec<_> = batches.try_collect().await?;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 500);
         Ok(())

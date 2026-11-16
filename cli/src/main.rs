@@ -867,10 +867,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 .await
                 .map_err(|e| CliError::op(OpKind::Bench, e))?;
 
-            let linger = args.linger.map_or_else(
-                || bench::default_linger(args.target_mibps, args.record_size),
-                Into::into,
-            );
+            let linger = *args.linger;
             eprintln!(
                 "Running for {} targeting {} MiB/s with {} byte records and {} linger, Ctrl+C to end early",
                 args.duration,
