@@ -387,24 +387,31 @@ impl Backend {
                 if !auto_create_on.is_enabled(&config) {
                     return Err(e.into());
                 }
-                if let Err(e) = self
-                    .provision_stream(
-                        basin.clone(),
-                        stream.clone(),
-                        stream_config,
-                        ProvisionMode::CreateOnly {
-                            request_token: None,
-                        },
-                    )
-                    .await
-                {
+                // A conflict means a concurrent transaction committed first, usually another
+                // request creating this stream, so a retry is likely to find it.
+                for attempt in 1.. {
+                    let Err(e) = self
+                        .provision_stream(
+                            basin.clone(),
+                            stream.clone(),
+                            stream_config.clone(),
+                            ProvisionMode::CreateOnly {
+                                request_token: None,
+                            },
+                        )
+                        .await
+                    else {
+                        break;
+                    };
                     match e {
+                        ProvisionStreamError::TransactionConflict(_)
+                            if attempt < AUTO_CREATE_PROVISION_ATTEMPTS => {}
                         ProvisionStreamError::Storage(e) => Err(e)?,
                         ProvisionStreamError::TransactionConflict(e) => Err(e)?,
                         ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
                         ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
                         ProvisionStreamError::BasinNotFound(e) => Err(e)?,
-                        ProvisionStreamError::StreamAlreadyExists(_) => {}
+                        ProvisionStreamError::StreamAlreadyExists(_) => break,
                         ProvisionStreamError::Validation(e) => {
                             unreachable!("auto-create config is validated at the API boundary: {e}")
                         }
@@ -421,6 +428,8 @@ impl Backend {
         })
     }
 }
+
+const AUTO_CREATE_PROVISION_ATTEMPTS: usize = 3;
 
 /// Which basin setting governs creating a missing stream on demand.
 #[derive(Debug, Clone, Copy)]
@@ -445,6 +454,7 @@ mod tests {
     use std::str::FromStr as _;
 
     use bytes::Bytes;
+    use rstest::rstest;
     use s2_common::{
         config::{BasinConfig, OptionalStreamConfig, StreamConfig, TimestampingMode},
         record::{Metered, MeteredExt as _, Record, StreamPosition},
@@ -735,13 +745,63 @@ mod tests {
                 })
                 .collect();
             for task in tasks {
-                match task.await.unwrap() {
-                    Ok(_) => {}
-                    // Conflict losers surface as retryable 409s to clients.
-                    Err(AppendError::TransactionConflict(_)) => {}
-                    Err(e) => panic!("concurrent auto-create append failed: {e:?}"),
+                if let Err(e) = task.await.unwrap() {
+                    panic!("concurrent auto-create append failed: {e:?}");
                 }
             }
         }
+    }
+
+    #[rstest]
+    #[case::append(AutoCreateOn::Append)]
+    #[case::read(AutoCreateOn::Read)]
+    #[tokio::test]
+    async fn concurrent_auto_create_absorbs_transaction_conflicts(
+        #[case] auto_create_on: AutoCreateOn,
+    ) {
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("autocreate-conflict").unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig {
+                    create_stream_on_append: true,
+                    create_stream_on_read: true,
+                    ..BasinConfig::default()
+                },
+                ProvisionMode::Ensure,
+            )
+            .await
+            .unwrap();
+        let stream = StreamName::from_str("contended").unwrap();
+
+        // On this single-threaded runtime the openers' creating transactions overlap, so the
+        // ones that commit after the first conflict.
+        let openers: Vec<_> = (0..4)
+            .map(|_| {
+                let backend = backend.clone();
+                let basin = basin.clone();
+                let stream = stream.clone();
+                tokio::spawn(async move {
+                    match auto_create_on {
+                        AutoCreateOn::Append => backend
+                            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                            .await
+                            .map(drop)
+                            .map_err(|e| format!("{e:?}")),
+                        AutoCreateOn::Read => backend
+                            .open_for_check_tail(&basin, &stream)
+                            .await
+                            .map(drop)
+                            .map_err(|e| format!("{e:?}")),
+                    }
+                })
+            })
+            .collect();
+        for opener in openers {
+            let opened = opener.await.unwrap();
+            assert!(opened.is_ok(), "{opened:?}");
+        }
+        backend.close().await.unwrap();
     }
 }
