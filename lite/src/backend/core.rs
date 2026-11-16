@@ -355,6 +355,34 @@ impl Backend {
         }
     }
 
+    /// Like [`Self::streamer_client_guarded`], but a `StreamNotFound` from an initialization
+    /// that began before `fence` is stale, so it is retried rather than returned.
+    async fn streamer_client_guarded_after(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        fence: StreamerGenerationId,
+    ) -> Result<GuardedStreamerClient, StreamerError> {
+        loop {
+            let (generation_id, client) = match self.streamer_client_slot(basin, stream) {
+                StreamerClientSlot::Initializing {
+                    generation_id,
+                    future,
+                    ..
+                } => (generation_id, future.await),
+                StreamerClientSlot::Ready { client } => (client.generation_id(), Ok(client)),
+            };
+            match client {
+                Ok(client) => match client.guard() {
+                    Ok(client) => return Ok(client),
+                    Err(StreamerMissingInActionError) => continue,
+                },
+                Err(StreamerError::StreamNotFound(_)) if generation_id < fence => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Resolve a handle for `stream`, creating it on demand if the basin config allows.
     ///
     /// `stream_config` is applied over the basin's default stream configuration only if the
@@ -410,15 +438,10 @@ impl Backend {
                         }
                     }
                 }
-                // The stream now exists durably, but this may join an initialization whose
-                // snapshot predates its creation. That initialization vacates its slot before
-                // reporting, so the retry uses one that began after the creation.
-                match self.streamer_client_guarded(basin, stream).await {
-                    Err(StreamerError::StreamNotFound(_)) => {
-                        self.streamer_client_guarded(basin, stream).await?
-                    }
-                    result => result?,
-                }
+                // The stream now exists durably. Initializations from after this fence will see it.
+                let fence = StreamerGenerationId::next();
+                self.streamer_client_guarded_after(basin, stream, fence)
+                    .await?
             }
             Err(e) => return Err(e.into()),
         };
