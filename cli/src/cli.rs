@@ -878,6 +878,12 @@ pub struct BenchArgs {
     /// Delay before starting the catchup read.
     #[arg(short = 'w', long, default_value = "20s")]
     pub catchup_delay: humantime::Duration,
+
+    /// How long to wait for more records before sending a batch. Ack and end-to-end latencies
+    /// include it. Defaults to none when the target is at most 200 records per second, and
+    /// otherwise to 5ms, since S2 throttles a stream past 200 batches per second.
+    #[arg(long)]
+    pub linger: Option<humantime::Duration>,
 }
 
 /// Time range args for gauge metrics (no interval).

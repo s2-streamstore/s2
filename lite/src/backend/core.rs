@@ -355,6 +355,34 @@ impl Backend {
         }
     }
 
+    /// Like [`Self::streamer_client_guarded`], but a `StreamNotFound` from an initialization
+    /// that began before `fence` is stale, so it is retried rather than returned.
+    async fn streamer_client_guarded_after(
+        &self,
+        basin: &BasinName,
+        stream: &StreamName,
+        fence: StreamerGenerationId,
+    ) -> Result<GuardedStreamerClient, StreamerError> {
+        loop {
+            let (generation_id, client) = match self.streamer_client_slot(basin, stream) {
+                StreamerClientSlot::Initializing {
+                    generation_id,
+                    future,
+                    ..
+                } => (generation_id, future.await),
+                StreamerClientSlot::Ready { client } => (client.generation_id(), Ok(client)),
+            };
+            match client {
+                Ok(client) => match client.guard() {
+                    Ok(client) => return Ok(client),
+                    Err(StreamerMissingInActionError) => continue,
+                },
+                Err(StreamerError::StreamNotFound(_)) if generation_id < fence => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Resolve a handle for `stream`, creating it on demand if the basin config allows.
     ///
     /// `stream_config` is applied over the basin's default stream configuration only if the
@@ -387,30 +415,40 @@ impl Backend {
                 if !auto_create_on.is_enabled(&config) {
                     return Err(e.into());
                 }
-                if let Err(e) = self
-                    .provision_stream(
-                        basin.clone(),
-                        stream.clone(),
-                        stream_config,
-                        ProvisionMode::CreateOnly {
-                            request_token: None,
-                        },
-                    )
-                    .await
-                {
+                // A conflict means a concurrent transaction committed first, usually another
+                // request creating this stream, so a retry is likely to find it.
+                for attempt in 1.. {
+                    let Err(e) = self
+                        .provision_stream(
+                            basin.clone(),
+                            stream.clone(),
+                            stream_config.clone(),
+                            ProvisionMode::CreateOnly {
+                                request_token: None,
+                            },
+                        )
+                        .await
+                    else {
+                        break;
+                    };
                     match e {
+                        ProvisionStreamError::TransactionConflict(_)
+                            if attempt < AUTO_CREATE_PROVISION_ATTEMPTS => {}
                         ProvisionStreamError::Storage(e) => Err(e)?,
                         ProvisionStreamError::TransactionConflict(e) => Err(e)?,
                         ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
                         ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
                         ProvisionStreamError::BasinNotFound(e) => Err(e)?,
-                        ProvisionStreamError::StreamAlreadyExists(_) => {}
+                        ProvisionStreamError::StreamAlreadyExists(_) => break,
                         ProvisionStreamError::Validation(e) => {
                             unreachable!("auto-create config is validated at the API boundary: {e}")
                         }
                     }
                 }
-                self.streamer_client_guarded(basin, stream).await?
+                // The stream now exists durably. Initializations from after this fence will see it.
+                let fence = StreamerGenerationId::next();
+                self.streamer_client_guarded_after(basin, stream, fence)
+                    .await?
             }
             Err(e) => return Err(e.into()),
         };
@@ -421,6 +459,8 @@ impl Backend {
         })
     }
 }
+
+const AUTO_CREATE_PROVISION_ATTEMPTS: usize = 3;
 
 /// Which basin setting governs creating a missing stream on demand.
 #[derive(Debug, Clone, Copy)]
@@ -445,6 +485,7 @@ mod tests {
     use std::str::FromStr as _;
 
     use bytes::Bytes;
+    use rstest::rstest;
     use s2_common::{
         config::{BasinConfig, OptionalStreamConfig, StreamConfig, TimestampingMode},
         record::{Metered, MeteredExt as _, Record, StreamPosition},
@@ -701,6 +742,122 @@ mod tests {
         }
     }
 
+    async fn flush_until_finished<T>(backend: &Backend, task: tokio::task::JoinHandle<T>) -> T {
+        while !task.is_finished() {
+            backend.db.flush().await.unwrap();
+            tokio::task::yield_now().await;
+        }
+        task.await.unwrap()
+    }
+
+    #[rstest]
+    #[case::append(AutoCreateOn::Append)]
+    #[case::read(AutoCreateOn::Read)]
+    #[tokio::test]
+    async fn auto_create_ignores_initialization_that_predates_creation(
+        #[case] auto_create_on: AutoCreateOn,
+    ) {
+        // Without background flushes, the creating commit waits until the test flushes.
+        let db = slatedb::Db::builder("test", Arc::new(object_store::memory::InMemory::new()))
+            .with_settings(slatedb::config::Settings {
+                flush_interval: None,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let backend = Backend::new(db, ByteSize::b(1));
+        let basin = BasinName::from_str("autocreate-stale-init").unwrap();
+        let stream = StreamName::from_str("fresh").unwrap();
+        let stream_id = StreamId::new(&basin, &stream);
+
+        let provision = tokio::spawn({
+            let backend = backend.clone();
+            let basin = basin.clone();
+            async move {
+                backend
+                    .provision_basin(
+                        basin,
+                        BasinConfig {
+                            create_stream_on_append: true,
+                            create_stream_on_read: true,
+                            ..BasinConfig::default()
+                        },
+                        ProvisionMode::Ensure,
+                    )
+                    .await
+            }
+        });
+        flush_until_finished(&backend, provision).await.unwrap();
+
+        // Another caller's initialization snapshots the stream before it exists.
+        let stale_generation_id = StreamerGenerationId::next();
+        let stale_result = backend
+            .start_streamer(stale_generation_id, basin.clone(), stream.clone())
+            .await;
+        assert!(matches!(
+            stale_result,
+            Err(StreamerError::StreamNotFound(_))
+        ));
+
+        let opener = tokio::spawn({
+            let backend = backend.clone();
+            let basin = basin.clone();
+            let stream = stream.clone();
+            async move {
+                match auto_create_on {
+                    AutoCreateOn::Append => backend
+                        .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                        .await
+                        .map(drop)
+                        .map_err(|e| format!("{e:?}")),
+                    AutoCreateOn::Read => backend
+                        .open_for_check_tail(&basin, &stream)
+                        .await
+                        .map(drop)
+                        .map_err(|e| format!("{e:?}")),
+                }
+            }
+        });
+
+        // The opener finds no stream and commits its creation, which waits for a flush.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let meta_key = kv::stream_meta::ser_key(&basin, &stream);
+            while backend.db.get(&meta_key).await.unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // The stale initialization holds the slot when the opener looks the stream up again.
+        // Like a real one, it vacates the slot before its result is observed.
+        let stale_init = {
+            let backend = backend.clone();
+            async move {
+                backend.streamer_finish_initialization(
+                    stream_id,
+                    stale_generation_id,
+                    &stale_result,
+                );
+                stale_result
+            }
+        };
+        let replaced = backend.streamer_slots.insert(
+            stream_id,
+            StreamerClientSlot::Initializing {
+                generation_id: stale_generation_id,
+                future: stale_init.boxed().shared(),
+                pending_config: None,
+            },
+        );
+        assert!(replaced.is_none());
+
+        let opened = flush_until_finished(&backend, opener).await;
+        assert!(opened.is_ok(), "{opened:?}");
+        backend.close().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_appends_auto_create_stream_without_spurious_not_found() {
         let backend = new_test_backend().await;
@@ -735,13 +892,63 @@ mod tests {
                 })
                 .collect();
             for task in tasks {
-                match task.await.unwrap() {
-                    Ok(_) => {}
-                    // Conflict losers surface as retryable 409s to clients.
-                    Err(AppendError::TransactionConflict(_)) => {}
-                    Err(e) => panic!("concurrent auto-create append failed: {e:?}"),
+                if let Err(e) = task.await.unwrap() {
+                    panic!("concurrent auto-create append failed: {e:?}");
                 }
             }
         }
+    }
+
+    #[rstest]
+    #[case::append(AutoCreateOn::Append)]
+    #[case::read(AutoCreateOn::Read)]
+    #[tokio::test]
+    async fn concurrent_auto_create_absorbs_transaction_conflicts(
+        #[case] auto_create_on: AutoCreateOn,
+    ) {
+        let backend = new_test_backend().await;
+        let basin = BasinName::from_str("autocreate-conflict").unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig {
+                    create_stream_on_append: true,
+                    create_stream_on_read: true,
+                    ..BasinConfig::default()
+                },
+                ProvisionMode::Ensure,
+            )
+            .await
+            .unwrap();
+        let stream = StreamName::from_str("contended").unwrap();
+
+        // On this single-threaded runtime the openers' creating transactions overlap, so the
+        // ones that commit after the first conflict.
+        let openers: Vec<_> = (0..4)
+            .map(|_| {
+                let backend = backend.clone();
+                let basin = basin.clone();
+                let stream = stream.clone();
+                tokio::spawn(async move {
+                    match auto_create_on {
+                        AutoCreateOn::Append => backend
+                            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                            .await
+                            .map(drop)
+                            .map_err(|e| format!("{e:?}")),
+                        AutoCreateOn::Read => backend
+                            .open_for_check_tail(&basin, &stream)
+                            .await
+                            .map(drop)
+                            .map_err(|e| format!("{e:?}")),
+                    }
+                })
+            })
+            .collect();
+        for opener in openers {
+            let opened = opener.await.unwrap();
+            assert!(opened.is_ok(), "{opened:?}");
+        }
+        backend.close().await.unwrap();
     }
 }

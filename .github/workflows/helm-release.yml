@@ -11,14 +11,24 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: release
     permissions:
-      contents: write  # Push to gh-pages and create releases
+      contents: read
       packages: write  # Push to GHCR
     steps:
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        id: generate-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          token: ${{ steps.generate-token.outputs.token }}
 
       - name: Configure Git
         run: |
@@ -36,7 +46,7 @@ jobs:
           charts_dir: charts
           skip_existing: true
         env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          CR_TOKEN: "${{ steps.generate-token.outputs.token }}"
           CR_GENERATE_RELEASE_NOTES: "true"
 
       - name: Login to GitHub Container Registry

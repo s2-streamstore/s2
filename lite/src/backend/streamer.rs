@@ -56,13 +56,17 @@ use crate::{
 
 pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Allocated before an initialization takes its snapshot, so a later ID
+/// implies a later snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct StreamerGenerationId(u64);
 
 impl StreamerGenerationId {
     pub(super) fn next() -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+        // AcqRel so that whatever preceded an earlier ID happens-before
+        // whatever follows a later one.
+        Self(NEXT_ID.fetch_add(1, Ordering::AcqRel))
     }
 }
 
