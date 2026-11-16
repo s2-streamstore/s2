@@ -131,7 +131,7 @@
       "additionalProperties": false
     },
     "RetentionPolicy": {
-      "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically trim records older than the given duration (e.g. \"7days\", \"1week\"). Age durations must be greater than 0 seconds.",
+      "description": "Retain records unless explicitly trimmed (\"infinite\"), or automatically trim records older than the given duration (e.g. \"7days\", \"1week\"). Age durations must be a whole number of seconds greater than 0.",
       "type": "string",
       "examples": [
         "infinite",

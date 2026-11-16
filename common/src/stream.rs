@@ -26,8 +26,13 @@ pub struct StreamNameStr<T: StrProps>(CompactString, PhantomData<T>);
 
 impl<T: StrProps> StreamNameStr<T> {
     fn validate_str(name: &str) -> Result<(), ValidationError> {
-        if !T::IS_PREFIX && name.is_empty() {
-            return Err(format!("stream {} must not be empty", T::FIELD_NAME).into());
+        if !T::IS_PREFIX && name.len() < caps::MIN_STREAM_NAME_LEN {
+            return Err(format!(
+                "stream {} should be at least {} bytes in length",
+                T::FIELD_NAME,
+                caps::MIN_STREAM_NAME_LEN
+            )
+            .into());
         }
 
         if !T::IS_PREFIX && (name == "." || name == "..") {
@@ -392,6 +397,7 @@ mod test {
     #[case::normal("my-stream".to_owned())]
     #[case::control_chars("a\tb\nc\rd\x01e".to_owned())]
     #[case::unicode("stream/名前 😀?#%20".to_owned())]
+    #[case::min_len("a".repeat(crate::caps::MIN_STREAM_NAME_LEN))]
     #[case::max_len("a".repeat(crate::caps::MAX_STREAM_NAME_LEN))]
     fn validate_name_ok(#[case] name: String) {
         assert_eq!(StreamNameStr::<NameProps>::validate_str(&name), Ok(()));
@@ -399,6 +405,7 @@ mod test {
 
     #[rstest]
     #[case::empty("".to_owned())]
+    #[case::too_short("a".repeat(crate::caps::MIN_STREAM_NAME_LEN - 1))]
     #[case::dot(".".to_owned())]
     #[case::dot_dot("..".to_owned())]
     #[case::too_long("a".repeat(crate::caps::MAX_STREAM_NAME_LEN + 1))]

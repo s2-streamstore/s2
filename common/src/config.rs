@@ -49,6 +49,9 @@ impl RetentionPolicy {
             Self::Age(duration) if duration.is_zero() => Err(ValidationError(
                 "age must be greater than 0 seconds".to_string(),
             )),
+            Self::Age(duration) if duration.subsec_nanos() != 0 => Err(ValidationError(
+                "age must be a whole number of seconds".to_string(),
+            )),
             policy => Ok(policy),
         }
     }
@@ -342,4 +345,28 @@ pub struct BasinReconfiguration {
     pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     pub create_stream_on_append: Maybe<bool>,
     pub create_stream_on_read: Maybe<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rstest::rstest;
+
+    use super::RetentionPolicy;
+
+    #[rstest]
+    #[case::one_second(Duration::from_secs(1))]
+    #[case::one_week(Duration::from_secs(7 * 24 * 60 * 60))]
+    fn retention_policy_age_valid(#[case] age: Duration) {
+        assert!(RetentionPolicy::Age(age).validate().is_ok());
+    }
+
+    #[rstest]
+    #[case::zero(Duration::ZERO)]
+    #[case::sub_second(Duration::from_millis(500))]
+    #[case::fractional_seconds(Duration::from_millis(1500))]
+    fn retention_policy_age_invalid(#[case] age: Duration) {
+        assert!(RetentionPolicy::Age(age).validate().is_err());
+    }
 }
