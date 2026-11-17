@@ -928,7 +928,8 @@ pub enum AccountMetricCommand {
     ActiveBasins(TimeRangeArgs),
     /// Account operations by type.
     AccountOps(TimeRangeAndIntervalArgs),
-    /// Most recent use of each given access token. May lag by a couple of minutes.
+    /// Most recent use of each given access token, per outcome and source address.
+    /// May lag by a couple of minutes.
     TokenActivity(TokenActivityArgs),
 }
 
