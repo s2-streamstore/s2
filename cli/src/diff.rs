@@ -387,10 +387,13 @@ impl TryFrom<s2_api::v1::config::BasinConfig> for BasinConfigView {
 /// - The token ID is identity, not configuration, so it is deliberately excluded.
 /// - Operations render as a sorted list of wire-format names; sets and permissions render as
 ///   compact strings (`"prefix: \"prod-\""`, `"rw"`).
+/// - The network policy renders as its `<slug>.<nonce>` reference, or `none`: it decides where the
+///   token may be used from, so two tokens that differ only in it are different.
 #[derive(Serialize)]
 struct AccessTokenInfoView {
     expires_at: String,
     auto_prefix_streams: bool,
+    network_policy: String,
     scope: AccessTokenScopeView,
 }
 
@@ -485,8 +488,7 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
         expires_at,
         auto_prefix_streams,
         mut scope,
-        // Inherited from the issuer and immutable, so not part of the configuration diff.
-        network_policy: _,
+        network_policy,
     } = info;
     // Operations this version does not recognize cannot be canonicalized, only named.
     let (known_ops, unknown_ops): (Vec<_>, Vec<_>) = scope
@@ -507,6 +509,10 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
             Some(at) => humantime::format_rfc3339_seconds(at.into()).to_string(),
         },
         auto_prefix_streams,
+        network_policy: match network_policy {
+            None => "none".to_owned(),
+            Some(id) => id.to_string(),
+        },
         scope,
     })?)
 }
@@ -913,6 +919,7 @@ mod tests {
         assert_eq!(left["scope"]["op_groups"]["account"], json!("r"));
         assert_eq!(left["scope"]["op_groups"]["stream"], json!("none"));
         assert_eq!(left["expires_at"], json!("never"));
+        assert_eq!(left["network_policy"], json!("none"));
         assert!(left.get("id").is_none());
     }
 
