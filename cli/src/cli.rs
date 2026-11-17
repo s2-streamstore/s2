@@ -928,6 +928,15 @@ pub enum AccountMetricCommand {
     ActiveBasins(TimeRangeArgs),
     /// Account operations by type.
     AccountOps(TimeRangeAndIntervalArgs),
+    /// Most recent use of each given access token. May lag by a couple of minutes.
+    TokenActivity(TokenActivityArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct TokenActivityArgs {
+    /// Access token IDs to look up. Tokens with no recorded use are omitted.
+    #[arg(required = true, num_args = 1..=50)]
+    pub token_ids: Vec<AccessTokenId>,
 }
 
 /// Basin metrics.

@@ -324,6 +324,7 @@ pub async fn get_account_metrics(
             let (start, end) = resolve_time_range(&t.time_range);
             AccountMetricSet::AccountOps(time_range_and_interval(start, end, t.interval))
         }
+        AccountMetricCommand::TokenActivity(t) => AccountMetricSet::TokenActivity(t.token_ids),
     };
 
     let input = GetAccountMetricsInput::new(set);
