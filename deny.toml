@@ -14,6 +14,8 @@ ignore = [
     { id = "RUSTSEC-2026-0372", reason = "Accept zvariant_derive maintenance advisory for the existing transitive Linux keyring stack." },
 
     { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar unmaintained, required by testcontainers 0.28 (latest); s2-testcontainers does not use its tar-backed copy or image-build APIs." },
+    { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained, with no patched version; required by object_store, and used by s2-cli and s2-resource-spec." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, with no patched version; required by slatedb and object_store." },
 ]
 
 [licenses]
