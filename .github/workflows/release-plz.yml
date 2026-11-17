@@ -45,13 +45,25 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # cargo-semver-checks builds each crate from a throwaway project outside the workspace, where
+      # the workspace `[patch.crates-io]` does not apply; Cargo's user config applies everywhere.
+      - name: Expose workspace patches to cargo-semver-checks
+        run: sed -n '/^\[patch\.crates-io\]/,/^$/p' Cargo.toml >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+
       - name: Run release-plz
         id: release-plz
         uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release-pr
         env:
+          # cargo-semver-checks resolves our own crates from crates.io, including ones released
+          # less than the cooldown ago. Its builds are throwaway and never reach Cargo.lock.
+          CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE: allow
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+
+      # The simulator workspace does not use the patched crates, and an unused patch changes its lockfile.
+      - name: Remove workspace patches from the user config
+        run: rm -f "${CARGO_HOME:-$HOME/.cargo}/config.toml"
 
       - name: Refresh simulator lockfile in release PR
         env:
