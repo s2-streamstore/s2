@@ -15,7 +15,7 @@ use crate::{
         ListAllAccessTokensInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
         ListStreamsInput, LocationInfo, LocationName, Metric, Page, ReadBatch, ReadInput,
         ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig,
-        StreamInfo, StreamName, StreamPosition, Streaming,
+        StreamInfo, StreamName, StreamPosition, Streaming, ValidationError,
     },
 };
 
@@ -170,13 +170,18 @@ impl S2 {
         &self,
         input: ListAccessTokensInput,
     ) -> Result<Page<AccessTokenInfo>, RequestError> {
-        let response = self.client.list_access_tokens(input.into()).await?;
+        let (response, unknown) = self.client.list_access_tokens(input.into()).await?;
         Ok(Page::new(
             response
                 .access_tokens
                 .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .enumerate()
+                .map(|(i, info)| {
+                    let mut info = AccessTokenInfo::try_from(info)?;
+                    info.unknown_fields = unknown.under(&["access_tokens", &i.to_string()]);
+                    Ok(info)
+                })
+                .collect::<Result<Vec<_>, ValidationError>>()?,
             response.has_more,
         ))
     }
@@ -187,7 +192,7 @@ impl S2 {
         &self,
         input: ListAccessTokensInput,
     ) -> Result<s2_api::v1::access::ListAccessTokensResponse, RequestError> {
-        Ok(self.client.list_access_tokens(input.into()).await?)
+        Ok(self.client.list_access_tokens(input.into()).await?.0)
     }
 
     /// List all access tokens, paginating automatically.

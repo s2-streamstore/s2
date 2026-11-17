@@ -91,6 +91,15 @@ struct BasinInfoSerde {
     created_at: OffsetDateTime,
     #[serde(default, with = "time::serde::rfc3339::option")]
     deleted_at: Option<OffsetDateTime>,
+    /// Named so that it is not taken for a field this version does not know.
+    #[serde(default, rename = "state", deserialize_with = "discard")]
+    _state: (),
+}
+
+fn discard<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
+    deserializer
+        .deserialize_any(serde::de::IgnoredAny)
+        .map(|_| ())
 }
 
 impl<'de> Deserialize<'de> for BasinInfo {
@@ -103,6 +112,7 @@ impl<'de> Deserialize<'de> for BasinInfo {
             location,
             created_at,
             deleted_at,
+            _state: _,
         } = BasinInfoSerde::deserialize(deserializer)?;
 
         let state = basin_state_for_deleted_at(deleted_at.as_ref());

@@ -1903,6 +1903,11 @@ pub struct AccessTokenInfo {
     pub auto_prefix_streams: bool,
     /// Scope of the access token.
     pub scope: AccessTokenScope,
+    /// Fields of this access token that this version of the SDK does not recognize, as dotted
+    /// paths such as `scope.op_groups.network`. They were added to the service later, so what
+    /// is shown here may be less than what the token has or permits. When not empty, a newer
+    /// version of the SDK is needed to see all of it.
+    pub unknown_fields: Vec<String>,
 }
 
 impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
@@ -1915,6 +1920,7 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
             expires_at,
             auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
+            unknown_fields: Vec::new(),
         })
     }
 }

@@ -43,7 +43,7 @@ use tokio_util::codec::Decoder;
 use tracing::{debug, warn};
 
 use crate::{
-    client::{self, StreamingResponse, UnaryResponse},
+    client::{self, StreamingResponse, UnaryResponse, UnknownFields},
     error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
     frame_signal::FrameSignal,
     reconnect::ReconnectAdvice,
@@ -88,11 +88,11 @@ impl AccountClient {
     pub async fn list_access_tokens(
         &self,
         request: ListAccessTokensRequest,
-    ) -> Result<ListAccessTokensResponse, ApiError> {
+    ) -> Result<(ListAccessTokensResponse, UnknownFields), ApiError> {
         let url = self.uri("v1/access-tokens");
         let request = self.get(url).query(&request).build()?;
         let response = self.request(request).send().await?;
-        Ok(response.json::<ListAccessTokensResponse>()?)
+        Ok(response.json_and_unknown::<ListAccessTokensResponse>()?)
     }
 
     pub async fn issue_access_token(

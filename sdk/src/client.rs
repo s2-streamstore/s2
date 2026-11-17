@@ -367,7 +367,68 @@ impl UnaryResponse {
     }
 
     pub fn json<T: DeserializeOwned>(self) -> Result<T, HttpError> {
-        serde_json::from_slice(&self.bytes).map_err(HttpError::ResponseDecode)
+        self.json_and_unknown().map(|(value, _)| value)
+    }
+
+    /// Like [`json`](Self::json), also returning the fields of the response that `T` lacks.
+    pub fn json_and_unknown<T: DeserializeOwned>(self) -> Result<(T, UnknownFields), HttpError> {
+        let (value, unknown) =
+            UnknownFields::decode(&self.bytes).map_err(HttpError::ResponseDecode)?;
+        if !unknown.0.is_empty() {
+            tracing::debug!(
+                fields = ?unknown.under(&[]),
+                "response has fields this SDK version does not recognize"
+            );
+        }
+        Ok((value, unknown))
+    }
+}
+
+/// Fields of a JSON response that the type it was decoded into does not have: ones the service
+/// gained after this SDK version was released. Each is the path of names and indices leading to
+/// the field.
+#[derive(Debug, Default)]
+pub struct UnknownFields(Vec<Vec<String>>);
+
+impl UnknownFields {
+    fn decode<T: DeserializeOwned>(json: &[u8]) -> Result<(T, Self), serde_json::Error> {
+        fn segments(path: &serde_ignored::Path<'_>, into: &mut Vec<String>) {
+            use serde_ignored::Path;
+            match path {
+                Path::Root => {}
+                Path::Seq { parent, index } => {
+                    segments(parent, into);
+                    into.push(index.to_string());
+                }
+                Path::Map { parent, key } => {
+                    segments(parent, into);
+                    into.push(key.clone());
+                }
+                // Not part of the JSON.
+                Path::Some { parent }
+                | Path::NewtypeStruct { parent }
+                | Path::NewtypeVariant { parent } => segments(parent, into),
+            }
+        }
+
+        let mut unknown = Vec::new();
+        let mut deserializer = serde_json::Deserializer::from_slice(json);
+        let value = serde_ignored::deserialize(&mut deserializer, |path| {
+            let mut field = Vec::new();
+            segments(&path, &mut field);
+            unknown.push(field);
+        })?;
+        deserializer.end()?;
+        Ok((value, Self(unknown)))
+    }
+
+    /// The unknown fields within the part of the response at `path`, as dotted paths from there.
+    pub fn under(&self, path: &[&str]) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|field| field.len() > path.len() && field.iter().zip(path).all(|(a, b)| a == b))
+            .map(|field| field[path.len()..].join("."))
+            .collect()
     }
 }
 
@@ -1027,6 +1088,70 @@ mod tests {
 
     fn test_pool() -> Pool<HttpConnector> {
         Pool::new(HttpConnector::new(), Http2Config::new())
+    }
+
+    #[test]
+    fn response_fields_added_by_a_newer_service_are_reported_where_they_are() {
+        use s2_api::v1::{access::ListAccessTokensResponse, basin::ListBasinsResponse};
+
+        let token = |id: &str, extra: serde_json::Value, scope_extra: serde_json::Value| {
+            let mut token = serde_json::json!({
+                "id": id,
+                "auto_prefix_streams": false,
+                "scope": {
+                    "basins": { "prefix": "" },
+                    "op_groups": { "account": { "read": true } },
+                    "ops": ["read", "some-future-op"],
+                },
+            });
+            token
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let scope = token["scope"].as_object_mut().unwrap();
+            scope.extend(scope_extra.as_object().unwrap().clone());
+            token
+        };
+        let body = serde_json::json!({
+            "has_more": false,
+            "next_cursor": "abc",
+            "access_tokens": [
+                token("current", serde_json::json!({}), serde_json::json!({})),
+                token(
+                    "newer",
+                    serde_json::json!({ "network_policy": "office.a1b2c3d4" }),
+                    serde_json::json!({
+                        "locations": { "exact": "aws:us-east-1" },
+                        "op_groups": {
+                            "account": { "read": true, "admin": true },
+                            "network": { "read": true },
+                        },
+                    }),
+                ),
+            ],
+        });
+        let (response, unknown): (ListAccessTokensResponse, _) =
+            UnknownFields::decode(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert_eq!(response.access_tokens.len(), 2);
+        assert_eq!(unknown.under(&["access_tokens", "0"]), Vec::<String>::new());
+        let mut newer = unknown.under(&["access_tokens", "1"]);
+        newer.sort();
+        assert_eq!(
+            newer,
+            [
+                "network_policy",
+                "scope.locations",
+                "scope.op_groups.account.admin",
+                "scope.op_groups.network",
+            ]
+        );
+        assert_eq!(unknown.under(&[]).len(), 5, "{unknown:?}");
+
+        // Everything the service sends today is recognized, including what is not kept.
+        let body = br#"{"has_more":false,"basins":[{"name":"my-basin","location":"aws:us-east-1",
+            "created_at":"2026-01-01T00:00:00Z","deleted_at":null,"state":"active"}]}"#;
+        let (_, unknown): (ListBasinsResponse, _) = UnknownFields::decode(body).unwrap();
+        assert_eq!(unknown.under(&[]), Vec::<String>::new());
     }
 
     #[test]

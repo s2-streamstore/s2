@@ -777,6 +777,9 @@ pub struct AccessTokenInfo {
     pub expires_at: Option<String>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
+    /// What the token has that this build does not know, so it is not shown.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unknown_fields: Vec<String>,
 }
 
 impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
@@ -786,8 +789,18 @@ impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
             expires_at: info.expires_at.map(|expires_at| expires_at.to_string()),
             auto_prefix_streams: info.auto_prefix_streams,
             scope: info.scope.into(),
+            unknown_fields: info.unknown_fields,
         }
     }
+}
+
+/// Appended to a listing entry that has fields this build does not know.
+fn upgrade_note(unknown_fields: &[String]) -> Option<String> {
+    (!unknown_fields.is_empty()).then(|| {
+        format!("unknown={} (upgrade s2 to view)", unknown_fields.join(","))
+            .yellow()
+            .to_string()
+    })
 }
 
 impl AccessTokenInfo {
@@ -806,7 +819,7 @@ impl AccessTokenInfo {
         let header = format!("{}{padding}  expires {expires}", self.id.bold());
 
         let scope = &self.scope;
-        let detail = format!(
+        let mut detail = format!(
             "  basins={}  streams={}  tokens={}  perms={}  ops={}",
             matcher_summary(scope.basins.as_ref().map(BasinMatcher::summary)),
             matcher_summary(scope.streams.as_ref().map(StreamMatcher::summary)),
@@ -822,6 +835,10 @@ impl AccessTokenInfo {
                 .map_or_else(|| "none".to_owned(), PermittedOperationGroups::summary),
             scope.ops.len(),
         );
+
+        if let Some(note) = upgrade_note(&self.unknown_fields) {
+            detail.push_str(&format!("  {note}"));
+        }
 
         format!("{header}\n{detail}")
     }
@@ -1034,6 +1051,7 @@ mod tests {
             expires_at: None,
             auto_prefix_streams: false,
             scope: scope.into(),
+            unknown_fields: Vec::new(),
         };
 
         assert_eq!(
@@ -1097,6 +1115,7 @@ mod tests {
                 }),
                 ops: vec![],
             },
+            unknown_fields: Vec::new(),
         };
 
         // id padded to width 8, unset expiry renders `never`, unset matcher renders `∅`.
@@ -1122,12 +1141,14 @@ mod tests {
                 op_group_perms: None,
                 ops: vec![super::Operation::Read, super::Operation::Append],
             },
+            unknown_fields: vec!["scope.locations".to_owned(), "network_policy".to_owned()],
         };
 
         assert_eq!(
             info.summary_block(4),
             "prod  expires 2030-01-01T00:00:00Z\n\
-             \x20 basins=∅  streams=∅  tokens=root  perms=none  ops=2"
+             \x20 basins=∅  streams=∅  tokens=root  perms=none  ops=2  \
+             unknown=scope.locations,network_policy (upgrade s2 to view)"
         );
     }
 

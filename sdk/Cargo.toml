@@ -43,6 +43,7 @@ s2-api = { workspace = true }
 s2-common = { workspace = true }
 secrecy = "0.10"
 serde = { workspace = true }
+serde_ignored = "0.1.14"
 serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
