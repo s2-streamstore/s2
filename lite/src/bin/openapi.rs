@@ -13,6 +13,10 @@ use s2_lite::handlers::v1::{
     },
     locations::{__path_get_default_location, __path_list_locations, __path_set_default_location},
     metrics::{__path_account_metrics, __path_basin_metrics, __path_stream_metrics},
+    network_policies::{
+        __path_create_network_policy, __path_delete_network_policy, __path_get_network_policy,
+        __path_list_network_policies,
+    },
     paths::{self, cloud_endpoints},
     records::{__path_append, __path_check_tail, __path_read},
     streams::{
@@ -47,6 +51,7 @@ use utoipa::{
         (name = paths::metrics::TAG, description = paths::metrics::DESCRIPTION),
         (name = paths::basins::TAG, description = paths::basins::DESCRIPTION),
         (name = paths::access_tokens::TAG, description = paths::access_tokens::DESCRIPTION),
+        (name = paths::network_policies::TAG, description = paths::network_policies::DESCRIPTION),
         (name = paths::locations::TAG, description = paths::locations::DESCRIPTION),
         (name = paths::streams::TAG, description = paths::streams::DESCRIPTION),
         (name = paths::streams::records::TAG, description = paths::streams::records::DESCRIPTION),
@@ -74,6 +79,11 @@ use utoipa::{
         list_access_tokens,
         issue_access_token,
         revoke_access_token,
+        // Network policy ops
+        list_network_policies,
+        create_network_policy,
+        get_network_policy,
+        delete_network_policy,
         // Location ops
         list_locations,
         get_default_location,

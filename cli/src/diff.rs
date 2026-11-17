@@ -485,6 +485,8 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
         expires_at,
         auto_prefix_streams,
         mut scope,
+        // Inherited from the issuer and immutable, so not part of the configuration diff.
+        network_policy: _,
     } = info;
     // Operations this version does not recognize cannot be canonicalized, only named.
     let (known_ops, unknown_ops): (Vec<_>, Vec<_>) = scope
