@@ -1884,6 +1884,37 @@ impl ListAllAccessTokensInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// AWS PrivateLink details for a location.
+///
+/// See [`PrivateNet`].
+pub struct AwsPrivateNet {
+    /// Endpoint service name, for creating a VPC endpoint.
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+/// How a location can be reached over a private network. Exactly one kind applies.
+pub enum PrivateNet {
+    /// AWS PrivateLink.
+    Aws(AwsPrivateNet),
+    /// A kind this version of the SDK does not recognize, by its wire name.
+    Unknown(String),
+}
+
+impl From<MaybeKnown<api::location::PrivateNet>> for PrivateNet {
+    fn from(value: MaybeKnown<api::location::PrivateNet>) -> Self {
+        match value {
+            MaybeKnown::Known(api::location::PrivateNet::Aws(aws)) => Self::Aws(AwsPrivateNet {
+                service_name: aws.service_name.into(),
+            }),
+            MaybeKnown::Unknown(name) => Self::Unknown(name),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 /// Location information.
 pub struct LocationInfo {
     /// Location name.
@@ -1894,6 +1925,9 @@ pub struct LocationInfo {
     pub storage_classes: Option<Vec<CompactString>>,
     /// Default [storage class](https://s2.dev/docs/storage-classes) for this location.
     pub default_storage_class: Option<CompactString>,
+    /// [Private networking](https://s2.dev/docs/platform/private-networking) for this location,
+    /// if it can be reached over a private network.
+    pub private_net: Option<PrivateNet>,
 }
 
 impl From<api::location::LocationInfo> for LocationInfo {
@@ -1903,6 +1937,7 @@ impl From<api::location::LocationInfo> for LocationInfo {
             is_private: value.is_private,
             storage_classes: value.storage_classes,
             default_storage_class: value.default_storage_class,
+            private_net: value.private_net.map(Into::into),
         }
     }
 }

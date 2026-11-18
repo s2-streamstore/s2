@@ -142,12 +142,23 @@ impl From<LocationName> for CompactString {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwsPrivateNet {
+    pub service_name: CompactString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateNet {
+    Aws(AwsPrivateNet),
+}
+
 #[derive(Debug, Clone)]
 pub struct LocationInfo {
     pub name: LocationName,
     pub is_private: bool,
     pub storage_classes: Vec<CompactString>,
     pub default_storage_class: CompactString,
+    pub private_net: Option<PrivateNet>,
 }
 
 #[cfg(test)]
