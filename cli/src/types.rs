@@ -939,7 +939,7 @@ impl NetworkPolicyInfo {
             Some(PrivateNetPolicy::Unknown(name)) => format!("private-net=<{name}>"),
             None => format!("aws-vpce={}", list(None)),
         };
-        let detail = format!("  allow={public_net}  {private_net}");
+        let detail = format!("  cidr={public_net}  {private_net}");
 
         format!("{header}\n{detail}")
     }

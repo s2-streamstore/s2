@@ -349,13 +349,13 @@ pub async fn create_network_policy(
 ) -> Result<NetworkPolicyInfo, CliError> {
     let CreateNetworkPolicyArgs {
         slug,
-        allow_cidr,
+        cidr,
         aws_vpce,
     } = args;
 
     let mut policy = NetworkPolicy::new();
-    if !allow_cidr.is_empty() {
-        policy = policy.with_public_net(PublicNetPolicy::Cidrs(allow_cidr));
+    if !cidr.is_empty() {
+        policy = policy.with_public_net(PublicNetPolicy::Cidrs(cidr));
     }
     if !aws_vpce.is_empty() {
         policy = policy.with_private_net(AwsPrivateNetPolicy::new(aws_vpce));

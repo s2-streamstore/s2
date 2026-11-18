@@ -268,8 +268,8 @@ pub enum NetworkPolicyCommand {
     /// Create a network policy.
     #[command(after_help = "\
 Examples:
-  s2 network-policy create office --allow-cidr 203.0.113.0/24
-  s2 network-policy create laptop --allow-cidr 198.51.100.7/32 --allow-cidr 2001:db8::/32
+  s2 network-policy create office --cidr 203.0.113.0/24
+  s2 network-policy create laptop --cidr 198.51.100.7/32 --cidr 2001:db8::/32
   s2 network-policy create vpc-only --aws-vpce vpce-0a1b2c3d4e5f67890")]
     Create(CreateNetworkPolicyArgs),
 
@@ -640,8 +640,8 @@ pub struct CreateNetworkPolicyArgs {
 
     /// Source CIDR that may use bound tokens over the public path, e.g. `203.0.113.0/24`.
     /// Repeatable. When omitted, bound tokens cannot be used over the public path.
-    #[arg(long, value_delimiter = ',', group = "policy")]
-    pub allow_cidr: Vec<Cidr>,
+    #[arg(long, alias = "allow-cidr", value_delimiter = ',', group = "policy")]
+    pub cidr: Vec<Cidr>,
 
     /// AWS VPC endpoint ID through which bound tokens may be used, e.g. `vpce-0a1b2c3d4e5f67890`.
     /// Repeatable. When omitted, bound tokens cannot be used through a private network.

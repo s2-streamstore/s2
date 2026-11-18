@@ -120,7 +120,7 @@ pub fn render_token_activity(
             .push([
                 address,
                 age,
-                field(record, "reason").to_string(),
+                field(record, "context").to_string(),
                 field(record, "user_agent").to_string(),
             ]);
     }
@@ -221,7 +221,7 @@ mod tests {
                     ("outcome", "denied"),
                     ("ip_address", "10.0.0.7"),
                     ("private_net_id", "vpce-1"),
-                    ("reason", "token_revoked"),
+                    ("context", "token_revoked"),
                     ("user_agent", "curl/8.5"),
                 ],
             ),
