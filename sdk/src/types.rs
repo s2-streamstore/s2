@@ -1925,8 +1925,9 @@ pub struct LocationInfo {
     pub storage_classes: Option<Vec<CompactString>>,
     /// Default [storage class](https://s2.dev/docs/storage-classes) for this location.
     pub default_storage_class: Option<CompactString>,
-    /// [Private networking](https://s2.dev/docs/platform/private-networking) for this location,
-    /// if it can be reached over a private network.
+    /// [Private networking](https://s2.dev/docs/platform/private-networking) for this location.
+    /// `None` until the account has a basin in this location, and when the location cannot be
+    /// reached over a private network.
     pub private_net: Option<PrivateNet>,
 }
 

@@ -50,7 +50,8 @@ pub struct LocationInfo {
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     pub default_storage_class: Option<CompactString>,
     /// [Private networking](https://s2.dev/docs/platform/private-networking) for this location.
-    /// Omitted when the location cannot be reached over a private network.
+    /// Omitted until the account has a basin in this location, and when the location cannot be
+    /// reached over a private network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<PrivateNet>))]
     pub private_net: Option<MaybeKnown<PrivateNet>>,
