@@ -416,7 +416,7 @@ pub async fn get_account_metrics(
         }
         AccountMetricCommand::AccountOps(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
-            AccountMetricSet::AccountOps(time_range_and_interval(start, end, t.interval))
+            AccountMetricSet::AccountOps(time_range_and_interval(start, end, Some(t.interval)))
         }
         AccountMetricCommand::EstimatedBillableUsage(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
@@ -446,23 +446,23 @@ pub async fn get_basin_metrics(
         }
         BasinMetricCommand::AppendOps(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::AppendOps(time_range_and_interval(start, end, t.interval))
+            BasinMetricSet::AppendOps(time_range_and_interval(start, end, Some(t.interval)))
         }
         BasinMetricCommand::ReadOps(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::ReadOps(time_range_and_interval(start, end, t.interval))
+            BasinMetricSet::ReadOps(time_range_and_interval(start, end, Some(t.interval)))
         }
         BasinMetricCommand::ReadThroughput(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::ReadThroughput(time_range_and_interval(start, end, t.interval))
+            BasinMetricSet::ReadThroughput(time_range_and_interval(start, end, Some(t.interval)))
         }
         BasinMetricCommand::AppendThroughput(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::AppendThroughput(time_range_and_interval(start, end, t.interval))
+            BasinMetricSet::AppendThroughput(time_range_and_interval(start, end, Some(t.interval)))
         }
         BasinMetricCommand::BasinOps(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::BasinOps(time_range_and_interval(start, end, t.interval))
+            BasinMetricSet::BasinOps(time_range_and_interval(start, end, Some(t.interval)))
         }
     };
 
