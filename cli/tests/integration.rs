@@ -22,7 +22,7 @@ fn s2() -> Command {
 fn wait_for_basin(basin: &str) {
     for _ in 0..60 {
         if s2()
-            .args(["get-basin-config", basin])
+            .args(["basin", "get", basin])
             .output()
             .is_ok_and(|o| o.status.success())
         {
@@ -33,17 +33,17 @@ fn wait_for_basin(basin: &str) {
 }
 
 fn cleanup_basin(basin: &str) {
-    let _ = s2().args(["delete-basin", basin]).output();
+    let _ = s2().args(["basin", "delete", basin]).output();
 }
 
 fn cleanup_stream(basin: &str, stream: &str) {
     let _ = s2()
-        .args(["delete-stream", &format!("s2://{basin}/{stream}")])
+        .args(["stream", "delete", &format!("s2://{basin}/{stream}")])
         .output();
 }
 
 fn ensure_test_basin(name: &str) -> String {
-    let _ = s2().args(["create-basin", name]).output();
+    let _ = s2().args(["basin", "create", name]).output();
     wait_for_basin(name);
     name.to_string()
 }
@@ -51,7 +51,7 @@ fn ensure_test_basin(name: &str) -> String {
 #[test]
 #[serial]
 fn list_basins() {
-    s2().args(["list-basins", "--limit", "5"])
+    s2().args(["basin", "list", "--limit", "5"])
         .assert()
         .success();
 }
@@ -59,7 +59,7 @@ fn list_basins() {
 #[test]
 #[serial]
 fn list_basins_with_prefix() {
-    s2().args(["list-basins", "--prefix", "test-cli-", "--limit", "5"])
+    s2().args(["basin", "list", "--prefix", "test-cli-", "--limit", "5"])
         .assert()
         .success();
 }
@@ -69,13 +69,13 @@ fn list_basins_with_prefix() {
 fn create_get_delete_basin() {
     let basin = unique_name("test-cli-basin");
 
-    s2().args(["create-basin", &basin]).assert().success();
+    s2().args(["basin", "create", &basin]).assert().success();
 
     wait_for_basin(&basin);
 
-    s2().args(["get-basin-config", &basin]).assert().success();
+    s2().args(["basin", "get", &basin]).assert().success();
 
-    s2().args(["delete-basin", &basin]).assert().success();
+    s2().args(["basin", "delete", &basin]).assert().success();
 }
 
 #[test]
@@ -84,7 +84,8 @@ fn create_basin_with_config() {
     let basin = unique_name("test-cli-basin-cfg");
 
     s2().args([
-        "create-basin",
+        "basin",
+        "create",
         &basin,
         "--retention-policy",
         "1d",
@@ -95,7 +96,7 @@ fn create_basin_with_config() {
 
     wait_for_basin(&basin);
 
-    s2().args(["get-basin-config", &basin])
+    s2().args(["basin", "get", &basin])
         .assert()
         .success()
         .stdout(predicate::str::contains("create_stream_on_append"));
@@ -109,11 +110,12 @@ fn diff_basins() {
     let left = unique_name("test-cli-diff-basin-left");
     let right = unique_name("test-cli-diff-basin-right");
 
-    s2().args(["create-basin", &left, "--retention-policy", "infinite"])
+    s2().args(["basin", "create", &left, "--retention-policy", "infinite"])
         .assert()
         .success();
     s2().args([
-        "create-basin",
+        "basin",
+        "create",
         &right,
         "--create-stream-on-append",
         "--retention-policy",
@@ -175,11 +177,12 @@ fn diff_basins() {
 fn reconfigure_basin() {
     let basin = unique_name("test-cli-basin-reconfig");
 
-    s2().args(["create-basin", &basin]).assert().success();
+    s2().args(["basin", "create", &basin]).assert().success();
     wait_for_basin(&basin);
 
     s2().args([
-        "reconfigure-basin",
+        "basin",
+        "reconfigure",
         &basin,
         "--create-stream-on-append",
         "true",
@@ -187,7 +190,7 @@ fn reconfigure_basin() {
     .assert()
     .success();
 
-    s2().args(["get-basin-config", &basin])
+    s2().args(["basin", "get", &basin])
         .assert()
         .success()
         .stdout(predicate::str::contains("create_stream_on_append"));
@@ -204,7 +207,7 @@ fn ls_basins() {
 #[test]
 #[serial]
 fn delete_nonexistent_basin() {
-    s2().args(["delete-basin", "nonexistent-basin-12345"])
+    s2().args(["basin", "delete", "nonexistent-basin-12345"])
         .assert()
         .failure();
 }
@@ -212,7 +215,7 @@ fn delete_nonexistent_basin() {
 #[test]
 #[serial]
 fn get_config_nonexistent_basin() {
-    s2().args(["get-basin-config", "nonexistent-basin-12345"])
+    s2().args(["basin", "get", "nonexistent-basin-12345"])
         .assert()
         .failure();
 }
@@ -221,7 +224,7 @@ fn get_config_nonexistent_basin() {
 #[serial]
 fn list_streams() {
     let basin = ensure_test_basin("test-cli-streams");
-    s2().args(["list-streams", &basin, "--limit", "5"])
+    s2().args(["stream", "list", &basin, "--limit", "5"])
         .assert()
         .success();
 }
@@ -230,7 +233,7 @@ fn list_streams() {
 #[serial]
 fn list_streams_with_uri() {
     let basin = ensure_test_basin("test-cli-streams");
-    s2().args(["list-streams", &format!("s2://{basin}/"), "--limit", "5"])
+    s2().args(["stream", "list", &format!("s2://{basin}/"), "--limit", "5"])
         .assert()
         .success();
 }
@@ -242,11 +245,11 @@ fn create_get_delete_stream() {
     let stream = unique_name("test-stream");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
-    s2().args(["get-stream-config", &uri]).assert().success();
+    s2().args(["stream", "get", &uri]).assert().success();
 
-    s2().args(["delete-stream", &uri]).assert().success();
+    s2().args(["stream", "delete", &uri]).assert().success();
 }
 
 #[test]
@@ -256,10 +259,10 @@ fn create_stream_with_config() {
     let stream = unique_name("test-stream-cfg");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri, "--retention-policy", "7d"])
+    s2().args(["stream", "create", &uri, "--retention-policy", "7d"])
         .assert()
         .success();
-    s2().args(["get-stream-config", &uri]).assert().success();
+    s2().args(["stream", "get", &uri]).assert().success();
 
     cleanup_stream(&basin, &stream);
 }
@@ -273,8 +276,10 @@ fn diff_streams() {
     let left_uri = format!("s2://{basin}/{left}");
     let right_uri = format!("s2://{basin}/{right}");
 
-    s2().args(["create-stream", &left_uri]).assert().success();
-    s2().args(["create-stream", &right_uri, "--retention-policy", "1d"])
+    s2().args(["stream", "create", &left_uri])
+        .assert()
+        .success();
+    s2().args(["stream", "create", &right_uri, "--retention-policy", "1d"])
         .assert()
         .success();
 
@@ -326,7 +331,8 @@ fn diff_stream_against_basin_defaults() {
     let stream_uri = format!("{basin_uri}/{stream}");
 
     s2().args([
-        "create-basin",
+        "basin",
+        "create",
         &basin,
         "--retention-policy",
         "7d",
@@ -337,7 +343,8 @@ fn diff_stream_against_basin_defaults() {
     .success();
     wait_for_basin(&basin);
     s2().args([
-        "create-stream",
+        "stream",
+        "create",
         &stream_uri,
         "--retention-policy",
         "30d",
@@ -394,12 +401,12 @@ fn reconfigure_stream() {
     let stream = unique_name("test-stream-reconfig");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
-    s2().args(["reconfigure-stream", &uri, "--retention-policy", "14d"])
+    s2().args(["stream", "create", &uri]).assert().success();
+    s2().args(["stream", "reconfigure", &uri, "--retention-policy", "14d"])
         .assert()
         .success();
 
-    s2().args(["get-stream-config", &uri])
+    s2().args(["stream", "get", &uri])
         .assert()
         .success()
         .stdout(predicate::str::contains("14d").or(predicate::str::contains("1209600")));
@@ -421,7 +428,7 @@ fn check_tail() {
     let stream = unique_name("test-stream-tail");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
     s2().args(["check-tail", &uri])
         .assert()
         .success()
@@ -435,7 +442,8 @@ fn check_tail() {
 fn delete_nonexistent_stream() {
     let basin = ensure_test_basin("test-cli-streams");
     s2().args([
-        "delete-stream",
+        "stream",
+        "delete",
         &format!("s2://{basin}/nonexistent-stream-12345"),
     ])
     .assert()
@@ -449,7 +457,7 @@ fn append_and_read_text() {
     let stream = unique_name("test-data-text");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     let temp = tempfile::TempDir::new().unwrap();
     let input = temp.path().join("input.txt");
@@ -494,7 +502,7 @@ fn append_and_read_json() {
     let stream = unique_name("test-data-json");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     let temp = tempfile::TempDir::new().unwrap();
     let input = temp.path().join("input.json");
@@ -539,7 +547,7 @@ fn append_from_stdin() {
     let stream = unique_name("test-data-stdin");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args(["append", &uri, "--format", "text", "--input", "-"])
         .write_stdin("stdin record\n")
@@ -568,7 +576,8 @@ fn append_from_stdin() {
 fn append_with_stream_config() {
     let basin = unique_name("test-cli-csoa-cfg");
     s2().args([
-        "create-basin",
+        "basin",
+        "create",
         &basin,
         "--retention-policy",
         "7d",
@@ -596,7 +605,7 @@ fn append_with_stream_config() {
     .assert()
     .success();
 
-    s2().args(["get-stream-config", &uri])
+    s2().args(["stream", "get", &uri])
         .assert()
         .success()
         .stdout(
@@ -619,7 +628,7 @@ fn append_with_stream_config() {
     .assert()
     .success();
 
-    s2().args(["get-stream-config", &uri])
+    s2().args(["stream", "get", &uri])
         .assert()
         .success()
         .stdout(predicate::str::contains("1h").and(predicate::str::contains("2h").not()));
@@ -632,7 +641,7 @@ fn append_with_stream_config() {
 #[serial]
 fn read_with_stream_config() {
     let basin = unique_name("test-cli-csor-cfg");
-    s2().args(["create-basin", &basin, "--create-stream-on-read"])
+    s2().args(["basin", "create", &basin, "--create-stream-on-read"])
         .assert()
         .success();
     wait_for_basin(&basin);
@@ -643,7 +652,7 @@ fn read_with_stream_config() {
         .assert()
         .failure();
 
-    s2().args(["get-stream-config", &uri])
+    s2().args(["stream", "get", &uri])
         .assert()
         .success()
         .stdout(predicate::str::contains("1h"));
@@ -659,7 +668,7 @@ fn tail_stream() {
     let stream = unique_name("test-data-tail");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     let temp = tempfile::TempDir::new().unwrap();
     let input = temp.path().join("input.txt");
@@ -696,7 +705,7 @@ fn read_with_tail_offset() {
     let stream = unique_name("test-data-offset");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     let temp = tempfile::TempDir::new().unwrap();
     let input = temp.path().join("input.txt");
@@ -742,7 +751,7 @@ fn trim_stream() {
     let stream = unique_name("test-data-trim");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     let temp = tempfile::TempDir::new().unwrap();
     let input = temp.path().join("input.txt");
@@ -779,7 +788,7 @@ fn fence_stream() {
     let stream = unique_name("test-data-fence");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args(["fence", &uri, "my-token"])
         .assert()
@@ -796,7 +805,7 @@ fn append_with_fencing_token() {
     let stream = unique_name("test-data-fence-append");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
     s2().args(["fence", &uri, "writer-1"]).assert().success();
 
     s2().args([
@@ -820,7 +829,8 @@ fn append_with_fencing_token() {
 #[serial]
 fn list_basins_with_start_after() {
     s2().args([
-        "list-basins",
+        "basin",
+        "list",
         "--start-after",
         "a",
         "--limit",
@@ -836,7 +846,8 @@ fn list_basins_with_start_after() {
 fn list_streams_with_start_after() {
     let basin = ensure_test_basin("test-cli-streams");
     s2().args([
-        "list-streams",
+        "stream",
+        "list",
         &basin,
         "--start-after",
         "a",
@@ -854,7 +865,7 @@ fn create_basin_with_storage_class() {
     let basin = unique_name("test-cli-basin-sc");
 
     let output = s2()
-        .args(["create-basin", &basin, "--storage-class", "express"])
+        .args(["basin", "create", &basin, "--storage-class", "express"])
         .output()
         .unwrap();
 
@@ -863,12 +874,12 @@ fn create_basin_with_storage_class() {
         if stderr.contains("tier") || stderr.contains("unavailable") {
             return;
         }
-        panic!("create-basin failed: {stderr}");
+        panic!("basin create failed: {stderr}");
     }
 
     wait_for_basin(&basin);
 
-    s2().args(["get-basin-config", &basin])
+    s2().args(["basin", "get", &basin])
         .assert()
         .success()
         .stdout(predicate::str::contains("express").or(predicate::str::contains("Express")));
@@ -882,7 +893,8 @@ fn create_basin_with_timestamping() {
     let basin = unique_name("test-cli-basin-ts");
 
     s2().args([
-        "create-basin",
+        "basin",
+        "create",
         &basin,
         "--timestamping-mode",
         "client-require",
@@ -899,13 +911,13 @@ fn create_basin_with_timestamping() {
 fn create_basin_with_create_stream_on_read() {
     let basin = unique_name("test-cli-basin-csor");
 
-    s2().args(["create-basin", &basin, "--create-stream-on-read"])
+    s2().args(["basin", "create", &basin, "--create-stream-on-read"])
         .assert()
         .success();
 
     wait_for_basin(&basin);
 
-    s2().args(["get-basin-config", &basin])
+    s2().args(["basin", "get", &basin])
         .assert()
         .success()
         .stdout(predicate::str::contains("create_stream_on_read"));
@@ -921,7 +933,7 @@ fn create_stream_with_storage_class() {
     let uri = format!("s2://{basin}/{stream}");
 
     let output = s2()
-        .args(["create-stream", &uri, "--storage-class", "express"])
+        .args(["stream", "create", &uri, "--storage-class", "express"])
         .output()
         .unwrap();
 
@@ -930,10 +942,10 @@ fn create_stream_with_storage_class() {
         if stderr.contains("tier") || stderr.contains("unavailable") {
             return;
         }
-        panic!("create-stream failed: {stderr}");
+        panic!("stream create failed: {stderr}");
     }
 
-    s2().args(["get-stream-config", &uri])
+    s2().args(["stream", "get", &uri])
         .assert()
         .success()
         .stdout(predicate::str::contains("express").or(predicate::str::contains("Express")));
@@ -949,7 +961,8 @@ fn create_stream_with_timestamping() {
     let uri = format!("s2://{basin}/{stream}");
 
     s2().args([
-        "create-stream",
+        "stream",
+        "create",
         &uri,
         "--timestamping-mode",
         "client-prefer",
@@ -967,7 +980,7 @@ fn append_with_match_seq_num() {
     let stream = unique_name("test-data-match");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args([
         "append",
@@ -1007,7 +1020,7 @@ fn append_and_read_json_base64() {
     let stream = unique_name("test-data-b64");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args(["append", &uri, "--format", "json-base64", "--input", "-"])
         .write_stdin("{\"body\": \"aGVsbG8gd29ybGQ=\"}\n")
@@ -1038,7 +1051,7 @@ fn read_with_bytes_limit() {
     let stream = unique_name("test-data-bytes");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     let temp = tempfile::TempDir::new().unwrap();
     let input = temp.path().join("input.txt");
@@ -1083,7 +1096,7 @@ fn read_with_ago() {
     let stream = unique_name("test-data-ago");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args(["append", &uri, "--format", "text", "--input", "-"])
         .write_stdin("recent record\n")
@@ -1107,7 +1120,7 @@ fn read_to_file() {
     let stream = unique_name("test-data-file");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args(["append", &uri, "--format", "text", "--input", "-"])
         .write_stdin("file output test\n")
@@ -1145,7 +1158,7 @@ fn append_wrong_fencing_token_fails() {
     let stream = unique_name("test-data-wrong-fence");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
     s2().args(["fence", &uri, "correct-token"])
         .assert()
         .success();
@@ -1172,11 +1185,11 @@ fn append_wrong_fencing_token_fails() {
 fn reconfigure_basin_storage_class() {
     let basin = unique_name("test-cli-basin-reconfig-sc");
 
-    s2().args(["create-basin", &basin]).assert().success();
+    s2().args(["basin", "create", &basin]).assert().success();
     wait_for_basin(&basin);
 
     let output = s2()
-        .args(["reconfigure-basin", &basin, "--storage-class", "express"])
+        .args(["basin", "reconfigure", &basin, "--storage-class", "express"])
         .output()
         .unwrap();
 
@@ -1187,10 +1200,10 @@ fn reconfigure_basin_storage_class() {
             return;
         }
         cleanup_basin(&basin);
-        panic!("reconfigure-basin failed: {stderr}");
+        panic!("basin reconfigure failed: {stderr}");
     }
 
-    s2().args(["get-basin-config", &basin])
+    s2().args(["basin", "get", &basin])
         .assert()
         .success()
         .stdout(predicate::str::contains("express").or(predicate::str::contains("Express")));
@@ -1205,12 +1218,18 @@ fn reconfigure_stream_timestamping() {
     let stream = unique_name("test-stream-reconfig-ts");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
-    s2().args(["reconfigure-stream", &uri, "--timestamping-mode", "arrival"])
-        .assert()
-        .success();
+    s2().args(["stream", "create", &uri]).assert().success();
+    s2().args([
+        "stream",
+        "reconfigure",
+        &uri,
+        "--timestamping-mode",
+        "arrival",
+    ])
+    .assert()
+    .success();
 
-    s2().args(["get-stream-config", &uri])
+    s2().args(["stream", "get", &uri])
         .assert()
         .success()
         .stdout(predicate::str::contains("arrival").or(predicate::str::contains("Arrival")));
@@ -1225,7 +1244,7 @@ fn read_with_timestamp() {
     let stream = unique_name("test-data-ts-read");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args(["append", &uri, "--format", "text", "--input", "-"])
         .write_stdin("timestamp test record\n")
@@ -1256,7 +1275,7 @@ fn trim_with_fencing_token() {
     let stream = unique_name("test-data-trim-fence");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     let temp = tempfile::TempDir::new().unwrap();
     let input = temp.path().join("input.txt");
@@ -1298,7 +1317,7 @@ fn fence_with_existing_token() {
     let stream = unique_name("test-data-fence-existing");
     let uri = format!("s2://{basin}/{stream}");
 
-    s2().args(["create-stream", &uri]).assert().success();
+    s2().args(["stream", "create", &uri]).assert().success();
 
     s2().args(["fence", &uri, "token-v1"]).assert().success();
 

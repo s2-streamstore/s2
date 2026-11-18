@@ -151,7 +151,7 @@ impl TestEnv {
 fn invalid_uri_scheme() {
     TestEnv::new()
         .s2()
-        .args(["get-stream-config", "foo://invalid/stream"])
+        .args(["stream", "get", "foo://invalid/stream"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("s2://"));
@@ -161,7 +161,7 @@ fn invalid_uri_scheme() {
 fn missing_stream_in_uri() {
     TestEnv::new()
         .s2()
-        .args(["get-stream-config", "s2://basin-only"])
+        .args(["stream", "get", "s2://basin-only"])
         .assert()
         .failure();
 }
@@ -170,7 +170,7 @@ fn missing_stream_in_uri() {
 fn invalid_basin_name() {
     TestEnv::new()
         .s2()
-        .args(["create-basin", "-invalid-name"])
+        .args(["basin", "create", "-invalid-name"])
         .assert()
         .failure();
 }
@@ -179,7 +179,7 @@ fn invalid_basin_name() {
 fn missing_access_token() {
     let env = TestEnv::new();
     let mut cmd = env.s2();
-    cmd.args(["list-basins"])
+    cmd.args(["basin", "list"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("access token"));
@@ -213,7 +213,7 @@ fn private_file_access_token_authenticates_without_leaking_to_config() {
     env.s2()
         .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
         .env("S2_BASIN_ENDPOINT", &server.endpoint)
-        .args(["list-basins", "--limit", "1"])
+        .args(["basin", "list", "--limit", "1"])
         .assert()
         .success()
         .stdout(predicate::str::contains("remembered-secret").not())
@@ -232,7 +232,7 @@ fn environment_access_token_overrides_a_stored_token() {
         .env("S2_ACCESS_TOKEN", "environment-secret")
         .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
         .env("S2_BASIN_ENDPOINT", &server.endpoint)
-        .args(["list-basins", "--limit", "1"])
+        .args(["basin", "list", "--limit", "1"])
         .assert()
         .success();
 
@@ -457,7 +457,7 @@ fn invalid_endpoint_from_config_file() {
         .assert()
         .success();
 
-    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let assert = env.s2().args(["basin", "list"]).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
 
     // The error should not misattribute the source to environment variables.
@@ -497,7 +497,7 @@ fn invalid_endpoint_from_env() {
     cmd.env("S2_ACCOUNT_ENDPOINT", "https//a.s2.dev");
     cmd.env("S2_BASIN_ENDPOINT", "https//b.s2.dev");
 
-    let assert = cmd.args(["list-basins"]).assert().failure();
+    let assert = cmd.args(["basin", "list"]).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
 
     assert!(
@@ -534,7 +534,7 @@ fn invalid_basin_endpoint_from_config_file() {
         .assert()
         .success();
 
-    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let assert = env.s2().args(["basin", "list"]).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
 
     assert!(
@@ -568,7 +568,7 @@ fn mismatched_endpoint_schemes_from_config_file() {
         .assert()
         .success();
 
-    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let assert = env.s2().args(["basin", "list"]).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
 
     assert!(
@@ -602,7 +602,7 @@ fn only_account_endpoint_set_warns_and_uses_defaults() {
     // missing basin endpoint and fall back to defaults. Without a reachable
     // server the command will fail, but it must fail with a network/connection
     // error, not an endpoint parse error.
-    let assert = env.s2().args(["list-basins"]).assert().failure();
+    let assert = env.s2().args(["basin", "list"]).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
 
     assert!(

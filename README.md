@@ -168,7 +168,7 @@ Install the CLI (see [Installation](#installation) above) or upgrade if `s2 --ve
 
 Let's create a [basin](https://s2.dev/docs/concepts) with auto-creation of streams enabled:
 ```bash
-s2 create-basin liteness --create-stream-on-append --create-stream-on-read
+s2 basin create liteness --create-stream-on-append --create-stream-on-read
 ```
 
 Test your performance:

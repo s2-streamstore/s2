@@ -30,7 +30,7 @@ const STYLES: styling::Styles = styling::Styles::styled()
 const GENERAL_USAGE: &str = color_print::cstr!(
     r#"
     <dim>$</dim> <bold>s2 login</bold>
-    <dim>$</dim> <bold>s2 list-basins --prefix "foo" --limit 100</bold>
+    <dim>$</dim> <bold>s2 basin list --prefix "foo" --limit 100</bold>
     "#
 );
 
@@ -43,6 +43,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    // Variants are declared in the order `s2 --help` lists them: setup, resources, stream data,
+    // then tools.
     /// Log in to S2 through your browser.
     Login(LoginArgs),
 
@@ -63,45 +65,21 @@ pub enum Command {
     /// the basin.
     Ls(LsArgs),
 
-    /// List basins.
-    ListBasins(ListBasinsArgs),
+    /// Manage basins.
+    #[command(subcommand)]
+    Basin(BasinCommand),
 
-    /// Create a basin.
-    CreateBasin(CreateBasinArgs),
+    /// Manage streams.
+    #[command(subcommand)]
+    Stream(StreamCommand),
 
-    /// Delete a basin.
-    DeleteBasin {
-        /// Name of the basin to delete.
-        basin: S2BasinUri,
-    },
-
-    /// Get basin config.
-    GetBasinConfig {
-        /// Basin name to get config for.
-        basin: S2BasinUri,
-    },
-
-    /// Reconfigure a basin.
-    ReconfigureBasin(ReconfigureBasinArgs),
-
-    /// List access tokens.
-    ListAccessTokens(ListAccessTokensArgs),
-
-    /// Issue an access token.
-    IssueAccessToken(IssueAccessTokenArgs),
-
-    /// Revoke an access token.
-    RevokeAccessToken {
-        /// ID of the access token to revoke.
-        id: AccessTokenId,
-    },
+    /// Manage access tokens.
+    #[command(subcommand)]
+    AccessToken(AccessTokenCommand),
 
     /// Manage network policies.
     #[command(subcommand)]
     NetworkPolicy(NetworkPolicyCommand),
-
-    /// Compare two basins, streams, or access tokens.
-    Diff(DiffArgs),
 
     /// Manage locations.
     #[command(subcommand)]
@@ -111,57 +89,43 @@ pub enum Command {
     #[command(subcommand)]
     Metrics(MetricsCommand),
 
-    // The flat names below predate the `location` and `metrics` groups. They keep working but are
-    // hidden from help.
-    /// Alias of `s2 location list`.
-    #[command(hide = true)]
-    ListLocations,
+    /// Compare two basins, streams, or access tokens.
+    Diff(DiffArgs),
 
-    /// Alias of `s2 location get-default`.
-    #[command(hide = true)]
-    GetDefaultLocation,
+    /// Apply a declarative spec file, ensuring basins and streams.
+    ///
+    /// Reads a JSON file and ensures the declared basins and streams exist with the
+    /// specified configuration. Defaults are applied before comparison; omitted fields are
+    /// defaulted, not preserved.
+    ///
+    /// Dry-run output legend:
+    ///   `+` create
+    ///   `~` ensure
+    ///   `=` unchanged
+    ///   `?` storage-class default resolved at apply
+    ///
+    /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
+    ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[]}
+    ///
+    /// For local-only use, point to a local path/URI instead:
+    ///   {"$schema":"./cli/schema.json","basins":[]}
+    ///
+    /// Example spec file:
+    ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[{"name":"my-basin","streams":[{"name":"events"}]}]}
+    Apply(ApplyArgs),
 
-    /// Alias of `s2 location set-default`.
-    #[command(hide = true)]
-    SetDefaultLocation {
-        /// Location name to make the default.
-        location: LocationName,
-    },
+    /// Append records to a stream.
+    Append(AppendArgs),
 
-    /// Alias of `s2 metrics account`.
-    #[command(hide = true)]
-    GetAccountMetrics(GetAccountMetricsArgs),
+    /// Read records from a stream.
+    ///
+    /// If a limit if specified, reading will stop when the limit is reached or there are no more
+    /// records on the stream. If a limit is not specified, the reader will keep tailing and
+    /// wait for new records.
+    Read(ReadArgs),
 
-    /// Alias of `s2 metrics basin`.
-    #[command(hide = true)]
-    GetBasinMetrics(GetBasinMetricsArgs),
-
-    /// Alias of `s2 metrics stream`.
-    #[command(hide = true)]
-    GetStreamMetrics(GetStreamMetricsArgs),
-
-    /// List streams.
-    ListStreams(ListStreamsArgs),
-
-    /// Create a stream.
-    CreateStream(CreateStreamArgs),
-
-    /// Delete a stream.
-    DeleteStream {
-        /// S2 URI of the format: s2://{basin}/{stream}
-        #[arg(value_name = "S2_URI")]
-        uri: S2BasinAndStreamUri,
-    },
-
-    /// Get stream config.
-    GetStreamConfig {
-        /// S2 URI of the format: s2://{basin}/{stream}
-        #[arg(value_name = "S2_URI")]
-        uri: S2BasinAndStreamUri,
-    },
-
-    /// Reconfigure a stream.
-    ReconfigureStream(ReconfigureStreamArgs),
+    /// Tail a stream, showing the last N records.
+    Tail(TailArgs),
 
     /// Check the tail position of a stream.
     ///
@@ -188,43 +152,8 @@ pub enum Command {
     /// and it is only enforced when a token is provided.
     Fence(FenceArgs),
 
-    /// Append records to a stream.
-    Append(AppendArgs),
-
-    /// Read records from a stream.
-    ///
-    /// If a limit if specified, reading will stop when the limit is reached or there are no more
-    /// records on the stream. If a limit is not specified, the reader will keep tailing and
-    /// wait for new records.
-    Read(ReadArgs),
-
-    /// Tail a stream, showing the last N records.
-    Tail(TailArgs),
-
     /// Benchmark a stream to measure throughput and latency.
     Bench(BenchArgs),
-
-    /// Apply a declarative spec file, ensuring basins and streams.
-    ///
-    /// Reads a JSON file and ensures the declared basins and streams exist with the
-    /// specified configuration. Defaults are applied before comparison; omitted fields are
-    /// defaulted, not preserved.
-    ///
-    /// Dry-run output legend:
-    ///   `+` create
-    ///   `~` ensure
-    ///   `=` unchanged
-    ///   `?` storage-class default resolved at apply
-    ///
-    /// For IDE validation/autocomplete, add `$schema` at the top of each spec file:
-    ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[]}
-    ///
-    /// For local-only use, point to a local path/URI instead:
-    ///   {"$schema":"./cli/schema.json","basins":[]}
-    ///
-    /// Example spec file:
-    ///   {"$schema":"https://raw.githubusercontent.com/s2-streamstore/s2/main/cli/schema.json","basins":[{"name":"my-basin","streams":[{"name":"events"}]}]}
-    Apply(ApplyArgs),
 
     /// Run S2 Lite server backed by object storage.
     ///
@@ -241,6 +170,104 @@ pub enum Command {
     ///     that package manager;
     ///   - Docker / source build: prints how to update.
     Update(UpdateArgs),
+
+    // The flat names below predate the command groups. They keep working but are hidden from
+    // help.
+    /// Alias of `s2 basin list`.
+    #[command(hide = true)]
+    ListBasins(ListBasinsArgs),
+
+    /// Alias of `s2 basin create`.
+    #[command(hide = true)]
+    CreateBasin(CreateBasinArgs),
+
+    /// Alias of `s2 basin delete`.
+    #[command(hide = true)]
+    DeleteBasin {
+        /// Name of the basin to delete.
+        basin: S2BasinUri,
+    },
+
+    /// Alias of `s2 basin get`.
+    #[command(hide = true)]
+    GetBasinConfig {
+        /// Basin name to get config for.
+        basin: S2BasinUri,
+    },
+
+    /// Alias of `s2 basin reconfigure`.
+    #[command(hide = true)]
+    ReconfigureBasin(ReconfigureBasinArgs),
+
+    /// Alias of `s2 stream list`.
+    #[command(hide = true)]
+    ListStreams(ListStreamsArgs),
+
+    /// Alias of `s2 stream create`.
+    #[command(hide = true)]
+    CreateStream(CreateStreamArgs),
+
+    /// Alias of `s2 stream delete`.
+    #[command(hide = true)]
+    DeleteStream {
+        /// S2 URI of the format: s2://{basin}/{stream}
+        #[arg(value_name = "S2_URI")]
+        uri: S2BasinAndStreamUri,
+    },
+
+    /// Alias of `s2 stream get`.
+    #[command(hide = true)]
+    GetStreamConfig {
+        /// S2 URI of the format: s2://{basin}/{stream}
+        #[arg(value_name = "S2_URI")]
+        uri: S2BasinAndStreamUri,
+    },
+
+    /// Alias of `s2 stream reconfigure`.
+    #[command(hide = true)]
+    ReconfigureStream(ReconfigureStreamArgs),
+
+    /// Alias of `s2 access-token list`.
+    #[command(hide = true)]
+    ListAccessTokens(ListAccessTokensArgs),
+
+    /// Alias of `s2 access-token issue`.
+    #[command(hide = true)]
+    IssueAccessToken(Box<IssueAccessTokenArgs>),
+
+    /// Alias of `s2 access-token revoke`.
+    #[command(hide = true)]
+    RevokeAccessToken {
+        /// ID of the access token to revoke.
+        id: AccessTokenId,
+    },
+
+    /// Alias of `s2 location list`.
+    #[command(hide = true)]
+    ListLocations,
+
+    /// Alias of `s2 location get-default`.
+    #[command(hide = true)]
+    GetDefaultLocation,
+
+    /// Alias of `s2 location set-default`.
+    #[command(hide = true)]
+    SetDefaultLocation {
+        /// Location name to make the default.
+        location: LocationName,
+    },
+
+    /// Alias of `s2 metrics account`.
+    #[command(hide = true)]
+    GetAccountMetrics(GetAccountMetricsArgs),
+
+    /// Alias of `s2 metrics basin`.
+    #[command(hide = true)]
+    GetBasinMetrics(GetBasinMetricsArgs),
+
+    /// Alias of `s2 metrics stream`.
+    #[command(hide = true)]
+    GetStreamMetrics(GetStreamMetricsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -258,6 +285,71 @@ pub struct UpdateArgs {
     /// command directly where the running executable can be replaced.
     #[arg(long, short = 'y')]
     pub yes: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BasinCommand {
+    /// List basins.
+    List(ListBasinsArgs),
+
+    /// Create a basin.
+    Create(CreateBasinArgs),
+
+    /// Delete a basin.
+    Delete {
+        /// Name of the basin to delete.
+        basin: S2BasinUri,
+    },
+
+    /// Get basin config.
+    Get {
+        /// Basin name to get config for.
+        basin: S2BasinUri,
+    },
+
+    /// Reconfigure a basin.
+    Reconfigure(ReconfigureBasinArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StreamCommand {
+    /// List streams.
+    List(ListStreamsArgs),
+
+    /// Create a stream.
+    Create(CreateStreamArgs),
+
+    /// Delete a stream.
+    Delete {
+        /// S2 URI of the format: s2://{basin}/{stream}
+        #[arg(value_name = "S2_URI")]
+        uri: S2BasinAndStreamUri,
+    },
+
+    /// Get stream config.
+    Get {
+        /// S2 URI of the format: s2://{basin}/{stream}
+        #[arg(value_name = "S2_URI")]
+        uri: S2BasinAndStreamUri,
+    },
+
+    /// Reconfigure a stream.
+    Reconfigure(ReconfigureStreamArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AccessTokenCommand {
+    /// List access tokens.
+    List(ListAccessTokensArgs),
+
+    /// Issue an access token.
+    Issue(Box<IssueAccessTokenArgs>),
+
+    /// Revoke an access token.
+    Revoke {
+        /// ID of the access token to revoke.
+        id: AccessTokenId,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1135,7 +1227,10 @@ pub struct GetStreamMetricsArgs {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, DiffArgs, DiffOutput, DiffResourceKind, IssueAccessTokenArgs};
+    use super::{
+        AccessTokenCommand, Cli, Command, DiffArgs, DiffOutput, DiffResourceKind,
+        IssueAccessTokenArgs,
+    };
 
     fn issue_access_token_args_from<I, T>(args: I) -> IssueAccessTokenArgs
     where
@@ -1144,7 +1239,7 @@ mod tests {
     {
         let cli = Cli::try_parse_from(args).expect("cli parses");
         match cli.command {
-            Some(Command::IssueAccessToken(args)) => args,
+            Some(Command::AccessToken(AccessTokenCommand::Issue(args))) => *args,
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -1241,11 +1336,65 @@ mod tests {
         assert!(args.exit_code);
     }
 
+    // Scripts written against released CLIs use the flat names, so they must keep parsing after
+    // the commands moved into groups.
+    #[test]
+    fn released_flat_command_names_still_parse() {
+        const URI: &str = "s2://my-basin/stream";
+        let invocations: [&[&str]; 19] = [
+            &["list-basins", "--prefix", "foo"],
+            &["create-basin", "my-basin"],
+            &["delete-basin", "my-basin"],
+            &["get-basin-config", "my-basin"],
+            &[
+                "reconfigure-basin",
+                "my-basin",
+                "--create-stream-on-append",
+                "true",
+            ],
+            &["list-streams", "my-basin"],
+            &["create-stream", URI],
+            &["delete-stream", URI],
+            &["get-stream-config", URI],
+            &["reconfigure-stream", URI, "--storage-class", "standard"],
+            &["list-access-tokens"],
+            &["issue-access-token", "my-token"],
+            &["revoke-access-token", "my-token"],
+            &["list-locations"],
+            &["get-default-location"],
+            &["set-default-location", "aws:us-east-1"],
+            &["get-account-metrics", "token-activity", "my-token"],
+            &[
+                "get-basin-metrics",
+                "my-basin",
+                "storage",
+                "--start-ago",
+                "1h",
+                "--end-ago",
+                "0s",
+            ],
+            &[
+                "get-stream-metrics",
+                URI,
+                "storage",
+                "--start-ago",
+                "1h",
+                "--end-ago",
+                "0s",
+            ],
+        ];
+        for args in invocations {
+            let parsed = Cli::try_parse_from(std::iter::once("s2").chain(args.iter().copied()));
+            assert!(parsed.is_ok(), "{args:?}: {}", parsed.unwrap_err());
+        }
+    }
+
     #[test]
     fn issue_access_token_streams_prefix_empty_matches_all() {
         let args = issue_access_token_args_from([
             "s2",
-            "issue-access-token",
+            "access-token",
+            "issue",
             "my-token",
             "--streams-prefix",
             "",
@@ -1259,7 +1408,8 @@ mod tests {
     fn issue_access_token_streams_prefix_accepts_leading_equals() {
         let args = issue_access_token_args_from([
             "s2",
-            "issue-access-token",
+            "access-token",
+            "issue",
             "my-token",
             "--streams-prefix",
             "=tenant/",
@@ -1273,7 +1423,8 @@ mod tests {
     fn issue_access_token_streams_exact_accepts_leading_equals() {
         let args = issue_access_token_args_from([
             "s2",
-            "issue-access-token",
+            "access-token",
+            "issue",
             "my-token",
             "--streams-exact",
             "=stream",
@@ -1287,7 +1438,8 @@ mod tests {
     fn issue_access_token_streams_flags_conflict() {
         let err = Cli::try_parse_from([
             "s2",
-            "issue-access-token",
+            "access-token",
+            "issue",
             "my-token",
             "--streams-prefix",
             "x",
