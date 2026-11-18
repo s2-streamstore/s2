@@ -110,12 +110,16 @@ fn get_started() -> String {
             ("s2 login", format!("my-basin-{}", example_basin_suffix()))
         }
     };
+    let prompt = match environment.shell {
+        Shell::Posix => "$",
+        Shell::PowerShell => ">",
+    };
     color_print::cformat!(
         r#"<bold><green>Get started:</green></bold>
-  <dim>$</dim> <bold>{auth}</bold>
-  <dim>$</dim> <bold>s2 basin create {basin} --create-stream-on-append</bold>
-  <dim>$</dim> <bold>echo "hello, world" | s2 append s2://{basin}/my-stream</bold>
-  <dim>$</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0</bold> <dim>--count 10</dim>
+  <dim>{prompt}</dim> <bold>{auth}</bold>
+  <dim>{prompt}</dim> <bold>s2 basin create {basin} --create-stream-on-append</bold>
+  <dim>{prompt}</dim> <bold>echo "hello, world" | s2 append s2://{basin}/my-stream</bold>
+  <dim>{prompt}</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0</bold> <dim>--count 10</dim>
 "#
     )
 }
