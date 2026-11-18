@@ -2936,9 +2936,8 @@ pub enum AccountMetricSet {
     /// [`interval`](TimeRangeAndInterval::interval) defaults to [`hour`](TimeseriesInterval::Hour).
     AccountOps(TimeRangeAndInterval),
     /// Returns one [`RecordMetric`] per given access token, outcome and source address, describing
-    /// the most recent such use. Covers the last 30 days, and up to 10 most recently used
-    /// addresses per token and outcome. Tokens with no recorded use are omitted. May lag by a
-    /// couple of minutes.
+    /// the most recent such use. Covers up to 10 most recently used addresses per token and
+    /// outcome. Tokens with no recorded use are omitted. May lag by a couple of minutes.
     ///
     /// Between 1 and 50 access token IDs must be given.
     TokenActivity(Vec<AccessTokenId>),

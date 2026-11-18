@@ -191,8 +191,8 @@ pub enum AccountMetricSet {
     /// Estimated USD billable usage by dimension, plus a total.
     EstimatedBillableUsage,
     /// Where each access token given by `token_id` was last used from, as one record per token,
-    /// outcome and source address, describing the most recent such use. Covers the last 30 days,
-    /// and up to 10 most recently used addresses per token and outcome.
+    /// outcome and source address, describing the most recent such use. Covers up to 10 most
+    /// recently used addresses per token and outcome.
     /// Tokens with no recorded use are omitted. May lag by a couple of minutes.
     TokenActivity,
 }
