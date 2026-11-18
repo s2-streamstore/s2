@@ -2594,6 +2594,12 @@ pub enum AccountMetricSet {
     ///
     /// [`interval`](TimeRangeAndInterval::interval) defaults to [`hour`](TimeseriesInterval::Hour).
     AccountOps(TimeRangeAndInterval),
+    /// Returns one [`RecordMetric`] per given access token, outcome and source address, describing
+    /// the most recent such use. Covers up to 10 most recently used addresses per token and
+    /// outcome. Tokens with no recorded use are omitted. May lag by a couple of minutes.
+    ///
+    /// Between 1 and 50 access token IDs must be given.
+    TokenActivity(Vec<AccessTokenId>),
 }
 
 #[derive(Debug, Clone)]
@@ -2613,25 +2619,35 @@ impl GetAccountMetricsInput {
 
 impl From<GetAccountMetricsInput> for api::metrics::AccountMetricSetRequest {
     fn from(value: GetAccountMetricsInput) -> Self {
-        let (set, start, end, interval) = match value.set {
+        let (set, start, end, interval, token_ids) = match value.set {
             AccountMetricSet::ActiveBasins(args) => (
                 api::metrics::AccountMetricSet::ActiveBasins,
-                args.start,
-                args.end,
+                Some(args.start),
+                Some(args.end),
                 None,
+                Vec::new(),
             ),
             AccountMetricSet::AccountOps(args) => (
                 api::metrics::AccountMetricSet::AccountOps,
-                args.start,
-                args.end,
+                Some(args.start),
+                Some(args.end),
                 args.interval,
+                Vec::new(),
+            ),
+            AccountMetricSet::TokenActivity(token_ids) => (
+                api::metrics::AccountMetricSet::TokenActivity,
+                None,
+                None,
+                None,
+                token_ids,
             ),
         };
         Self {
             set,
-            start: Some(start),
-            end: Some(end),
+            start,
+            end,
             interval: interval.map(Into::into),
+            token_ids,
         }
     }
 }
@@ -2887,6 +2903,18 @@ pub struct LabelMetric {
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+/// Named set of string attributes observed at a point in time.
+pub struct RecordMetric {
+    /// Record name.
+    pub name: String,
+    /// Timestamp of the record in Unix epoch seconds.
+    pub timestamp: u32,
+    /// Named string attributes of the record.
+    pub fields: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 /// Individual metric in a returned metric set.
 pub enum Metric {
     /// Single named value.
@@ -2898,6 +2926,8 @@ pub enum Metric {
     Gauge(GaugeMetric),
     /// Set of string labels.
     Label(LabelMetric),
+    /// Named set of string attributes observed at a point in time.
+    Record(RecordMetric),
     /// A kind of metric this version of the SDK does not recognize, by its wire name.
     Unknown(String),
 }
@@ -2928,6 +2958,11 @@ impl From<MaybeKnown<api::metrics::Metric>> for Metric {
             api::metrics::Metric::Label(lm) => Metric::Label(LabelMetric {
                 name: lm.name.into(),
                 values: lm.values,
+            }),
+            api::metrics::Metric::Record(rm) => Metric::Record(RecordMetric {
+                name: rm.name.into(),
+                timestamp: rm.timestamp,
+                fields: rm.fields,
             }),
         }
     }
