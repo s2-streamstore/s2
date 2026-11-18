@@ -777,6 +777,7 @@ pub struct AccessTokenInfo {
     pub expires_at: Option<String>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
+    pub network_policy: Option<String>,
 }
 
 impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
@@ -786,6 +787,7 @@ impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
             expires_at: info.expires_at.map(|expires_at| expires_at.to_string()),
             auto_prefix_streams: info.auto_prefix_streams,
             scope: info.scope.into(),
+            network_policy: info.network_policy.map(|policy| policy.to_string()),
         }
     }
 }
@@ -807,7 +809,7 @@ impl AccessTokenInfo {
 
         let scope = &self.scope;
         let detail = format!(
-            "  basins={}  streams={}  tokens={}  perms={}  ops={}",
+            "  basins={}  streams={}  tokens={}  perms={}  ops={}  network={}",
             matcher_summary(scope.basins.as_ref().map(BasinMatcher::summary)),
             matcher_summary(scope.streams.as_ref().map(StreamMatcher::summary)),
             matcher_summary(
@@ -821,7 +823,123 @@ impl AccessTokenInfo {
                 .as_ref()
                 .map_or_else(|| "none".to_owned(), PermittedOperationGroups::summary),
             scope.ops.len(),
+            self.network_policy
+                .as_deref()
+                .map_or_else(|| "any".dimmed().to_string(), |policy| policy.to_owned()),
         );
+
+        format!("{header}\n{detail}")
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkPolicyInfo {
+    pub id: String,
+    pub created_at: String,
+    pub policy: NetworkPolicy,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_net: Option<PublicNetPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_net: Option<PrivateNetPolicy>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PublicNetPolicy {
+    Cidrs(Vec<String>),
+    /// Not recognized by this version of the CLI; only ever seen in output.
+    #[serde(untagged, serialize_with = "serialize_unknown_kind")]
+    Unknown(String),
+}
+
+impl From<sdk::types::PublicNetPolicy> for PublicNetPolicy {
+    fn from(policy: sdk::types::PublicNetPolicy) -> Self {
+        match policy {
+            sdk::types::PublicNetPolicy::Cidrs(cidrs) => {
+                PublicNetPolicy::Cidrs(cidrs.iter().map(ToString::to_string).collect())
+            }
+            sdk::types::PublicNetPolicy::Unknown(name) => PublicNetPolicy::Unknown(name),
+            other => PublicNetPolicy::Unknown(format!("{other:?}")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrivateNetPolicy {
+    Aws(AwsPrivateNetPolicy),
+    /// Not recognized by this version of the CLI; only ever seen in output.
+    #[serde(untagged, serialize_with = "serialize_unknown_kind")]
+    Unknown(String),
+}
+
+impl From<sdk::types::PrivateNetPolicy> for PrivateNetPolicy {
+    fn from(policy: sdk::types::PrivateNetPolicy) -> Self {
+        match policy {
+            sdk::types::PrivateNetPolicy::Aws(aws) => PrivateNetPolicy::Aws(AwsPrivateNetPolicy {
+                vpce_ids: aws.vpce_ids.iter().map(ToString::to_string).collect(),
+            }),
+            sdk::types::PrivateNetPolicy::Unknown(name) => PrivateNetPolicy::Unknown(name),
+            other => PrivateNetPolicy::Unknown(format!("{other:?}")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AwsPrivateNetPolicy {
+    pub vpce_ids: Vec<String>,
+}
+
+impl From<sdk::types::NetworkPolicy> for NetworkPolicy {
+    fn from(policy: sdk::types::NetworkPolicy) -> Self {
+        NetworkPolicy {
+            public_net: policy.public_net.map(Into::into),
+            private_net: policy.private_net.map(Into::into),
+        }
+    }
+}
+
+impl From<sdk::types::NetworkPolicyInfo> for NetworkPolicyInfo {
+    fn from(info: sdk::types::NetworkPolicyInfo) -> Self {
+        NetworkPolicyInfo {
+            id: info.id.to_string(),
+            created_at: info.created_at.to_string(),
+            policy: info.policy.into(),
+        }
+    }
+}
+
+impl NetworkPolicyInfo {
+    /// Two-line compact summary for `s2 network-policy list`, in the style of
+    /// [`AccessTokenInfo::summary_block`].
+    pub fn summary_block(&self, id_width: usize) -> String {
+        let padding = " ".repeat(id_width.saturating_sub(self.id.len()));
+        let header = format!(
+            "{}{padding}  created {}",
+            self.id.bold(),
+            self.created_at.green()
+        );
+
+        // A path with no rule is closed.
+        let list = |items: Option<&Vec<String>>| match items {
+            Some(items) => items.join(","),
+            None => "none".dimmed().to_string(),
+        };
+        let public_net = match &self.policy.public_net {
+            Some(PublicNetPolicy::Cidrs(cidrs)) => list(Some(cidrs)),
+            Some(PublicNetPolicy::Unknown(name)) => format!("<{name}>"),
+            None => list(None),
+        };
+        let private_net = match &self.policy.private_net {
+            Some(PrivateNetPolicy::Aws(aws)) => format!("aws-vpce={}", list(Some(&aws.vpce_ids))),
+            Some(PrivateNetPolicy::Unknown(name)) => format!("private-net=<{name}>"),
+            None => format!("aws-vpce={}", list(None)),
+        };
+        let detail = format!("  allow={public_net}  {private_net}");
 
         format!("{header}\n{detail}")
     }
@@ -879,6 +997,10 @@ pub enum Operation {
     ListLocations,
     GetDefaultLocation,
     SetDefaultLocation,
+    ListNetworkPolicies,
+    CreateNetworkPolicy,
+    GetNetworkPolicy,
+    DeleteNetworkPolicy,
     /// Not recognized by this version of the CLI; only ever seen in output.
     #[value(skip)]
     #[serde(untagged)]
@@ -912,6 +1034,10 @@ impl From<Operation> for sdk::types::Operation {
             Operation::Fence => sdk::types::Operation::Fence,
             Operation::Append => sdk::types::Operation::Append,
             Operation::Read => sdk::types::Operation::Read,
+            Operation::ListNetworkPolicies => sdk::types::Operation::ListNetworkPolicies,
+            Operation::CreateNetworkPolicy => sdk::types::Operation::CreateNetworkPolicy,
+            Operation::GetNetworkPolicy => sdk::types::Operation::GetNetworkPolicy,
+            Operation::DeleteNetworkPolicy => sdk::types::Operation::DeleteNetworkPolicy,
             Operation::Unknown(name) => sdk::types::Operation::Unknown(name),
         }
     }
@@ -944,6 +1070,10 @@ impl From<sdk::types::Operation> for Operation {
             sdk::types::Operation::Fence => Operation::Fence,
             sdk::types::Operation::Append => Operation::Append,
             sdk::types::Operation::Read => Operation::Read,
+            sdk::types::Operation::ListNetworkPolicies => Operation::ListNetworkPolicies,
+            sdk::types::Operation::CreateNetworkPolicy => Operation::CreateNetworkPolicy,
+            sdk::types::Operation::GetNetworkPolicy => Operation::GetNetworkPolicy,
+            sdk::types::Operation::DeleteNetworkPolicy => Operation::DeleteNetworkPolicy,
             sdk::types::Operation::Unknown(name) => Operation::Unknown(name),
             other => Operation::Unknown(format!("{other:?}")),
         }
@@ -1033,13 +1163,14 @@ mod tests {
             id: "tok".to_owned(),
             expires_at: None,
             auto_prefix_streams: false,
+            network_policy: None,
             scope: scope.into(),
         };
 
         assert_eq!(
             info.summary_block(3),
             "tok  expires never\n\
-             \x20 basins=∅  streams=∅  tokens=∅  perms=none  ops=0"
+             \x20 basins=∅  streams=∅  tokens=∅  perms=none  ops=0  network=any"
         );
         let json = serde_json::to_value(&info.scope).unwrap();
         assert!(json["basins"].is_null(), "{json}");
@@ -1086,6 +1217,7 @@ mod tests {
             id: "tok".to_owned(),
             expires_at: None,
             auto_prefix_streams: false,
+            network_policy: None,
             scope: AccessTokenScope {
                 basins: Some(BasinMatcher::Prefix("".parse().unwrap())),
                 streams: Some(StreamMatcher::Prefix("tenant/".parse().unwrap())),
@@ -1103,7 +1235,7 @@ mod tests {
         assert_eq!(
             info.summary_block(8),
             "tok       expires never\n\
-             \x20 basins=*  streams=tenant/*  tokens=∅  perms=a:r  ops=0"
+             \x20 basins=*  streams=tenant/*  tokens=∅  perms=a:r  ops=0  network=any"
         );
     }
 
@@ -1115,6 +1247,7 @@ mod tests {
             id: "prod".to_owned(),
             expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
             auto_prefix_streams: false,
+            network_policy: None,
             scope: AccessTokenScope {
                 basins: None,
                 streams: None,
@@ -1127,7 +1260,7 @@ mod tests {
         assert_eq!(
             info.summary_block(4),
             "prod  expires 2030-01-01T00:00:00Z\n\
-             \x20 basins=∅  streams=∅  tokens=root  perms=none  ops=2"
+             \x20 basins=∅  streams=∅  tokens=root  perms=none  ops=2  network=any"
         );
     }
 

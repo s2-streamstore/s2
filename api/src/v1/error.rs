@@ -32,6 +32,9 @@ pub enum ErrorCode {
     DecryptionFailed,
     HotServer,
     Invalid,
+    NetworkPolicyDenied,
+    NetworkPolicyInUse,
+    NetworkPolicyNotFound,
     NotImplemented,
     Other,
     PermissionDenied,
@@ -53,7 +56,10 @@ impl ErrorCode {
     pub fn is_auth_error(self) -> bool {
         matches!(
             self,
-            Self::Authn | Self::PermissionDenied | Self::AccessTokenNotFound
+            Self::Authn
+                | Self::PermissionDenied
+                | Self::AccessTokenNotFound
+                | Self::NetworkPolicyDenied
         )
     }
 
@@ -68,12 +74,16 @@ impl ErrorCode {
             | Self::BadPath
             | Self::BadProto
             | Self::BadQuery => http::StatusCode::BAD_REQUEST,
-            Self::PermissionDenied | Self::QuotaExhausted => http::StatusCode::FORBIDDEN,
-            Self::AccessTokenNotFound | Self::BasinNotFound | Self::StreamNotFound => {
-                http::StatusCode::NOT_FOUND
+            Self::PermissionDenied | Self::QuotaExhausted | Self::NetworkPolicyDenied => {
+                http::StatusCode::FORBIDDEN
             }
+            Self::AccessTokenNotFound
+            | Self::BasinNotFound
+            | Self::NetworkPolicyNotFound
+            | Self::StreamNotFound => http::StatusCode::NOT_FOUND,
             Self::RequestTimeout => http::StatusCode::REQUEST_TIMEOUT,
             Self::BasinDeletionPending
+            | Self::NetworkPolicyInUse
             | Self::ResourceAlreadyExists
             | Self::StreamDeletionPending
             | Self::TransactionConflict => http::StatusCode::CONFLICT,
@@ -113,6 +123,9 @@ impl ErrorCode {
             | Self::ClientHangup
             | Self::DecryptionFailed
             | Self::Invalid
+            | Self::NetworkPolicyDenied
+            | Self::NetworkPolicyInUse
+            | Self::NetworkPolicyNotFound
             | Self::NotImplemented
             | Self::PermissionDenied
             | Self::QuotaExhausted
@@ -138,6 +151,9 @@ impl ErrorCode {
             | Self::DecryptionFailed
             | Self::HotServer
             | Self::Invalid
+            | Self::NetworkPolicyDenied
+            | Self::NetworkPolicyInUse
+            | Self::NetworkPolicyNotFound
             | Self::NotImplemented
             | Self::PermissionDenied
             | Self::QuotaExhausted

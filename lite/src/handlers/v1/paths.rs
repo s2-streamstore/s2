@@ -28,6 +28,16 @@ pub mod access_tokens {
     pub const REVOKE: &str = "/access-tokens/{id}";
 }
 
+pub mod network_policies {
+    pub const TAG: &str = "network-policies";
+    pub const DESCRIPTION: &str = "Manage network policies";
+
+    pub const LIST: &str = "/network-policies";
+    pub const CREATE: &str = "/network-policies";
+    pub const GET: &str = "/network-policies/{id}";
+    pub const DELETE: &str = "/network-policies/{id}";
+}
+
 pub mod locations {
     pub const TAG: &str = "locations";
     pub const DESCRIPTION: &str = "Manage locations";

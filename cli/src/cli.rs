@@ -4,8 +4,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum, builder::styling};
 use compact_str::CompactString;
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionKey, FencingToken, StreamName, StreamNamePrefix,
-    StreamNameStartAfter,
+    BasinNameStartAfter, Cidr, EncryptionKey, FencingToken, NetworkPolicySelector,
+    NetworkPolicySlug, NetworkPolicySlugPrefix, NetworkPolicySlugStartAfter, StreamName,
+    StreamNamePrefix, StreamNameStartAfter, VpcEndpointId,
 };
 
 use crate::{
@@ -95,28 +96,48 @@ pub enum Command {
         id: AccessTokenId,
     },
 
+    /// Manage network policies.
+    #[command(subcommand)]
+    NetworkPolicy(NetworkPolicyCommand),
+
     /// Compare two basins, streams, or access tokens.
     Diff(DiffArgs),
 
-    /// List locations.
+    /// Manage locations.
+    #[command(subcommand)]
+    Location(LocationCommand),
+
+    /// Get account, basin, or stream metrics.
+    #[command(subcommand)]
+    Metrics(MetricsCommand),
+
+    // The flat names below predate the `location` and `metrics` groups. They keep working but are
+    // hidden from help.
+    /// Alias of `s2 location list`.
+    #[command(hide = true)]
     ListLocations,
 
-    /// Get the default location.
+    /// Alias of `s2 location get-default`.
+    #[command(hide = true)]
     GetDefaultLocation,
 
-    /// Set the default location.
+    /// Alias of `s2 location set-default`.
+    #[command(hide = true)]
     SetDefaultLocation {
         /// Location name to make the default.
         location: LocationName,
     },
 
-    /// Get account metrics.
+    /// Alias of `s2 metrics account`.
+    #[command(hide = true)]
     GetAccountMetrics(GetAccountMetricsArgs),
 
-    /// Get basin metrics.
+    /// Alias of `s2 metrics basin`.
+    #[command(hide = true)]
     GetBasinMetrics(GetBasinMetricsArgs),
 
-    /// Get stream metrics.
+    /// Alias of `s2 metrics stream`.
+    #[command(hide = true)]
     GetStreamMetrics(GetStreamMetricsArgs),
 
     /// List streams.
@@ -237,6 +258,59 @@ pub struct UpdateArgs {
     /// command directly where the running executable can be replaced.
     #[arg(long, short = 'y')]
     pub yes: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NetworkPolicyCommand {
+    /// List network policies.
+    List(ListNetworkPoliciesArgs),
+
+    /// Create a network policy.
+    #[command(after_help = "\
+Examples:
+  s2 network-policy create office --allow-cidr 203.0.113.0/24
+  s2 network-policy create laptop --allow-cidr 198.51.100.7/32 --allow-cidr 2001:db8::/32
+  s2 network-policy create vpc-only --aws-vpce vpce-0a1b2c3d4e5f67890")]
+    Create(CreateNetworkPolicyArgs),
+
+    /// Get a network policy.
+    Get {
+        /// Network policy slug, or full `<slug>.<nonce>` reference.
+        id: NetworkPolicySelector,
+    },
+
+    /// Delete a network policy. It must not be bound to any access token.
+    Delete {
+        /// Network policy slug, or full `<slug>.<nonce>` reference.
+        id: NetworkPolicySelector,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LocationCommand {
+    /// List locations.
+    List,
+
+    /// Get the default location.
+    GetDefault,
+
+    /// Set the default location.
+    SetDefault {
+        /// Location name to make the default.
+        location: LocationName,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MetricsCommand {
+    /// Get account metrics.
+    Account(GetAccountMetricsArgs),
+
+    /// Get basin metrics.
+    Basin(GetBasinMetricsArgs),
+
+    /// Get stream metrics.
+    Stream(GetStreamMetricsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -531,6 +605,48 @@ pub struct IssueAccessTokenArgs {
     /// A union of allowed operations and groups is used as an effective set of allowed operations.
     #[arg(long, value_delimiter = ',')]
     pub ops: Vec<Operation>,
+
+    /// Slug or full `<slug>.<nonce>` reference of a network policy to restrict the token by.
+    /// If the issuing token is itself restricted, the new token inherits its policy.
+    #[arg(long)]
+    pub network_policy: Option<NetworkPolicySelector>,
+}
+
+#[derive(Args, Debug)]
+pub struct ListNetworkPoliciesArgs {
+    /// List network policies whose slugs begin with this prefix.
+    #[arg(short = 'p', long)]
+    pub prefix: Option<NetworkPolicySlugPrefix>,
+
+    /// Only return network policies whose slugs lexicographically start after this slug.
+    #[arg(short = 's', long)]
+    pub start_after: Option<NetworkPolicySlugStartAfter>,
+
+    /// Limit the number of network policies to return. Acts as page size (max 1000) when using
+    /// --no-auto-paginate.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+
+    /// Returns only a single page of network policies instead of auto-paginating.
+    #[arg(long, default_value_t = false)]
+    pub no_auto_paginate: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(group(clap::ArgGroup::new("policy").required(true).multiple(true)))]
+pub struct CreateNetworkPolicyArgs {
+    /// Slug, unique to the account. Up to 96 characters of letters, digits, `-` and `_`.
+    pub slug: NetworkPolicySlug,
+
+    /// Source CIDR that may use bound tokens over the public path, e.g. `203.0.113.0/24`.
+    /// Repeatable. When omitted, bound tokens cannot be used over the public path.
+    #[arg(long, value_delimiter = ',', group = "policy")]
+    pub allow_cidr: Vec<Cidr>,
+
+    /// AWS VPC endpoint ID through which bound tokens may be used, e.g. `vpce-0a1b2c3d4e5f67890`.
+    /// Repeatable. When omitted, bound tokens cannot be used through a private network.
+    #[arg(long, value_delimiter = ',', group = "policy")]
+    pub aws_vpce: Vec<VpcEndpointId>,
 }
 
 #[derive(Args, Debug)]

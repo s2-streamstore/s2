@@ -5,6 +5,7 @@ pub mod error;
 pub mod location;
 mod maybe_known;
 pub mod metrics;
+pub mod network_policy;
 pub mod stream;
 
 pub use maybe_known::MaybeKnown;
