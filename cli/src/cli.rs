@@ -295,10 +295,10 @@ is created in the account's default location."
     /// Benchmark a stream to measure throughput and latency.
     Bench(BenchArgs),
 
-    /// Run S2 Lite server backed by object storage.
+    /// Run S2 Lite server (in-memory by default).
     ///
-    /// Starts a lightweight S2-compatible server that can be backed by
-    /// S3, local filesystem, or in-memory storage.
+    /// Starts a lightweight S2-compatible server. Storage is in-memory unless
+    /// `--bucket` (S3) or `--local-root` (local filesystem) is set.
     Lite(crate::lite::LiteArgs),
 
     /// Update the S2 CLI to the latest release.
