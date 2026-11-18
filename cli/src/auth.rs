@@ -4,9 +4,9 @@ use colored::Colorize as _;
 use s2_sdk::{S2, error::ErrorCode, types::ListBasinsInput};
 
 use crate::{
-    config::{CliConfig, CredentialStore, DEFAULT_ACCOUNT_ENDPOINT, sdk_config},
+    config::{CliConfig, CredentialStore, sdk_config},
     error::{CliConfigError, CliError, TokenSource},
-    login::{LoginError, effective_endpoints, resolve_access_token, uses_loopback_endpoints},
+    login::{LoginError, destination_label, resolve_access_token, uses_loopback_endpoints},
     update,
 };
 
@@ -114,22 +114,7 @@ fn print_unverified(label: &str, error: &impl std::fmt::Display) {
 }
 
 fn print_heading(config: &CliConfig) {
-    let (account_endpoint, _) = effective_endpoints(config);
-    let heading = if account_endpoint == DEFAULT_ACCOUNT_ENDPOINT {
-        "s2.dev".to_owned()
-    } else {
-        reqwest::Url::parse(&account_endpoint)
-            .ok()
-            .and_then(|url| {
-                let host = url.host_str()?;
-                Some(match url.port() {
-                    Some(port) => format!("{host}:{port}"),
-                    None => host.to_owned(),
-                })
-            })
-            .unwrap_or_else(|| account_endpoint.clone())
-    };
-    eprintln!("{}", heading.bold());
+    eprintln!("{}", destination_label(config).bold());
 }
 
 fn configured_credential_label(config: &CliConfig) -> String {

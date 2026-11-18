@@ -21,6 +21,28 @@ pub(crate) fn effective_endpoints(config: &CliConfig) -> (String, String) {
     }
 }
 
+/// Where the CLI is pointed: `s2.dev`, or the host of a custom account endpoint.
+pub(crate) fn destination_label(config: &CliConfig) -> String {
+    let (account_endpoint, _) = effective_endpoints(config);
+    if account_endpoint == DEFAULT_ACCOUNT_ENDPOINT {
+        return "s2.dev".to_owned();
+    }
+    Url::parse(&account_endpoint)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            })
+        })
+        .unwrap_or(account_endpoint)
+}
+
+pub(crate) fn uses_default_endpoints(config: &CliConfig) -> bool {
+    effective_endpoints(config).0 == DEFAULT_ACCOUNT_ENDPOINT
+}
+
 pub(crate) fn uses_loopback_endpoints(config: &CliConfig) -> bool {
     let (account, basin) = effective_endpoints(config);
     endpoint_environment(&account, &basin) == Some(EndpointEnvironment::Loopback)

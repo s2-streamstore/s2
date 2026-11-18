@@ -27,23 +27,109 @@ const STYLES: styling::Styles = styling::Styles::styled()
     .literal(styling::AnsiColor::Blue.on_default().bold())
     .placeholder(styling::AnsiColor::Cyan.on_default());
 
-/// The first-use walkthrough shown as usage. Basin names are unique across all accounts, so the
-/// example name gets a fresh random suffix to stay free for whoever copies it.
-fn general_usage() -> String {
+/// Config as `s2 --help` sees it, to tailor the help to where the CLI is pointed. `None` if the
+/// config cannot be loaded; help must still print.
+static HELP_CONFIG: std::sync::LazyLock<Option<crate::config::CliConfig>> =
+    std::sync::LazyLock::new(|| crate::config::load_cli_config().ok());
+
+/// Top-level commands as `s2 --help` lists them. A visible command missing from every group
+/// would not be shown at all, which `help_groups_cover_visible_commands` guards.
+const COMMAND_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Commands",
+        &["append", "read", "tail", "check-tail", "trim", "fence"],
+    ),
+    (
+        "Resources",
+        &[
+            "ls",
+            "basin",
+            "stream",
+            "access-token",
+            "network-policy",
+            "location",
+            "diff",
+            "apply",
+        ],
+    ),
+    ("Observability", &["metrics"]),
+    ("Setup", &["login", "logout", "auth", "config"]),
+    ("Tools", &["bench", "lite", "update"]),
+];
+
+/// A first-use walkthrough. Basin names are unique across all accounts, so the example name gets
+/// a fresh random suffix to stay free for whoever copies it.
+fn get_started() -> String {
     let id = uuid::Uuid::new_v4().simple().to_string();
     let basin = format!("my-basin-{}", &id[..7]);
+    // Browser login is refused for local endpoints, which accept any token.
+    let auth = if HELP_CONFIG
+        .as_ref()
+        .is_some_and(crate::login::uses_loopback_endpoints)
+    {
+        "export S2_ACCESS_TOKEN=ignored"
+    } else {
+        "s2 login"
+    };
     color_print::cformat!(
-        r#"
-    <dim>$</dim> <bold>s2 login</bold>
-    <dim>$</dim> <bold>s2 basin create {basin} --create-stream-on-append</bold>
-    <dim>$</dim> <bold>echo "hello, world" | s2 append s2://{basin}/my-stream</bold>
-    <dim>$</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0</bold> <dim>--count 10</dim>
-    "#
+        r#"<bold><green>Get started:</green></bold>
+  <dim>$</dim> <bold>{auth}</bold>
+  <dim>$</dim> <bold>s2 basin create {basin} --create-stream-on-append</bold>
+  <dim>$</dim> <bold>echo "hello, world" | s2 append s2://{basin}/my-stream</bold>
+  <dim>$</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0</bold> <dim>--count 10</dim>
+"#
     )
 }
 
+/// Help for bare `s2`: clap cannot put subcommands under more than one heading, so the command
+/// listing is laid out here.
+fn top_level_help() -> String {
+    let commands = Command::augment_subcommands(clap::Command::new("s2"));
+    let width = COMMAND_GROUPS
+        .iter()
+        .flat_map(|(_, names)| names.iter())
+        .map(|name| name.len())
+        .max()
+        .unwrap_or(0);
+
+    let mut help = String::new();
+    // Only worth a line when it is not S2 itself, e.g. `s2 lite`.
+    if let Some(config) = HELP_CONFIG
+        .as_ref()
+        .filter(|config| !crate::login::uses_default_endpoints(config))
+    {
+        let endpoint = crate::login::destination_label(config);
+        help.push_str(&color_print::cformat!(
+            "<bold><green>Endpoint:</green></bold> {endpoint} <dim>(custom)</dim>\n\n"
+        ));
+    }
+    help.push_str("{usage-heading} {usage}\n\n");
+    help.push_str(&get_started());
+    for (heading, names) in COMMAND_GROUPS {
+        help.push_str(&color_print::cformat!(
+            "\n<bold><green>{heading}:</green></bold>\n"
+        ));
+        for name in *names {
+            let about = commands
+                .find_subcommand(name)
+                .and_then(|command| command.get_about())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let padding = " ".repeat(width - name.len());
+            help.push_str(&color_print::cformat!(
+                "  <bold><blue>{name}</blue></bold>{padding}  {about}\n"
+            ));
+        }
+    }
+    help.push_str(&color_print::cformat!(
+        "\n<bold><green>Options:</green></bold>\n{{options}}\n\n\
+         Run `s2 [COMMAND] --help` for details. Docs: https://s2.dev/docs/cli"
+    ));
+    help
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "s2", version = crate::update::long_version(), override_usage = general_usage(), styles = STYLES)]
+#[command(name = "s2", version = crate::update::long_version(), help_template = top_level_help(), styles = STYLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -1242,10 +1328,10 @@ pub struct GetStreamMetricsArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{Parser, Subcommand};
 
     use super::{
-        AccessTokenCommand, Cli, Command, DiffArgs, DiffOutput, DiffResourceKind,
+        AccessTokenCommand, COMMAND_GROUPS, Cli, Command, DiffArgs, DiffOutput, DiffResourceKind,
         IssueAccessTokenArgs,
     };
 
@@ -1355,6 +1441,23 @@ mod tests {
 
     // Scripts written against released CLIs use the flat names, so they must keep parsing after
     // the commands moved into groups.
+    #[test]
+    fn help_groups_cover_visible_commands() {
+        let commands = Command::augment_subcommands(clap::Command::new("s2"));
+        let mut visible: Vec<&str> = commands
+            .get_subcommands()
+            .filter(|command| !command.is_hide_set())
+            .map(|command| command.get_name())
+            .collect();
+        let mut grouped: Vec<&str> = COMMAND_GROUPS
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect();
+        visible.sort_unstable();
+        grouped.sort_unstable();
+        assert_eq!(grouped, visible);
+    }
+
     #[test]
     fn released_flat_command_names_still_parse() {
         const URI: &str = "s2://my-basin/stream";
