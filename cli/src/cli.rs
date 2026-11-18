@@ -35,9 +35,9 @@ fn general_usage() -> String {
     color_print::cformat!(
         r#"
     <dim>$</dim> <bold>s2 login</bold>
-    <dim>$</dim> <bold>s2 basin create {basin} --location aws:us-east-1 --create-stream-on-append</bold>
+    <dim>$</dim> <bold>s2 basin create {basin}</bold> <dim>--location aws:us-east-1</dim> <bold>--create-stream-on-append</bold>
     <dim>$</dim> <bold>echo "hello, world" | s2 append s2://{basin}/my-stream</bold>
-    <dim>$</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0 --count 10</bold>
+    <dim>$</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0</bold> <dim>--count 10</dim>
     "#
     )
 }
