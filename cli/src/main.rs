@@ -606,15 +606,24 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::GetAccountMetrics(args) | Command::Metrics(MetricsCommand::Account(args)) => {
             let output = args.output;
-            let token_activity = matches!(
-                args.metric,
-                cli::AccountMetricCommand::TokenActivity(_)
-            );
+            let pretty = match &args.metric {
+                _ if output != cli::MetricsOutput::Pretty => None,
+                cli::AccountMetricCommand::TokenActivity(_) => {
+                    Some(print_token_activity as fn(&[Metric]))
+                }
+                cli::AccountMetricCommand::EstimatedBillableUsage(usage) => {
+                    Some(if usage.interval.is_some() {
+                        |metrics: &[Metric]| print_estimated_billable_usage(metrics, true)
+                    } else {
+                        |metrics: &[Metric]| print_estimated_billable_usage(metrics, false)
+                    })
+                }
+                _ => None,
+            };
             let metrics = ops::get_account_metrics(&s2, args).await?;
-            if token_activity && output == cli::MetricsOutput::Pretty {
-                print_token_activity(&metrics);
-            } else {
-                print_metrics(&metrics, output);
+            match pretty {
+                Some(print) => print(&metrics),
+                None => print_metrics(&metrics, output),
             }
         }
 
@@ -1142,6 +1151,14 @@ fn print_token_activity(metrics: &[Metric]) {
     );
     let rest: Vec<Metric> = rest.into_iter().cloned().collect();
     print_metrics(&rest, cli::MetricsOutput::Pretty);
+}
+
+fn print_estimated_billable_usage(metrics: &[Metric], by_interval: bool) {
+    let rendered = metrics::render_estimated_billable_usage(metrics, by_interval);
+    if rendered.is_empty() {
+        eprintln!("No estimated billable usage in the time range.");
+    }
+    print!("{rendered}");
 }
 
 fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {

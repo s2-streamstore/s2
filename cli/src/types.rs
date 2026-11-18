@@ -1100,6 +1100,24 @@ impl From<Interval> for TimeseriesInterval {
     }
 }
 
+/// Intervals the estimated billable usage metric set is available in.
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum BillableUsageInterval {
+    /// Per-hour intervals.
+    Hour,
+    /// Per-day intervals.
+    Day,
+}
+
+impl From<BillableUsageInterval> for TimeseriesInterval {
+    fn from(value: BillableUsageInterval) -> Self {
+        match value {
+            BillableUsageInterval::Hour => TimeseriesInterval::Hour,
+            BillableUsageInterval::Day => TimeseriesInterval::Day,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LatencyStats {
     pub min: std::time::Duration,

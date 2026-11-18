@@ -17,7 +17,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        BasinConfig, EncryptionAlgorithm, Interval, LocationName, Operation,
+        BasinConfig, BillableUsageInterval, EncryptionAlgorithm, Interval, LocationName, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StreamConfig,
     },
@@ -1263,14 +1263,15 @@ pub struct BenchArgs {
 
 /// Time range args for gauge metrics (no interval).
 #[derive(Args, Debug)]
-#[command(group(clap::ArgGroup::new("start_time").required(true)))]
-#[command(group(clap::ArgGroup::new("end_time").required(true)))]
+#[command(group(clap::ArgGroup::new("start_time")))]
+#[command(group(clap::ArgGroup::new("end_time")))]
 pub struct TimeRangeArgs {
     /// Start time in seconds since Unix epoch.
     #[arg(long = "start-timestamp", group = "start_time")]
     pub start_timestamp: Option<u32>,
 
     /// Start time as human-friendly delta from current time (e.g., "2h", "1d", "0s").
+    /// Defaults to 30 days ago.
     #[arg(long, group = "start_time")]
     pub start_ago: Option<humantime::Duration>,
 
@@ -1279,6 +1280,7 @@ pub struct TimeRangeArgs {
     pub end_timestamp: Option<u32>,
 
     /// End time as human-friendly delta from current time (e.g., "2h", "1d", "0s").
+    /// Defaults to now.
     #[arg(long, group = "end_time")]
     pub end_ago: Option<humantime::Duration>,
 }
@@ -1302,9 +1304,22 @@ pub enum AccountMetricCommand {
     ActiveBasins(TimeRangeArgs),
     /// Account operations by type.
     AccountOps(TimeRangeAndIntervalArgs),
+    /// Estimated billable usage in US dollars by billing dimension.
+    /// Counts only hours whose usage is finalized, so the most recent hours are missing.
+    EstimatedBillableUsage(EstimatedBillableUsageArgs),
     /// Most recent use of each given access token, per outcome and source address.
     /// May lag by a couple of minutes.
     TokenActivity(TokenActivityArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct EstimatedBillableUsageArgs {
+    #[command(flatten)]
+    pub time_range: TimeRangeArgs,
+
+    /// Show the total per interval, instead of each dimension summed over the time range.
+    #[arg(long)]
+    pub interval: Option<BillableUsageInterval>,
 }
 
 #[derive(Args, Debug)]

@@ -6,7 +6,7 @@ use std::{
 };
 
 use colored::Colorize;
-use s2_sdk::types::{Metric, MetricUnit, RecordMetric, TimeseriesInterval};
+use s2_sdk::types::{AccumulationMetric, Metric, MetricUnit, RecordMetric, TimeseriesInterval};
 use serde_json::{Value, json};
 
 pub fn format_unit(unit: &MetricUnit) -> &str {
@@ -173,9 +173,97 @@ pub fn render_token_activity(
     out
 }
 
+/// Estimated billable usage in US dollars: each dimension with usage summed over the time range,
+/// or with `by_interval` the total of each interval. Both end with the total over the range.
+pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) -> String {
+    const TOTAL: &str = "total";
+
+    let series: Vec<&AccumulationMetric> = metrics
+        .iter()
+        .filter_map(|metric| match metric {
+            Metric::Accumulation(series) => Some(series),
+            _ => None,
+        })
+        .collect();
+    let Some(total) = series.iter().find(|series| series.name == TOTAL) else {
+        return String::new();
+    };
+    let sum = |series: &AccumulationMetric| series.values.iter().map(|(_, usd)| usd).sum::<f64>();
+    let timestamp = |ts: u32| {
+        humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_secs(ts as u64)).to_string()
+    };
+
+    let mut out = String::new();
+    let (heading, mut rows): (&str, Vec<(String, f64)>) = if by_interval {
+        let rows = total.values.iter().map(|(ts, usd)| (timestamp(*ts), *usd));
+        ("interval start", rows.collect())
+    } else {
+        // Only finalized hours are counted, so say which hours the sums cover.
+        if let (Some((first, _)), Some((last, _))) = (total.values.first(), total.values.last()) {
+            let interval = match total.interval {
+                TimeseriesInterval::Minute => 60,
+                TimeseriesInterval::Hour => 60 * 60,
+                TimeseriesInterval::Day => 24 * 60 * 60,
+                _ => 0,
+            };
+            out.push_str(&format!(
+                "Estimated billable usage, {} to {}\n\n",
+                timestamp(*first),
+                timestamp(last.saturating_add(interval))
+            ));
+        }
+        let rows = series
+            .iter()
+            .filter(|series| series.name != TOTAL)
+            .map(|series| (series.name.clone(), sum(series)));
+        ("dimension", rows.collect())
+    };
+    rows.push((TOTAL.to_string(), sum(total)));
+
+    let rows: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|(name, usd)| (name, format!("{usd:.6}")))
+        .collect();
+    let name_width = rows
+        .iter()
+        .map(|(name, _)| name.len())
+        .chain([heading.len()])
+        .max()
+        .unwrap_or_default();
+    let usd_width = rows
+        .iter()
+        .map(|(_, usd)| usd.len())
+        .max()
+        .unwrap_or_default();
+    let line = |name: &str, usd: &str| format!("{name:<name_width$}  {usd:>usd_width$}");
+
+    out.push_str(&format!("{}\n", line(heading, "usd").dimmed()));
+    for (i, (name, usd)) in rows.iter().enumerate() {
+        let line = line(name, usd);
+        if i + 1 == rows.len() {
+            out.push_str(&format!("{}\n", line.bold()));
+        } else {
+            out.push_str(&format!("{line}\n"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usd(name: &str, values: &[(u32, f64)]) -> Metric {
+        let api = s2_api::v1::metrics::AccumulationMetric {
+            name: name.into(),
+            unit: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::MetricUnit::Usd),
+            interval: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::TimeseriesInterval::Hour),
+            values: values.to_vec(),
+        };
+        Metric::from(s2_api::v1::MaybeKnown::Known(
+            s2_api::v1::metrics::Metric::Accumulation(api),
+        ))
+    }
 
     fn record(timestamp: u32, fields: &[(&str, &str)]) -> Metric {
         let api = s2_api::v1::metrics::RecordMetric {
@@ -286,6 +374,37 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn estimated_billable_usage_sums_dimensions_or_lists_interval_totals() {
+        colored::control::set_override(false);
+        let metrics = [
+            usd("ops.stream", &[(0, 0.25), (3600, 1.5)]),
+            usd("storage.data", &[(0, 0.000001), (3600, 0.000002)]),
+            usd("total", &[(0, 0.250001), (3600, 1.500002)]),
+        ];
+        let expected = [
+            "Estimated billable usage, 1970-01-01T00:00:00Z to 1970-01-01T02:00:00Z",
+            "",
+            "dimension          usd",
+            "ops.stream    1.750000",
+            "storage.data  0.000003",
+            "total         1.750003",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(render_estimated_billable_usage(&metrics, false), expected);
+
+        let expected = [
+            "interval start             usd",
+            "1970-01-01T00:00:00Z  0.250001",
+            "1970-01-01T01:00:00Z  1.500002",
+            "total                 1.750003",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(render_estimated_billable_usage(&metrics, true), expected);
     }
 
     #[test]

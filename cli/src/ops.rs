@@ -23,7 +23,7 @@ use s2_sdk::{
         NetworkPolicySelector, PublicNetPolicy, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig,
         ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime,
         SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
-        StreamReconfiguration, TimeRange, TimeRangeAndInterval,
+        StreamReconfiguration, TimeRange, TimeRangeAndInterval, TimeseriesInterval,
     },
 };
 
@@ -47,7 +47,7 @@ use crate::{
         ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs, TimeRangeArgs, TrimArgs,
     },
     error::{CliError, OpKind},
-    types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
+    types::{BasinConfig, S2BasinAndStreamUri, StreamConfig},
 };
 
 /// List basins, returning items and whether there are more.
@@ -417,6 +417,12 @@ pub async fn get_account_metrics(
         AccountMetricCommand::AccountOps(t) => {
             let (start, end) = resolve_time_range(&t.time_range);
             AccountMetricSet::AccountOps(time_range_and_interval(start, end, t.interval))
+        }
+        AccountMetricCommand::EstimatedBillableUsage(t) => {
+            let (start, end) = resolve_time_range(&t.time_range);
+            AccountMetricSet::EstimatedBillableUsage(time_range_and_interval(
+                start, end, t.interval,
+            ))
         }
         AccountMetricCommand::TokenActivity(t) => AccountMetricSet::TokenActivity(t.token_ids),
     };
@@ -857,7 +863,11 @@ async fn append_command(
         .map_err(|e| CliError::op(op_error, e))
 }
 
-fn resolve_time(timestamp: Option<u32>, ago: Option<humantime::Duration>) -> u32 {
+fn resolve_time(
+    timestamp: Option<u32>,
+    ago: Option<humantime::Duration>,
+    default_ago: Duration,
+) -> u32 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -865,23 +875,27 @@ fn resolve_time(timestamp: Option<u32>, ago: Option<humantime::Duration>) -> u32
 
     match (timestamp, ago) {
         (Some(ts), None) => ts,
-        (None, Some(ago)) => now.saturating_sub(ago.as_secs() as u32),
-        (None, None) => unreachable!("clap group ensures one is specified"),
+        (None, ago) => {
+            let ago = ago.map_or(default_ago, Into::into);
+            now.saturating_sub(ago.as_secs() as u32)
+        }
         (Some(_), Some(_)) => unreachable!("clap group ensures only one is specified"),
     }
 }
 
+/// The last 30 days, where a bound is not given.
 fn resolve_time_range(args: &TimeRangeArgs) -> (u32, u32) {
+    const DEFAULT_START_AGO: Duration = Duration::from_secs(30 * 24 * 60 * 60);
     (
-        resolve_time(args.start_timestamp, args.start_ago),
-        resolve_time(args.end_timestamp, args.end_ago),
+        resolve_time(args.start_timestamp, args.start_ago, DEFAULT_START_AGO),
+        resolve_time(args.end_timestamp, args.end_ago, Duration::ZERO),
     )
 }
 
 fn time_range_and_interval(
     start: u32,
     end: u32,
-    interval: Option<Interval>,
+    interval: Option<impl Into<TimeseriesInterval>>,
 ) -> TimeRangeAndInterval {
     let mut range = TimeRangeAndInterval::new(start, end);
     if let Some(interval) = interval {
