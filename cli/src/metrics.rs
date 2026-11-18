@@ -125,7 +125,7 @@ pub fn render_token_activity(
             ]);
     }
 
-    let header = ["ADDRESS", "LAST USE", "REASON", "USER AGENT"].map(str::to_string);
+    let header = ["ADDRESS", "LAST ACTIVITY", "REASON", "USER AGENT"].map(str::to_string);
     let rows = || tokens.values().flat_map(BTreeMap::values).flatten();
     // A column no record has a value for is left out, heading included.
     let widths: [usize; 4] =
@@ -237,13 +237,13 @@ mod tests {
         ];
         let rendered = render_token_activity(&records(&metrics), now, Some(70));
         let expected = [
-            "    ADDRESS            LAST USE     REASON         USER AGENT",
+            "    ADDRESS            LAST ACTIVITY  REASON         USER AGENT",
             "t",
             "  accepted",
-            "    2600:1700::c97a    1m 42s ago                  s2-cli/0.45.0 (cha…",
-            "    99.43.255.71       1h ago                      s2-sdk-rust/0.35.1",
+            "    2600:1700::c97a    1m 42s ago                    s2-cli/0.45.0 (c…",
+            "    99.43.255.71       1h ago                        s2-sdk-rust/0.35…",
             "  denied",
-            "    10.0.0.7 (vpce-1)  16m 40s ago  token_revoked  curl/8.5",
+            "    10.0.0.7 (vpce-1)  16m 40s ago    token_revoked  curl/8.5",
             "",
         ]
         .join("\n");
@@ -273,8 +273,17 @@ mod tests {
             ),
         ];
         let rendered = render_token_activity(&records(&metrics), now, None);
-        let expected = "    ADDRESS  LAST USE\na\n  accepted\n    ::2      just now\nb\n  accepted\n    \
-                        ::1      1m ago\n";
+        let expected = [
+            "    ADDRESS  LAST ACTIVITY",
+            "a",
+            "  accepted",
+            "    ::2      just now",
+            "b",
+            "  accepted",
+            "    ::1      1m ago",
+            "",
+        ]
+        .join("\n");
         assert_eq!(rendered, expected);
     }
 
