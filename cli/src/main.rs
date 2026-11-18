@@ -43,8 +43,9 @@ use s2_sdk::{
     S2,
     types::{
         AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
-        EncryptionKey, LocationInfo, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
-        StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig, TimestampingMode,
+        EncryptionKey, LocationInfo, MeteredBytes, Metric, PrivateNet, RetentionPolicy,
+        RetryConfig, StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig,
+        TimestampingMode,
     },
 };
 use strum::VariantNames;
@@ -985,6 +986,11 @@ fn print_location_listing(location: &LocationInfo) {
     }
     if let Some(default_storage_class) = &location.default_storage_class {
         println!("  default storage class: {default_storage_class}");
+    }
+    match &location.private_net {
+        Some(PrivateNet::Aws(aws)) => println!("  privatelink service name: {}", aws.service_name),
+        Some(PrivateNet::Unknown(kind)) => println!("  private net: {kind}"),
+        Some(_) | None => {}
     }
 }
 
