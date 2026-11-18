@@ -13,7 +13,7 @@ pub struct AwsPrivateNet {
     pub service_name: CompactString,
 }
 
-/// How a location can be reached over a private network. Exactly one kind applies.
+/// How the account can reach a location over a private network. Exactly one kind applies.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -49,7 +49,8 @@ pub struct LocationInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     pub default_storage_class: Option<CompactString>,
-    /// [Private networking](https://s2.dev/docs/platform/private-networking) for this location.
+    /// [Private networking](https://s2.dev/docs/platform/private-networking) details for the
+    /// account in this location, which can differ between accounts.
     /// Omitted until the account has a basin in this location, and when the location cannot be
     /// reached over a private network.
     #[serde(default, skip_serializing_if = "Option::is_none")]

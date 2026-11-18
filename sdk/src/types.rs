@@ -1894,7 +1894,7 @@ pub struct AwsPrivateNet {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// How a location can be reached over a private network. Exactly one kind applies.
+/// How the account can reach a location over a private network. Exactly one kind applies.
 pub enum PrivateNet {
     /// AWS PrivateLink.
     Aws(AwsPrivateNet),
@@ -1925,7 +1925,8 @@ pub struct LocationInfo {
     pub storage_classes: Option<Vec<CompactString>>,
     /// Default [storage class](https://s2.dev/docs/storage-classes) for this location.
     pub default_storage_class: Option<CompactString>,
-    /// [Private networking](https://s2.dev/docs/platform/private-networking) for this location.
+    /// [Private networking](https://s2.dev/docs/platform/private-networking) details for the
+    /// account in this location, which can differ between accounts.
     /// `None` until the account has a basin in this location, and when the location cannot be
     /// reached over a private network.
     pub private_net: Option<PrivateNet>,
