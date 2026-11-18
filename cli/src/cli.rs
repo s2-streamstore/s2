@@ -59,13 +59,12 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
-    /// List basins or streams in a basin.
+    /// List basins, or streams within a basin.
     ///
-    /// List basins if basin name is not provided otherwise lists streams in
-    /// the basin.
+    /// Lists basins if no basin name is given, otherwise the streams in that basin.
     Ls(LsArgs),
 
-    /// Manage basins.
+    /// Manage basins (namespaces for streams).
     #[command(subcommand)]
     Basin(BasinCommand),
 
@@ -81,8 +80,16 @@ pub enum Command {
     #[command(subcommand)]
     NetworkPolicy(NetworkPolicyCommand),
 
-    /// Manage locations.
-    #[command(subcommand)]
+    /// Manage locations (where basins are physically hosted).
+    ///
+    /// A basin is created in one location, such as `aws:us-east-1`, and its streams are stored
+    /// and served there.
+    #[command(
+        subcommand,
+        after_help = "\
+A basin's location is chosen with `s2 basin create --location`. Without the flag, the basin
+is created in the account's default location."
+    )]
     Location(LocationCommand),
 
     /// Get account, basin, or stream metrics.
@@ -380,13 +387,13 @@ Examples:
 
 #[derive(Subcommand, Debug)]
 pub enum LocationCommand {
-    /// List locations.
+    /// List the locations basins can be created in.
     List,
 
-    /// Get the default location.
+    /// Get the default location for new basins.
     GetDefault,
 
-    /// Set the default location.
+    /// Set the default location for new basins.
     SetDefault {
         /// Location name to make the default.
         location: LocationName,
@@ -594,7 +601,9 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
-    /// Basin location.
+    /// Location to create the basin in, from `s2 location list`.
+    ///
+    /// Defaults to the account's default location.
     #[arg(long)]
     pub location: Option<LocationName>,
 
