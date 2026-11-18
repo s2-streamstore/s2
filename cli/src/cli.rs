@@ -8,6 +8,7 @@ use s2_sdk::types::{
     NetworkPolicySlug, NetworkPolicySlugPrefix, NetworkPolicySlugStartAfter, StreamName,
     StreamNamePrefix, StreamNameStartAfter, VpcEndpointId,
 };
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     record_format::{
@@ -57,8 +58,34 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
     ("Tools", &["bench", "lite", "update"]),
 ];
 
-/// A first-use walkthrough. On S2, basin names are unique across all accounts, so the example
-/// name gets a fresh random suffix to stay free for whoever copies it.
+/// Suffix for the walkthrough's basin name. On S2, basin names are unique across all accounts,
+/// so the example needs one to stay free for whoever copies it. It is derived from the machine
+/// and the home directory: the same user sees the same name on every run, logged in or not,
+/// without the CLI storing anything. Containers have no machine ID, so there it is random.
+fn example_basin_suffix() -> String {
+    let machine_id = machine_uid::get().unwrap_or_default();
+    let machine_id = machine_id.trim();
+    let hex = if machine_id.is_empty() {
+        uuid::Uuid::new_v4().simple().to_string()
+    } else {
+        // Hashed, as a machine ID is not meant to be shown.
+        let mut hasher = Sha256::new();
+        hasher.update(b"s2-cli-example-basin\0");
+        hasher.update(machine_id.as_bytes());
+        hasher.update(b"\0");
+        if let Some(home) = dirs::home_dir() {
+            hasher.update(home.as_os_str().as_encoded_bytes());
+        }
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    hex[..7].to_owned()
+}
+
+/// A first-use walkthrough.
 fn get_started() -> String {
     // A local endpoint accepts any token, refuses browser login, and has its own basin names.
     let (auth, basin) = if HELP_CONFIG
@@ -67,8 +94,7 @@ fn get_started() -> String {
     {
         ("export S2_ACCESS_TOKEN=ignored", "my-basin".to_owned())
     } else {
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        ("s2 login", format!("my-basin-{}", &id[..7]))
+        ("s2 login", format!("my-basin-{}", example_basin_suffix()))
     };
     color_print::cformat!(
         r#"<bold><green>Get started:</green></bold>
