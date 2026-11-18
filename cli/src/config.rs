@@ -141,10 +141,7 @@ pub fn load_config_file() -> Result<CliConfig, CliConfigError> {
     if !path.exists() {
         return Ok(CliConfig::default());
     }
-    let builder = Config::builder().add_source(config::File::new(
-        path.to_str().expect("config path is valid utf8"),
-        FileFormat::Toml,
-    ));
+    let builder = Config::builder().add_source(config::File::from(path).format(FileFormat::Toml));
     Ok(builder.build()?.try_deserialize::<CliConfig>()?)
 }
 
