@@ -11,6 +11,7 @@ mod diff;
 mod error;
 mod lite;
 mod login;
+mod metrics;
 mod ops;
 mod record_format;
 mod types;
@@ -582,18 +583,29 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
 
         Command::GetAccountMetrics(args) | Command::Metrics(MetricsCommand::Account(args)) => {
+            let output = args.output;
+            let token_activity = matches!(
+                args.metric,
+                cli::AccountMetricCommand::TokenActivity(_)
+            );
             let metrics = ops::get_account_metrics(&s2, args).await?;
-            print_metrics(&metrics);
+            if token_activity && output == cli::MetricsOutput::Pretty {
+                print_token_activity(&metrics);
+            } else {
+                print_metrics(&metrics, output);
+            }
         }
 
         Command::GetBasinMetrics(args) | Command::Metrics(MetricsCommand::Basin(args)) => {
+            let output = args.output;
             let metrics = ops::get_basin_metrics(&s2, args).await?;
-            print_metrics(&metrics);
+            print_metrics(&metrics, output);
         }
 
         Command::GetStreamMetrics(args) | Command::Metrics(MetricsCommand::Stream(args)) => {
+            let output = args.output;
             let metrics = ops::get_stream_metrics(&s2, args).await?;
-            print_metrics(&metrics);
+            print_metrics(&metrics, output);
         }
 
         Command::ListStreams(args) => {
@@ -1070,29 +1082,52 @@ fn format_timestamp(ts: u32) -> String {
     humantime::format_rfc3339_seconds(time).to_string()
 }
 
-/// ` (2h 5m ago)` for a time in the past, by its two largest units, and nothing for one that is
-/// not (a clock ahead of the server's would otherwise print a negative age).
+/// ` (2h 5m ago)` for a time in the past, and nothing for one that is not.
 fn format_ago(ts: u32) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let Ok(elapsed) = (UNIX_EPOCH + Duration::from_secs(ts as u64)).elapsed() else {
-        return String::new();
-    };
-    let elapsed = humantime::format_duration(Duration::from_secs(elapsed.as_secs())).to_string();
-    let largest: Vec<&str> = elapsed.split(' ').take(2).collect();
-    format!(" ({} ago)", largest.join(" "))
+    metrics::format_age(ts, std::time::SystemTime::now())
+        .map(|age| format!(" ({age} ago)"))
+        .unwrap_or_default()
 }
 
-fn format_unit(unit: &s2_sdk::types::MetricUnit) -> &str {
-    match unit {
-        s2_sdk::types::MetricUnit::Bytes => "bytes",
-        s2_sdk::types::MetricUnit::Operations => "operations",
-        s2_sdk::types::MetricUnit::Usd => "usd",
-        s2_sdk::types::MetricUnit::Unknown(name) => name,
-        _ => "unknown",
+/// Token activity grouped by outcome. Anything in the set that is not a record is printed as any
+/// other metric would be.
+fn print_token_activity(metrics: &[Metric]) {
+    let (records, rest): (Vec<&Metric>, Vec<&Metric>) = metrics
+        .iter()
+        .partition(|metric| matches!(metric, Metric::Record(_)));
+    let records: Vec<_> = records
+        .into_iter()
+        .filter_map(|metric| match metric {
+            Metric::Record(record) => Some(record),
+            _ => None,
+        })
+        .collect();
+    if records.is_empty() && rest.is_empty() {
+        eprintln!("No recorded use.");
     }
+    let width = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        .then(terminal_size::terminal_size)
+        .flatten()
+        .map(|(terminal_size::Width(width), _)| width as usize);
+    print!(
+        "{}",
+        metrics::render_token_activity(&records, std::time::SystemTime::now(), width)
+    );
+    let rest: Vec<Metric> = rest.into_iter().cloned().collect();
+    print_metrics(&rest, cli::MetricsOutput::Pretty);
 }
 
-fn print_metrics(metrics: &[Metric]) {
+fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
+    use metrics::format_unit;
+
+    if output == cli::MetricsOutput::Json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&metrics::to_json(metrics)).expect("metrics as JSON")
+        );
+        return;
+    }
+
     #[derive(Tabled)]
     struct AccumulationRow {
         interval_start: String,
