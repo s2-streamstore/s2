@@ -698,6 +698,15 @@ pub enum DiffOutput {
     Json,
 }
 
+#[derive(ValueEnum, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsOutput {
+    /// Human-readable tables.
+    #[default]
+    Pretty,
+    /// The metric set as JSON, in the shape of the API response.
+    Json,
+}
+
 #[derive(Args, Debug)]
 pub struct ListStreamsArgs {
     /// Name of the basin to manage or S2 URI with basin and optionally prefix.
@@ -1085,6 +1094,10 @@ pub enum StreamMetricCommand {
 #[derive(Args, Debug)]
 #[command(subcommand_value_name = "METRIC", subcommand_help_heading = "Metrics")]
 pub struct GetAccountMetricsArgs {
+    /// Output format.
+    #[arg(short, long, value_enum, default_value_t, global = true)]
+    pub output: MetricsOutput,
+
     #[command(subcommand)]
     pub metric: AccountMetricCommand,
 }
@@ -1094,6 +1107,10 @@ pub struct GetAccountMetricsArgs {
 pub struct GetBasinMetricsArgs {
     /// Basin name.
     pub basin: S2BasinUri,
+
+    /// Output format.
+    #[arg(short, long, value_enum, default_value_t, global = true)]
+    pub output: MetricsOutput,
 
     #[command(subcommand)]
     pub metric: BasinMetricCommand,
@@ -1105,6 +1122,10 @@ pub struct GetStreamMetricsArgs {
     /// S2 URI of the format: s2://{basin}/{stream}
     #[arg(value_name = "S2_URI")]
     pub uri: S2BasinAndStreamUri,
+
+    /// Output format.
+    #[arg(short, long, value_enum, default_value_t, global = true)]
+    pub output: MetricsOutput,
 
     #[command(subcommand)]
     pub metric: StreamMetricCommand,
