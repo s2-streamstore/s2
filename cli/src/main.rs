@@ -377,6 +377,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         update::user_agent(),
     )?);
     let token_source = Some(credential.source());
+    let default_endpoints = login::uses_default_endpoints(&cli_config);
     let s2 = S2::new(sdk_config.clone())
         .map_err(|e| CliError::SdkInit(e.into()).with_token_source(token_source))?;
     let mut exit_code = ExitCode::SUCCESS;
@@ -944,9 +945,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     })
     .await;
 
-    result
-        .map(|()| exit_code)
-        .map_err(|err| err.with_token_source(token_source))
+    result.map(|()| exit_code).map_err(|err| {
+        err.with_token_source(token_source)
+            .with_endpoints(default_endpoints)
+    })
 }
 
 fn format_position(seq_num: u64, timestamp: u64) -> String {
