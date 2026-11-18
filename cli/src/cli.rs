@@ -57,19 +57,18 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
     ("Tools", &["bench", "lite", "update"]),
 ];
 
-/// A first-use walkthrough. Basin names are unique across all accounts, so the example name gets
-/// a fresh random suffix to stay free for whoever copies it.
+/// A first-use walkthrough. On S2, basin names are unique across all accounts, so the example
+/// name gets a fresh random suffix to stay free for whoever copies it.
 fn get_started() -> String {
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let basin = format!("my-basin-{}", &id[..7]);
-    // Browser login is refused for local endpoints, which accept any token.
-    let auth = if HELP_CONFIG
+    // A local endpoint accepts any token, refuses browser login, and has its own basin names.
+    let (auth, basin) = if HELP_CONFIG
         .as_ref()
         .is_some_and(crate::login::uses_loopback_endpoints)
     {
-        "export S2_ACCESS_TOKEN=ignored"
+        ("export S2_ACCESS_TOKEN=ignored", "my-basin".to_owned())
     } else {
-        "s2 login"
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        ("s2 login", format!("my-basin-{}", &id[..7]))
     };
     color_print::cformat!(
         r#"<bold><green>Get started:</green></bold>
