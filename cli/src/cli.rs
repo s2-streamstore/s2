@@ -30,7 +30,9 @@ const STYLES: styling::Styles = styling::Styles::styled()
 const GENERAL_USAGE: &str = color_print::cstr!(
     r#"
     <dim>$</dim> <bold>s2 login</bold>
-    <dim>$</dim> <bold>s2 basin list --prefix "foo" --limit 100</bold>
+    <dim>$</dim> <bold>s2 basin create my-first-basin --location aws:us-east-1 --create-stream-on-append</bold>
+    <dim>$</dim> <bold>echo "hello, world" | s2 append s2://my-first-basin/my-stream</bold>
+    <dim>$</dim> <bold>s2 read s2://my-first-basin/my-stream --seq-num 0 --count 10</bold>
     "#
 );
 
