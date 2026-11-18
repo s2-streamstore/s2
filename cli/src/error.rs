@@ -5,6 +5,8 @@ use s2_sdk::error::{
 };
 use thiserror::Error;
 
+use crate::environment::Target;
+
 const HELP: &str = color_print::cstr!(
     "\n<cyan><bold>Notice something wrong?</bold></cyan>\n\n\
      <green> > Open an issue:</green>\n\
@@ -182,10 +184,10 @@ impl CliError {
 
     /// S2 implements every API, so `not_implemented` from any other endpoint most likely means
     /// s2-lite, which does not.
-    pub fn with_endpoints(self, default_endpoints: bool) -> Self {
+    pub fn with_target(self, target: Target) -> Self {
         match self {
             CliError::Operation(kind, source)
-                if !default_endpoints && is_not_implemented(&source) =>
+                if target != Target::S2 && is_not_implemented(&source) =>
             {
                 CliError::NotImplemented(kind, source)
             }

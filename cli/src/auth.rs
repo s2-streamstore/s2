@@ -5,8 +5,9 @@ use s2_sdk::{S2, error::ErrorCode, types::ListBasinsInput};
 
 use crate::{
     config::{CliConfig, CredentialStore, sdk_config},
+    environment::Target,
     error::{CliConfigError, CliError, TokenSource},
-    login::{LoginError, destination_label, resolve_access_token, uses_loopback_endpoints},
+    login::{LoginError, destination_label, resolve_access_token},
     update,
 };
 
@@ -58,7 +59,7 @@ pub async fn status() -> Result<ExitCode, CliError> {
 
     let exit_code = match result {
         Ok(_) => {
-            if uses_loopback_endpoints(&config) {
+            if Target::detect(&config) == Target::Local {
                 print_local_connection();
             } else {
                 print_authenticated(&label);

@@ -11,6 +11,7 @@ use s2_sdk::types::{
 use sha2::{Digest as _, Sha256};
 
 use crate::{
+    environment::{Environment, Shell, Target},
     record_format::{
         RecordFormat, RecordsIn, RecordsOut, parse_records_input_source,
         parse_records_output_source,
@@ -32,6 +33,17 @@ const STYLES: styling::Styles = styling::Styles::styled()
 /// config cannot be loaded; help must still print.
 static HELP_CONFIG: std::sync::LazyLock<Option<crate::config::CliConfig>> =
     std::sync::LazyLock::new(|| crate::config::load_cli_config().ok());
+
+/// The environment as `s2 --help` sees it. Without a loadable config, the defaults apply.
+fn help_environment() -> Environment {
+    match HELP_CONFIG.as_ref() {
+        Some(config) => Environment::detect(config),
+        None => Environment {
+            target: Target::S2,
+            shell: Shell::detect(),
+        },
+    }
+}
 
 /// Top-level commands as `s2 --help` lists them. A visible command missing from every group
 /// would not be shown at all, which `help_groups_cover_visible_commands` guards.
@@ -87,14 +99,16 @@ fn example_basin_suffix() -> String {
 
 /// A first-use walkthrough.
 fn get_started() -> String {
+    let environment = help_environment();
     // A local endpoint accepts any token, refuses browser login, and has its own basin names.
-    let (auth, basin) = if HELP_CONFIG
-        .as_ref()
-        .is_some_and(crate::login::uses_loopback_endpoints)
-    {
-        ("export S2_ACCESS_TOKEN=ignored", "my-basin".to_owned())
-    } else {
-        ("s2 login", format!("my-basin-{}", example_basin_suffix()))
+    let (auth, basin) = match (environment.target, environment.shell) {
+        (Target::Local, Shell::Posix) => ("export S2_ACCESS_TOKEN=ignored", "my-basin".to_owned()),
+        (Target::Local, Shell::PowerShell) => {
+            (r#"$env:S2_ACCESS_TOKEN = "ignored""#, "my-basin".to_owned())
+        }
+        (Target::S2 | Target::Custom, _) => {
+            ("s2 login", format!("my-basin-{}", example_basin_suffix()))
+        }
     };
     color_print::cformat!(
         r#"<bold><green>Get started:</green></bold>
@@ -121,7 +135,7 @@ fn top_level_help() -> String {
     // Only worth a line when it is not S2 itself, e.g. `s2 lite`.
     if let Some(config) = HELP_CONFIG
         .as_ref()
-        .filter(|config| !crate::login::uses_default_endpoints(config))
+        .filter(|_| help_environment().target != Target::S2)
     {
         let endpoint = crate::login::destination_label(config);
         help.push_str(&color_print::cformat!(
