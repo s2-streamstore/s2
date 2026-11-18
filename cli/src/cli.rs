@@ -27,17 +27,23 @@ const STYLES: styling::Styles = styling::Styles::styled()
     .literal(styling::AnsiColor::Blue.on_default().bold())
     .placeholder(styling::AnsiColor::Cyan.on_default());
 
-const GENERAL_USAGE: &str = color_print::cstr!(
-    r#"
+/// The first-use walkthrough shown as usage. Basin names are unique across all accounts, so the
+/// example name gets a fresh random suffix to stay free for whoever copies it.
+fn general_usage() -> String {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let basin = format!("my-basin-{}", &id[..7]);
+    color_print::cformat!(
+        r#"
     <dim>$</dim> <bold>s2 login</bold>
-    <dim>$</dim> <bold>s2 basin create my-first-basin --location aws:us-east-1 --create-stream-on-append</bold>
-    <dim>$</dim> <bold>echo "hello, world" | s2 append s2://my-first-basin/my-stream</bold>
-    <dim>$</dim> <bold>s2 read s2://my-first-basin/my-stream --seq-num 0 --count 10</bold>
+    <dim>$</dim> <bold>s2 basin create {basin} --location aws:us-east-1 --create-stream-on-append</bold>
+    <dim>$</dim> <bold>echo "hello, world" | s2 append s2://{basin}/my-stream</bold>
+    <dim>$</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0 --count 10</bold>
     "#
-);
+    )
+}
 
 #[derive(Parser, Debug)]
-#[command(name = "s2", version = crate::update::long_version(), override_usage = GENERAL_USAGE, styles = STYLES)]
+#[command(name = "s2", version = crate::update::long_version(), override_usage = general_usage(), styles = STYLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
