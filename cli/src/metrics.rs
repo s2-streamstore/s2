@@ -89,7 +89,8 @@ pub fn render_token_activity(
     now: SystemTime,
     width: Option<usize>,
 ) -> String {
-    const OUTCOMES: [&str; 2] = ["accepted", "denied"];
+    // Denials first: they are what a reader checking a policy or a leaked token looks for.
+    const OUTCOMES: [&str; 2] = ["denied", "accepted"];
     const INDENT: &str = "    ";
     type Row = [String; 4];
 
@@ -239,11 +240,11 @@ mod tests {
         let expected = [
             "    ADDRESS            LAST ACTIVITY  REASON         USER AGENT",
             "t",
+            "  denied",
+            "    10.0.0.7 (vpce-1)  16m 40s ago    token_revoked  curl/8.5",
             "  accepted",
             "    2600:1700::c97a    1m 42s ago                    s2-cli/0.45.0 (c…",
             "    99.43.255.71       1h ago                        s2-sdk-rust/0.35…",
-            "  denied",
-            "    10.0.0.7 (vpce-1)  16m 40s ago    token_revoked  curl/8.5",
             "",
         ]
         .join("\n");
