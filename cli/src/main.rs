@@ -25,7 +25,7 @@ use std::{pin::Pin, process::ExitCode, time::Duration};
 use clap::{CommandFactory, Parser};
 use cli::{
     ApplyArgs, AuthAccessTokenCommand, AuthCommand, Cli, Command, ConfigCommand, ListBasinsArgs,
-    ListStreamsArgs,
+    ListStreamsArgs, LocationCommand, MetricsCommand, NetworkPolicyCommand,
 };
 use colored::Colorize;
 use config::{
@@ -515,7 +515,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             );
         }
 
-        Command::ListNetworkPolicies(args) => {
+        Command::NetworkPolicy(NetworkPolicyCommand::List(args)) => {
             let (policies, _) = ops::list_network_policies(&s2, args).await?;
             let policies: Vec<NetworkPolicyInfo> =
                 policies.into_iter().map(NetworkPolicyInfo::from).collect();
@@ -529,18 +529,18 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             }
         }
 
-        Command::CreateNetworkPolicy(args) => {
+        Command::NetworkPolicy(NetworkPolicyCommand::Create(args)) => {
             let info = ops::create_network_policy(&s2, args).await?;
             eprintln!("{}", "✓ Network policy created".green().bold());
             println!("{}", info.id);
         }
 
-        Command::GetNetworkPolicy { id } => {
+        Command::NetworkPolicy(NetworkPolicyCommand::Get { id }) => {
             let info = NetworkPolicyInfo::from(ops::get_network_policy(&s2, id).await?);
             println!("{}", json_to_table(&serde_json::to_value(&info)?));
         }
 
-        Command::DeleteNetworkPolicy { id } => {
+        Command::NetworkPolicy(NetworkPolicyCommand::Delete { id }) => {
             ops::delete_network_policy(&s2, id.clone()).await?;
             eprintln!(
                 "{}",
@@ -556,19 +556,20 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             }
         }
 
-        Command::ListLocations => {
+        Command::ListLocations | Command::Location(LocationCommand::List) => {
             let locations = ops::list_locations(&s2).await?;
             for location_info in locations {
                 print_location_listing(&location_info);
             }
         }
 
-        Command::GetDefaultLocation => {
+        Command::GetDefaultLocation | Command::Location(LocationCommand::GetDefault) => {
             let location = ops::get_default_location(&s2).await?;
             print_location_listing(&location);
         }
 
-        Command::SetDefaultLocation { location } => {
+        Command::SetDefaultLocation { location }
+        | Command::Location(LocationCommand::SetDefault { location }) => {
             let location_name = location.to_string();
             let location = ops::set_default_location(&s2, location).await?;
             eprintln!(
@@ -580,17 +581,17 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             print_location_listing(&location);
         }
 
-        Command::GetAccountMetrics(args) => {
+        Command::GetAccountMetrics(args) | Command::Metrics(MetricsCommand::Account(args)) => {
             let metrics = ops::get_account_metrics(&s2, args).await?;
             print_metrics(&metrics);
         }
 
-        Command::GetBasinMetrics(args) => {
+        Command::GetBasinMetrics(args) | Command::Metrics(MetricsCommand::Basin(args)) => {
             let metrics = ops::get_basin_metrics(&s2, args).await?;
             print_metrics(&metrics);
         }
 
-        Command::GetStreamMetrics(args) => {
+        Command::GetStreamMetrics(args) | Command::Metrics(MetricsCommand::Stream(args)) => {
             let metrics = ops::get_stream_metrics(&s2, args).await?;
             print_metrics(&metrics);
         }
@@ -1069,6 +1070,18 @@ fn format_timestamp(ts: u32) -> String {
     humantime::format_rfc3339_seconds(time).to_string()
 }
 
+/// ` (2h 5m ago)` for a time in the past, by its two largest units, and nothing for one that is
+/// not (a clock ahead of the server's would otherwise print a negative age).
+fn format_ago(ts: u32) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let Ok(elapsed) = (UNIX_EPOCH + Duration::from_secs(ts as u64)).elapsed() else {
+        return String::new();
+    };
+    let elapsed = humantime::format_duration(Duration::from_secs(elapsed.as_secs())).to_string();
+    let largest: Vec<&str> = elapsed.split(' ').take(2).collect();
+    format!(" ({} ago)", largest.join(" "))
+}
+
 fn format_unit(unit: &s2_sdk::types::MetricUnit) -> &str {
     match unit {
         s2_sdk::types::MetricUnit::Bytes => "bytes",
@@ -1163,7 +1176,12 @@ fn print_metrics(metrics: &[Metric]) {
                 }
             }
             Metric::Record(m) => {
-                println!("{} @ {}:", m.name, format_timestamp(m.timestamp));
+                println!(
+                    "{} @ {}{}:",
+                    m.name,
+                    format_timestamp(m.timestamp),
+                    format_ago(m.timestamp)
+                );
                 for (field, value) in &m.fields {
                     println!("  {field}: {value}");
                 }

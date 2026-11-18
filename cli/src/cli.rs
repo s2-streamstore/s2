@@ -96,46 +96,48 @@ pub enum Command {
         id: AccessTokenId,
     },
 
-    /// List network policies.
-    ListNetworkPolicies(ListNetworkPoliciesArgs),
-
-    /// Create a network policy.
-    CreateNetworkPolicy(CreateNetworkPolicyArgs),
-
-    /// Get a network policy.
-    GetNetworkPolicy {
-        /// Network policy slug, or full `<slug>.<nonce>` reference.
-        id: NetworkPolicySelector,
-    },
-
-    /// Delete a network policy. It must not be bound to any access token.
-    DeleteNetworkPolicy {
-        /// Network policy slug, or full `<slug>.<nonce>` reference.
-        id: NetworkPolicySelector,
-    },
+    /// Manage network policies.
+    #[command(subcommand)]
+    NetworkPolicy(NetworkPolicyCommand),
 
     /// Compare two basins, streams, or access tokens.
     Diff(DiffArgs),
 
-    /// List locations.
+    /// Manage locations.
+    #[command(subcommand)]
+    Location(LocationCommand),
+
+    /// Get account, basin, or stream metrics.
+    #[command(subcommand)]
+    Metrics(MetricsCommand),
+
+    // The flat names below predate the `location` and `metrics` groups. They keep working but are
+    // hidden from help.
+    /// Alias of `s2 location list`.
+    #[command(hide = true)]
     ListLocations,
 
-    /// Get the default location.
+    /// Alias of `s2 location get-default`.
+    #[command(hide = true)]
     GetDefaultLocation,
 
-    /// Set the default location.
+    /// Alias of `s2 location set-default`.
+    #[command(hide = true)]
     SetDefaultLocation {
         /// Location name to make the default.
         location: LocationName,
     },
 
-    /// Get account metrics.
+    /// Alias of `s2 metrics account`.
+    #[command(hide = true)]
     GetAccountMetrics(GetAccountMetricsArgs),
 
-    /// Get basin metrics.
+    /// Alias of `s2 metrics basin`.
+    #[command(hide = true)]
     GetBasinMetrics(GetBasinMetricsArgs),
 
-    /// Get stream metrics.
+    /// Alias of `s2 metrics stream`.
+    #[command(hide = true)]
     GetStreamMetrics(GetStreamMetricsArgs),
 
     /// List streams.
@@ -256,6 +258,59 @@ pub struct UpdateArgs {
     /// command directly where the running executable can be replaced.
     #[arg(long, short = 'y')]
     pub yes: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NetworkPolicyCommand {
+    /// List network policies.
+    List(ListNetworkPoliciesArgs),
+
+    /// Create a network policy.
+    #[command(after_help = "\
+Examples:
+  s2 network-policy create office --allow-cidr 203.0.113.0/24
+  s2 network-policy create laptop --allow-cidr 198.51.100.7/32 --allow-cidr 2001:db8::/32
+  s2 network-policy create vpc-only --aws-vpce vpce-0a1b2c3d4e5f67890")]
+    Create(CreateNetworkPolicyArgs),
+
+    /// Get a network policy.
+    Get {
+        /// Network policy slug, or full `<slug>.<nonce>` reference.
+        id: NetworkPolicySelector,
+    },
+
+    /// Delete a network policy. It must not be bound to any access token.
+    Delete {
+        /// Network policy slug, or full `<slug>.<nonce>` reference.
+        id: NetworkPolicySelector,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LocationCommand {
+    /// List locations.
+    List,
+
+    /// Get the default location.
+    GetDefault,
+
+    /// Set the default location.
+    SetDefault {
+        /// Location name to make the default.
+        location: LocationName,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MetricsCommand {
+    /// Get account metrics.
+    Account(GetAccountMetricsArgs),
+
+    /// Get basin metrics.
+    Basin(GetBasinMetricsArgs),
+
+    /// Get stream metrics.
+    Stream(GetStreamMetricsArgs),
 }
 
 #[derive(Subcommand, Debug)]

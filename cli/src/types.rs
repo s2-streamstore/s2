@@ -914,7 +914,7 @@ impl From<sdk::types::NetworkPolicyInfo> for NetworkPolicyInfo {
 }
 
 impl NetworkPolicyInfo {
-    /// Two-line compact summary for `s2 list-network-policies`, in the style of
+    /// Two-line compact summary for `s2 network-policy list`, in the style of
     /// [`AccessTokenInfo::summary_block`].
     pub fn summary_block(&self, id_width: usize) -> String {
         let padding = " ".repeat(id_width.saturating_sub(self.id.len()));
