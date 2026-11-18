@@ -126,7 +126,7 @@ pub fn render_token_activity(
             ]);
     }
 
-    let header = ["ADDRESS", "LAST ACTIVITY", "REASON", "USER AGENT"].map(str::to_string);
+    let header = ["ADDRESS", "LAST ACTIVITY", "CONTEXT", "USER AGENT"].map(str::to_string);
     let rows = || tokens.values().flat_map(BTreeMap::values).flatten();
     // A column no record has a value for is left out, heading included.
     let widths: [usize; 4] =
@@ -238,7 +238,7 @@ mod tests {
         ];
         let rendered = render_token_activity(&records(&metrics), now, Some(70));
         let expected = [
-            "    ADDRESS            LAST ACTIVITY  REASON         USER AGENT",
+            "    ADDRESS            LAST ACTIVITY  CONTEXT        USER AGENT",
             "t",
             "  denied",
             "    10.0.0.7 (vpce-1)  16m 40s ago    token_revoked  curl/8.5",
