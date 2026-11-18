@@ -81,85 +81,90 @@ fn field<'a>(record: &'a RecordMetric, name: &str) -> &'a str {
     record.fields.get(name).map_or("", String::as_str)
 }
 
-/// Token activity as one section per outcome, with a line for each source address: the address,
-/// how long ago it last used the token, why it was denied (if it was), and its user agent.
-/// Sections are under a token ID heading when the records cover more than one token.
+/// Token activity under a heading per token ID and, within it, per outcome, with a line for each
+/// source address: the address, how long ago it last used the token, why it was denied (if it
+/// was), and its user agent. Columns line up across all sections.
 pub fn render_token_activity(
     records: &[&RecordMetric],
     now: SystemTime,
     width: Option<usize>,
 ) -> String {
     const OUTCOMES: [&str; 2] = ["accepted", "denied"];
+    const INDENT: &str = "    ";
+    type Row = [String; 4];
 
-    let mut tokens: BTreeMap<&str, BTreeMap<(usize, &str), Vec<&RecordMetric>>> = BTreeMap::new();
-    for record in records {
+    if records.is_empty() {
+        return String::new();
+    }
+
+    let mut tokens: BTreeMap<&str, BTreeMap<(usize, &str), Vec<Row>>> = BTreeMap::new();
+    let mut sorted = records.to_vec();
+    sorted.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
+    for record in sorted {
         let outcome = field(record, "outcome");
         let rank = OUTCOMES
             .iter()
             .position(|known| *known == outcome)
             .unwrap_or(OUTCOMES.len());
+        let address = match field(record, "private_net_id") {
+            "" => field(record, "ip_address").to_string(),
+            net => format!("{} ({net})", field(record, "ip_address")),
+        };
+        let age = format_age(record.timestamp, now)
+            .map_or_else(|| "just now".to_string(), |age| format!("{age} ago"));
         tokens
             .entry(field(record, "token_id"))
             .or_default()
             .entry((rank, outcome))
             .or_default()
-            .push(record);
+            .push([
+                address,
+                age,
+                field(record, "reason").to_string(),
+                field(record, "user_agent").to_string(),
+            ]);
     }
 
-    let indent = if tokens.len() > 1 { "  " } else { "" };
-    let mut out = String::new();
-    for (token_id, outcomes) in tokens {
-        if !indent.is_empty() {
-            out.push_str(&format!("{}\n", token_id.bold()));
+    let header = ["ADDRESS", "LAST USE", "REASON", "USER AGENT"].map(str::to_string);
+    let rows = || tokens.values().flat_map(BTreeMap::values).flatten();
+    // A column no record has a value for is left out, heading included.
+    let widths: [usize; 4] =
+        std::array::from_fn(
+            |column| match rows().map(|row| row[column].chars().count()).max() {
+                Some(0) | None => 0,
+                Some(widest) => widest.max(header[column].len()),
+            },
+        );
+    let line = |row: &Row| {
+        let mut line = INDENT.to_string();
+        for (cell, width) in row.iter().zip(widths) {
+            if width > 0 {
+                line.push_str(&format!("{cell:<width$}  "));
+            }
         }
-        for ((_, outcome), mut records) in outcomes {
-            records.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
-            let heading = match outcome {
+        let line = line.trim_end();
+        match width {
+            Some(width) if line.chars().count() > width && width > 1 => {
+                let mut cut: String = line.chars().take(width - 1).collect();
+                cut.push('…');
+                cut
+            }
+            _ => line.to_string(),
+        }
+    };
+
+    let mut out = format!("{}\n", line(&header).dimmed());
+    for (token_id, outcomes) in &tokens {
+        out.push_str(&format!("{}\n", token_id.bold()));
+        for ((_, outcome), rows) in outcomes {
+            let heading = match *outcome {
                 "accepted" => outcome.green().bold(),
                 "denied" => outcome.red().bold(),
                 _ => outcome.bold(),
             };
-            out.push_str(&format!("{indent}{heading}\n"));
-
-            let rows: Vec<[String; 4]> = records
-                .iter()
-                .map(|record| {
-                    let address = match field(record, "private_net_id") {
-                        "" => field(record, "ip_address").to_string(),
-                        net => format!("{} ({net})", field(record, "ip_address")),
-                    };
-                    let age = format_age(record.timestamp, now)
-                        .map_or_else(|| "just now".to_string(), |age| format!("{age} ago"));
-                    [
-                        address,
-                        age,
-                        field(record, "reason").to_string(),
-                        field(record, "user_agent").to_string(),
-                    ]
-                })
-                .collect();
-            let widths: [usize; 3] = std::array::from_fn(|column| {
-                rows.iter()
-                    .map(|row| row[column].chars().count())
-                    .max()
-                    .unwrap_or(0)
-            });
+            out.push_str(&format!("  {heading}\n"));
             for row in rows {
-                let mut line = format!("{indent}  ");
-                for (cell, width) in row.iter().zip(widths) {
-                    if width > 0 {
-                        line.push_str(&format!("{cell:<width$}  "));
-                    }
-                }
-                line.push_str(&row[3]);
-                let line = line.trim_end();
-                match width {
-                    Some(width) if line.chars().count() > width && width > 1 => {
-                        out.extend(line.chars().take(width - 1));
-                        out.push('…');
-                    }
-                    _ => out.push_str(line),
-                }
+                out.push_str(&line(row));
                 out.push('\n');
             }
         }
@@ -230,15 +235,23 @@ mod tests {
                 ],
             ),
         ];
-        assert_eq!(
-            render_token_activity(&records(&metrics), now, Some(40)),
-            "accepted\n  2600:1700::c97a  1m 42s ago  s2-cli/0…\n  99.43.255.71     1h ago      \
-             s2-sdk-r…\ndenied\n  10.0.0.7 (vpce-1)  16m 40s ago  token…\n"
-        );
+        let rendered = render_token_activity(&records(&metrics), now, Some(70));
+        let expected = [
+            "    ADDRESS            LAST USE     REASON         USER AGENT",
+            "t",
+            "  accepted",
+            "    2600:1700::c97a    1m 42s ago                  s2-cli/0.45.0 (cha…",
+            "    99.43.255.71       1h ago                      s2-sdk-rust/0.35.1",
+            "  denied",
+            "    10.0.0.7 (vpce-1)  16m 40s ago  token_revoked  curl/8.5",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(rendered, expected);
     }
 
     #[test]
-    fn token_activity_heads_each_of_several_tokens() {
+    fn token_activity_heads_each_token_and_omits_empty_columns() {
         colored::control::set_override(false);
         let now = UNIX_EPOCH + Duration::from_secs(100);
         let metrics = [
@@ -259,10 +272,10 @@ mod tests {
                 ],
             ),
         ];
-        assert_eq!(
-            render_token_activity(&records(&metrics), now, None),
-            "a\n  accepted\n    ::2  just now\nb\n  accepted\n    ::1  1m ago\n"
-        );
+        let rendered = render_token_activity(&records(&metrics), now, None);
+        let expected = "    ADDRESS  LAST USE\na\n  accepted\n    ::2      just now\nb\n  accepted\n    \
+                        ::1      1m ago\n";
+        assert_eq!(rendered, expected);
     }
 
     #[test]
