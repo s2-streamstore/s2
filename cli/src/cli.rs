@@ -749,9 +749,11 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
-    /// Location to create the basin in, from `s2 location list`.
+    /// Physical location where the basin and all of its streams will reside, from `s2 location
+    /// list`.
     ///
-    /// Defaults to the account's default location.
+    /// Defaults to the account's default location. It cannot be changed after the basin is
+    /// created.
     #[arg(long)]
     pub location: Option<LocationName>,
 

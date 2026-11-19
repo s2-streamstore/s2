@@ -175,6 +175,8 @@ pub struct BasinConfig {
 pub struct StreamConfig {
     #[arg(long)]
     /// Storage class for a stream.
+    ///
+    /// `s2 location list` shows the storage classes available in each location, and the default.
     pub storage_class: Option<CompactString>,
     #[arg(long, help("Example: 1d, 1w, 1y"))]
     /// Retention policy for a stream.
