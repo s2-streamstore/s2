@@ -2972,6 +2972,15 @@ pub enum AccountMetricSet {
     ///
     /// [`interval`](TimeRangeAndInterval::interval) defaults to [`hour`](TimeseriesInterval::Hour).
     AccountOps(TimeRangeAndInterval),
+    /// Returns [`AccumulationMetric`]s of estimated billable usage in US dollars, one per billing
+    /// dimension with usage in the requested time range, and one named `total`.
+    ///
+    /// Only hours whose usage has been finalized are counted, so the most recent values lag and a
+    /// daily value may cover part of a day.
+    ///
+    /// [`interval`](TimeRangeAndInterval::interval) defaults to [`hour`](TimeseriesInterval::Hour),
+    /// and may otherwise only be [`day`](TimeseriesInterval::Day).
+    EstimatedBillableUsage(TimeRangeAndInterval),
     /// Returns one [`RecordMetric`] per given access token, outcome and source address, describing
     /// the most recent such use. Covers up to 10 most recently used addresses per token and
     /// outcome. Tokens with no recorded use are omitted. May lag by a couple of minutes.
@@ -3007,6 +3016,13 @@ impl From<GetAccountMetricsInput> for api::metrics::AccountMetricSetRequest {
             ),
             AccountMetricSet::AccountOps(args) => (
                 api::metrics::AccountMetricSet::AccountOps,
+                Some(args.start),
+                Some(args.end),
+                args.interval,
+                Vec::new(),
+            ),
+            AccountMetricSet::EstimatedBillableUsage(args) => (
+                api::metrics::AccountMetricSet::EstimatedBillableUsage,
                 Some(args.start),
                 Some(args.end),
                 args.interval,

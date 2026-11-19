@@ -610,24 +610,34 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 args.metric,
                 cli::AccountMetricCommand::TokenActivity(_)
             );
-            let metrics = ops::get_account_metrics(&s2, args).await?;
-            if token_activity && output == cli::MetricsOutput::Pretty {
+            let billable_usage = matches!(
+                args.metric,
+                cli::AccountMetricCommand::EstimatedBillableUsage(_)
+            );
+            let (range, metrics) = ops::get_account_metrics(&s2, args).await?;
+            if output != cli::MetricsOutput::Pretty {
+                print_metrics(&metrics, output, None);
+            } else if token_activity {
                 print_token_activity(&metrics);
+            } else if billable_usage {
+                print_time_range(range.as_ref());
+                let by_interval = range.is_some_and(|range| range.interval.is_some());
+                print_estimated_billable_usage(&metrics, by_interval);
             } else {
-                print_metrics(&metrics, output);
+                print_metrics(&metrics, output, range.as_ref());
             }
         }
 
         Command::GetBasinMetrics(args) | Command::Metrics(MetricsCommand::Basin(args)) => {
             let output = args.output;
-            let metrics = ops::get_basin_metrics(&s2, args).await?;
-            print_metrics(&metrics, output);
+            let (range, metrics) = ops::get_basin_metrics(&s2, args).await?;
+            print_metrics(&metrics, output, range.as_ref());
         }
 
         Command::GetStreamMetrics(args) | Command::Metrics(MetricsCommand::Stream(args)) => {
             let output = args.output;
-            let metrics = ops::get_stream_metrics(&s2, args).await?;
-            print_metrics(&metrics, output);
+            let (range, metrics) = ops::get_stream_metrics(&s2, args).await?;
+            print_metrics(&metrics, output, range.as_ref());
         }
 
         Command::ListStreams(args) | Command::Stream(StreamCommand::List(args)) => {
@@ -995,24 +1005,44 @@ fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) 
 }
 
 fn print_location_listing(location: &LocationInfo) {
+    print!("{}", render_location_listing(location));
+}
+
+/// A location, with its storage classes one to a line and the default one marked.
+fn render_location_listing(location: &LocationInfo) -> String {
     let visibility = format_location_visibility(location.is_private);
-    println!("{} {visibility}", location.name);
-    if let Some(storage_classes) = &location.storage_classes {
-        let classes = if storage_classes.is_empty() {
-            "none".to_owned()
-        } else {
-            storage_classes.join(", ")
-        };
-        println!("  storage classes: {classes}");
+    let mut out = format!("{} {visibility}\n", location.name);
+    let default = location.default_storage_class.as_ref();
+    let classes = location.storage_classes.as_deref().unwrap_or_default();
+    match &location.storage_classes {
+        Some(classes) if classes.is_empty() => out.push_str("  storage classes: none\n"),
+        Some(classes) => {
+            out.push_str("  storage classes:\n");
+            for class in classes {
+                if Some(class) == default {
+                    out.push_str(&format!("    {class} {}\n", "(default)".dimmed()));
+                } else {
+                    out.push_str(&format!("    {class}\n"));
+                }
+            }
+        }
+        None => {}
     }
-    if let Some(default_storage_class) = &location.default_storage_class {
-        println!("  default storage class: {default_storage_class}");
+    // A default that is not among the classes listed still has to be shown.
+    if let Some(default) = default.filter(|default| !classes.contains(default)) {
+        out.push_str(&format!("  default storage class: {default}\n"));
     }
     match &location.private_net {
-        Some(PrivateNet::Aws(aws)) => println!("  privatelink service name: {}", aws.service_name),
-        Some(PrivateNet::Unknown(kind)) => println!("  private net: {kind}"),
+        Some(PrivateNet::Aws(aws)) => {
+            out.push_str(&format!(
+                "  privatelink service name: {}\n",
+                aws.service_name
+            ));
+        }
+        Some(PrivateNet::Unknown(kind)) => out.push_str(&format!("  private net: {kind}\n")),
         Some(_) | None => {}
     }
+    out
 }
 
 fn format_location_visibility(is_private: bool) -> colored::ColoredString {
@@ -1141,10 +1171,30 @@ fn print_token_activity(metrics: &[Metric]) {
         metrics::render_token_activity(&records, std::time::SystemTime::now(), width)
     );
     let rest: Vec<Metric> = rest.into_iter().cloned().collect();
-    print_metrics(&rest, cli::MetricsOutput::Pretty);
+    print_metrics(&rest, cli::MetricsOutput::Pretty, None);
 }
 
-fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
+fn print_estimated_billable_usage(metrics: &[Metric], by_interval: bool) {
+    let rendered = metrics::render_estimated_billable_usage(metrics, by_interval);
+    if rendered.is_empty() {
+        eprintln!("No estimated billable usage in the time range.");
+    }
+    print!("{rendered}");
+}
+
+fn print_time_range(range: Option<&s2_sdk::types::TimeRangeAndInterval>) {
+    if let Some(range) = range {
+        print!("{}", metrics::render_time_range(range.start, range.end));
+    }
+}
+
+/// Pretty output is a glance: without an interval asked for, accumulations are summed over
+/// `range`, and a long gauge is sampled. JSON has every point.
+fn print_metrics(
+    metrics: &[Metric],
+    output: cli::MetricsOutput,
+    range: Option<&s2_sdk::types::TimeRangeAndInterval>,
+) {
     use metrics::format_unit;
 
     if output == cli::MetricsOutput::Json {
@@ -1161,10 +1211,21 @@ fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
         count: String,
     }
 
-    #[derive(Tabled)]
-    struct GaugeRow {
-        time: String,
-        value: String,
+    print_time_range(range);
+    let summed = range.is_some_and(|range| range.interval.is_none());
+    if summed {
+        let series: Vec<_> = metrics
+            .iter()
+            .filter_map(|metric| match metric {
+                Metric::Accumulation(series) => Some(series),
+                _ => None,
+            })
+            .collect();
+        print!("{}", metrics::render_sums(&series));
+    }
+    // Without a range these are what is left of a set printed elsewhere, which may be nothing.
+    if metrics.is_empty() && range.is_some() {
+        eprintln!("No data in the time range.");
     }
 
     for metric in metrics {
@@ -1172,6 +1233,7 @@ fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
             Metric::Scalar(m) => {
                 println!("{}: {} {}", m.name, m.value, format_unit(&m.unit));
             }
+            Metric::Accumulation(_) if summed => {}
             Metric::Accumulation(m) => {
                 let rows: Vec<AccumulationRow> = m
                     .values
@@ -1205,31 +1267,11 @@ fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
                 println!();
             }
             Metric::Gauge(m) => {
-                let rows: Vec<GaugeRow> = m
-                    .values
-                    .iter()
-                    .map(|(ts, value)| GaugeRow {
-                        time: format_timestamp(*ts),
-                        value: value.to_string(),
-                    })
-                    .collect();
-
-                let count_col = format_unit(&m.unit).to_string();
-                println!("{}\n", m.name);
-
-                let mut table = Table::new(rows);
-                table.modify(
-                    tabled::settings::object::Columns::last(),
-                    tabled::settings::Alignment::right(),
-                );
-
-                table.with(
-                    tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 1))
-                        .with(tabled::settings::Format::content(|_| count_col.clone())),
-                );
-
-                println!("{table}");
-                println!();
+                let rendered = metrics::render_gauge(m);
+                if rendered.is_empty() {
+                    eprintln!("{}: no data in the time range.", m.name);
+                }
+                println!("{rendered}");
             }
             Metric::Label(m) => {
                 println!("{}:", m.name);
@@ -1270,5 +1312,42 @@ fn resolve_encryption_key(
             )?))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_listing_marks_the_default_storage_class() {
+        colored::control::set_override(false);
+        let render = |json: &str| {
+            let location: s2_api::v1::location::LocationInfo = serde_json::from_str(json).unwrap();
+            render_location_listing(&location.into())
+        };
+
+        let listed = r#"{"name": "aws:us-east-1", "is_private": false,
+            "storage_classes": ["express", "standard"], "default_storage_class": "express"}"#;
+        let expected = [
+            "aws:us-east-1 (public)",
+            "  storage classes:",
+            "    express (default)",
+            "    standard",
+            "",
+        ];
+        assert_eq!(render(listed), expected.join("\n"));
+
+        // The default is not lost when the account cannot use it.
+        let unlisted = r#"{"name": "aws:us-east-1", "is_private": true,
+            "storage_classes": ["standard"], "default_storage_class": "express"}"#;
+        let expected = [
+            "aws:us-east-1 (private)",
+            "  storage classes:",
+            "    standard",
+            "  default storage class: express",
+            "",
+        ];
+        assert_eq!(render(unlisted), expected.join("\n"));
     }
 }

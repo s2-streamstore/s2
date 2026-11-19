@@ -6,7 +6,9 @@ use std::{
 };
 
 use colored::Colorize;
-use s2_sdk::types::{Metric, MetricUnit, RecordMetric, TimeseriesInterval};
+use s2_sdk::types::{
+    AccumulationMetric, GaugeMetric, Metric, MetricUnit, RecordMetric, TimeseriesInterval,
+};
 use serde_json::{Value, json};
 
 pub fn format_unit(unit: &MetricUnit) -> &str {
@@ -173,9 +175,174 @@ pub fn render_token_activity(
     out
 }
 
+fn timestamp(ts: u32) -> String {
+    humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_secs(ts as u64)).to_string()
+}
+
+fn value(unit: &MetricUnit, value: f64) -> String {
+    match unit {
+        // Usage of a small account is fractions of a cent.
+        MetricUnit::Usd => format!("{value:.6}"),
+        _ => value.to_string(),
+    }
+}
+
+fn sum(series: &AccumulationMetric) -> f64 {
+    // Not `Iterator::sum`, which is -0.0 for a series with no points.
+    series
+        .values
+        .iter()
+        .fold(0.0, |sum, (_, value)| sum + value)
+}
+
+/// Two columns under a dimmed heading, the second right-aligned, with the last row in bold if it
+/// is a total.
+fn table(heading: [&str; 2], rows: &[(String, String)], total: bool) -> String {
+    let width = |column: fn(&(String, String)) -> &String, heading: &str| {
+        let cells = rows.iter().map(|row| column(row).chars().count());
+        cells.chain([heading.len()]).max().unwrap_or_default()
+    };
+    let (left, right) = (
+        width(|row| &row.0, heading[0]),
+        width(|row| &row.1, heading[1]),
+    );
+    let line = |name: &str, value: &str| format!("{name:<left$}  {value:>right$}");
+
+    let mut out = format!("{}\n", line(heading[0], heading[1]).dimmed());
+    for (i, (name, value)) in rows.iter().enumerate() {
+        let line = line(name, value);
+        if total && i + 1 == rows.len() {
+            out.push_str(&format!("{}\n", line.bold()));
+        } else {
+            out.push_str(&format!("{line}\n"));
+        }
+    }
+    out
+}
+
+/// The time range metrics were asked for, as the heading of any view of them.
+pub fn render_time_range(start: u32, end: u32) -> String {
+    format!(
+        "{} {}\n{}   {}\n\n",
+        "start:".dimmed(),
+        timestamp(start),
+        "end:".dimmed(),
+        timestamp(end)
+    )
+}
+
+/// Each series summed over the time range, and their total if there are several.
+pub fn render_sums(series: &[&AccumulationMetric]) -> String {
+    let Some(first) = series.first() else {
+        return String::new();
+    };
+    let mut rows: Vec<(String, String)> = series
+        .iter()
+        .map(|series| (series.name.clone(), value(&series.unit, sum(series))))
+        .collect();
+    // A total of unlike units would mean nothing.
+    let total = series.len() > 1 && series.iter().all(|series| series.unit == first.unit);
+    if total {
+        let all = series.iter().fold(0.0, |all, series| all + sum(series));
+        rows.push(("total".to_string(), value(&first.unit, all)));
+    }
+    table(["", format_unit(&first.unit)], &rows, total)
+}
+
+/// The latest value of a gauge, then its values over time: all of them, or of a long series, a
+/// few spread evenly from the first to the latest.
+pub fn render_gauge(gauge: &GaugeMetric) -> String {
+    const POINTS: usize = 12;
+
+    let Some((latest_at, latest)) = gauge.values.last() else {
+        return String::new();
+    };
+    let len = gauge.values.len();
+    let shown: Vec<usize> = if len <= POINTS {
+        (0..len).collect()
+    } else {
+        (0..POINTS).map(|i| i * (len - 1) / (POINTS - 1)).collect()
+    };
+    let rows: Vec<(String, String)> = shown
+        .iter()
+        .map(|i| gauge.values[*i])
+        .map(|(ts, point)| (timestamp(ts), value(&gauge.unit, point)))
+        .collect();
+
+    let unit = format_unit(&gauge.unit);
+    let mut out = format!(
+        "{}: {} {unit} at {}\n\n{}",
+        gauge.name,
+        value(&gauge.unit, *latest).bold(),
+        timestamp(*latest_at),
+        table(["time", unit], &rows, false)
+    );
+    if shown.len() < len {
+        let note = format!("{} of {len} points, see -o json for all", shown.len());
+        out.push_str(&format!("{}\n", note.dimmed()));
+    }
+    out
+}
+
+/// Estimated billable usage in US dollars: each dimension with usage summed over the time range,
+/// or with `by_interval` the total of each interval. Both end with the total over the range.
+pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) -> String {
+    const TOTAL: &str = "total";
+
+    let series: Vec<&AccumulationMetric> = metrics
+        .iter()
+        .filter_map(|metric| match metric {
+            Metric::Accumulation(series) => Some(series),
+            _ => None,
+        })
+        .collect();
+    let Some(total) = series.iter().find(|series| series.name == TOTAL) else {
+        return String::new();
+    };
+    let usd = |usd: f64| value(&MetricUnit::Usd, usd);
+
+    let (heading, mut rows): (&str, Vec<(String, String)>) = if by_interval {
+        let rows = total.values.iter().map(|(ts, v)| (timestamp(*ts), usd(*v)));
+        ("interval start", rows.collect())
+    } else {
+        let dimensions = series.iter().filter(|series| series.name != TOTAL);
+        let rows = dimensions.map(|series| (series.name.clone(), usd(sum(series))));
+        ("dimension", rows.collect())
+    };
+    rows.push((TOTAL.to_string(), usd(sum(total))));
+    // As the dashboard says of the same figures.
+    let disclaimer = "Only finalized hours are included, so the most recent usage may be missing.\n\
+                      These estimates are not a final invoice.";
+    format!(
+        "{}\n\n{}",
+        disclaimer.dimmed(),
+        table([heading, "usd"], &rows, true)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn series(name: &str, unit: &str, values: &[(u32, f64)]) -> AccumulationMetric {
+        let api = s2_api::v1::metrics::AccumulationMetric {
+            name: name.into(),
+            unit: s2_api::v1::MaybeKnown::Unknown(unit.into()),
+            interval: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::TimeseriesInterval::Hour),
+            values: values.to_vec(),
+        };
+        let metric = s2_api::v1::metrics::Metric::Accumulation(api);
+        match Metric::from(s2_api::v1::MaybeKnown::Known(metric)) {
+            Metric::Accumulation(series) => series,
+            _ => unreachable!(),
+        }
+    }
+
+    fn usd(name: &str, values: &[(u32, f64)]) -> Metric {
+        let mut series = series(name, "usd", values);
+        series.unit = MetricUnit::Usd;
+        Metric::Accumulation(series)
+    }
 
     fn record(timestamp: u32, fields: &[(&str, &str)]) -> Metric {
         let api = s2_api::v1::metrics::RecordMetric {
@@ -286,6 +453,79 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn estimated_billable_usage_sums_dimensions_or_lists_interval_totals() {
+        colored::control::set_override(false);
+        let metrics = [
+            usd("ops.stream", &[(0, 0.25), (3600, 1.5)]),
+            usd("storage.data", &[(0, 0.000001), (3600, 0.000002)]),
+            usd("total", &[(0, 0.250001), (3600, 1.500002)]),
+        ];
+        let disclaimer = [
+            "Only finalized hours are included, so the most recent usage may be missing.",
+            "These estimates are not a final invoice.",
+            "",
+        ];
+        let expected = [
+            "dimension          usd",
+            "ops.stream    1.750000",
+            "storage.data  0.000003",
+            "total         1.750003",
+            "",
+        ]
+        .join("\n");
+        let expected = [disclaimer.join("\n"), expected].join("\n");
+        assert_eq!(render_estimated_billable_usage(&metrics, false), expected);
+
+        let expected = [
+            "interval start             usd",
+            "1970-01-01T00:00:00Z  0.250001",
+            "1970-01-01T01:00:00Z  1.500002",
+            "total                 1.750003",
+            "",
+        ]
+        .join("\n");
+        let expected = [disclaimer.join("\n"), expected].join("\n");
+        assert_eq!(render_estimated_billable_usage(&metrics, true), expected);
+    }
+
+    #[test]
+    fn default_views_sum_counters_and_sample_gauges() {
+        colored::control::set_override(false);
+        let appends = [
+            series("standard", "operations", &[(0, 2.0), (3600, 3.0)]),
+            series("express", "operations", &[(3600, 40.0)]),
+            series("unused", "operations", &[]),
+        ];
+        let expected = [
+            "          operations",
+            "standard           5",
+            "express           40",
+            "unused             0",
+            "total             45",
+            "",
+        ]
+        .join("\n");
+        let appends: Vec<&AccumulationMetric> = appends.iter().collect();
+        assert_eq!(render_sums(&appends), expected);
+
+        let api = s2_api::v1::metrics::GaugeMetric {
+            name: "storage".into(),
+            unit: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::MetricUnit::Bytes),
+            values: (0..100).map(|i| (i * 60, f64::from(i))).collect(),
+        };
+        let gauge = s2_api::v1::metrics::Metric::Gauge(api);
+        let Metric::Gauge(gauge) = Metric::from(s2_api::v1::MaybeKnown::Known(gauge)) else {
+            unreachable!()
+        };
+        let rendered = render_gauge(&gauge);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines[0], "storage: 99 bytes at 1970-01-01T01:39:00Z");
+        assert_eq!(lines[3], "1970-01-01T00:00:00Z      0");
+        assert_eq!(lines[14], "1970-01-01T01:39:00Z     99");
+        assert_eq!(lines[15], "12 of 100 points, see -o json for all");
     }
 
     #[test]

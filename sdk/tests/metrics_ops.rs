@@ -667,7 +667,8 @@ async fn account_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::
     let range_with_interval = time_range_and_interval(1, None);
     let sets = [
         AccountMetricSet::ActiveBasins(range),
-        AccountMetricSet::AccountOps(range_with_interval),
+        AccountMetricSet::AccountOps(range_with_interval.clone()),
+        AccountMetricSet::EstimatedBillableUsage(range_with_interval),
     ];
 
     for set in sets {

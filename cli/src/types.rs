@@ -175,6 +175,8 @@ pub struct BasinConfig {
 pub struct StreamConfig {
     #[arg(long)]
     /// Storage class for a stream.
+    ///
+    /// `s2 location list` shows the storage classes available in each location, and the default.
     pub storage_class: Option<CompactString>,
     #[arg(long, help("Example: 1d, 1w, 1y"))]
     /// Retention policy for a stream.
@@ -1096,6 +1098,24 @@ impl From<Interval> for TimeseriesInterval {
             Interval::Minute => TimeseriesInterval::Minute,
             Interval::Hour => TimeseriesInterval::Hour,
             Interval::Day => TimeseriesInterval::Day,
+        }
+    }
+}
+
+/// Intervals the estimated billable usage metric set is available in.
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum BillableUsageInterval {
+    /// Per-hour intervals.
+    Hour,
+    /// Per-day intervals.
+    Day,
+}
+
+impl From<BillableUsageInterval> for TimeseriesInterval {
+    fn from(value: BillableUsageInterval) -> Self {
+        match value {
+            BillableUsageInterval::Hour => TimeseriesInterval::Hour,
+            BillableUsageInterval::Day => TimeseriesInterval::Day,
         }
     }
 }

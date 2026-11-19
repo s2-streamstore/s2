@@ -17,7 +17,7 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        BasinConfig, EncryptionAlgorithm, Interval, LocationName, Operation,
+        BasinConfig, BillableUsageInterval, EncryptionAlgorithm, Interval, LocationName, Operation,
         PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
         StreamConfig,
     },
@@ -387,7 +387,7 @@ is created in the account's default location."
     ListAccessTokens(ListAccessTokensArgs),
 
     /// Alias of `s2 access-token issue`.
-    #[command(hide = true)]
+    #[command(hide = true, after_help = ISSUE_ACCESS_TOKEN_EXAMPLES)]
     IssueAccessToken(Box<IssueAccessTokenArgs>),
 
     /// Alias of `s2 access-token revoke`.
@@ -492,12 +492,34 @@ pub enum StreamCommand {
     Reconfigure(ReconfigureStreamArgs),
 }
 
+const ISSUE_ACCESS_TOKEN_EXAMPLES: &str = "\
+Examples:
+  Append and read on streams `events/*` in basins `company-*`, for one day:
+
+    s2 access-token issue my-new-token \\
+      --expires-in 1d \\
+      --basins-prefix \"company-\" \\
+      --streams-prefix \"events/\" \\
+      --ops append,read,check_tail
+
+  Everything in the account:
+
+    s2 access-token issue admin-token \\
+      --basins-prefix \"\" \\
+      --streams-prefix \"\" \\
+      --access-tokens-prefix \"\" \\
+      --op-group-perms account=rw,basin=rw,stream=rw
+
+Without a prefix or an exact name for basins, streams or access tokens, the token cannot access \
+any of that kind.";
+
 #[derive(Subcommand, Debug)]
 pub enum AccessTokenCommand {
     /// List access tokens.
     List(ListAccessTokensArgs),
 
     /// Issue an access token.
+    #[command(after_help = ISSUE_ACCESS_TOKEN_EXAMPLES)]
     Issue(Box<IssueAccessTokenArgs>),
 
     /// Revoke an access token.
@@ -749,9 +771,11 @@ pub struct CreateBasinArgs {
     /// Name of the basin to create.
     pub basin: S2BasinUri,
 
-    /// Location to create the basin in, from `s2 location list`.
+    /// Physical location where the basin and all of its streams will reside, from `s2 location
+    /// list`.
     ///
-    /// Defaults to the account's default location.
+    /// Defaults to the account's default location. It cannot be changed after the basin is
+    /// created.
     #[arg(long)]
     pub location: Option<LocationName>,
 
@@ -1263,14 +1287,15 @@ pub struct BenchArgs {
 
 /// Time range args for gauge metrics (no interval).
 #[derive(Args, Debug)]
-#[command(group(clap::ArgGroup::new("start_time").required(true)))]
-#[command(group(clap::ArgGroup::new("end_time").required(true)))]
+#[command(group(clap::ArgGroup::new("start_time")))]
+#[command(group(clap::ArgGroup::new("end_time")))]
 pub struct TimeRangeArgs {
     /// Start time in seconds since Unix epoch.
     #[arg(long = "start-timestamp", group = "start_time")]
     pub start_timestamp: Option<u32>,
 
     /// Start time as human-friendly delta from current time (e.g., "2h", "1d", "0s").
+    /// Defaults to 30 days before the end.
     #[arg(long, group = "start_time")]
     pub start_ago: Option<humantime::Duration>,
 
@@ -1279,6 +1304,7 @@ pub struct TimeRangeArgs {
     pub end_timestamp: Option<u32>,
 
     /// End time as human-friendly delta from current time (e.g., "2h", "1d", "0s").
+    /// Defaults to now.
     #[arg(long, group = "end_time")]
     pub end_ago: Option<humantime::Duration>,
 }
@@ -1289,7 +1315,7 @@ pub struct TimeRangeAndIntervalArgs {
     #[command(flatten)]
     pub time_range: TimeRangeArgs,
 
-    /// Accumulation interval.
+    /// Show each interval, instead of the sum over the time range.
     #[arg(long)]
     pub interval: Option<Interval>,
 }
@@ -1302,9 +1328,22 @@ pub enum AccountMetricCommand {
     ActiveBasins(TimeRangeArgs),
     /// Account operations by type.
     AccountOps(TimeRangeAndIntervalArgs),
+    /// Estimated billable usage in US dollars by billing dimension.
+    /// Counts only hours whose usage is finalized, so the most recent hours are missing.
+    EstimatedBillableUsage(EstimatedBillableUsageArgs),
     /// Most recent use of each given access token, per outcome and source address.
     /// May lag by a couple of minutes.
     TokenActivity(TokenActivityArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct EstimatedBillableUsageArgs {
+    #[command(flatten)]
+    pub time_range: TimeRangeArgs,
+
+    /// Show the total per interval, instead of each dimension summed over the time range.
+    #[arg(long)]
+    pub interval: Option<BillableUsageInterval>,
 }
 
 #[derive(Args, Debug)]
