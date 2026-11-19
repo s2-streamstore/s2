@@ -47,7 +47,7 @@ use crate::{
         ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs, TimeRangeArgs, TrimArgs,
     },
     error::{CliError, OpKind},
-    types::{BasinConfig, S2BasinAndStreamUri, StreamConfig},
+    types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
 };
 
 /// List basins, returning items and whether there are more.
@@ -403,92 +403,105 @@ pub async fn set_default_location(
         .map_err(|e| CliError::op(OpKind::SetDefaultLocation, e))
 }
 
+/// The time range and interval asked for, alongside the metrics, for a metric set that takes them.
+pub type MetricsInRange = (Option<TimeRangeAndInterval>, Vec<Metric>);
+
 pub async fn get_account_metrics(
     s2: &S2,
     args: GetAccountMetricsArgs,
-) -> Result<Vec<Metric>, CliError> {
+) -> Result<MetricsInRange, CliError> {
     use crate::cli::AccountMetricCommand;
 
-    let set = match args.metric {
+    let (range, set) = match args.metric {
         AccountMetricCommand::ActiveBasins(t) => {
-            let (start, end) = resolve_time_range(&t);
-            AccountMetricSet::ActiveBasins(TimeRange::new(start, end))
+            let range = resolve_time_range(&t, None::<Interval>);
+            let set = AccountMetricSet::ActiveBasins(TimeRange::new(range.start, range.end));
+            (Some(range), set)
         }
         AccountMetricCommand::AccountOps(t) => {
-            let (start, end) = resolve_time_range(&t.time_range);
-            AccountMetricSet::AccountOps(time_range_and_interval(start, end, Some(t.interval)))
+            let range = resolve_time_range(&t.time_range, t.interval);
+            (Some(range.clone()), AccountMetricSet::AccountOps(range))
         }
         AccountMetricCommand::EstimatedBillableUsage(t) => {
-            let (start, end) = resolve_time_range(&t.time_range);
-            AccountMetricSet::EstimatedBillableUsage(time_range_and_interval(
-                start, end, t.interval,
-            ))
+            let range = resolve_time_range(&t.time_range, t.interval);
+            let set = AccountMetricSet::EstimatedBillableUsage(range.clone());
+            (Some(range), set)
         }
-        AccountMetricCommand::TokenActivity(t) => AccountMetricSet::TokenActivity(t.token_ids),
+        AccountMetricCommand::TokenActivity(t) => {
+            (None, AccountMetricSet::TokenActivity(t.token_ids))
+        }
     };
 
     let input = GetAccountMetricsInput::new(set);
-    s2.get_account_metrics(input)
+    let metrics = s2
+        .get_account_metrics(input)
         .await
-        .map_err(|e| CliError::op(OpKind::GetAccountMetrics, e))
+        .map_err(|e| CliError::op(OpKind::GetAccountMetrics, e))?;
+    Ok((range, metrics))
 }
 
 pub async fn get_basin_metrics(
     s2: &S2,
     args: GetBasinMetricsArgs,
-) -> Result<Vec<Metric>, CliError> {
+) -> Result<MetricsInRange, CliError> {
     use crate::cli::BasinMetricCommand;
 
-    let set = match args.metric {
+    let (range, set) = match args.metric {
         BasinMetricCommand::Storage(t) => {
-            let (start, end) = resolve_time_range(&t);
-            BasinMetricSet::Storage(TimeRange::new(start, end))
+            let range = resolve_time_range(&t, None::<Interval>);
+            let set = BasinMetricSet::Storage(TimeRange::new(range.start, range.end));
+            (range, set)
         }
         BasinMetricCommand::AppendOps(t) => {
-            let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::AppendOps(time_range_and_interval(start, end, Some(t.interval)))
+            let range = resolve_time_range(&t.time_range, t.interval);
+            (range.clone(), BasinMetricSet::AppendOps(range))
         }
         BasinMetricCommand::ReadOps(t) => {
-            let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::ReadOps(time_range_and_interval(start, end, Some(t.interval)))
+            let range = resolve_time_range(&t.time_range, t.interval);
+            (range.clone(), BasinMetricSet::ReadOps(range))
         }
         BasinMetricCommand::ReadThroughput(t) => {
-            let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::ReadThroughput(time_range_and_interval(start, end, Some(t.interval)))
+            let range = resolve_time_range(&t.time_range, t.interval);
+            (range.clone(), BasinMetricSet::ReadThroughput(range))
         }
         BasinMetricCommand::AppendThroughput(t) => {
-            let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::AppendThroughput(time_range_and_interval(start, end, Some(t.interval)))
+            let range = resolve_time_range(&t.time_range, t.interval);
+            (range.clone(), BasinMetricSet::AppendThroughput(range))
         }
         BasinMetricCommand::BasinOps(t) => {
-            let (start, end) = resolve_time_range(&t.time_range);
-            BasinMetricSet::BasinOps(time_range_and_interval(start, end, Some(t.interval)))
+            let range = resolve_time_range(&t.time_range, t.interval);
+            (range.clone(), BasinMetricSet::BasinOps(range))
         }
     };
 
     let input = GetBasinMetricsInput::new(args.basin.into(), set);
-    s2.get_basin_metrics(input)
+    let metrics = s2
+        .get_basin_metrics(input)
         .await
-        .map_err(|e| CliError::op(OpKind::GetBasinMetrics, e))
+        .map_err(|e| CliError::op(OpKind::GetBasinMetrics, e))?;
+    Ok((Some(range), metrics))
 }
 
 pub async fn get_stream_metrics(
     s2: &S2,
     args: GetStreamMetricsArgs,
-) -> Result<Vec<Metric>, CliError> {
+) -> Result<MetricsInRange, CliError> {
     use crate::cli::StreamMetricCommand;
 
-    let set = match args.metric {
+    let (range, set) = match args.metric {
         StreamMetricCommand::Storage(t) => {
-            let (start, end) = resolve_time_range(&t);
-            StreamMetricSet::Storage(TimeRange::new(start, end))
+            let range = resolve_time_range(&t, None::<Interval>);
+            let set = StreamMetricSet::Storage(TimeRange::new(range.start, range.end));
+            (range, set)
         }
     };
 
     let input = GetStreamMetricsInput::new(args.uri.basin, args.uri.stream, set);
-    s2.get_stream_metrics(input)
+    let metrics = s2
+        .get_stream_metrics(input)
         .await
-        .map_err(|e| CliError::op(OpKind::GetStreamMetrics, e))
+        .map_err(|e| CliError::op(OpKind::GetStreamMetrics, e))?;
+    Ok((Some(range), metrics))
 }
 
 fn list_streams_prefix(
@@ -884,24 +897,19 @@ fn resolve_time(
 }
 
 /// The last 30 days, where a bound is not given.
-fn resolve_time_range(args: &TimeRangeArgs) -> (u32, u32) {
-    const DEFAULT_START_AGO: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-    (
-        resolve_time(args.start_timestamp, args.start_ago, DEFAULT_START_AGO),
-        resolve_time(args.end_timestamp, args.end_ago, Duration::ZERO),
-    )
-}
-
-fn time_range_and_interval(
-    start: u32,
-    end: u32,
+fn resolve_time_range(
+    args: &TimeRangeArgs,
     interval: Option<impl Into<TimeseriesInterval>>,
 ) -> TimeRangeAndInterval {
-    let mut range = TimeRangeAndInterval::new(start, end);
-    if let Some(interval) = interval {
-        range = range.with_interval(interval.into());
+    const DEFAULT_START_AGO: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+    let range = TimeRangeAndInterval::new(
+        resolve_time(args.start_timestamp, args.start_ago, DEFAULT_START_AGO),
+        resolve_time(args.end_timestamp, args.end_ago, Duration::ZERO),
+    );
+    match interval {
+        Some(interval) => range.with_interval(interval.into()),
+        None => range,
     }
-    range
 }
 
 #[cfg(test)]

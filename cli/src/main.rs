@@ -606,37 +606,37 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::GetAccountMetrics(args) | Command::Metrics(MetricsCommand::Account(args)) => {
             let output = args.output;
-            let pretty = match &args.metric {
-                _ if output != cli::MetricsOutput::Pretty => None,
-                cli::AccountMetricCommand::TokenActivity(_) => {
-                    Some(print_token_activity as fn(&[Metric]))
-                }
-                cli::AccountMetricCommand::EstimatedBillableUsage(usage) => {
-                    Some(if usage.interval.is_some() {
-                        |metrics: &[Metric]| print_estimated_billable_usage(metrics, true)
-                    } else {
-                        |metrics: &[Metric]| print_estimated_billable_usage(metrics, false)
-                    })
-                }
-                _ => None,
-            };
-            let metrics = ops::get_account_metrics(&s2, args).await?;
-            match pretty {
-                Some(print) => print(&metrics),
-                None => print_metrics(&metrics, output),
+            let token_activity = matches!(
+                args.metric,
+                cli::AccountMetricCommand::TokenActivity(_)
+            );
+            let billable_usage = matches!(
+                args.metric,
+                cli::AccountMetricCommand::EstimatedBillableUsage(_)
+            );
+            let (range, metrics) = ops::get_account_metrics(&s2, args).await?;
+            if output != cli::MetricsOutput::Pretty {
+                print_metrics(&metrics, output, None);
+            } else if token_activity {
+                print_token_activity(&metrics);
+            } else if billable_usage {
+                let by_interval = range.is_some_and(|range| range.interval.is_some());
+                print_estimated_billable_usage(&metrics, by_interval);
+            } else {
+                print_metrics(&metrics, output, range.as_ref());
             }
         }
 
         Command::GetBasinMetrics(args) | Command::Metrics(MetricsCommand::Basin(args)) => {
             let output = args.output;
-            let metrics = ops::get_basin_metrics(&s2, args).await?;
-            print_metrics(&metrics, output);
+            let (range, metrics) = ops::get_basin_metrics(&s2, args).await?;
+            print_metrics(&metrics, output, range.as_ref());
         }
 
         Command::GetStreamMetrics(args) | Command::Metrics(MetricsCommand::Stream(args)) => {
             let output = args.output;
-            let metrics = ops::get_stream_metrics(&s2, args).await?;
-            print_metrics(&metrics, output);
+            let (range, metrics) = ops::get_stream_metrics(&s2, args).await?;
+            print_metrics(&metrics, output, range.as_ref());
         }
 
         Command::ListStreams(args) | Command::Stream(StreamCommand::List(args)) => {
@@ -1150,7 +1150,7 @@ fn print_token_activity(metrics: &[Metric]) {
         metrics::render_token_activity(&records, std::time::SystemTime::now(), width)
     );
     let rest: Vec<Metric> = rest.into_iter().cloned().collect();
-    print_metrics(&rest, cli::MetricsOutput::Pretty);
+    print_metrics(&rest, cli::MetricsOutput::Pretty, None);
 }
 
 fn print_estimated_billable_usage(metrics: &[Metric], by_interval: bool) {
@@ -1161,7 +1161,13 @@ fn print_estimated_billable_usage(metrics: &[Metric], by_interval: bool) {
     print!("{rendered}");
 }
 
-fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
+/// Pretty output is a glance: without an interval asked for, accumulations are summed over
+/// `range`, and a long gauge is sampled. JSON has every point.
+fn print_metrics(
+    metrics: &[Metric],
+    output: cli::MetricsOutput,
+    range: Option<&s2_sdk::types::TimeRangeAndInterval>,
+) {
     use metrics::format_unit;
 
     if output == cli::MetricsOutput::Json {
@@ -1178,10 +1184,19 @@ fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
         count: String,
     }
 
-    #[derive(Tabled)]
-    struct GaugeRow {
-        time: String,
-        value: String,
+    let summed = range.filter(|range| range.interval.is_none());
+    if let Some(range) = summed {
+        let series: Vec<_> = metrics
+            .iter()
+            .filter_map(|metric| match metric {
+                Metric::Accumulation(series) => Some(series),
+                _ => None,
+            })
+            .collect();
+        print!("{}", metrics::render_sums(range.start, range.end, &series));
+    }
+    if metrics.is_empty() {
+        eprintln!("No data in the time range.");
     }
 
     for metric in metrics {
@@ -1189,6 +1204,7 @@ fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
             Metric::Scalar(m) => {
                 println!("{}: {} {}", m.name, m.value, format_unit(&m.unit));
             }
+            Metric::Accumulation(_) if summed.is_some() => {}
             Metric::Accumulation(m) => {
                 let rows: Vec<AccumulationRow> = m
                     .values
@@ -1222,31 +1238,11 @@ fn print_metrics(metrics: &[Metric], output: cli::MetricsOutput) {
                 println!();
             }
             Metric::Gauge(m) => {
-                let rows: Vec<GaugeRow> = m
-                    .values
-                    .iter()
-                    .map(|(ts, value)| GaugeRow {
-                        time: format_timestamp(*ts),
-                        value: value.to_string(),
-                    })
-                    .collect();
-
-                let count_col = format_unit(&m.unit).to_string();
-                println!("{}\n", m.name);
-
-                let mut table = Table::new(rows);
-                table.modify(
-                    tabled::settings::object::Columns::last(),
-                    tabled::settings::Alignment::right(),
-                );
-
-                table.with(
-                    tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 1))
-                        .with(tabled::settings::Format::content(|_| count_col.clone())),
-                );
-
-                println!("{table}");
-                println!();
+                let rendered = metrics::render_gauge(m);
+                if rendered.is_empty() {
+                    eprintln!("{}: no data in the time range.", m.name);
+                }
+                println!("{rendered}");
             }
             Metric::Label(m) => {
                 println!("{}:", m.name);

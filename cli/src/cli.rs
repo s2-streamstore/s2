@@ -1291,9 +1291,9 @@ pub struct TimeRangeAndIntervalArgs {
     #[command(flatten)]
     pub time_range: TimeRangeArgs,
 
-    /// Accumulation interval.
-    #[arg(long, default_value = "day")]
-    pub interval: Interval,
+    /// Show each interval, instead of the sum over the time range.
+    #[arg(long)]
+    pub interval: Option<Interval>,
 }
 
 /// Account metrics.
