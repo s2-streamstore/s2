@@ -17,9 +17,9 @@ use crate::{
         parse_records_output_source,
     },
     types::{
-        BasinConfig, BillableUsageInterval, EncryptionAlgorithm, Interval, LocationName, Operation,
-        PermittedOperationGroups, S2BasinAndMaybeStreamUri, S2BasinAndStreamUri, S2BasinUri,
-        StreamConfig,
+        AccessTokenPreset, BasinConfig, BillableUsageInterval, EncryptionAlgorithm, Interval,
+        LocationName, Operation, PermittedOperationGroups, S2BasinAndMaybeStreamUri,
+        S2BasinAndStreamUri, S2BasinUri, StreamConfig,
     },
 };
 
@@ -504,14 +504,14 @@ Examples:
 
   Everything in the account:
 
-    s2 access-token issue admin-token \\
-      --basins-prefix \"\" \\
-      --streams-prefix \"\" \\
-      --access-tokens-prefix \"\" \\
-      --op-group-perms account=rw,basin=rw,stream=rw
+    s2 access-token issue admin-token --preset full-access
 
-Without a prefix or an exact name for basins, streams or access tokens, the token cannot access \
-any of that kind.";
+  Read-only on one basin and its streams:
+
+    s2 access-token issue reader-token --preset read-only --basins-exact my-basin
+
+Without `--preset`, the token cannot access basins, streams or access tokens that are given \
+neither a prefix nor an exact name.";
 
 #[derive(Subcommand, Debug)]
 pub enum AccessTokenCommand {
@@ -867,6 +867,13 @@ pub struct IssueAccessTokenArgs {
     /// Exact access token ID allowed.
     #[arg(long)]
     pub access_tokens_exact: Option<AccessTokenId>,
+
+    /// Permissions on all basins, streams and access tokens, in place of the flags below.
+    ///
+    /// A `--basins-*`, `--streams-*` or `--access-tokens-*` flag narrows the preset to those
+    /// resources of that kind.
+    #[arg(long, conflicts_with_all = ["op_group_perms", "ops"])]
+    pub preset: Option<AccessTokenPreset>,
 
     /// Access permissions at the operation group level.
     /// The format is: "account=rw,basin=r,stream=w"
