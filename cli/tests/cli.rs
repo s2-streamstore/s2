@@ -382,8 +382,8 @@ fn top_level_help_follows_the_configured_endpoints() {
         (Some((LOCAL, LOCAL)), Some("localhost:8080"), "ignored"),
         (Some((LAN, LAN)), Some("192.168.1.10:8080"), "<token>"),
         (
-            Some(("https://a.s2.dev", LOCAL)),
-            Some("s2.dev, basins at localhost:8080"),
+            Some(("https://a.s2.dev", "https://{basin}.basins.example")),
+            Some("s2.dev, basins at basins.example"),
             "<token>",
         ),
     ];
