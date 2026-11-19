@@ -1005,24 +1005,44 @@ fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) 
 }
 
 fn print_location_listing(location: &LocationInfo) {
+    print!("{}", render_location_listing(location));
+}
+
+/// A location, with its storage classes one to a line and the default one marked.
+fn render_location_listing(location: &LocationInfo) -> String {
     let visibility = format_location_visibility(location.is_private);
-    println!("{} {visibility}", location.name);
-    if let Some(storage_classes) = &location.storage_classes {
-        let classes = if storage_classes.is_empty() {
-            "none".to_owned()
-        } else {
-            storage_classes.join(", ")
-        };
-        println!("  storage classes: {classes}");
+    let mut out = format!("{} {visibility}\n", location.name);
+    let default = location.default_storage_class.as_ref();
+    let classes = location.storage_classes.as_deref().unwrap_or_default();
+    match &location.storage_classes {
+        Some(classes) if classes.is_empty() => out.push_str("  storage classes: none\n"),
+        Some(classes) => {
+            out.push_str("  storage classes:\n");
+            for class in classes {
+                if Some(class) == default {
+                    out.push_str(&format!("    {class} {}\n", "(default)".dimmed()));
+                } else {
+                    out.push_str(&format!("    {class}\n"));
+                }
+            }
+        }
+        None => {}
     }
-    if let Some(default_storage_class) = &location.default_storage_class {
-        println!("  default storage class: {default_storage_class}");
+    // A default that is not among the classes listed still has to be shown.
+    if let Some(default) = default.filter(|default| !classes.contains(default)) {
+        out.push_str(&format!("  default storage class: {default}\n"));
     }
     match &location.private_net {
-        Some(PrivateNet::Aws(aws)) => println!("  privatelink service name: {}", aws.service_name),
-        Some(PrivateNet::Unknown(kind)) => println!("  private net: {kind}"),
+        Some(PrivateNet::Aws(aws)) => {
+            out.push_str(&format!(
+                "  privatelink service name: {}\n",
+                aws.service_name
+            ));
+        }
+        Some(PrivateNet::Unknown(kind)) => out.push_str(&format!("  private net: {kind}\n")),
         Some(_) | None => {}
     }
+    out
 }
 
 fn format_location_visibility(is_private: bool) -> colored::ColoredString {
@@ -1291,5 +1311,42 @@ fn resolve_encryption_key(
             )?))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_listing_marks_the_default_storage_class() {
+        colored::control::set_override(false);
+        let render = |json: &str| {
+            let location: s2_api::v1::location::LocationInfo = serde_json::from_str(json).unwrap();
+            render_location_listing(&location.into())
+        };
+
+        let listed = r#"{"name": "aws:us-east-1", "is_private": false,
+            "storage_classes": ["express", "standard"], "default_storage_class": "express"}"#;
+        let expected = [
+            "aws:us-east-1 (public)",
+            "  storage classes:",
+            "    express (default)",
+            "    standard",
+            "",
+        ];
+        assert_eq!(render(listed), expected.join("\n"));
+
+        // The default is not lost when the account cannot use it.
+        let unlisted = r#"{"name": "aws:us-east-1", "is_private": true,
+            "storage_classes": ["standard"], "default_storage_class": "express"}"#;
+        let expected = [
+            "aws:us-east-1 (private)",
+            "  storage classes:",
+            "    standard",
+            "  default storage class: express",
+            "",
+        ];
+        assert_eq!(render(unlisted), expected.join("\n"));
     }
 }
