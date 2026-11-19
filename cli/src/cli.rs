@@ -387,7 +387,7 @@ is created in the account's default location."
     ListAccessTokens(ListAccessTokensArgs),
 
     /// Alias of `s2 access-token issue`.
-    #[command(hide = true)]
+    #[command(hide = true, after_help = ISSUE_ACCESS_TOKEN_EXAMPLES)]
     IssueAccessToken(Box<IssueAccessTokenArgs>),
 
     /// Alias of `s2 access-token revoke`.
@@ -492,12 +492,34 @@ pub enum StreamCommand {
     Reconfigure(ReconfigureStreamArgs),
 }
 
+const ISSUE_ACCESS_TOKEN_EXAMPLES: &str = "\
+Examples:
+  Append and read on streams `events/*` in basins `company-*`, for one day:
+
+    s2 access-token issue my-new-token \\
+      --expires-in 1d \\
+      --basins-prefix \"company-\" \\
+      --streams-prefix \"events/\" \\
+      --ops append,read,check_tail
+
+  Everything in the account:
+
+    s2 access-token issue admin-token \\
+      --basins-prefix \"\" \\
+      --streams-prefix \"\" \\
+      --access-tokens-prefix \"\" \\
+      --op-group-perms account=rw,basin=rw,stream=rw
+
+Without a prefix or an exact name for basins, streams or access tokens, the token cannot access \
+any of that kind.";
+
 #[derive(Subcommand, Debug)]
 pub enum AccessTokenCommand {
     /// List access tokens.
     List(ListAccessTokensArgs),
 
     /// Issue an access token.
+    #[command(after_help = ISSUE_ACCESS_TOKEN_EXAMPLES)]
     Issue(Box<IssueAccessTokenArgs>),
 
     /// Revoke an access token.
