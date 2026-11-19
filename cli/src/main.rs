@@ -1223,7 +1223,8 @@ fn print_metrics(
             .collect();
         print!("{}", metrics::render_sums(&series));
     }
-    if metrics.is_empty() {
+    // Without a range these are what is left of a set printed elsewhere, which may be nothing.
+    if metrics.is_empty() && range.is_some() {
         eprintln!("No data in the time range.");
     }
 
