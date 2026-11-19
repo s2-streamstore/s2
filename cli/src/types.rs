@@ -654,6 +654,31 @@ impl PermittedOperationGroups {
     }
 }
 
+/// Permissions an access token can be issued with in one flag.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq)]
+pub enum AccessTokenPreset {
+    /// Every operation.
+    FullAccess,
+    /// Read operations at the account, basin and stream level.
+    ReadOnly,
+}
+
+impl From<AccessTokenPreset> for PermittedOperationGroups {
+    fn from(preset: AccessTokenPreset) -> Self {
+        let perms = || {
+            Some(ReadWritePermissions {
+                read: true,
+                write: preset == AccessTokenPreset::FullAccess,
+            })
+        };
+        PermittedOperationGroups {
+            account: perms(),
+            basin: perms(),
+            stream: perms(),
+        }
+    }
+}
+
 impl From<PermittedOperationGroups> for sdk::types::OperationGroupPermissions {
     fn from(groups: PermittedOperationGroups) -> Self {
         let mut result = sdk::types::OperationGroupPermissions::new();

@@ -47,7 +47,7 @@ use crate::{
         ReconfigureBasinArgs, ReconfigureStreamArgs, TailArgs, TimeRangeArgs, TrimArgs,
     },
     error::{CliError, OpKind},
-    types::{BasinConfig, Interval, S2BasinAndStreamUri, StreamConfig},
+    types::{BasinConfig, Interval, PermittedOperationGroups, S2BasinAndStreamUri, StreamConfig},
 };
 
 /// List basins, returning items and whether there are more.
@@ -237,26 +237,49 @@ pub async fn get_access_token_api(
         .ok_or_else(|| CliError::AccessTokenNotFound(id.to_string()))
 }
 
-pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<String, CliError> {
-    let mut scope = AccessTokenScopeInput::from_ops(args.ops.into_iter().map(|op| op.into()));
-    if let Some(v) = args.basins_exact {
+/// A preset allows every resource of a kind that no flag names. Without one, the token cannot
+/// access that kind at all.
+fn access_token_scope(args: &IssueAccessTokenArgs) -> Result<AccessTokenScopeInput, CliError> {
+    let op_group_perms = args
+        .preset
+        .map(PermittedOperationGroups::from)
+        .or_else(|| args.op_group_perms.clone());
+    if op_group_perms.is_none() && args.ops.is_empty() {
+        return Err(CliError::InvalidArgs(miette::miette!(
+            help = "Use '--preset full-access' or '--preset read-only', or choose operations with '--op-group-perms' or '--ops'",
+            "No permissions given for the access token"
+        )));
+    }
+    let all = args.preset.is_some();
+
+    let mut scope = AccessTokenScopeInput::from_ops(args.ops.iter().cloned().map(|op| op.into()));
+    if let Some(v) = args.basins_exact.clone() {
         scope = scope.with_basins(sdk::types::BasinMatcher::Exact(v));
-    } else if let Some(v) = args.basins_prefix {
+    } else if let Some(v) = args.basins_prefix.clone().or(all.then(Default::default)) {
         scope = scope.with_basins(sdk::types::BasinMatcher::Prefix(v));
     }
-    if let Some(v) = args.streams_exact {
+    if let Some(v) = args.streams_exact.clone() {
         scope = scope.with_streams(sdk::types::StreamMatcher::Exact(v));
-    } else if let Some(v) = args.streams_prefix {
+    } else if let Some(v) = args.streams_prefix.clone().or(all.then(Default::default)) {
         scope = scope.with_streams(sdk::types::StreamMatcher::Prefix(v));
     }
-    if let Some(v) = args.access_tokens_exact {
+    if let Some(v) = args.access_tokens_exact.clone() {
         scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Exact(v));
-    } else if let Some(v) = args.access_tokens_prefix {
+    } else if let Some(v) = args
+        .access_tokens_prefix
+        .clone()
+        .or(all.then(Default::default))
+    {
         scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Prefix(v));
     }
-    if let Some(op_group_perms) = args.op_group_perms {
+    if let Some(op_group_perms) = op_group_perms {
         scope = scope.with_op_group_perms(op_group_perms.into());
     }
+    Ok(scope)
+}
+
+pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<String, CliError> {
+    let scope = access_token_scope(&args)?;
 
     let mut input = IssueAccessTokenInput::new(args.id, scope);
     if let Some(expires_in) = args.expires_in {
@@ -908,7 +931,51 @@ fn resolve_time_range(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+    use crate::cli::{AccessTokenCommand, Cli, Command};
+
+    #[test]
+    fn access_token_preset_is_all_resources_unless_narrowed() {
+        let scope = |flags: &[&str]| {
+            let cli = Cli::try_parse_from(["s2", "access-token", "issue", "t"].iter().chain(flags))
+                .unwrap();
+            let Some(Command::AccessToken(AccessTokenCommand::Issue(args))) = cli.command else {
+                panic!("not an issue command");
+            };
+            access_token_scope(&args).map(|scope| format!("{scope:?}"))
+        };
+        assert_eq!(
+            scope(&["--preset", "full-access"]).unwrap(),
+            scope(&[
+                "--basins-prefix",
+                "",
+                "--streams-prefix",
+                "",
+                "--access-tokens-prefix",
+                "",
+                "--op-group-perms",
+                "account=rw,basin=rw,stream=rw",
+            ])
+            .unwrap()
+        );
+        assert_eq!(
+            scope(&["--preset", "read-only", "--basins-exact", "my-basin"]).unwrap(),
+            scope(&[
+                "--basins-exact",
+                "my-basin",
+                "--streams-prefix",
+                "",
+                "--access-tokens-prefix",
+                "",
+                "--op-group-perms",
+                "account=r,basin=r,stream=r",
+            ])
+            .unwrap()
+        );
+        assert!(matches!(scope(&[]), Err(CliError::InvalidArgs(_))));
+    }
 
     #[test]
     fn list_streams_prefix_rejects_uri_and_flag_prefix() {
