@@ -11,6 +11,12 @@ pub struct AwsPrivateNet {
     /// AWS PrivateLink endpoint service name, for creating a VPC endpoint.
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub service_name: CompactString,
+    /// Private DNS name of the endpoint service. With private DNS enabled on the VPC endpoint,
+    /// it resolves to the endpoint, and can be used as the account endpoint so that account
+    /// requests also go over PrivateLink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub private_dns_name: Option<CompactString>,
 }
 
 /// How the account can reach a location over a private network. Exactly one kind applies.
@@ -28,6 +34,7 @@ impl From<s2_common::location::PrivateNet> for PrivateNet {
         match value {
             s2_common::location::PrivateNet::Aws(aws) => Self::Aws(AwsPrivateNet {
                 service_name: aws.service_name,
+                private_dns_name: aws.private_dns_name,
             }),
         }
     }

@@ -145,6 +145,7 @@ impl From<LocationName> for CompactString {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsPrivateNet {
     pub service_name: CompactString,
+    pub private_dns_name: Option<CompactString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
