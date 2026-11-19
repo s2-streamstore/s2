@@ -91,7 +91,7 @@ pub struct ListStreamsResponse {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateStreamRequest {
     /// Stream name that is unique to the basin.
-    /// It can be between 1 and 512 bytes in length, and must not contain NUL bytes.
+    /// It can be between 1 and 253 bytes in length, and must not contain NUL bytes.
     pub stream: StreamName,
     /// Stream configuration.
     pub config: Option<StreamConfig>,

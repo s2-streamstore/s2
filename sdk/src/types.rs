@@ -71,7 +71,7 @@ pub use s2_common::network_policy::NetworkPolicySlugStartAfter;
 pub use s2_common::network_policy::VpcEndpointId;
 /// Stream name.
 ///
-/// **Note:** It must be unique to the basin and between 1 and 512 bytes in length, and must
+/// **Note:** It must be unique to the basin and between 1 and 253 bytes in length, and must
 /// not contain NUL bytes.
 pub use s2_common::stream::StreamName;
 /// See [`ListStreamsInput::prefix`]. It must not contain NUL bytes.
