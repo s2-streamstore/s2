@@ -47,7 +47,9 @@ use crate::{
 mod destination;
 
 use destination::validate_endpoint_binding;
-pub(crate) use destination::{effective_endpoints, uses_loopback_endpoints};
+pub(crate) use destination::{
+    destination_label, effective_endpoints, uses_default_endpoints, uses_loopback_endpoints,
+};
 
 const DEFAULT_OAUTH_ISSUER: &str = "https://clerk.s2.dev";
 const DEFAULT_OAUTH_CLIENT_ID: &str = "9zTKDS3tHSmaWl33";
@@ -502,6 +504,21 @@ impl Drop for RefreshLock {
     fn drop(&mut self) {
         let _ = fs2::FileExt::unlock(&self.file);
     }
+}
+
+/// Whether `s2 login` would accept the configured endpoints.
+pub(crate) fn browser_login_available(config: &CliConfig) -> bool {
+    let Ok(issuer) = oauth_issuer(None) else {
+        return false;
+    };
+    let (account_endpoint, basin_endpoint) = effective_endpoints(config);
+    validate_endpoint_binding(
+        issuer.as_str(),
+        &account_endpoint,
+        &basin_endpoint,
+        config.ssl_no_verify == Some(true),
+    )
+    .is_ok()
 }
 
 pub async fn login(args: &LoginArgs) -> Result<(), LoginError> {

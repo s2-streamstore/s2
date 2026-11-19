@@ -589,7 +589,7 @@ impl AccessTokenMatcher {
     }
 }
 
-/// Compact human summary for a resource matcher, used in `s2 list-access-tokens`:
+/// Compact human summary for a resource matcher, used in `s2 access-token list`:
 ///
 /// - `*` matches any resource (an empty prefix).
 /// - `<prefix>*` matches names beginning with `<prefix>`.
@@ -793,7 +793,7 @@ impl From<sdk::types::AccessTokenInfo> for AccessTokenInfo {
 }
 
 impl AccessTokenInfo {
-    /// Two-line compact summary for `s2 list-access-tokens`.
+    /// Two-line compact summary for `s2 access-token list`.
     ///
     /// - Header: the token id (padded to `id_width` for column alignment across the listing)
     ///   followed by its expiry, or `never` when the token does not expire.

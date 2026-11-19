@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod credential_store;
 mod diff;
+mod environment;
 mod error;
 mod lite;
 mod login;
@@ -23,10 +24,11 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::{pin::Pin, process::ExitCode, time::Duration};
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use cli::{
-    ApplyArgs, AuthAccessTokenCommand, AuthCommand, Cli, Command, ConfigCommand, ListBasinsArgs,
-    ListStreamsArgs, LocationCommand, MetricsCommand, NetworkPolicyCommand,
+    AccessTokenCommand, ApplyArgs, AuthAccessTokenCommand, AuthCommand, BasinCommand, Cli, Command,
+    ConfigCommand, ListBasinsArgs, ListStreamsArgs, LocationCommand, MetricsCommand,
+    NetworkPolicyCommand, StreamCommand,
 };
 use colored::Colorize;
 use config::{
@@ -82,6 +84,17 @@ async fn main() -> miette::Result<ExitCode> {
     Ok(result?)
 }
 
+/// Whether the arguments ask for the help of `s2` itself. It takes no options of its own, so
+/// that is `-h`, `--help` or a bare `help` in first position.
+fn wants_top_level_help() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("-h" | "--help") => true,
+        Some("help") => args.next().is_none(),
+        _ => false,
+    }
+}
+
 fn parse_cli() -> Cli {
     Cli::try_parse().unwrap_or_else(|e| {
         // Customize error message for metric commands to say "metric" instead of "subcommand"
@@ -93,6 +106,13 @@ fn parse_cli() -> Cli {
                 .replace("[subcommands:", "[metrics:");
             eprintln!("{msg}");
             std::process::exit(2);
+        }
+        // Top-level help is rendered again with its own layout, which is only built here.
+        if e.kind() == clap::error::ErrorKind::DisplayHelp
+            && wants_top_level_help()
+            && let Err(help) = cli::command_with_top_level_help().try_get_matches()
+        {
+            help.exit()
         }
         e.exit()
     })
@@ -214,7 +234,7 @@ fn print_token_removal(removal: access_token::TokenRemoval) {
 
 async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     let Some(command) = cli.command else {
-        Cli::command().print_help().ok();
+        cli::command_with_top_level_help().print_help().ok();
         std::process::exit(0);
     };
 
@@ -376,6 +396,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         update::user_agent(),
     )?);
     let token_source = Some(credential.source());
+    let target = environment::Target::detect(&cli_config);
     let s2 = S2::new(sdk_config.clone())
         .map_err(|e| CliError::SdkInit(e.into()).with_token_source(token_source))?;
     let mut exit_code = ExitCode::SUCCESS;
@@ -457,7 +478,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             }
         }
 
-        Command::ListBasins(args) => {
+        Command::ListBasins(args) | Command::Basin(BasinCommand::List(args)) => {
             let (basins, _) = ops::list_basins(&s2, args).await?;
             for basin_info in basins {
                 print_basin_listing(
@@ -468,29 +489,29 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             }
         }
 
-        Command::CreateBasin(args) => {
+        Command::CreateBasin(args) | Command::Basin(BasinCommand::Create(args)) => {
             let _info = ops::create_basin(&s2, args).await?;
             eprintln!("{}", "✓ Basin created".green().bold());
         }
 
-        Command::DeleteBasin { basin } => {
+        Command::DeleteBasin { basin } | Command::Basin(BasinCommand::Delete { basin }) => {
             ops::delete_basin(&s2, &basin.into()).await?;
             eprintln!("{}", "✓ Basin deletion requested".green().bold());
         }
 
-        Command::GetBasinConfig { basin } => {
+        Command::GetBasinConfig { basin } | Command::Basin(BasinCommand::Get { basin }) => {
             let basin_config: BasinConfig = ops::get_basin_config(&s2, &basin.into()).await?.into();
             println!("{}", json_to_table(&serde_json::to_value(&basin_config)?));
         }
 
-        Command::ReconfigureBasin(args) => {
+        Command::ReconfigureBasin(args) | Command::Basin(BasinCommand::Reconfigure(args)) => {
             let config = ops::reconfigure_basin(&s2, args).await?;
 
             eprintln!("{}", "✓ Basin reconfigured".green().bold());
             println!("{}", json_to_table(&serde_json::to_value(&config)?));
         }
 
-        Command::ListAccessTokens(args) => {
+        Command::ListAccessTokens(args) | Command::AccessToken(AccessTokenCommand::List(args)) => {
             let (tokens, _) = ops::list_access_tokens(&s2, args).await?;
             let tokens: Vec<AccessTokenInfo> =
                 tokens.into_iter().map(AccessTokenInfo::from).collect();
@@ -504,12 +525,12 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             }
         }
 
-        Command::IssueAccessToken(args) => {
-            let token = ops::issue_access_token(&s2, args).await?;
+        Command::IssueAccessToken(args) | Command::AccessToken(AccessTokenCommand::Issue(args)) => {
+            let token = ops::issue_access_token(&s2, *args).await?;
             println!("{}", token);
         }
 
-        Command::RevokeAccessToken { id } => {
+        Command::RevokeAccessToken { id } | Command::AccessToken(AccessTokenCommand::Revoke { id }) => {
             ops::revoke_access_token(&s2, id.clone()).await?;
             eprintln!(
                 "{}",
@@ -609,7 +630,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             print_metrics(&metrics, output);
         }
 
-        Command::ListStreams(args) => {
+        Command::ListStreams(args) | Command::Stream(StreamCommand::List(args)) => {
             let basin_name = args.uri.basin.clone();
             let (streams, _) = ops::list_streams(&s2, args).await?;
             for stream_info in streams {
@@ -620,23 +641,23 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             }
         }
 
-        Command::CreateStream(args) => {
+        Command::CreateStream(args) | Command::Stream(StreamCommand::Create(args)) => {
             ops::create_stream(&s2, args).await?;
             eprintln!("{}", "✓ Stream created".green().bold());
         }
 
-        Command::DeleteStream { uri } => {
+        Command::DeleteStream { uri } | Command::Stream(StreamCommand::Delete { uri }) => {
             ops::delete_stream(&s2, uri).await?;
             eprintln!("{}", "✓ Stream deletion requested".green().bold());
         }
 
-        Command::GetStreamConfig { uri } => {
+        Command::GetStreamConfig { uri } | Command::Stream(StreamCommand::Get { uri }) => {
             let stream_config = ops::get_stream_config(&s2, uri).await?;
             let stream_config: StreamConfig = stream_config.into();
             println!("{}", json_to_table(&serde_json::to_value(&stream_config)?));
         }
 
-        Command::ReconfigureStream(args) => {
+        Command::ReconfigureStream(args) | Command::Stream(StreamCommand::Reconfigure(args)) => {
             let config = ops::reconfigure_stream(&s2, args).await?;
 
             eprintln!("{}", "✓ Stream reconfigured".green().bold());
@@ -945,7 +966,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
     result
         .map(|()| exit_code)
-        .map_err(|err| err.with_token_source(token_source))
+        .map_err(|err| err.with_token_source(token_source).with_target(target))
 }
 
 fn format_position(seq_num: u64, timestamp: u64) -> String {

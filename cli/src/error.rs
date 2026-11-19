@@ -5,12 +5,19 @@ use s2_sdk::error::{
 };
 use thiserror::Error;
 
+use crate::environment::Target;
+
 const HELP: &str = color_print::cstr!(
     "\n<cyan><bold>Notice something wrong?</bold></cyan>\n\n\
      <green> > Open an issue:</green>\n\
      <bold>https://github.com/s2-streamstore/s2/issues</bold>\n\n\
      <green> > Reach out to us:</green>\n\
      <bold>hi@s2.dev</bold>"
+);
+
+const LITE_HELP: &str = color_print::cstr!(
+    "If you are using s2-lite, some APIs are not supported.\n\
+     More at <bold>https://s2.dev/docs/s2-lite</bold>"
 );
 
 const BUG_HELP: &str = color_print::cstr!(
@@ -112,6 +119,10 @@ pub enum CliError {
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
     #[error("{}: {}", .0, .1)]
+    #[diagnostic(help("{}", LITE_HELP))]
+    NotImplemented(OpKind, #[source] SdkError),
+
+    #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
         "The access token is bound to a network policy that does not permit requests from this \
          network. Retry from a permitted network, or use a token without that restriction."
@@ -168,6 +179,19 @@ impl CliError {
                 CliError::MalformedAccessToken(source, token_source)
             }
             (err, _) => err,
+        }
+    }
+
+    /// S2 implements every API, so `not_implemented` from any other endpoint most likely means
+    /// s2-lite, which does not.
+    pub fn with_target(self, target: Target) -> Self {
+        match self {
+            CliError::Operation(kind, source)
+                if target != Target::S2 && is_not_implemented(&source) =>
+            {
+                CliError::NotImplemented(kind, source)
+            }
+            err => err,
         }
     }
 }
@@ -273,6 +297,12 @@ fn is_network_policy_denied(err: &SdkError) -> bool {
     err.server_error()
         .and_then(ServerError::known_code)
         .is_some_and(|code| matches!(code, ErrorCode::NetworkPolicyDenied))
+}
+
+fn is_not_implemented(err: &SdkError) -> bool {
+    err.server_error()
+        .and_then(ServerError::known_code)
+        .is_some_and(|code| matches!(code, ErrorCode::NotImplemented))
 }
 
 fn is_malformed_access_token(err: &SdkError) -> bool {

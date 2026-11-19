@@ -178,10 +178,10 @@ fn has_sst(path: &Path) -> bool {
 fn separate_wal_routes_files_and_recovers_acknowledged_records_after_restart() {
     let root: TempDir = tempfile::tempdir().unwrap();
     let mut server = Server::start(root.path(), "before");
-    server.client(root.path(), &["create-basin", "wal-test"], None);
+    server.client(root.path(), &["basin", "create", "wal-test"], None);
     server.client(
         root.path(),
-        &["create-stream", "s2://wal-test/recovery"],
+        &["stream", "create", "s2://wal-test/recovery"],
         None,
     );
     let mut input = (0..64)

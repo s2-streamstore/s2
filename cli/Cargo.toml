@@ -30,6 +30,7 @@ humantime = { workspace = true }
 indicatif = { workspace = true }
 json_to_table = { workspace = true }
 keyring = { workspace = true }
+machine-uid = "0.6.0"
 miette = { workspace = true, features = ["fancy"] }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["form"] }
