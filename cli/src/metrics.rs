@@ -188,7 +188,11 @@ fn value(unit: &MetricUnit, value: f64) -> String {
 }
 
 fn sum(series: &AccumulationMetric) -> f64 {
-    series.values.iter().map(|(_, value)| value).sum()
+    // Not `Iterator::sum`, which is -0.0 for a series with no points.
+    series
+        .values
+        .iter()
+        .fold(0.0, |sum, (_, value)| sum + value)
 }
 
 /// Two columns under a dimmed heading, the second right-aligned, with the last row in bold if it
@@ -239,7 +243,7 @@ pub fn render_sums(series: &[&AccumulationMetric]) -> String {
     // A total of unlike units would mean nothing.
     let total = series.len() > 1 && series.iter().all(|series| series.unit == first.unit);
     if total {
-        let all = series.iter().map(|series| sum(series)).sum();
+        let all = series.iter().fold(0.0, |all, series| all + sum(series));
         rows.push(("total".to_string(), value(&first.unit, all)));
     }
     table(["", format_unit(&first.unit)], &rows, total)
@@ -493,11 +497,13 @@ mod tests {
         let appends = [
             series("standard", "operations", &[(0, 2.0), (3600, 3.0)]),
             series("express", "operations", &[(3600, 40.0)]),
+            series("unused", "operations", &[]),
         ];
         let expected = [
             "          operations",
             "standard           5",
             "express           40",
+            "unused             0",
             "total             45",
             "",
         ]
