@@ -18,7 +18,7 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "wrap_help"] }
 color-print = { workspace = true }
 colored = { workspace = true }
 compact_str = { workspace = true, features = ["serde"] }
