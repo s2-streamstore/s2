@@ -24,7 +24,7 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::{pin::Pin, process::ExitCode, time::Duration};
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use cli::{
     AccessTokenCommand, ApplyArgs, AuthAccessTokenCommand, AuthCommand, BasinCommand, Cli, Command,
     ConfigCommand, ListBasinsArgs, ListStreamsArgs, LocationCommand, MetricsCommand,
@@ -84,6 +84,17 @@ async fn main() -> miette::Result<ExitCode> {
     Ok(result?)
 }
 
+/// Whether the arguments ask for the help of `s2` itself. It takes no options of its own, so
+/// that is `-h`, `--help` or a bare `help` in first position.
+fn wants_top_level_help() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("-h" | "--help") => true,
+        Some("help") => args.next().is_none(),
+        _ => false,
+    }
+}
+
 fn parse_cli() -> Cli {
     Cli::try_parse().unwrap_or_else(|e| {
         // Customize error message for metric commands to say "metric" instead of "subcommand"
@@ -95,6 +106,13 @@ fn parse_cli() -> Cli {
                 .replace("[subcommands:", "[metrics:");
             eprintln!("{msg}");
             std::process::exit(2);
+        }
+        // Top-level help is rendered again with its own layout, which is only built here.
+        if e.kind() == clap::error::ErrorKind::DisplayHelp
+            && wants_top_level_help()
+            && let Err(help) = cli::command_with_top_level_help().try_get_matches()
+        {
+            help.exit()
         }
         e.exit()
     })
@@ -216,7 +234,7 @@ fn print_token_removal(removal: access_token::TokenRemoval) {
 
 async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     let Some(command) = cli.command else {
-        Cli::command().print_help().ok();
+        cli::command_with_top_level_help().print_help().ok();
         std::process::exit(0);
     };
 

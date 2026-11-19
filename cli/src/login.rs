@@ -506,6 +506,21 @@ impl Drop for RefreshLock {
     }
 }
 
+/// Whether `s2 login` would accept the configured endpoints.
+pub(crate) fn browser_login_available(config: &CliConfig) -> bool {
+    let Ok(issuer) = oauth_issuer(None) else {
+        return false;
+    };
+    let (account_endpoint, basin_endpoint) = effective_endpoints(config);
+    validate_endpoint_binding(
+        issuer.as_str(),
+        &account_endpoint,
+        &basin_endpoint,
+        config.ssl_no_verify == Some(true),
+    )
+    .is_ok()
+}
+
 pub async fn login(args: &LoginArgs) -> Result<(), LoginError> {
     let issuer = oauth_issuer(args.issuer.as_deref())?;
     let client_id = oauth_client_id(args.client_id.as_deref());

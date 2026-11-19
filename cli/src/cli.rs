@@ -38,10 +38,7 @@ static HELP_CONFIG: std::sync::LazyLock<Option<crate::config::CliConfig>> =
 fn help_environment() -> Environment {
     match HELP_CONFIG.as_ref() {
         Some(config) => Environment::detect(config),
-        None => Environment {
-            target: Target::S2,
-            shell: Shell::detect(),
-        },
+        None => Environment::detect(&crate::config::CliConfig::default()),
     }
 }
 
@@ -100,15 +97,23 @@ fn example_basin_suffix() -> String {
 /// A first-use walkthrough.
 fn get_started() -> String {
     let environment = help_environment();
-    // A local endpoint accepts any token, refuses browser login, and has its own basin names.
-    let (auth, basin) = match (environment.target, environment.shell) {
-        (Target::Local, Shell::Posix) => ("export S2_ACCESS_TOKEN=ignored", "my-basin".to_owned()),
-        (Target::Local, Shell::PowerShell) => {
-            (r#"$env:S2_ACCESS_TOKEN = "ignored""#, "my-basin".to_owned())
+    // Without browser login a token goes in the environment. A local endpoint accepts any.
+    let auth = if environment.browser_login {
+        "s2 login".to_owned()
+    } else {
+        let token = match environment.target {
+            Target::Local => "ignored",
+            Target::S2 | Target::Custom => "<token>",
+        };
+        match environment.shell {
+            Shell::Posix => format!("export S2_ACCESS_TOKEN={token}"),
+            Shell::PowerShell => format!(r#"$env:S2_ACCESS_TOKEN = "{token}""#),
         }
-        (Target::S2 | Target::Custom, _) => {
-            ("s2 login", format!("my-basin-{}", example_basin_suffix()))
-        }
+    };
+    // A local endpoint has its own basin names.
+    let basin = match environment.target {
+        Target::Local => "my-basin".to_owned(),
+        Target::S2 | Target::Custom => format!("my-basin-{}", example_basin_suffix()),
     };
     let prompt = match environment.shell {
         Shell::Posix => "$",
@@ -122,6 +127,12 @@ fn get_started() -> String {
   <dim>{prompt}</dim> <bold>s2 read s2://{basin}/my-stream --seq-num 0</bold> <dim>--count 10</dim>
 "#
     )
+}
+
+/// The command with the top-level help laid out by `top_level_help`. Building that help loads
+/// the config and may read the machine ID, so this is only for when it is printed.
+pub fn command_with_top_level_help() -> clap::Command {
+    <Cli as clap::CommandFactory>::command().help_template(top_level_help())
 }
 
 /// Help for bare `s2`: clap cannot put subcommands under more than one heading, so the command
@@ -172,7 +183,7 @@ fn top_level_help() -> String {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "s2", version = crate::update::long_version(), help_template = top_level_help(), styles = STYLES)]
+#[command(name = "s2", version = crate::update::long_version(), styles = STYLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,

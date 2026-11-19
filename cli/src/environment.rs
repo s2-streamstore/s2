@@ -6,7 +6,7 @@ use crate::{config::CliConfig, login};
 /// What the configured endpoints point at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
-    /// S2 itself, at its default endpoints.
+    /// S2 itself: both endpoints are the defaults.
     S2,
     /// Another endpoint that is not local.
     Custom,
@@ -25,6 +25,8 @@ pub enum Shell {
 pub struct Environment {
     pub target: Target,
     pub shell: Shell,
+    /// Whether `s2 login` works against the target. Otherwise an access token is needed.
+    pub browser_login: bool,
 }
 
 impl Environment {
@@ -32,6 +34,7 @@ impl Environment {
         Self {
             target: Target::detect(config),
             shell: Shell::detect(),
+            browser_login: login::browser_login_available(config),
         }
     }
 }

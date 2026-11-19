@@ -21,13 +21,31 @@ pub(crate) fn effective_endpoints(config: &CliConfig) -> (String, String) {
     }
 }
 
-/// Where the CLI is pointed: `s2.dev`, or the host of a custom account endpoint.
+/// Where the CLI is pointed: `s2.dev`, or the host of a custom account endpoint. When only one
+/// of the two endpoints is S2's, both are named.
 pub(crate) fn destination_label(config: &CliConfig) -> String {
-    let (account_endpoint, _) = effective_endpoints(config);
-    if account_endpoint == DEFAULT_ACCOUNT_ENDPOINT {
-        return "s2.dev".to_owned();
+    let (account, basin) = effective_endpoints(config);
+    let account_default = account == DEFAULT_ACCOUNT_ENDPOINT;
+    let basin_default = basin == DEFAULT_BASIN_ENDPOINT;
+    let label = |endpoint: &str, default: bool| {
+        if default {
+            "s2.dev".to_owned()
+        } else {
+            endpoint_host(endpoint)
+        }
+    };
+    let account_label = label(&account, account_default);
+    if account_default == basin_default {
+        return account_label;
     }
-    Url::parse(&account_endpoint)
+    format!(
+        "{account_label}, basins at {}",
+        label(&basin.replace("{basin}.", ""), basin_default)
+    )
+}
+
+fn endpoint_host(endpoint: &str) -> String {
+    Url::parse(endpoint)
         .ok()
         .and_then(|url| {
             let host = url.host_str()?;
@@ -36,11 +54,12 @@ pub(crate) fn destination_label(config: &CliConfig) -> String {
                 None => host.to_owned(),
             })
         })
-        .unwrap_or(account_endpoint)
+        .unwrap_or_else(|| endpoint.to_owned())
 }
 
 pub(crate) fn uses_default_endpoints(config: &CliConfig) -> bool {
-    effective_endpoints(config).0 == DEFAULT_ACCOUNT_ENDPOINT
+    let (account, basin) = effective_endpoints(config);
+    account == DEFAULT_ACCOUNT_ENDPOINT && basin == DEFAULT_BASIN_ENDPOINT
 }
 
 pub(crate) fn uses_loopback_endpoints(config: &CliConfig) -> bool {
