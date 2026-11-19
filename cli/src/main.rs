@@ -1038,6 +1038,9 @@ fn render_location_listing(location: &LocationInfo) -> String {
                 "  privatelink service name: {}\n",
                 aws.service_name
             ));
+            if let Some(private_dns_name) = &aws.private_dns_name {
+                out.push_str(&format!("  privatelink dns name: {private_dns_name}\n"));
+            }
         }
         Some(PrivateNet::Unknown(kind)) => out.push_str(&format!("  private net: {kind}\n")),
         Some(_) | None => {}

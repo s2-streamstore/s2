@@ -1890,6 +1890,10 @@ impl ListAllAccessTokensInput {
 pub struct AwsPrivateNet {
     /// Endpoint service name, for creating a VPC endpoint.
     pub service_name: String,
+    /// Private DNS name of the endpoint service. With private DNS enabled on the VPC endpoint,
+    /// it resolves to the endpoint, and can be used as the account endpoint so that account
+    /// requests also go over PrivateLink.
+    pub private_dns_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1907,6 +1911,7 @@ impl From<MaybeKnown<api::location::PrivateNet>> for PrivateNet {
         match value {
             MaybeKnown::Known(api::location::PrivateNet::Aws(aws)) => Self::Aws(AwsPrivateNet {
                 service_name: aws.service_name.into(),
+                private_dns_name: aws.private_dns_name.map(Into::into),
             }),
             MaybeKnown::Unknown(name) => Self::Unknown(name),
         }
