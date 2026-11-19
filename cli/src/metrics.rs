@@ -306,7 +306,14 @@ pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) ->
         ("dimension", rows.collect())
     };
     rows.push((TOTAL.to_string(), usd(sum(total))));
-    table([heading, "usd"], &rows, true)
+    // As the dashboard says of the same figures.
+    let disclaimer = "Only finalized hours are included, so the most recent usage may be missing.\n\
+                      These estimates are not a final invoice.";
+    format!(
+        "{}\n\n{}",
+        disclaimer.dimmed(),
+        table([heading, "usd"], &rows, true)
+    )
 }
 
 #[cfg(test)]
@@ -452,6 +459,11 @@ mod tests {
             usd("storage.data", &[(0, 0.000001), (3600, 0.000002)]),
             usd("total", &[(0, 0.250001), (3600, 1.500002)]),
         ];
+        let disclaimer = [
+            "Only finalized hours are included, so the most recent usage may be missing.",
+            "These estimates are not a final invoice.",
+            "",
+        ];
         let expected = [
             "dimension          usd",
             "ops.stream    1.750000",
@@ -460,6 +472,7 @@ mod tests {
             "",
         ]
         .join("\n");
+        let expected = [disclaimer.join("\n"), expected].join("\n");
         assert_eq!(render_estimated_billable_usage(&metrics, false), expected);
 
         let expected = [
@@ -470,6 +483,7 @@ mod tests {
             "",
         ]
         .join("\n");
+        let expected = [disclaimer.join("\n"), expected].join("\n");
         assert_eq!(render_estimated_billable_usage(&metrics, true), expected);
     }
 
