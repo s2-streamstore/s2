@@ -216,8 +216,19 @@ fn table(heading: [&str; 2], rows: &[(String, String)], total: bool) -> String {
     out
 }
 
-/// Each series summed over the time range it was asked for, and their total if there are several.
-pub fn render_sums(start: u32, end: u32, series: &[&AccumulationMetric]) -> String {
+/// The time range metrics were asked for, as the heading of any view of them.
+pub fn render_time_range(start: u32, end: u32) -> String {
+    format!(
+        "{} {}\n{}   {}\n\n",
+        "start:".dimmed(),
+        timestamp(start),
+        "end:".dimmed(),
+        timestamp(end)
+    )
+}
+
+/// Each series summed over the time range, and their total if there are several.
+pub fn render_sums(series: &[&AccumulationMetric]) -> String {
     let Some(first) = series.first() else {
         return String::new();
     };
@@ -231,12 +242,7 @@ pub fn render_sums(start: u32, end: u32, series: &[&AccumulationMetric]) -> Stri
         let all = series.iter().map(|series| sum(series)).sum();
         rows.push(("total".to_string(), value(&first.unit, all)));
     }
-    format!(
-        "{} to {}\n\n{}",
-        timestamp(start),
-        timestamp(end),
-        table(["", format_unit(&first.unit)], &rows, total)
-    )
+    table(["", format_unit(&first.unit)], &rows, total)
 }
 
 /// The latest value of a gauge, then its values over time: all of them, or of a long series, a
@@ -274,9 +280,8 @@ pub fn render_gauge(gauge: &GaugeMetric) -> String {
     out
 }
 
-/// Estimated billable usage in US dollars: each dimension with usage summed over the hours
-/// counted, or with `by_interval` the total of each interval. Both end with the total over the
-/// range.
+/// Estimated billable usage in US dollars: each dimension with usage summed over the time range,
+/// or with `by_interval` the total of each interval. Both end with the total over the range.
 pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) -> String {
     const TOTAL: &str = "total";
 
@@ -292,32 +297,16 @@ pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) ->
     };
     let usd = |usd: f64| value(&MetricUnit::Usd, usd);
 
-    let mut out = String::new();
     let (heading, mut rows): (&str, Vec<(String, String)>) = if by_interval {
         let rows = total.values.iter().map(|(ts, v)| (timestamp(*ts), usd(*v)));
         ("interval start", rows.collect())
     } else {
-        // Only finalized hours are counted, so say which hours the sums cover.
-        if let (Some((first, _)), Some((last, _))) = (total.values.first(), total.values.last()) {
-            let interval = match total.interval {
-                TimeseriesInterval::Minute => 60,
-                TimeseriesInterval::Hour => 60 * 60,
-                TimeseriesInterval::Day => 24 * 60 * 60,
-                _ => 0,
-            };
-            out.push_str(&format!(
-                "Estimated billable usage, {} to {}\n\n",
-                timestamp(*first),
-                timestamp(last.saturating_add(interval))
-            ));
-        }
         let dimensions = series.iter().filter(|series| series.name != TOTAL);
         let rows = dimensions.map(|series| (series.name.clone(), usd(sum(series))));
         ("dimension", rows.collect())
     };
     rows.push((TOTAL.to_string(), usd(sum(total))));
-    out.push_str(&table([heading, "usd"], &rows, true));
-    out
+    table([heading, "usd"], &rows, true)
 }
 
 #[cfg(test)]
@@ -464,8 +453,6 @@ mod tests {
             usd("total", &[(0, 0.250001), (3600, 1.500002)]),
         ];
         let expected = [
-            "Estimated billable usage, 1970-01-01T00:00:00Z to 1970-01-01T02:00:00Z",
-            "",
             "dimension          usd",
             "ops.stream    1.750000",
             "storage.data  0.000003",
@@ -494,8 +481,6 @@ mod tests {
             series("express", "operations", &[(3600, 40.0)]),
         ];
         let expected = [
-            "1970-01-01T00:00:00Z to 1970-01-01T02:00:00Z",
-            "",
             "          operations",
             "standard           5",
             "express           40",
@@ -504,7 +489,7 @@ mod tests {
         ]
         .join("\n");
         let appends: Vec<&AccumulationMetric> = appends.iter().collect();
-        assert_eq!(render_sums(0, 7200, &appends), expected);
+        assert_eq!(render_sums(&appends), expected);
 
         let api = s2_api::v1::metrics::GaugeMetric {
             name: "storage".into(),

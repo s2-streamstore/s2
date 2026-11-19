@@ -620,6 +620,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             } else if token_activity {
                 print_token_activity(&metrics);
             } else if billable_usage {
+                print_time_range(range.as_ref());
                 let by_interval = range.is_some_and(|range| range.interval.is_some());
                 print_estimated_billable_usage(&metrics, by_interval);
             } else {
@@ -1161,6 +1162,12 @@ fn print_estimated_billable_usage(metrics: &[Metric], by_interval: bool) {
     print!("{rendered}");
 }
 
+fn print_time_range(range: Option<&s2_sdk::types::TimeRangeAndInterval>) {
+    if let Some(range) = range {
+        print!("{}", metrics::render_time_range(range.start, range.end));
+    }
+}
+
 /// Pretty output is a glance: without an interval asked for, accumulations are summed over
 /// `range`, and a long gauge is sampled. JSON has every point.
 fn print_metrics(
@@ -1184,8 +1191,9 @@ fn print_metrics(
         count: String,
     }
 
-    let summed = range.filter(|range| range.interval.is_none());
-    if let Some(range) = summed {
+    print_time_range(range);
+    let summed = range.is_some_and(|range| range.interval.is_none());
+    if summed {
         let series: Vec<_> = metrics
             .iter()
             .filter_map(|metric| match metric {
@@ -1193,7 +1201,7 @@ fn print_metrics(
                 _ => None,
             })
             .collect();
-        print!("{}", metrics::render_sums(range.start, range.end, &series));
+        print!("{}", metrics::render_sums(&series));
     }
     if metrics.is_empty() {
         eprintln!("No data in the time range.");
@@ -1204,7 +1212,7 @@ fn print_metrics(
             Metric::Scalar(m) => {
                 println!("{}: {} {}", m.name, m.value, format_unit(&m.unit));
             }
-            Metric::Accumulation(_) if summed.is_some() => {}
+            Metric::Accumulation(_) if summed => {}
             Metric::Accumulation(m) => {
                 let rows: Vec<AccumulationRow> = m
                     .values
