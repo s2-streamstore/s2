@@ -1271,7 +1271,7 @@ pub struct TimeRangeArgs {
     pub start_timestamp: Option<u32>,
 
     /// Start time as human-friendly delta from current time (e.g., "2h", "1d", "0s").
-    /// Defaults to 30 days ago.
+    /// Defaults to 30 days before the end.
     #[arg(long, group = "start_time")]
     pub start_ago: Option<humantime::Duration>,
 

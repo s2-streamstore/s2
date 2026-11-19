@@ -876,36 +876,30 @@ async fn append_command(
         .map_err(|e| CliError::op(op_error, e))
 }
 
-fn resolve_time(
-    timestamp: Option<u32>,
-    ago: Option<humantime::Duration>,
-    default_ago: Duration,
-) -> u32 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
-
+fn resolve_time(timestamp: Option<u32>, ago: Option<humantime::Duration>, now: u32) -> Option<u32> {
     match (timestamp, ago) {
-        (Some(ts), None) => ts,
-        (None, ago) => {
-            let ago = ago.map_or(default_ago, Into::into);
-            now.saturating_sub(ago.as_secs() as u32)
-        }
+        (Some(ts), None) => Some(ts),
+        (None, Some(ago)) => Some(now.saturating_sub(ago.as_secs() as u32)),
+        (None, None) => None,
         (Some(_), Some(_)) => unreachable!("clap group ensures only one is specified"),
     }
 }
 
-/// The last 30 days, where a bound is not given.
+/// Up to now, where an end is not given, and from 30 days before the end, where a start is not.
+/// The start follows the end so that an end in the past alone is still a valid range.
 fn resolve_time_range(
     args: &TimeRangeArgs,
     interval: Option<impl Into<TimeseriesInterval>>,
 ) -> TimeRangeAndInterval {
-    const DEFAULT_START_AGO: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-    let range = TimeRangeAndInterval::new(
-        resolve_time(args.start_timestamp, args.start_ago, DEFAULT_START_AGO),
-        resolve_time(args.end_timestamp, args.end_ago, Duration::ZERO),
-    );
+    const DEFAULT_SPAN_SECS: u32 = 30 * 24 * 60 * 60;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+    let end = resolve_time(args.end_timestamp, args.end_ago, now).unwrap_or(now);
+    let start = resolve_time(args.start_timestamp, args.start_ago, now)
+        .unwrap_or_else(|| end.saturating_sub(DEFAULT_SPAN_SECS));
+    let range = TimeRangeAndInterval::new(start, end);
     match interval {
         Some(interval) => range.with_interval(interval.into()),
         None => range,
