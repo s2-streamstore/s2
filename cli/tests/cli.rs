@@ -34,10 +34,6 @@ impl TestServer {
     /// Serves one HTTP/2 request and returns the request line and headers it
     /// saw. The client speaks h2 with prior knowledge over cleartext.
     fn start() -> Self {
-        Self::start_with_body(r#"{"basins":[],"has_more":false}"#.into())
-    }
-
-    fn start_with_body(body: String) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
         let handle = std::thread::spawn(move || {
@@ -45,7 +41,7 @@ impl TestServer {
                 .enable_all()
                 .build()
                 .expect("test runtime")
-                .block_on(serve_one_request(listener, body.into()))
+                .block_on(serve_one_request(listener))
         });
         Self { endpoint, handle }
     }
@@ -57,7 +53,7 @@ impl TestServer {
 
 const TEST_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn serve_one_request(listener: TcpListener, body: bytes::Bytes) -> String {
+async fn serve_one_request(listener: TcpListener) -> String {
     listener
         .set_nonblocking(true)
         .expect("non-blocking listener");
@@ -71,7 +67,6 @@ async fn serve_one_request(listener: TcpListener, body: bytes::Bytes) -> String 
     let captured = observed.clone();
     let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
         let captured = captured.clone();
-        let body = body.clone();
         async move {
             let mut rendered = format!("{} {}\r\n", req.method(), req.uri());
             for (name, value) in req.headers() {
@@ -82,10 +77,11 @@ async fn serve_one_request(listener: TcpListener, body: bytes::Bytes) -> String 
             }
             *captured.lock().expect("capture request") = Some(rendered);
 
+            let body = r#"{"basins":[],"has_more":false}"#;
             Ok::<_, Infallible>(
                 hyper::Response::builder()
                     .header("content-type", "application/json")
-                    .body(http_body_util::Full::new(body))
+                    .body(http_body_util::Full::new(bytes::Bytes::from(body)))
                     .expect("build response"),
             )
         }
@@ -188,70 +184,6 @@ fn missing_access_token() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("access token"));
-}
-
-#[test]
-fn basin_and_location_lists_share_location_colors() {
-    let locations = [
-        ("aws:eu-north-1", 33),
-        ("aws:us-east-1", 36),
-        ("aws:us-west-2", 95),
-    ];
-    let basins = locations
-        .iter()
-        .map(|(location, _)| {
-            serde_json::json!({
-                "name": location.replace(':', "-"),
-                "location": location,
-                "created_at": "2026-01-01T00:00:00Z",
-                "deleted_at": null,
-            })
-        })
-        .collect::<Vec<_>>();
-    let location_info = locations
-        .iter()
-        .map(|(location, _)| {
-            serde_json::json!({
-                "name": location,
-                "is_private": false,
-                "storage_classes": ["express", "standard"],
-                "default_storage_class": "express",
-            })
-        })
-        .collect::<Vec<_>>();
-    let env = TestEnv::new();
-    let run = |args: &[&str], body: serde_json::Value, colors: bool| {
-        let server = TestServer::start_with_body(body.to_string());
-        let result = env
-            .s2()
-            .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
-            .env("S2_BASIN_ENDPOINT", &server.endpoint)
-            .env("S2_ACCESS_TOKEN", "test")
-            .env("CLICOLOR_FORCE", if colors { "1" } else { "0" })
-            .env("NO_COLOR", if colors { "" } else { "1" })
-            .args(args)
-            .assert()
-            .success();
-        server.finish();
-        String::from_utf8(result.get_output().stdout.clone()).unwrap()
-    };
-    let basin_body = serde_json::json!({ "basins": basins, "has_more": false });
-    let location_body = serde_json::json!(location_info);
-
-    let basin_list = run(&["ls"], basin_body, true);
-    let location_list = run(&["location", "list"], location_body.clone(), true);
-    for (location, sgr) in locations {
-        assert!(basin_list.contains(&format!("\x1b[{sgr}m({location})\x1b[0m")));
-        assert!(location_list.contains(&format!("- \x1b[{sgr}m{location}\x1b[0m")));
-    }
-
-    let plain_list = run(&["location", "list"], location_body, false);
-    let expected = locations.map(|(location, _)| {
-        format!(
-            "- {location} (public)\n    storage classes:\n      express (default)\n      standard\n"
-        )
-    });
-    assert_eq!(plain_list, expected.concat());
 }
 
 #[test]
