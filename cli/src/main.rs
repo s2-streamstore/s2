@@ -30,7 +30,7 @@ use cli::{
     ConfigCommand, ListBasinsArgs, ListStreamsArgs, LocationCommand, MetricsCommand,
     NetworkPolicyCommand, StreamCommand,
 };
-use colored::Colorize;
+use colored::{Color, Colorize};
 use config::{
     AuthMethod, ConfigKey, CredentialStore, load_config_file, sdk_config, select_auth_method,
     set_config_value, unset_config_value,
@@ -582,13 +582,13 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::ListLocations | Command::Location(LocationCommand::List) => {
             let locations = ops::list_locations(&s2).await?;
             for location_info in locations {
-                print_location_listing(&location_info);
+                print_location_listing(&location_info, true);
             }
         }
 
         Command::GetDefaultLocation | Command::Location(LocationCommand::GetDefault) => {
             let location = ops::get_default_location(&s2).await?;
-            print_location_listing(&location);
+            print_location_listing(&location, false);
         }
 
         Command::SetDefaultLocation { location }
@@ -601,7 +601,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     .green()
                     .bold()
             );
-            print_location_listing(&location);
+            print_location_listing(&location, false);
         }
 
         Command::GetAccountMetrics(args) | Command::Metrics(MetricsCommand::Account(args)) => {
@@ -994,8 +994,7 @@ fn print_listing_uri(uri: String, is_deleting: bool) {
 
 fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) {
     let name = format_listing_uri(name, is_deleting);
-    let location =
-        location.map(|location| format_listing_location(&format!("({location})"), is_deleting));
+    let location = location.map(|location| format!("({location})").color(location_color(location)));
     match (location, is_deleting) {
         (Some(location), true) => println!("{} {} {}", name, location, deletion_marker()),
         (Some(location), false) => println!("{} {}", name, location),
@@ -1004,25 +1003,33 @@ fn print_basin_listing(name: String, location: Option<&str>, is_deleting: bool) 
     }
 }
 
-fn print_location_listing(location: &LocationInfo) {
-    print!("{}", render_location_listing(location));
+fn print_location_listing(location: &LocationInfo, is_list_item: bool) {
+    print!("{}", render_location_listing(location, is_list_item));
 }
 
 /// A location, with its storage classes one to a line and the default one marked.
-fn render_location_listing(location: &LocationInfo) -> String {
+fn render_location_listing(location: &LocationInfo, is_list_item: bool) -> String {
+    let name = location.name.as_ref();
+    let (heading, indent) = if is_list_item {
+        (format!("- {}", name.color(location_color(name))), "    ")
+    } else {
+        (name.to_owned(), "  ")
+    };
     let visibility = format_location_visibility(location.is_private);
-    let mut out = format!("{} {visibility}\n", location.name);
+    let mut out = format!("{heading} {visibility}\n");
     let default = location.default_storage_class.as_ref();
     let classes = location.storage_classes.as_deref().unwrap_or_default();
     match &location.storage_classes {
-        Some(classes) if classes.is_empty() => out.push_str("  storage classes: none\n"),
+        Some(classes) if classes.is_empty() => {
+            out.push_str(&format!("{indent}storage classes: none\n"));
+        }
         Some(classes) => {
-            out.push_str("  storage classes:\n");
+            out.push_str(&format!("{indent}storage classes:\n"));
             for class in classes {
                 if Some(class) == default {
-                    out.push_str(&format!("    {class} {}\n", "(default)".dimmed()));
+                    out.push_str(&format!("{indent}  {class} {}\n", "(default)".dimmed()));
                 } else {
-                    out.push_str(&format!("    {class}\n"));
+                    out.push_str(&format!("{indent}  {class}\n"));
                 }
             }
         }
@@ -1030,19 +1037,21 @@ fn render_location_listing(location: &LocationInfo) -> String {
     }
     // A default that is not among the classes listed still has to be shown.
     if let Some(default) = default.filter(|default| !classes.contains(default)) {
-        out.push_str(&format!("  default storage class: {default}\n"));
+        out.push_str(&format!("{indent}default storage class: {default}\n"));
     }
     match &location.private_net {
         Some(PrivateNet::Aws(aws)) => {
             out.push_str(&format!(
-                "  privatelink service name: {}\n",
+                "{indent}privatelink service name: {}\n",
                 aws.service_name
             ));
             if let Some(private_dns_name) = &aws.private_dns_name {
-                out.push_str(&format!("  privatelink dns name: {private_dns_name}\n"));
+                out.push_str(&format!(
+                    "{indent}privatelink dns name: {private_dns_name}\n"
+                ));
             }
         }
-        Some(PrivateNet::Unknown(kind)) => out.push_str(&format!("  private net: {kind}\n")),
+        Some(PrivateNet::Unknown(kind)) => out.push_str(&format!("{indent}private net: {kind}\n")),
         Some(_) | None => {}
     }
     out
@@ -1075,12 +1084,23 @@ fn format_listing_uri(uri: String, is_deleting: bool) -> colored::ColoredString 
     if is_deleting { uri.red() } else { uri.normal() }
 }
 
-fn format_listing_location(location: &str, is_deleting: bool) -> colored::ColoredString {
-    if is_deleting {
-        location.red()
-    } else {
-        location.yellow()
-    }
+fn location_color(location: &str) -> Color {
+    const PALETTE: [Color; 8] = [
+        Color::Green,
+        Color::Magenta,
+        Color::BrightBlue,
+        Color::BrightGreen,
+        Color::Cyan,
+        Color::BrightCyan,
+        Color::Yellow,
+        Color::BrightMagenta,
+    ];
+
+    // FNV-1a keeps the palette index stable across runs.
+    let hash = location.bytes().fold(0x811c9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
+    });
+    PALETTE[hash as usize % PALETTE.len()]
 }
 
 fn deletion_marker() -> colored::ColoredString {
@@ -1327,7 +1347,7 @@ mod tests {
         colored::control::set_override(false);
         let render = |json: &str| {
             let location: s2_api::v1::location::LocationInfo = serde_json::from_str(json).unwrap();
-            render_location_listing(&location.into())
+            render_location_listing(&location.into(), false)
         };
 
         let listed = r#"{"name": "aws:us-east-1", "is_private": false,
