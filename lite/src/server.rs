@@ -6,7 +6,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::{
+    accept::{TcpConfigAcceptor, TcpKeepaliveConfig, TcpSocketConfig},
+    tls_rustls::{RustlsAcceptor, RustlsConfig},
+};
 use bytesize::ByteSize;
 use http::header::AUTHORIZATION;
 use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
@@ -18,7 +21,7 @@ use tower_http::{
     sensitive_headers::SetSensitiveRequestHeadersLayer,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{backend::Backend, dashboard, handlers, init};
 
@@ -361,10 +364,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
         app = app.layer(CorsLayer::very_permissive());
     }
 
-    let listener = socket.listen()?;
-    let server_handle = axum_server::Handle::new();
-    tokio::spawn(shutdown_signal(server_handle.clone()));
-    match (
+    let rustls_config = match (
         args.tls.tls_self,
         args.tls.tls_cert.clone(),
         args.tls.tls_key.clone(),
@@ -375,12 +375,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
                 ?cert_path,
                 "starting https server with provided certificate"
             );
-            let rustls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
-            info!("{}", cli_hint);
-            axum_server::from_tcp_rustls(listener, rustls_config)?
-                .handle(server_handle)
-                .serve(app.into_make_service())
-                .await?;
+            Some(RustlsConfig::from_pem_file(cert_path, key_path).await?)
         }
         (true, None, None) => {
             info!(
@@ -392,28 +387,46 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
                 "127.0.0.1".to_string(),
                 "::1".to_string(),
             ])?;
-            let rustls_config = RustlsConfig::from_pem(
-                cert.pem().into_bytes(),
-                signing_key.serialize_pem().into_bytes(),
+            Some(
+                RustlsConfig::from_pem(
+                    cert.pem().into_bytes(),
+                    signing_key.serialize_pem().into_bytes(),
+                )
+                .await?,
             )
-            .await?;
-            info!("{}", cli_hint);
-            axum_server::from_tcp_rustls(listener, rustls_config)?
-                .handle(server_handle)
-                .serve(app.into_make_service())
-                .await?;
         }
         (false, None, None) => {
             info!(%addr, "starting plain http server");
-            info!("{}", cli_hint);
-            axum_server::from_tcp(listener)?
-                .handle(server_handle)
-                .serve(app.into_make_service())
-                .await?;
+            None
         }
         _ => {
             // This shouldn't happen due to clap validation...
             return Err(eyre::eyre!("Invalid TLS configuration"));
+        }
+    };
+
+    let listener = socket.listen()?;
+    let server_handle = axum_server::Handle::new();
+    tokio::spawn(shutdown_signal(server_handle.clone()));
+    info!("{}", cli_hint);
+    let tcp_config = tcp_config_acceptor();
+    match rustls_config {
+        Some(rustls_config) => {
+            let acceptor = RustlsAcceptor::new(rustls_config).acceptor(tcp_config);
+            configure_server(
+                axum_server::from_tcp(listener)?.acceptor(acceptor),
+                server_handle,
+            )
+            .serve(app.into_make_service())
+            .await?;
+        }
+        None => {
+            configure_server(
+                axum_server::from_tcp(listener)?.acceptor(tcp_config),
+                server_handle,
+            )
+            .serve(app.into_make_service())
+            .await?;
         }
     }
 
@@ -627,15 +640,56 @@ impl BoundSocket {
 
     fn listen(self) -> eyre::Result<std::net::TcpListener> {
         let Self { socket, addr } = self;
-        let listen = || -> io::Result<()> {
-            socket.listen(1024)?;
-            // `axum_server::from_tcp` hands the listener to tokio as-is, which
-            // requires it to be non-blocking.
-            socket.set_nonblocking(true)
-        };
-        listen().map_err(|error| listen_error(addr, error))?;
+        socket
+            .listen(1024)
+            .map_err(|error| listen_error(addr, error))?;
         Ok(socket.into())
     }
+}
+
+const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// Hyper also reuses `header_read_timeout` as the idle timeout between HTTP/1.1
+// keep-alive requests, so keep it generous enough for connection pooling.
+const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(30);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+const TCP_KEEPALIVE_RETRIES: u32 = 4;
+
+fn tcp_config_acceptor() -> TcpConfigAcceptor {
+    TcpConfigAcceptor::new(
+        TcpSocketConfig::new().nodelay(true).keepalive(
+            TcpKeepaliveConfig::new()
+                .time(TCP_KEEPALIVE_TIME)
+                .interval(TCP_KEEPALIVE_INTERVAL)
+                .retries(TCP_KEEPALIVE_RETRIES),
+        ),
+    )
+}
+
+fn configure_server<Acc>(
+    server: axum_server::Server<SocketAddr, Acc>,
+    handle: axum_server::Handle<SocketAddr>,
+) -> axum_server::Server<SocketAddr, Acc> {
+    let mut server = server
+        .handle(handle)
+        .first_request_timeout(FIRST_REQUEST_TIMEOUT)
+        .accept_error_handler(|remote_addr, error| match remote_addr {
+            Some(remote_addr) => debug!(%remote_addr, %error, "failed to accept connection"),
+            None => warn!(%error, "failed to accept connection on listener"),
+        });
+    server
+        .http_builder()
+        .http1()
+        .header_read_timeout(HTTP1_HEADER_READ_TIMEOUT);
+    server
+        .http_builder()
+        .http2()
+        .adaptive_window(true)
+        .keep_alive_interval(HTTP2_KEEP_ALIVE_INTERVAL)
+        .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT);
+    server
 }
 
 /// Creates a TCP socket for `ip`.
@@ -834,14 +888,6 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         TcpStream::connect(addr).unwrap();
-    }
-
-    #[test]
-    fn listener_is_non_blocking() {
-        let error = listen_on(Some(Ipv4Addr::LOCALHOST.into()))
-            .accept()
-            .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[cfg(target_os = "linux")]
