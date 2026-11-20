@@ -1090,9 +1090,9 @@ fn location_color(location: &str) -> Color {
         Color::Magenta,
         Color::BrightBlue,
         Color::BrightGreen,
-        Color::Cyan,
-        Color::BrightCyan,
         Color::Yellow,
+        Color::BrightCyan,
+        Color::Cyan,
         Color::BrightMagenta,
     ];
 
