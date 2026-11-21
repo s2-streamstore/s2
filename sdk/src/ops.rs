@@ -2,12 +2,11 @@
 use crate::client::Connect;
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
-    error::{
-        AppendError, ClientClosedError, ErrorContext, ProtocolError, ReadError, ReadSessionError,
-        RequestError,
-    },
+    error::{AppendError, ClientClosedError, ErrorContext, ProtocolError, ReadError, RequestError},
     producer::{Producer, ProducerConfig},
-    session::{self, AppendSession, AppendSessionConfig, ReadSession, StreamHeaders},
+    session::{
+        self, AppendSession, AppendSessionConfig, ReadBatchSession, ReadSession, StreamHeaders,
+    },
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, EncryptionKey,
@@ -687,29 +686,56 @@ impl S2Stream {
         ))
     }
 
-    /// Create a read session.
-    pub async fn read_session(
+    /// Create a continuous read session yielding individual
+    /// [`SequencedRecord`](crate::types::SequencedRecord)s (`R5`, `R6`).
+    ///
+    /// Initiates the first request immediately without waiting for a response; request errors
+    /// surface through iteration.
+    pub fn read_session(
         &self,
         input: ReadInput,
         config: ReadSessionConfig,
-    ) -> Result<ReadSession, ReadSessionError> {
+    ) -> Result<ReadSession, ClientClosedError> {
         if self.client.is_closed() {
-            return Err(ReadSessionError::ClientClosed(ClientClosedError::new(
-                ErrorContext::stream(
-                    "read_session",
-                    self.client.name.as_ref(),
-                    self.name.as_ref(),
-                    true,
-                ),
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "read_session",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                true,
             )));
         }
-        session::read_session(
+        Ok(session::open_read_session(
             self.client.clone(),
             self.name.clone(),
             self.headers(input.stream_config.as_ref()),
             input,
             config,
-        )
-        .await
+        ))
+    }
+
+    /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es (`R6a`).
+    ///
+    /// Initiates the first request immediately without waiting for a response; request errors
+    /// surface through iteration.
+    pub fn read_batch_session(
+        &self,
+        input: ReadInput,
+        config: ReadSessionConfig,
+    ) -> Result<ReadBatchSession, ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "read_batch_session",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                true,
+            )));
+        }
+        Ok(session::open_read_batch_session(
+            self.client.clone(),
+            self.name.clone(),
+            self.headers(input.stream_config.as_ref()),
+            input,
+            config,
+        ))
     }
 }

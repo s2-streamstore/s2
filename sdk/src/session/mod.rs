@@ -6,8 +6,8 @@ pub(crate) use append::{
     validate_reserve_bytes,
 };
 pub use append::{AppendSession, AppendSessionConfig};
-pub use read::ReadSession;
-pub(crate) use read::read_session;
+pub use read::{ReadBatchSession, ReadSession};
+pub(crate) use read::{open_read_batch_session, open_read_session};
 
 /// Per-stream options sent as request headers on every (re)connect of a session.
 #[derive(Debug, Clone, Default)]

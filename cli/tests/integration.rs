@@ -1334,6 +1334,23 @@ fn fence_with_existing_token() {
 
 #[test]
 #[serial]
+fn tail_empty_stream() {
+    let basin = ensure_test_basin("test-cli-data");
+    let stream = unique_name("test-data-tail-empty");
+    let uri = format!("s2://{basin}/{stream}");
+
+    s2().args(["stream", "create", &uri]).assert().success();
+
+    s2().args(["tail", &uri])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    cleanup_stream(&basin, &stream);
+}
+
+#[test]
+#[serial]
 fn bench_stream() {
     let basin = ensure_test_basin("test-cli-data");
 

@@ -1760,9 +1760,6 @@ pub(crate) fn classify_http_error(err: client::HttpError, context: ErrorContext)
         client::HttpError::Send(_) | client::HttpError::Receive(_) => {
             if let Some(hyper_err) = source_err::<hyper::Error>(&err) {
                 let detail = format!("{hyper_err} -> {err_msg}");
-                if hyper_err.is_timeout() {
-                    return ApiError::Timeout(TimeoutError::new(detail, context));
-                }
                 if hyper_err.is_parse() || hyper_err.is_user() {
                     return ApiError::Protocol(ProtocolError::new(detail, context));
                 }

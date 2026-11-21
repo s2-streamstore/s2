@@ -204,12 +204,48 @@ impl StreamConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedStreamConfig {
+    pub storage_class: Option<CompactString>,
+    pub retention_policy: sdk::types::RetentionPolicy,
+    pub timestamping_mode: sdk::types::TimestampingMode,
+    pub timestamping_uncapped: bool,
+    pub delete_on_empty_min_age: Duration,
+}
+
+/// Resolve a stream configuration against basin defaults and server defaults while preserving
+/// unrecognized future enum values (`MaybeKnown::Unknown`) verbatim.
 pub fn resolve_stream_config(
-    config: s2_api::v1::config::StreamConfig,
-    basin_defaults: s2_api::v1::config::StreamConfig,
-) -> Result<s2_common::config::StreamConfig, s2_common::ValidationError> {
-    let config: s2_common::config::OptionalStreamConfig = config.try_into()?;
-    Ok(config.merge(basin_defaults.try_into()?))
+    config: sdk::types::StreamConfig,
+    basin_defaults: sdk::types::StreamConfig,
+) -> ResolvedStreamConfig {
+    const DEFAULT_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+
+    let ts = config.timestamping;
+    let default_ts = basin_defaults.timestamping;
+
+    ResolvedStreamConfig {
+        storage_class: config.storage_class.or(basin_defaults.storage_class),
+        retention_policy: config
+            .retention_policy
+            .or(basin_defaults.retention_policy)
+            .unwrap_or(sdk::types::RetentionPolicy::Age(DEFAULT_RETENTION_SECS)),
+        timestamping_mode: ts
+            .as_ref()
+            .and_then(|t| t.mode.clone())
+            .or_else(|| default_ts.as_ref().and_then(|t| t.mode.clone()))
+            .unwrap_or(sdk::types::TimestampingMode::ClientPrefer),
+        timestamping_uncapped: ts
+            .and_then(|t| t.uncapped)
+            .or_else(|| default_ts.and_then(|t| t.uncapped))
+            .unwrap_or(false),
+        delete_on_empty_min_age: Duration::from_secs(
+            config
+                .delete_on_empty
+                .or(basin_defaults.delete_on_empty)
+                .map_or(0, |d| d.min_age_secs),
+        ),
+    }
 }
 
 pub use sdk::types::LocationName;
@@ -283,6 +319,14 @@ pub enum RetentionPolicy {
     Unknown(String),
 }
 
+fn parse_whole_second_duration(s: &str) -> Result<Duration, String> {
+    let d = humantime::parse_duration(s).map_err(|e| e.to_string())?;
+    if d.subsec_nanos() != 0 {
+        return Err("duration must be a whole number of seconds".to_owned());
+    }
+    Ok(d)
+}
+
 impl TryFrom<&str> for RetentionPolicy {
     type Error = &'static str;
 
@@ -290,9 +334,12 @@ impl TryFrom<&str> for RetentionPolicy {
         if value == "infinite" {
             return Ok(RetentionPolicy::Infinite);
         } else if let Ok(d) = humantime::parse_duration(value) {
+            if d.subsec_nanos() != 0 {
+                return Err("invalid retention policy: duration must be a whole number of seconds");
+            }
             return Ok(RetentionPolicy::Age(d));
         }
-        Err("invalid retention policy: expected a duration, or 'infinite'")
+        Err("invalid retention policy: expected a whole-second duration, or 'infinite'")
     }
 }
 
@@ -306,7 +353,7 @@ impl FromStr for RetentionPolicy {
 
 #[derive(Args, Clone, Debug, Serialize)]
 pub struct DeleteOnEmptyConfig {
-    #[arg(long, value_parser = humantime::parse_duration, required = false)]
+    #[arg(long, value_parser = parse_whole_second_duration, required = false)]
     #[serde(serialize_with = "serialize_duration_humantime")]
     /// Minimum age before an empty stream can be deleted.
     /// Example: 1d, 1w, 1y
@@ -1496,5 +1543,40 @@ mod tests {
                 "S2BasinAndMaybeStreamUri: {s}"
             );
         }
+    }
+
+    #[test]
+    fn subsecond_durations_rejected_and_unknown_configs_resolved() {
+        use super::{
+            Duration, RetentionPolicy, parse_whole_second_duration, resolve_stream_config, sdk,
+        };
+
+        assert!(RetentionPolicy::try_from("500ms").is_err());
+        assert!(RetentionPolicy::try_from("1s 250ms").is_err());
+        assert!(RetentionPolicy::try_from("10s").is_ok());
+        assert!(RetentionPolicy::try_from("infinite").is_ok());
+
+        assert!(parse_whole_second_duration("500ms").is_err());
+        assert!(parse_whole_second_duration("1s 500ms").is_err());
+        assert_eq!(
+            parse_whole_second_duration("60s").unwrap(),
+            Duration::from_secs(60)
+        );
+
+        let unknown_cfg = sdk::types::StreamConfig::new()
+            .with_retention_policy(sdk::types::RetentionPolicy::Unknown("future_policy".into()))
+            .with_timestamping(
+                sdk::types::TimestampingConfig::new()
+                    .with_mode(sdk::types::TimestampingMode::Unknown("future_mode".into())),
+            );
+        let resolved = resolve_stream_config(unknown_cfg, Default::default());
+        assert_eq!(
+            resolved.retention_policy,
+            sdk::types::RetentionPolicy::Unknown("future_policy".into())
+        );
+        assert_eq!(
+            resolved.timestamping_mode,
+            sdk::types::TimestampingMode::Unknown("future_mode".into())
+        );
     }
 }

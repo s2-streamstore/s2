@@ -57,7 +57,7 @@ use crate::{
 };
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
-const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 90;
+const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 50;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -681,20 +681,46 @@ impl ConnectionId {
 /// Poisoning is idempotent: the connection is identified by its
 /// [`ConnectionId`], so poisoning it again — including from another session
 /// sharing the connection — is a no-op.
+#[derive(Clone)]
 pub struct PoisonHandle {
-    poison: Box<dyn Fn() + Send + Sync>,
+    poison: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl PoisonHandle {
     fn new(poison: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
-            poison: Box::new(poison),
+            poison: Arc::new(poison),
         }
     }
 
     pub(crate) fn poison(&self) {
         (self.poison)();
     }
+}
+
+fn is_dead_connection_hyper_error(err: &hyper::Error) -> bool {
+    if err.is_timeout() {
+        return true;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
+    while let Some(cur) = source {
+        if let Some(h2_err) = cur.downcast_ref::<h2::Error>() {
+            return h2_err.is_io() || h2_err.is_go_away();
+        }
+        source = cur.source();
+    }
+    err.is_closed()
+}
+
+fn is_dead_connection_legacy_error(err: &hyper_util::client::legacy::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
+    while let Some(cur) = source {
+        if let Some(hyper_err) = cur.downcast_ref::<hyper::Error>() {
+            return is_dead_connection_hyper_error(hyper_err);
+        }
+        source = cur.source();
+    }
+    false
 }
 
 pub struct StreamingResponse {
@@ -774,11 +800,17 @@ impl StreamingResponse {
             poison_handle,
             ..
         } = self;
+        let stream_poison = poison_handle.clone();
         let stream = http_body_util::BodyStream::new(body).filter_map(move |result| {
             let _ = &permit;
             std::future::ready(match result {
                 Ok(frame) => frame.into_data().ok().map(Ok),
-                Err(e) => Some(Err(HttpError::Receive(e))),
+                Err(e) => {
+                    if is_dead_connection_hyper_error(&e) {
+                        stream_poison.poison();
+                    }
+                    Some(Err(HttpError::Receive(e)))
+                }
             })
         });
         (stream, poison_handle)
@@ -935,10 +967,21 @@ where
     )?;
 
     let operation = async {
-        let response = client.request(http_request).await?;
+        let response = client.request(http_request).await.inspect_err(|e| {
+            if is_dead_connection_legacy_error(e) {
+                poison_handle.poison();
+            }
+        })?;
         let (parts, body) = response.into_parts();
         let bytes = if parts.status.is_success() {
-            body.collect().await?.to_bytes()
+            body.collect()
+                .await
+                .inspect_err(|e| {
+                    if is_dead_connection_hyper_error(e) {
+                        poison_handle.poison();
+                    }
+                })?
+                .to_bytes()
         } else {
             match body.collect().await {
                 Ok(collected) => collected.to_bytes(),
@@ -998,7 +1041,11 @@ where
 
     let started = Instant::now();
     let operation = async {
-        let response = client.request(http_request).await?;
+        let response = client.request(http_request).await.inspect_err(|e| {
+            if is_dead_connection_legacy_error(e) {
+                poison_handle.poison();
+            }
+        })?;
         let (parts, body) = response.into_parts();
         let remaining_timeout = request_timeout.map(|d| {
             d.saturating_sub(started.elapsed())
@@ -1486,7 +1533,7 @@ where
             return Err(HttpError::ClientClosed);
         }
         self.ensure_reaper_started();
-        let host = request.origin();
+        let origin = request.origin();
         let (
             pool,
             CheckedOutClient {
@@ -1494,8 +1541,8 @@ where
                 permit: _permit,
                 id,
             },
-        ) = self.checkout_for_host(&host)?;
-        let poison_handle = Self::make_poison_handle(&pool, host, id);
+        ) = self.checkout_for_host(&origin)?;
+        let poison_handle = Self::make_poison_handle(&pool, origin, id);
         let shutdown = self.shutdown.clone();
         tokio::select! {
             biased;
@@ -1509,9 +1556,9 @@ where
             return Err(HttpError::ClientClosed);
         }
         self.ensure_reaper_started();
-        let host = request.origin();
-        let (pool, CheckedOutClient { client, permit, id }) = self.checkout_for_host(&host)?;
-        let poison_handle = Self::make_poison_handle(&pool, host, id);
+        let origin = request.origin();
+        let (pool, CheckedOutClient { client, permit, id }) = self.checkout_for_host(&origin)?;
+        let poison_handle = Self::make_poison_handle(&pool, origin, id);
         let shutdown = self.shutdown.clone();
         tokio::select! {
             biased;
@@ -1653,8 +1700,10 @@ mod tests {
         );
     }
 
+    // spec: r1 C13a
     #[tokio::test]
     async fn checkout_within_capacity() {
+        assert_eq!(MAX_CONCURRENT_REQUESTS_PER_CLIENT, 50);
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
@@ -1664,6 +1713,7 @@ mod tests {
         assert_eq!(host_client_count(&pool, TEST_HOST), 1);
     }
 
+    // spec: r1 C13a
     #[tokio::test]
     async fn overflow_creates_new_client() {
         let pool = test_pool();
@@ -1679,6 +1729,29 @@ mod tests {
         assert_eq!(host_client_count(&pool, TEST_HOST), 2);
     }
 
+    // spec: r1 C13
+    #[tokio::test]
+    async fn poison_evicts_only_targeted_connection_preserving_siblings() {
+        let http2 = Http2Config::new().with_max_concurrent_requests(1).unwrap();
+        let pool = Pool::new(HttpConnector::new(), http2, ShutdownSignal::new());
+        let (_c1, p1, id1) = pool.checkout(TEST_HOST);
+        let (_c2, p2, id2) = pool.checkout(TEST_HOST);
+        assert_ne!(id1, id2);
+        assert_eq!(host_client_count(&pool, TEST_HOST), 2);
+
+        let host_pool = pool.get_or_create_host_pool(TEST_HOST).unwrap();
+        host_pool.poison(TEST_HOST, id1);
+        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+
+        // Freeing the healthy sibling's permit allows reusing it rather than dialing a new one.
+        drop(p2);
+        let (_c3, p3, id3) = pool.checkout(TEST_HOST);
+        assert_eq!(id3, id2);
+        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+        drop((p1, p3));
+    }
+
+    // spec: r1 C13a
     #[tokio::test]
     async fn custom_request_cap_bounds_client() {
         let http2 = Http2Config::new().with_max_concurrent_requests(2).unwrap();
@@ -1695,6 +1768,7 @@ mod tests {
         assert_eq!(host_client_count(&pool, TEST_HOST), 2);
     }
 
+    // spec: r1 C13a
     #[tokio::test]
     async fn permit_drop_frees_capacity() {
         let pool = test_pool();
@@ -1710,6 +1784,7 @@ mod tests {
         assert_eq!(host_client_count(&pool, TEST_HOST), 1);
     }
 
+    // spec: r1 C13c
     #[tokio::test]
     async fn reaper_removes_idle_clients() {
         let pool = test_pool();
@@ -1738,11 +1813,12 @@ mod tests {
         assert!(!pool.hosts.read().unwrap().map.contains_key(TEST_HOST));
     }
 
+    // spec: r1 C13
     #[tokio::test]
     async fn different_hosts_get_independent_pools() {
         let pool = test_pool();
-        let host_a = "host-a:443";
-        let host_b = "host-b:443";
+        let host_a = "https://host-a:443";
+        let host_b = "https://host-b:443";
 
         let mut permits_a = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
@@ -1759,18 +1835,19 @@ mod tests {
         drop(permits_a);
     }
 
+    // spec: r1 C13c
     #[tokio::test]
     async fn reaper_removes_empty_host_entries() {
         let pool = test_pool();
 
-        let (_client, permit_a, _) = pool.checkout("host-a:443");
-        let (_client, permit_b, _) = pool.checkout("host-b:443");
+        let (_client, permit_a, _) = pool.checkout("https://host-a");
+        let (_client, permit_b, _) = pool.checkout("https://host-b");
         assert_eq!(pool.hosts.read().unwrap().map.len(), 2);
 
         drop(permit_a);
         {
             let hosts = pool.hosts.read().unwrap();
-            let pool_a = hosts.map.get("host-a:443").unwrap();
+            let pool_a = hosts.map.get("https://host-a").unwrap();
             let state = pool_a.state.read().unwrap();
             for pooled in &state.clients {
                 pooled.state.lock().unwrap().idle_since =
@@ -1781,8 +1858,8 @@ mod tests {
         reap_idle_clients(&pool.hosts);
 
         let hosts = pool.hosts.read().unwrap();
-        assert!(!hosts.map.contains_key("host-a:443"));
-        assert!(hosts.map.contains_key("host-b:443"));
+        assert!(!hosts.map.contains_key("https://host-a"));
+        assert!(hosts.map.contains_key("https://host-b"));
 
         drop(permit_b);
     }

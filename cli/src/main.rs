@@ -777,7 +777,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::Read(args) => {
             let encryption_key = resolve_encryption_key(&args.encryption_key)?;
-            let mut batches = ops::read(&s2, &args, encryption_key.as_ref()).await?;
+            let mut batches = ops::read(&s2, &args, encryption_key.as_ref())?;
             let mut writer = args
                 .output
                 .writer()
@@ -840,7 +840,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::Tail(args) => {
             let encryption_key = resolve_encryption_key(&args.encryption_key)?;
-            let mut records = ops::tail(&s2, &args, encryption_key.as_ref()).await?;
+            let mut records = ops::tail(&s2, &args, encryption_key.as_ref())?;
             let mut writer = args
                 .output
                 .writer()
@@ -909,10 +909,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 "Creating temporary stream s2://{}/{} (storage class: {})",
                 basin_name,
                 stream_name,
-                args.storage_class
-                    .as_ref()
-                    .map(|sc| format!("{:?}", sc))
-                    .unwrap_or_else(|| "<default>".to_owned())
+                args.storage_class.as_deref().unwrap_or("<default>")
             );
 
             let mut stream_config = SdkStreamConfig::new()

@@ -784,16 +784,18 @@ async fn read_session_beyond_tail_errors(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let result = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(10))),
-            ReadSessionConfig::default(),
-        )
-        .await;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(10))),
+        ReadSessionConfig::default(),
+    )?;
 
-    assert!(result.is_err());
+    let err = session
+        .next()
+        .await
+        .expect("should yield error")
+        .expect_err("should be err");
     assert_matches!(
-        result.err().expect("should be err"),
+        err,
         ReadSessionError::ReadUnwritten(ReadUnwrittenError {
             tail: StreamPosition { seq_num: 1, .. },
             ..
@@ -817,21 +819,19 @@ async fn read_session_beyond_tail_with_clamp_to_tail(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(
-                ReadStart::new()
-                    .with_from(ReadFrom::SeqNum(10))
-                    .with_clamp_to_tail(true),
-            ),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(
+            ReadStart::new()
+                .with_from(ReadFrom::SeqNum(10))
+                .with_clamp_to_tail(true),
+        ),
+        ReadSessionConfig::default(),
+    )?;
 
-    assert_eq!(session.resume_seq_num(), None);
+    assert_eq!(session.next_seq_num(), None);
     let result = tokio::time::timeout(Duration::from_secs(1), session.next()).await;
     assert_matches!(result, Err(tokio::time::error::Elapsed { .. }));
-    assert_eq!(session.resume_seq_num(), Some(ack.tail.seq_num));
+    assert_eq!(session.next_seq_num(), Some(ack.tail.seq_num));
 
     Ok(())
 }
@@ -847,24 +847,22 @@ async fn read_session_reports_caught_up_after_tail_delivery(
             AppendRecord::new("second")?,
         ])?))
         .await?;
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
+        ReadSessionConfig::default(),
+    )?;
     let mut caught_up = session.caught_up();
     let mut seq_nums = Vec::new();
 
     assert!(!session.is_caught_up());
-    assert_eq!(session.resume_seq_num(), None);
+    assert_eq!(session.next_seq_num(), None);
     let caught_up_tail = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             tokio::select! {
                 tail = &mut caught_up => break tail,
-                batch = session.next() => {
-                    let batch = batch.expect("session should reach the tail")?;
-                    seq_nums.extend(batch.records.into_iter().map(|record| record.seq_num));
+                record = session.next() => {
+                    let record = record.expect("session should reach the tail")?;
+                    seq_nums.push(record.seq_num);
                 }
             }
         }
@@ -875,28 +873,21 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     assert!(session.is_caught_up());
     assert_eq!(seq_nums, [ack.tail.seq_num - 2, ack.tail.seq_num - 1]);
     assert_eq!(caught_up_tail, ack.tail);
-    assert_eq!(session.resume_seq_num(), Some(ack.tail.seq_num));
+    assert_eq!(session.next_seq_num(), Some(ack.tail.seq_num));
 
     let next_ack = stream
         .append(AppendInput::new(AppendRecordBatch::try_from_iter([
             AppendRecord::new("third")?,
         ])?))
         .await?;
-    let next_batch = tokio::time::timeout(Duration::from_secs(30), session.next())
+    let next_record = tokio::time::timeout(Duration::from_secs(30), session.next())
         .await
         .expect("session should keep reading after catching up")
         .expect("session should remain open")?;
 
-    assert_eq!(
-        next_batch
-            .records
-            .iter()
-            .map(|record| record.seq_num)
-            .collect::<Vec<_>>(),
-        [ack.tail.seq_num]
-    );
+    assert_eq!(next_record.seq_num, ack.tail.seq_num);
     assert!(session.is_caught_up());
-    assert_eq!(next_batch.tail, Some(next_ack.tail));
+    assert_eq!(session.last_observed_tail(), Some(next_ack.tail));
 
     Ok(())
 }
@@ -2177,15 +2168,12 @@ async fn compression_roundtrip_session(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let mut batches = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
-    let batch = batches.next().await.expect("should have batch")?;
-    assert_eq!(batch.records.len(), 1);
-    assert_eq!(batch.records[0].body.len(), 20480);
+    let mut records = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
+        ReadSessionConfig::default(),
+    )?;
+    let record = records.next().await.expect("should have record")?;
+    assert_eq!(record.body.len(), 20480);
 
     basin.delete_stream(stream_name).await?;
     s2.delete_basin(basin_name).await?;
@@ -2381,13 +2369,24 @@ async fn stream_config_applies_when_read_creates_stream() -> Result<(), Box<dyn 
     let stream_config = StreamConfig::new().with_retention_policy(RetentionPolicy::Age(3600));
 
     let session_stream = unique_stream_name();
-    let _session = basin
-        .stream(session_stream.clone())
-        .read_session(
-            ReadInput::new().with_stream_config(stream_config),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = basin.stream(session_stream.clone()).read_session(
+        ReadInput::new().with_stream_config(stream_config),
+        ReadSessionConfig::default(),
+    )?;
+    // Wait until the initial request connects and receives its first heartbeat before reading
+    // stream config, since read_session() initiates its request asynchronously (R5).
+    let mut caught_up = session.caught_up();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            res = &mut caught_up => res.map(|_| ()),
+            item = session.next() => match item {
+                Some(Err(e)) => Err(e),
+                _ => Ok(()),
+            },
+        }
+    })
+    .await
+    .expect("read session should connect and create stream")?;
     let config = basin.get_stream_config(session_stream).await?;
     assert_eq!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
 

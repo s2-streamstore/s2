@@ -3,10 +3,7 @@
 use colored::Colorize;
 use compact_str::CompactString;
 use s2_api::v1::{MaybeKnown, access::AccessTokenInfo as ApiAccessTokenInfo};
-use s2_common::{
-    access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet},
-    config::StreamConfig,
-};
+use s2_common::access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet};
 use s2_sdk::types::AccessTokenId;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -319,28 +316,38 @@ struct DeleteOnEmptyConfigView {
     min_age: String,
 }
 
-impl From<StreamConfig> for StreamConfigView {
-    fn from(config: StreamConfig) -> Self {
-        let StreamConfig {
+impl From<crate::types::ResolvedStreamConfig> for StreamConfigView {
+    fn from(config: crate::types::ResolvedStreamConfig) -> Self {
+        let crate::types::ResolvedStreamConfig {
             storage_class,
             retention_policy,
-            timestamping,
-            delete_on_empty,
+            timestamping_mode,
+            timestamping_uncapped,
+            delete_on_empty_min_age,
         } = config;
-        let s2_common::config::TimestampingConfig { mode, uncapped } = timestamping;
 
         Self {
             storage_class,
             retention_policy: match retention_policy {
-                s2_common::config::RetentionPolicy::Age(age) => compact_duration(age),
-                s2_common::config::RetentionPolicy::Infinite() => "infinite".to_owned(),
+                s2_sdk::types::RetentionPolicy::Age(secs) => {
+                    compact_duration(std::time::Duration::from_secs(secs))
+                }
+                s2_sdk::types::RetentionPolicy::Infinite => "infinite".to_owned(),
+                s2_sdk::types::RetentionPolicy::Unknown(name) => name,
+                _ => "unknown".to_owned(),
             },
             timestamping: TimestampingConfigView {
-                mode: wire_name(s2_api::v1::config::TimestampingMode::from(mode)),
-                uncapped,
+                mode: match timestamping_mode {
+                    s2_sdk::types::TimestampingMode::ClientPrefer => "client-prefer".to_owned(),
+                    s2_sdk::types::TimestampingMode::ClientRequire => "client-require".to_owned(),
+                    s2_sdk::types::TimestampingMode::Arrival => "arrival".to_owned(),
+                    s2_sdk::types::TimestampingMode::Unknown(name) => name,
+                    _ => "unknown".to_owned(),
+                },
+                uncapped: timestamping_uncapped,
             },
             delete_on_empty: DeleteOnEmptyConfigView {
-                min_age: compact_duration(delete_on_empty.min_age),
+                min_age: compact_duration(delete_on_empty_min_age),
             },
         }
     }
@@ -355,10 +362,8 @@ struct BasinConfigView {
     create_stream_on_read: bool,
 }
 
-impl TryFrom<s2_api::v1::config::BasinConfig> for BasinConfigView {
-    type Error = s2_common::ValidationError;
-
-    fn try_from(config: s2_api::v1::config::BasinConfig) -> Result<Self, Self::Error> {
+impl From<s2_api::v1::config::BasinConfig> for BasinConfigView {
+    fn from(config: s2_api::v1::config::BasinConfig) -> Self {
         let s2_api::v1::config::BasinConfig {
             default_stream_config,
             stream_cipher,
@@ -366,11 +371,11 @@ impl TryFrom<s2_api::v1::config::BasinConfig> for BasinConfigView {
             create_stream_on_read,
         } = config;
 
-        Ok(Self {
+        Self {
             default_stream_config: resolve_stream_config(
-                default_stream_config.unwrap_or_default(),
+                default_stream_config.unwrap_or_default().into(),
                 Default::default(),
-            )?
+            )
             .into(),
             stream_cipher: match stream_cipher {
                 None => "none".to_owned(),
@@ -378,7 +383,7 @@ impl TryFrom<s2_api::v1::config::BasinConfig> for BasinConfigView {
             },
             create_stream_on_append,
             create_stream_on_read,
-        })
+        }
     }
 }
 
@@ -468,7 +473,7 @@ fn permissions_view(permissions: ReadWritePermissions) -> String {
 }
 
 fn basin_view(config: s2_api::v1::config::BasinConfig) -> Result<Value, CliError> {
-    Ok(serde_json::to_value(BasinConfigView::try_from(config)?)?)
+    Ok(serde_json::to_value(BasinConfigView::from(config))?)
 }
 
 /// Renders a basin's effective stream defaults for comparison against a concrete stream.
@@ -477,7 +482,7 @@ fn basin_stream_defaults_view(config: s2_api::v1::config::BasinConfig) -> Result
 }
 
 fn stream_view(config: s2_api::v1::config::StreamConfig) -> Result<Value, CliError> {
-    let config = resolve_stream_config(config, Default::default())?;
+    let config = resolve_stream_config(config.into(), Default::default());
     Ok(serde_json::to_value(StreamConfigView::from(config))?)
 }
 

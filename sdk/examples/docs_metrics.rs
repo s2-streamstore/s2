@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Basin-level: storage usage with hourly resolution
     let basin_metrics = client
         .get_basin_metrics(GetBasinMetricsInput::new(
-            "events".parse()?,
+            "my-events".parse()?,
             BasinMetricSet::Storage(TimeRange::new(six_hours_ago, now)?),
         ))
         .await?;
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Stream-level: storage for a specific stream
     let stream_metrics = client
         .get_stream_metrics(GetStreamMetricsInput::new(
-            "events".parse()?,
+            "my-events".parse()?,
             "user-actions".parse()?,
             StreamMetricSet::Storage(TimeRange::new(hour_ago, now)?),
         ))

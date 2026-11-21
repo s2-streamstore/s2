@@ -5152,7 +5152,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-shared-rt",
- "tokio-stream",
  "tokio-util",
  "tower-service",
  "tracing",

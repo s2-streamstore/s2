@@ -117,35 +117,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ANCHOR: read-session
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
+        ReadSessionConfig::default(),
+    )?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session
 
     // ANCHOR: read-session-tail-offset
     // Start reading from 10 records before the current tail
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(10))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(10))),
+        ReadSessionConfig::default(),
+    )?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-tail-offset
 
@@ -155,19 +147,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64
         - 3600 * 1000;
-    let mut session = stream
-        .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::Timestamp(one_hour_ago))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::Timestamp(one_hour_ago))),
+        ReadSessionConfig::default(),
+    )?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-timestamp
 
@@ -177,40 +164,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64
         - 3600 * 1000;
-    let mut session = stream
-        .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_until(..one_hour_ago)),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new()
+            .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+            .with_stop(ReadStop::new().with_until(..one_hour_ago)),
+        ReadSessionConfig::default(),
+    )?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-until
 
     // ANCHOR: read-session-wait
     // Read all available records, and once reaching the current tail, wait an additional 30 seconds
     // for new ones
-    let mut session = stream
-        .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_wait(Duration::from_secs(30))?),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new()
+            .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+            .with_stop(ReadStop::new().with_wait(Duration::from_secs(30))?),
+        ReadSessionConfig::default(),
+    )?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-wait
 

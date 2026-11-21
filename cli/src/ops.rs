@@ -1,6 +1,6 @@
-use std::{pin::Pin, time::Duration};
+use std::time::Duration;
 
-use futures::{Stream, StreamExt, TryStreamExt, stream, stream::FuturesOrdered};
+use futures::{Stream, StreamExt, TryStreamExt, stream::FuturesOrdered};
 use s2_api::v1::{
     access::AccessTokenInfo as ApiAccessTokenInfo,
     config::{BasinConfig as ApiBasinConfig, StreamConfig as ApiStreamConfig},
@@ -8,7 +8,7 @@ use s2_api::v1::{
 use s2_sdk::{
     self as sdk, S2, S2Stream,
     producer::{ProducerConfig, RecordAck},
-    read_session::ReadSession,
+    read_session::ReadBatchSession,
     types::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
         AppendInput, AppendRecord, AppendRecordBatch, AwsPrivateNetPolicy, BasinInfo,
@@ -686,11 +686,11 @@ pub async fn fence(s2: &S2, args: FenceArgs) -> Result<AppendAck, CliError> {
     .await
 }
 
-pub async fn read(
+pub fn read(
     s2: &S2,
     args: &ReadArgs,
     encryption_key: Option<&EncryptionKey>,
-) -> Result<ReadSession, CliError> {
+) -> Result<ReadBatchSession, CliError> {
     use std::time::SystemTime;
 
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
@@ -734,8 +734,7 @@ pub async fn read(
     }
 
     stream
-        .read_session(input, ReadSessionConfig::default())
-        .await
+        .read_batch_session(input, ReadSessionConfig::default())
         .map_err(|e| CliError::op(OpKind::Read, e))
 }
 
@@ -784,7 +783,6 @@ where
         };
         let mut records = records;
         let mut pending_acks = FuturesOrdered::new();
-        let mut input_done = false;
         let mut stashed_record: Option<AppendRecord> = None;
         let mut stashed_bytes: u32 = 0;
 
@@ -798,18 +796,18 @@ where
                                 Ok(ticket) => pending_acks.push_back(ticket),
                                 Err(e) => {
                                     yield Err(CliError::op(OpKind::Append, e));
-                                    break 'inner;
+                                    return;
                                 }
                             }
                         }
                         Err(e) => {
                             yield Err(CliError::op(OpKind::Append, e));
-                            break 'inner;
+                            return;
                         }
                     }
                 }
 
-                res = records.next(), if stashed_record.is_none() && !input_done => {
+                res = records.next(), if stashed_record.is_none() => {
                     match res {
                         Some(Ok(record)) => {
                             stashed_bytes = record.metered_bytes() as u32;
@@ -817,10 +815,10 @@ where
                         }
                         Some(Err(e)) => {
                             yield Err(CliError::RecordReaderInit(e.to_string()));
-                            break 'inner;
+                            return;
                         }
                         None => {
-                            input_done = true;
+                            break 'inner;
                         }
                     }
                 }
@@ -830,23 +828,14 @@ where
                         Ok(ack) => yield Ok(ack),
                         Err(e) => {
                             yield Err(CliError::op(OpKind::Append, e));
-                            break 'inner;
+                            return;
                         }
-                    }
-                }
-
-                else => {
-                    if input_done && stashed_record.is_none() && pending_acks.is_empty() {
-                        break;
                     }
                 }
             }
         }
 
-        if let Err(e) = producer.close().await {
-            yield Err(CliError::op(OpKind::Append, e));
-            return;
-        }
+        let close_res = producer.close().await;
 
         while let Some(res) = pending_acks.next().await {
             match res {
@@ -857,14 +846,18 @@ where
                 }
             }
         }
+
+        if let Err(e) = close_res {
+            yield Err(CliError::op(OpKind::Append, e));
+        }
     }
 }
 
-pub async fn tail(
+pub fn tail(
     s2: &S2,
     args: &TailArgs,
     encryption_key: Option<&EncryptionKey>,
-) -> Result<Pin<Box<dyn Stream<Item = Result<SequencedRecord, CliError>> + Send>>, CliError> {
+) -> Result<impl Stream<Item = Result<SequencedRecord, CliError>> + Send + Unpin, CliError> {
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
 
     // Use clamp_to_tail to handle empty streams gracefully - if we ask for
@@ -878,22 +871,36 @@ pub async fn tail(
         ReadStop::new().with_limits(ReadLimits::new().with_count(args.lines))
     };
 
-    let batches = stream
+    let mut records = stream
         .read_session(
             ReadInput::new().with_start(start).with_stop(stop),
             ReadSessionConfig::default(),
         )
-        .await
         .map_err(|e| CliError::op(OpKind::Tail, e))?;
 
-    Ok(Box::pin(
-        batches
-            .map_err(|e| CliError::op(OpKind::Tail, e))
-            .flat_map(|batch_result| match batch_result {
-                Ok(batch) => stream::iter(batch.records.into_iter().map(Ok)).left_stream(),
-                Err(e) => stream::iter(std::iter::once(Err(e))).right_stream(),
-            }),
-    ))
+    let follow = args.follow;
+    Ok(Box::pin(async_stream::stream! {
+        let mut seen_any = false;
+        while let Some(item) = records.next().await {
+            match item {
+                Ok(record) => {
+                    seen_any = true;
+                    yield Ok(record);
+                }
+                // Non-follow tail on an empty stream returns initial 416 with tail.seq_num == 0;
+                // treat that as clean 0-record EOF.
+                Err(sdk::error::ReadSessionError::ReadUnwritten(e))
+                    if !follow && !seen_any && e.tail.seq_num == 0 =>
+                {
+                    break;
+                }
+                Err(e) => {
+                    yield Err(CliError::op(OpKind::Tail, e));
+                    break;
+                }
+            }
+        }
+    }))
 }
 
 async fn append_command(
@@ -922,7 +929,10 @@ async fn append_command(
 fn resolve_time(timestamp: Option<u32>, ago: Option<humantime::Duration>, now: u32) -> Option<u32> {
     match (timestamp, ago) {
         (Some(ts), None) => Some(ts),
-        (None, Some(ago)) => Some(now.saturating_sub(ago.as_secs() as u32)),
+        (None, Some(ago)) => {
+            let secs = u32::try_from(ago.as_secs()).unwrap_or(u32::MAX);
+            Some(now.saturating_sub(secs))
+        }
         (None, None) => None,
         (Some(_), Some(_)) => unreachable!("clap group ensures only one is specified"),
     }

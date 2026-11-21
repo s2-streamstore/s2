@@ -607,8 +607,7 @@ fn bench_read_inner(
             .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
             .with_stop(stop);
         let mut read_session = stream
-            .read_session(read_input, ReadSessionConfig::default())
-            .await
+            .read_batch_session(read_input, ReadSessionConfig::default())
             .map_err(|e| CliError::op(OpKind::Bench, e))?;
 
         let mut total_bytes: u64 = 0;
@@ -704,6 +703,11 @@ fn bench_read_inner(
                             if let Some(expected) = done_records() && total_records >= expected {
                                 break;
                             }
+                        }
+                        Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(e)))
+                            if total_records == 0 && e.tail.seq_num == 0 =>
+                        {
+                            break;
                         }
                         Some(Err(e)) => {
                             yield Err(CliError::op(OpKind::Bench, e));

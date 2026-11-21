@@ -1026,7 +1026,7 @@ impl ApiError {
         context: ErrorContext,
     ) -> Self {
         let status = match StatusCode::from_u16(msg.status) {
-            Ok(status) if status.as_u16() >= 300 => status,
+            Ok(status) if (300..600).contains(&status.as_u16()) => status,
             Ok(status) => {
                 return Self::Protocol(ProtocolError::new(
                     format!("unexpected non-error status code in terminal frame: {status}"),

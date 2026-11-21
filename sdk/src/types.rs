@@ -336,6 +336,11 @@ fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, St
     if parsed.host().is_empty() {
         return Err(format!("invalid {kind} endpoint authority: empty host"));
     }
+    if parsed.port_u16() == Some(0) {
+        return Err(format!(
+            "invalid {kind} endpoint authority: port must be between 1 and 65535"
+        ));
+    }
     validate_endpoint_host(parsed.host(), kind)?;
     Ok(parsed)
 }
@@ -686,7 +691,7 @@ impl RetryConfig {
 
 /// Overrides for the HTTP/2 transport used by pooled connections.
 ///
-/// Unset knobs keep the SDK defaults: 90 concurrent requests per connection and
+/// Unset knobs keep the SDK defaults: 50 concurrent requests per connection and
 /// Hyper's receive windows (2 MiB per stream, 5 MiB per connection). Receive
 /// windows bound unconsumed server-to-client DATA only; they do not affect
 /// append throughput, which is governed by the server's receive windows.
@@ -4693,7 +4698,6 @@ pub struct ReadInput {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-#[non_exhaustive]
 /// Retry policy for a continuous read session.
 pub enum ReadSessionRetryPolicy {
     /// Stop after the retry budget configured by [`RetryConfig`] is exhausted.
@@ -4701,9 +4705,8 @@ pub enum ReadSessionRetryPolicy {
     Budgeted,
     /// Keep retrying retryable failures after the configured retry budget is exhausted.
     ///
-    /// This also applies while establishing the initial session, so
-    /// [`read_session`](crate::S2Stream::read_session) may remain pending through retryable
-    /// failures until it connects or the future is cancelled.
+    /// This also applies to the initial attempt, so iteration may remain pending through
+    /// retryable failures until it connects or the session is dropped or aborted.
     Unbounded,
 }
 
