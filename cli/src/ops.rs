@@ -777,6 +777,13 @@ where
     let producer = stream.producer(producer_config);
 
     async_stream::stream! {
+        let producer = match producer {
+            Ok(producer) => producer,
+            Err(e) => {
+                yield Err(CliError::op(OpKind::Append, e));
+                return;
+            }
+        };
         let mut records = records;
         let mut pending_acks = FuturesOrdered::new();
         let mut input_done = false;

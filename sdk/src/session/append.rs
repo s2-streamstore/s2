@@ -439,6 +439,7 @@ async fn run_session_with_retry(
     context: ErrorContext,
 ) {
     let access_token_mode = client.config.access_token.mode();
+    let shutdown = client.shutdown_signal();
     let frame_signal = match client.config.retry.append_retry_policy {
         AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
         AppendRetryPolicy::All => None,
@@ -454,29 +455,49 @@ async fn run_session_with_retry(
         prev_ack_end: None,
         stashed_submission: None,
     };
-    let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
     let mut advised_reconnects = AdvisedReconnects::default();
     let mut attempts: u32 = 0;
 
     loop {
-        let result = run_session(
-            &client,
-            &stream,
-            &headers,
-            &mut state,
-            buffer_size,
-            &frame_signal,
-            advised_reconnects,
-            &context,
-        )
-        .await;
+        if shutdown.is_closed() {
+            abort_session(&mut state, &terminal_err, &context).await;
+            return;
+        }
+
+        let start_acked_records = state.total_acked_records;
+        let attempt_num = retry_backoff.used() + 1;
+        let shutdown_fut = shutdown.cancelled();
+        let result = tokio::select! {
+            biased;
+            _ = shutdown_fut => {
+                abort_session(&mut state, &terminal_err, &context).await;
+                return;
+            }
+            res = run_session(
+                &client,
+                &stream,
+                &headers,
+                &mut state,
+                buffer_size,
+                &frame_signal,
+                advised_reconnects,
+                &context,
+                attempt_num,
+            ) => res,
+        };
+
+        let made_progress = state.total_acked_records > start_acked_records;
+        if made_progress {
+            retry_backoff.reset();
+            attempts = 0;
+        }
 
         match result {
             Ok(SessionOutcome::Closed) => {
                 break;
             }
-            Ok(SessionOutcome::ReconnectAdvised) => {
+            Ok(SessionOutcome::ReconnectAdvised) if made_progress => {
                 // The advised connection was already poisoned when the advice
                 // was first decoded, so reconnecting dials a fresh one.
                 advised_reconnects.record();
@@ -486,21 +507,28 @@ async fn run_session_with_retry(
                     "reconnecting append session on server advice"
                 );
             }
-            Err(err) if err.is_server_draining() && state.is_close_complete() => break,
-            Err(err) if err.is_server_draining() => {
+            Ok(SessionOutcome::ReconnectAdvised) => {
                 advised_reconnects.record();
+                if let Some(backoff) = retry_backoff.next() {
+                    let aborted = tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => true,
+                        _ = tokio::time::sleep(backoff) => false,
+                    };
+                    if aborted {
+                        abort_session(&mut state, &terminal_err, &context).await;
+                        return;
+                    }
+                }
+            }
+            Err(err) if err.is_server_draining() && state.is_close_complete() => break,
+            Err(err) if err.is_server_draining() && made_progress => {
                 debug!(
                     inflight_appends_len = state.inflight_appends.len(),
-                    advised_reconnects = advised_reconnects.count(),
                     "reconnecting append session while server drains"
                 );
             }
             Err(err) => {
-                if prev_total_acked_records < state.total_acked_records {
-                    prev_total_acked_records = state.total_acked_records;
-                    retry_backoff.reset();
-                    attempts = 0;
-                }
                 attempts += 1;
                 let attempt_ctx = context.clone().with_attempts(attempts);
                 let err = err.with_context(&attempt_ctx);
@@ -524,7 +552,15 @@ async fn run_session_with_retry(
                         num_retries_remaining = retry_backoff.remaining(),
                         "retrying append session"
                     );
-                    tokio::time::sleep(backoff).await;
+                    let aborted = tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => true,
+                        _ = tokio::time::sleep(backoff) => false,
+                    };
+                    if aborted {
+                        abort_session(&mut state, &terminal_err, &context).await;
+                        return;
+                    }
                 } else {
                     debug!(
                         %err,
@@ -575,6 +611,61 @@ async fn run_session_with_retry(
     }
 }
 
+/// Abort the append session due to client shutdown (`C12`, `A8c`, `A6a`).
+async fn abort_session(
+    state: &mut SessionState,
+    terminal_err: &OnceLock<AppendSessionError>,
+    context: &ErrorContext,
+) {
+    state.cmd_rx.close();
+    let mut queued_cmds = Vec::new();
+    while let Some(cmd) = state.cmd_rx.recv().await {
+        queued_cmds.push(cmd);
+    }
+
+    let has_pending_work = !state.inflight_appends.is_empty()
+        || state.stashed_submission.is_some()
+        || queued_cmds
+            .iter()
+            .any(|cmd| matches!(cmd, Command::Submit { .. }));
+
+    if !has_pending_work {
+        if let Some(done_tx) = state.close_tx.take() {
+            let _ = done_tx.send(Ok(()));
+        }
+        for cmd in queued_cmds {
+            if let Command::Close { done_tx } = cmd {
+                let _ = done_tx.send(Ok(()));
+            }
+        }
+        return;
+    }
+
+    let aborted = AppendSessionError::Aborted(AbortedError::new("client closed", context.clone()));
+    let _ = terminal_err.set(aborted.clone());
+    let unsent = AppendSessionError::SessionClosed(SessionClosedError::new(
+        Some(aborted.clone()),
+        context.clone(),
+    ));
+
+    for inflight in state.inflight_appends.drain(..) {
+        let _ = inflight.ack_tx.send(Err(aborted.clone()));
+    }
+    if let Some(stashed) = state.stashed_submission.take() {
+        let _ = stashed.ack_tx.send(Err(unsent.clone()));
+    }
+    if let Some(done_tx) = state.close_tx.take() {
+        let _ = done_tx.send(Err(aborted.clone()));
+    }
+    for cmd in queued_cmds {
+        let error = match &cmd {
+            Command::Submit { .. } => unsent.clone(),
+            Command::Close { .. } => aborted.clone(),
+        };
+        cmd.reject(error);
+    }
+}
+
 /// How a connection attempt ended without failing.
 enum SessionOutcome {
     /// Everything submitted was acknowledged and the caller closed the session.
@@ -593,6 +684,7 @@ async fn run_session(
     frame_signal: &Option<FrameSignal>,
     advised_reconnects: AdvisedReconnects,
     context: &ErrorContext,
+    attempt: u32,
 ) -> Result<SessionOutcome, AppendSessionError> {
     if let Some(s) = frame_signal {
         s.reset();
@@ -606,6 +698,7 @@ async fn run_session(
         buffer_size,
         frame_signal.clone(),
         reconnect.clone(),
+        attempt,
     )
     .await?;
     let ack_timeout = client.config.request_timeout;
@@ -923,6 +1016,7 @@ async fn connect(
     buffer_size: usize,
     frame_signal: Option<FrameSignal>,
     reconnect: ReconnectAdvice,
+    attempt: u32,
 ) -> Result<(mpsc::Sender<AppendInput>, Streaming<AppendAck>), AppendSessionError> {
     let (input_tx, input_rx) = mpsc::channel::<AppendInput>(buffer_size);
     let ack_ctx = ErrorContext::stream(
@@ -940,6 +1034,7 @@ async fn connect(
                 headers.stream_config.as_ref(),
                 frame_signal,
                 reconnect,
+                attempt,
             )
             .await?
             .map(move |ack| match ack {

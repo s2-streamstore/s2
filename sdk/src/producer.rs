@@ -19,6 +19,7 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::{
     api::BasinClient,
     batching::{AppendInputs, AppendRecordBatches, BatchingConfig},
+    client::ShutdownSignal,
     error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError},
     session::{
         AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket, StreamHeaders,
@@ -185,6 +186,7 @@ impl Producer {
     ) -> Self {
         let context =
             ErrorContext::stream("producer", client.name.as_ref(), stream.as_ref(), false);
+        let shutdown = client.shutdown_signal();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(RECORD_BATCH_MAX.count);
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
         let session = AppendSessionInternal::new(client, stream, headers);
@@ -195,6 +197,7 @@ impl Producer {
             cmd_rx,
             terminal_err.clone(),
             context.clone(),
+            shutdown,
         )));
         Self {
             cmd_tx,
@@ -302,6 +305,7 @@ impl Producer {
         mut cmd_rx: mpsc::Receiver<Command>,
         terminal_err: Arc<OnceLock<AppendSessionError>>,
         context: ErrorContext,
+        shutdown: ShutdownSignal,
     ) {
         let (record_tx, mut inputs) = Self::batcher(&config, config.match_seq_num);
         let mut record_tx = Some(record_tx);
@@ -313,9 +317,27 @@ impl Producer {
         let mut submit_fut: Option<SubmitFuture> = None;
         let mut submit_batch_len: Option<usize> = None;
         let mut inputs_exhausted = false;
+        let mut shutdown_fut = shutdown.cancelled();
 
         loop {
             tokio::select! {
+                biased;
+
+                _ = &mut shutdown_fut => {
+                    abort_producer(
+                        &terminal_err,
+                        &context,
+                        &mut pending_batch_acks,
+                        &mut pending_record_acks,
+                        &mut stashed_submission,
+                        submit_fut.is_some(),
+                        &mut control,
+                        &mut cmd_rx,
+                    )
+                    .await;
+                    return;
+                }
+
                 record_tx_permit = async {
                     record_tx
                         .as_ref()
@@ -685,6 +707,87 @@ async fn terminate_producer(
         let reject_err = match &cmd {
             Command::Submit { .. } => unsent_err.clone(),
             Command::Flush { .. } | Command::Close { .. } => err.clone(),
+        };
+        cmd.reject(reject_err);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn abort_producer(
+    terminal_err: &OnceLock<AppendSessionError>,
+    context: &ErrorContext,
+    pending_batch_acks: &mut FuturesUnordered<PendingBatchAck>,
+    pending_record_acks: &mut VecDeque<PendingRecordAck>,
+    stashed_submission: &mut Option<StashedSubmission>,
+    has_submit_in_progress: bool,
+    control: &mut PendingControl,
+    cmd_rx: &mut mpsc::Receiver<Command>,
+) {
+    while let Some((batch_ack, batch_records)) = pending_batch_acks.next().now_or_never().flatten()
+    {
+        dispatch_acks(batch_ack, batch_records);
+    }
+
+    cmd_rx.close();
+    let mut queued_cmds = Vec::new();
+    while let Some(cmd) = cmd_rx.recv().await {
+        queued_cmds.push(cmd);
+    }
+
+    let has_pending_work = !pending_batch_acks.is_empty()
+        || !pending_record_acks.is_empty()
+        || stashed_submission.is_some()
+        || has_submit_in_progress
+        || queued_cmds
+            .iter()
+            .any(|cmd| matches!(cmd, Command::Submit { .. }));
+
+    if !has_pending_work {
+        if let Some(done_tx) = control.flush_tx.take() {
+            let _ = done_tx.send(Ok(()));
+        }
+        if let Some(done_tx) = control.close_tx.take() {
+            let _ = done_tx.send(Ok(()));
+        }
+        for cmd in queued_cmds {
+            match cmd {
+                Command::Flush { done_tx } | Command::Close { done_tx } => {
+                    let _ = done_tx.send(Ok(()));
+                }
+                Command::Submit { .. } => {}
+            }
+        }
+        return;
+    }
+
+    let aborted = AppendSessionError::Aborted(AbortedError::new("client closed", context.clone()));
+    let _ = terminal_err.set(aborted.clone());
+    let unsent = AppendSessionError::SessionClosed(SessionClosedError::new(
+        Some(aborted.clone()),
+        context.clone(),
+    ));
+
+    for mut batch in std::mem::take(pending_batch_acks) {
+        if let Some(records) = batch.pending_record_acks.take() {
+            dispatch_acks(Err(aborted.clone()), records);
+        }
+    }
+    for pending in pending_record_acks.drain(..) {
+        let _ = pending.ack_tx.send(Err(unsent.clone()));
+    }
+    if let Some(submission) = stashed_submission.take() {
+        let _ = submission.ack_tx.send(Err(unsent.clone()));
+    }
+    if let Some(done_tx) = control.flush_tx.take() {
+        let _ = done_tx.send(Err(aborted.clone()));
+    }
+    if let Some(done_tx) = control.close_tx.take() {
+        let _ = done_tx.send(Err(aborted.clone()));
+    }
+    for cmd in queued_cmds {
+        let reject_err = match &cmd {
+            Command::Submit { .. } => unsent.clone(),
+            Command::Flush { .. } | Command::Close { .. } => aborted.clone(),
         };
         cmd.reject(reject_err);
     }

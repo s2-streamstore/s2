@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
-    HeaderMap, HeaderValue, StatusCode, Uri,
+    HeaderMap, HeaderName, HeaderValue, StatusCode, Uri,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
 };
 use prost::{self, Message};
@@ -46,7 +46,7 @@ use tokio_util::codec::Decoder;
 use tracing::debug;
 
 use crate::{
-    client::{self, StreamingResponse, UnaryResponse},
+    client::{self, ShutdownSignal, StreamingResponse, UnaryResponse},
     error::{
         AbortedError, ClientClosedError, ConnectError, ConnectionLostError, ErrorContext,
         FencingTokenMismatchError, ProtocolError, ReadUnwrittenError, SeqNumMismatchError,
@@ -65,6 +65,7 @@ const CONTENT_TYPE_S2S: &str = "s2s/proto";
 const CONTENT_TYPE_PROTO: &str = "application/protobuf";
 const ACCEPT_PROTO: &str = "application/protobuf";
 const S2_REQUEST_TOKEN: &str = "s2-request-token";
+const S2_ATTEMPT: HeaderName = HeaderName::from_static("s2-attempt");
 const S2_BASIN: &str = "s2-basin";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
 
@@ -121,7 +122,11 @@ impl AccountClient {
             .json(&request)
             .build()
             .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
-        let response = self.request(request, ctx.clone()).send().await?;
+        let response = self
+            .request(request, ctx.clone())
+            .with_definite_retries_only()
+            .send()
+            .await?;
         response
             .json::<IssueAccessTokenResponse>()
             .map_err(|e| ApiError::from_http(e, ctx))
@@ -169,7 +174,11 @@ impl AccountClient {
             .json(&request)
             .build()
             .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
-        let response = self.request(request, ctx.clone()).send().await?;
+        let response = self
+            .request(request, ctx.clone())
+            .with_definite_retries_only()
+            .send()
+            .await?;
         response
             .json::<NetworkPolicyInfo>()
             .map_err(|e| ApiError::from_http(e, ctx))
@@ -679,6 +688,7 @@ impl BasinClient {
             .map_err(|e| ApiError::Protocol(ProtocolError::new(format!("protobuf decode: {e}"), ctx)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn append_session<I>(
         &self,
         name: &StreamName,
@@ -687,11 +697,15 @@ impl BasinClient {
         stream_config: Option<&StreamConfig>,
         frame_signal: Option<FrameSignal>,
         reconnect: ReconnectAdvice,
+        attempt: u32,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
         I: Stream<Item = AppendInput> + Send + 'static,
     {
         let ctx = ErrorContext::stream("append_session", self.name.as_ref(), name.as_ref(), false);
+        if self.client.is_closed() {
+            return Err(ApiError::ClientClosed(ClientClosedError::new(ctx)));
+        }
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
         let compression = self.config.compression.into();
@@ -710,6 +724,7 @@ impl BasinClient {
             .client
             .post(url)
             .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
+            .header(S2_ATTEMPT, HeaderValue::from(attempt))
             .body(body)
             .timeout(self.client.request_timeout);
         request_builder =
@@ -768,7 +783,7 @@ impl BasinClient {
                                 TerminalKind::Append,
                                 ctx.clone(),
                             );
-                            if error.is_server_draining() {
+                            if error.should_retire_connection() {
                                 poison_handle.poison();
                             }
                             auth_client.invalidate_access_token_if_rejected(
@@ -795,6 +810,7 @@ impl BasinClient {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn read_session(
         &self,
         name: &StreamName,
@@ -803,14 +819,19 @@ impl BasinClient {
         encryption: Option<&EncryptionKey>,
         stream_config: Option<&StreamConfig>,
         reconnect: ReconnectAdvice,
+        attempt: u32,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
         let ctx = ErrorContext::stream("read_session", self.name.as_ref(), name.as_ref(), true);
+        if self.client.is_closed() {
+            return Err(ApiError::ClientClosed(ClientClosedError::new(ctx)));
+        }
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
         let mut request_builder = self
             .client
             .get(url)
             .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
+            .header(S2_ATTEMPT, HeaderValue::from(attempt))
             .query(&start)
             .query(&end)
             .timeout(self.client.request_timeout);
@@ -870,7 +891,7 @@ impl BasinClient {
                                 TerminalKind::Read,
                                 ctx.clone(),
                             );
-                            if error.is_server_draining() {
+                            if error.should_retire_connection() {
                                 poison_handle.poison();
                             }
                             auth_client.invalidate_access_token_if_rejected(
@@ -1117,6 +1138,10 @@ impl ApiError {
         matches!(self, Self::Server(e) if e.is_server_draining())
     }
 
+    pub(crate) fn should_retire_connection(&self) -> bool {
+        matches!(self, Self::Server(e) if e.should_retire_connection())
+    }
+
     pub(crate) fn is_authentication_error(&self) -> bool {
         matches!(self, Self::Server(e) if e.is_authentication_error())
     }
@@ -1161,9 +1186,17 @@ pub(crate) fn authorization_header(access_token: &str) -> Result<HeaderValue, Va
     Ok(header)
 }
 
+struct PreparedClientConfig {
+    default_headers: HeaderMap,
+    access_token_mode: AccessTokenMode,
+    #[cfg(feature = "_hidden")]
+    access_token_provider: Option<Arc<dyn crate::types::AccessTokenProvider>>,
+}
+
 #[derive(Clone)]
 pub struct BaseClient {
     client: Arc<dyn client::RequestExecutor>,
+    shutdown: ShutdownSignal,
     default_headers: HeaderMap,
     access_token_mode: AccessTokenMode,
     #[cfg(feature = "_hidden")]
@@ -1181,23 +1214,53 @@ impl std::fmt::Debug for BaseClient {
 
 impl BaseClient {
     pub fn init(config: &S2Config) -> Result<Self, ApiError> {
-        let connector = client::default_connector(
-            Some(config.connection_timeout),
-            config.insecure_skip_cert_verification,
-            config.rustls_crypto_provider.clone(),
-        )
-        .map_err(|e| {
-            ApiError::Validation(ValidationError(format!(
-                "failed to initialize TLS connector: {e}"
-            )))
-        })?;
-        Self::init_with_connector(config, connector)
+        // Validate config and static token BEFORE initializing TLS so invalid configs never get
+        // masked by missing TLS providers or native CA errors.
+        let prepared = Self::prepare(config)?;
+        let shutdown = ShutdownSignal::new();
+        if config.endpoints.scheme == http::uri::Scheme::HTTP {
+            let connector = client::default_http_connector(Some(config.connection_timeout));
+            let managed = client::ManagedConnector::new(
+                connector,
+                Some(config.connection_timeout),
+                shutdown.clone(),
+            );
+            Ok(Self::from_prepared(config, prepared, managed, shutdown))
+        } else {
+            let connector = client::default_connector(
+                Some(config.connection_timeout),
+                config.insecure_skip_cert_verification,
+                config.rustls_crypto_provider.clone(),
+            )
+            .map_err(|e| {
+                ApiError::Validation(ValidationError(format!(
+                    "failed to initialize TLS connector: {e}"
+                )))
+            })?;
+            let managed = client::ManagedConnector::new(
+                connector,
+                Some(config.connection_timeout),
+                shutdown.clone(),
+            );
+            Ok(Self::from_prepared(config, prepared, managed, shutdown))
+        }
     }
 
+    #[cfg(feature = "_hidden")]
     pub fn init_with_connector<C>(config: &S2Config, connector: C) -> Result<Self, ApiError>
     where
         C: client::Connect + Clone + Send + Sync + 'static,
     {
+        let prepared = Self::prepare(config)?;
+        Ok(Self::from_prepared(
+            config,
+            prepared,
+            connector,
+            ShutdownSignal::new(),
+        ))
+    }
+
+    fn prepare(config: &S2Config) -> Result<PreparedClientConfig, ApiError> {
         config.validate()?;
         let access_token_mode = config.access_token.mode();
         let mut default_headers = config.default_headers.clone();
@@ -1235,18 +1298,49 @@ impl BaseClient {
             Compression::None => {}
         }
 
-        let client = client::Pool::new(connector, config.http2);
-
-        Ok(Self {
-            client: Arc::new(client),
+        Ok(PreparedClientConfig {
             default_headers,
             access_token_mode,
             #[cfg(feature = "_hidden")]
             access_token_provider,
+        })
+    }
+
+    fn from_prepared<C>(
+        config: &S2Config,
+        prepared: PreparedClientConfig,
+        connector: C,
+        shutdown: ShutdownSignal,
+    ) -> Self
+    where
+        C: client::Connect + Clone + Send + Sync + 'static,
+    {
+        let client = client::Pool::new(connector, config.http2, shutdown.clone());
+
+        Self {
+            client: Arc::new(client),
+            shutdown,
+            default_headers: prepared.default_headers,
+            access_token_mode: prepared.access_token_mode,
+            #[cfg(feature = "_hidden")]
+            access_token_provider: prepared.access_token_provider,
             request_timeout: config.request_timeout,
             retry_builder: retry_builder(&config.retry),
             compression: config.compression,
-        })
+        }
+    }
+
+    pub fn close(&self) {
+        self.shutdown.close();
+        self.client.close();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.shutdown.is_closed()
+    }
+
+    pub(crate) fn shutdown_signal(&self) -> ShutdownSignal {
+        self.shutdown.clone()
     }
 
     pub fn get(&self, uri: Uri) -> client::RequestBuilder {
@@ -1315,17 +1409,31 @@ impl BaseClient {
         Ok((response, access_token))
     }
 
-    async fn execute_unary(
+    async fn execute_unary_in_flight(
         &self,
         mut request: client::Request,
         context: ErrorContext,
     ) -> Result<(UnaryResponse, Option<String>), ApiError> {
-        let access_token = self.authorize(&mut request).await?;
+        let shutdown = self.shutdown.clone();
+        let access_token = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                return Err(ApiError::Aborted(AbortedError::new("client closed", context)));
+            }
+            res = self.authorize(&mut request) => res?,
+        };
         let response = self
             .client
             .execute_unary(request)
             .await
-            .map_err(|e| ApiError::from_http(e, context))?;
+            .map_err(|e| match e {
+                // Once a unary call passed entry-time closed check, closing the client aborts it
+                // rather than returning ClientClosedError (`C12`).
+                client::HttpError::ClientClosed => {
+                    ApiError::Aborted(AbortedError::new("client closed", context.clone()))
+                }
+                other => ApiError::from_http(other, context),
+            })?;
         Ok((response, access_token))
     }
 
@@ -1366,6 +1474,7 @@ impl BaseClient {
             context,
             retry_enabled: true,
             append_retry_policy: None,
+            definite_retries_only: false,
             frame_signal: None,
             error_handler: None,
         }
@@ -1408,6 +1517,7 @@ struct RequestBuilder<'a> {
     context: ErrorContext,
     retry_enabled: bool,
     append_retry_policy: Option<AppendRetryPolicy>,
+    definite_retries_only: bool,
     frame_signal: Option<FrameSignal>,
     error_handler: Option<ErrorHandlerFn>,
 }
@@ -1416,6 +1526,14 @@ impl<'a> RequestBuilder<'a> {
     fn with_append_retry_policy(self, policy: AppendRetryPolicy) -> Self {
         Self {
             append_retry_policy: Some(policy),
+            frame_signal: Some(FrameSignal::new()),
+            ..self
+        }
+    }
+
+    fn with_definite_retries_only(self) -> Self {
+        Self {
+            definite_retries_only: true,
             frame_signal: Some(FrameSignal::new()),
             ..self
         }
@@ -1435,6 +1553,10 @@ impl<'a> RequestBuilder<'a> {
     }
 
     async fn send(self) -> Result<UnaryResponse, ApiError> {
+        if self.client.is_closed() {
+            return Err(ApiError::ClientClosed(ClientClosedError::new(self.context)));
+        }
+
         let request = self.request;
 
         let mut retry_backoff: Option<RetryBackoff> = self
@@ -1451,13 +1573,23 @@ impl<'a> RequestBuilder<'a> {
                 signal.reset();
             }
 
+            let shutdown = self.client.shutdown_signal();
             let attempt_request = {
                 let mut r = request.try_clone().expect("body should not be a stream");
+                r.headers_mut().insert(S2_ATTEMPT, HeaderValue::from(attempts));
                 if let Some(ref signal) = self.frame_signal {
-                    r = r
-                        .compress()
-                        .await
-                        .map_err(|e| ApiError::from_http(e, attempt_ctx.clone()))?;
+                    r = tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => {
+                            return Err(ApiError::Aborted(AbortedError::new(
+                                "client closed",
+                                attempt_ctx,
+                            )));
+                        }
+                        res = r.compress() => {
+                            res.map_err(|e| ApiError::from_http(e, attempt_ctx.clone()))?
+                        }
+                    };
                     r = r.with_monitored_body(signal.clone());
                 }
                 r
@@ -1465,12 +1597,13 @@ impl<'a> RequestBuilder<'a> {
 
             let response = self
                 .client
-                .execute_unary(attempt_request, attempt_ctx.clone())
+                .execute_unary_in_flight(attempt_request, attempt_ctx.clone())
                 .await;
 
             let (err, retry_after, access_token) = match response {
-                Ok((resp, access_token)) => {
+                Ok((mut resp, access_token)) => {
                     let retry_after = parse_retry_after_ms(resp.headers());
+                    let poison_handle = resp.take_poison_handle();
 
                     let result = if let Some(ref handler) = self.error_handler {
                         resp.into_result_with_handler(attempt_ctx.clone(), handler)
@@ -1482,7 +1615,14 @@ impl<'a> RequestBuilder<'a> {
                         Ok(resp) => {
                             return Ok(resp);
                         }
-                        Err(err) => (err, retry_after, access_token),
+                        Err(err) => {
+                            if err.should_retire_connection()
+                                && let Some(handle) = poison_handle
+                            {
+                                handle.poison();
+                            }
+                            (err, retry_after, access_token)
+                        }
                     }
                 }
                 Err(err) => (err, None, None),
@@ -1497,6 +1637,7 @@ impl<'a> RequestBuilder<'a> {
             if is_safe_to_retry(
                 &err,
                 self.append_retry_policy,
+                self.definite_retries_only,
                 self.frame_signal.as_ref(),
                 self.client.access_token_mode,
             ) && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
@@ -1513,7 +1654,18 @@ impl<'a> RequestBuilder<'a> {
                 {
                     prior_uncertainty = true;
                 }
-                tokio::time::sleep(backoff).await;
+                let shutdown = self.client.shutdown_signal();
+                let aborted = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => true,
+                    _ = tokio::time::sleep(backoff) => false,
+                };
+                if aborted {
+                    return Err(ApiError::Aborted(AbortedError::new(
+                        "client closed",
+                        attempt_ctx,
+                    )));
+                }
             } else {
                 debug!(
                     %err,
@@ -1535,12 +1687,19 @@ impl<'a> RequestBuilder<'a> {
 fn is_safe_to_retry(
     err: &ApiError,
     policy: Option<AppendRetryPolicy>,
+    definite_retries_only: bool,
     frame_signal: Option<&FrameSignal>,
     access_token_mode: AccessTokenMode,
 ) -> bool {
-    let policy_compliant = match policy {
-        None | Some(AppendRetryPolicy::All) => true,
-        Some(AppendRetryPolicy::NoSideEffects) => !err.attempt_may_have_side_effects(frame_signal),
+    let policy_compliant = if definite_retries_only {
+        !err.attempt_may_have_side_effects(frame_signal)
+    } else {
+        match policy {
+            None | Some(AppendRetryPolicy::All) => true,
+            Some(AppendRetryPolicy::NoSideEffects) => {
+                !err.attempt_may_have_side_effects(frame_signal)
+            }
+        }
     };
     policy_compliant
         && (err.is_retryable()
@@ -1654,7 +1813,7 @@ impl StreamingResult for StreamingResponse {
             TerminalKind::Append => parse_append_error_response(status, &bytes, context),
             TerminalKind::Read => parse_read_error_response(status, &bytes, context),
         };
-        if error.is_server_draining() {
+        if error.should_retire_connection() {
             poison_handle.poison();
         }
         Err(error)
@@ -1861,6 +2020,7 @@ mod tests {
                     None,
                     None,
                     ReconnectAdvice::default(),
+                    1,
                 )
                 .await
                 .is_err()
@@ -1874,6 +2034,7 @@ mod tests {
                     None,
                     None,
                     ReconnectAdvice::default(),
+                    1,
                 )
                 .await
                 .is_err()
@@ -1883,6 +2044,11 @@ mod tests {
         let streaming = executor.streaming.lock().unwrap();
         assert_eq!(unary.len(), 3); // account, account retry, basin
         assert_eq!(streaming.len(), 2); // read and append
+        assert_eq!(unary[0][S2_ATTEMPT], "1");
+        assert_eq!(unary[1][S2_ATTEMPT], "2");
+        assert_eq!(unary[2][S2_ATTEMPT], "1");
+        assert_eq!(streaming[0][S2_ATTEMPT], "1");
+        assert_eq!(streaming[1][S2_ATTEMPT], "1");
         for headers in unary.iter().chain(streaming.iter()) {
             assert_eq!(headers["x-origin-session"], "session-1");
             assert!(headers["x-origin-session"].is_sensitive());
@@ -2166,8 +2332,8 @@ mod tests {
         let mode = AccessTokenMode::Static;
 
         // Non-append requests (no policy) — retry if retryable.
-        assert!(is_safe_to_retry(&retryable, None, None, mode));
-        assert!(!is_safe_to_retry(&non_retryable, None, None, mode));
+        assert!(is_safe_to_retry(&retryable, None, false, None, mode));
+        assert!(!is_safe_to_retry(&non_retryable, None, false, None, mode));
     }
 
     #[test]
@@ -2178,8 +2344,8 @@ mod tests {
         let mode = AccessTokenMode::Static;
 
         // All policy — retry if retryable, no frame signal checks.
-        assert!(is_safe_to_retry(&retryable, policy, None, mode));
-        assert!(!is_safe_to_retry(&non_retryable, policy, None, mode));
+        assert!(is_safe_to_retry(&retryable, policy, false, None, mode));
+        assert!(!is_safe_to_retry(&non_retryable, policy, false, None, mode));
     }
 
     #[test]
@@ -2193,22 +2359,36 @@ mod tests {
         let mode = AccessTokenMode::Static;
 
         // Signal not set — safe to retry.
-        assert!(is_safe_to_retry(&retryable, policy, Some(&signal), mode));
+        assert!(is_safe_to_retry(
+            &retryable,
+            policy,
+            false,
+            Some(&signal),
+            mode,
+        ));
 
         // Signal set + error with possible side effects — not safe.
         signal.signal();
-        assert!(!is_safe_to_retry(&retryable, policy, Some(&signal), mode));
+        assert!(!is_safe_to_retry(
+            &retryable,
+            policy,
+            false,
+            Some(&signal),
+            mode,
+        ));
 
         // Signal set + no-side-effect error — safe.
         assert!(is_safe_to_retry(
             &no_side_effect,
             policy,
+            false,
             Some(&signal),
             mode,
         ));
         assert!(is_safe_to_retry(
             &transaction_conflict,
             policy,
+            false,
             Some(&signal),
             mode,
         ));
@@ -2217,6 +2397,23 @@ mod tests {
         assert!(!is_safe_to_retry(
             &non_retryable,
             policy,
+            false,
+            Some(&signal),
+            mode,
+        ));
+
+        // Definite-only non-append ops (T2d: issue_access_token, create_network_policy).
+        assert!(!is_safe_to_retry(
+            &retryable,
+            None,
+            true,
+            Some(&signal),
+            mode,
+        ));
+        assert!(is_safe_to_retry(
+            &no_side_effect,
+            None,
+            true,
             Some(&signal),
             mode,
         ));
@@ -2261,6 +2458,7 @@ mod tests {
         let executor = Arc::new(RejectOldTokenExecutor::default());
         let client = BaseClient {
             client: executor.clone(),
+            shutdown: ShutdownSignal::new(),
             default_headers: HeaderMap::new(),
             access_token_mode: AccessTokenMode::Refreshable,
             access_token_provider: Some(provider.clone()),

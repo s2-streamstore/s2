@@ -19,7 +19,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
-    error::{ErrorContext, ReadSessionError, SessionClosedError, TimeoutError},
+    error::{AbortedError, ErrorContext, ReadSessionError, SessionClosedError, TimeoutError},
     reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoff,
     session::StreamHeaders,
@@ -327,6 +327,7 @@ pub async fn read_session(
     config: ReadSessionConfig,
 ) -> Result<ReadSession, ReadSessionError> {
     let context = ErrorContext::stream("read_session", client.name.as_ref(), name.as_ref(), true);
+    let shutdown = client.shutdown_signal();
     let ReadInput {
         start,
         stop,
@@ -346,38 +347,58 @@ pub async fn read_session(
         start.seq_num
     };
 
+    let mut retries_since_reset: u32 = 0;
     let mut initial_attempts: u32 = 0;
     let batches = loop {
+        if shutdown.is_closed() {
+            return Err(ReadSessionError::Aborted(AbortedError::new(
+                "client closed",
+                context.clone(),
+            )));
+        }
         end.wait = remaining_wait(baseline_wait, last_tail_at);
-        match session_inner(
-            client.clone(),
-            name.clone(),
-            headers.clone(),
-            start.clone(),
-            end.clone(),
-            ReconnectAdvice::default(),
-            advised_reconnects,
-            context.clone(),
-        )
-        .await
-        {
+        let attempt_num = retries_since_reset + 1;
+        let open_res = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                return Err(ReadSessionError::Aborted(AbortedError::new(
+                    "client closed",
+                    context.clone(),
+                )));
+            }
+            res = session_inner(
+                client.clone(),
+                name.clone(),
+                headers.clone(),
+                start.clone(),
+                end.clone(),
+                ReconnectAdvice::default(),
+                advised_reconnects,
+                context.clone(),
+                attempt_num,
+            ) => res,
+        };
+        match open_res {
             Ok(batches) => {
-                retry_backoff.reset();
                 break batches;
             }
             Err(err) => {
-                if take_server_draining_reconnect(&err, &mut advised_reconnects) {
-                    debug!(
-                        advised_reconnects = advised_reconnects.count(),
-                        "reconnecting initial read session while server drains"
-                    );
-                    continue;
-                }
                 initial_attempts += 1;
                 if let Some(backoff) =
                     retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
                 {
-                    tokio::time::sleep(backoff).await;
+                    retries_since_reset += 1;
+                    let aborted = tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => true,
+                        _ = tokio::time::sleep(backoff) => false,
+                    };
+                    if aborted {
+                        return Err(ReadSessionError::Aborted(AbortedError::new(
+                            "client closed",
+                            context.clone(),
+                        )));
+                    }
                     continue;
                 }
                 return Err(err.into_error(&context.clone().with_attempts(initial_attempts)));
@@ -388,31 +409,49 @@ pub async fn read_session(
     let stream_context = context.clone();
     let updates = Box::pin(stream! {
         let mut batches: Option<ReadItemStream> = Some(batches);
-        let mut attempts: u32 = 0;
+        let mut attempts: u32 = initial_attempts;
+        let mut retries_since_reset: u32 = retries_since_reset;
+        let mut made_progress_in_attempt = false;
 
         loop {
+            if shutdown.is_closed() {
+                yield Err(ReadSessionError::Aborted(AbortedError::new(
+                    "client closed",
+                    stream_context.clone(),
+                )));
+                break;
+            }
+
             if batches.is_none() {
                 end.wait = remaining_wait(baseline_wait, last_tail_at);
-                match session_inner(
-                    client.clone(),
-                    name.clone(),
-                    headers.clone(),
-                    start.clone(),
-                    end.clone(),
-                    ReconnectAdvice::default(),
-                    advised_reconnects,
-                    stream_context.clone(),
-                ).await {
-                    Ok(b) => batches = Some(b),
+                let attempt_num = retries_since_reset + 1;
+                let open_res = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        yield Err(ReadSessionError::Aborted(AbortedError::new(
+                            "client closed",
+                            stream_context.clone(),
+                        )));
+                        break;
+                    }
+                    res = session_inner(
+                        client.clone(),
+                        name.clone(),
+                        headers.clone(),
+                        start.clone(),
+                        end.clone(),
+                        ReconnectAdvice::default(),
+                        advised_reconnects,
+                        stream_context.clone(),
+                        attempt_num,
+                    ) => res,
+                };
+                match open_res {
+                    Ok(b) => {
+                        batches = Some(b);
+                        made_progress_in_attempt = false;
+                    }
                     Err(err) => {
-                        if take_server_draining_reconnect(&err, &mut advised_reconnects) {
-                            debug!(
-                                resume_seq_num = ?start.seq_num,
-                                advised_reconnects = advised_reconnects.count(),
-                                "reconnecting read session while server drains"
-                            );
-                            continue;
-                        }
                         attempts += 1;
                         if let Some(backoff) =
                             retry_delay(
@@ -422,7 +461,19 @@ pub async fn read_session(
                                 access_token_mode,
                             )
                         {
-                            tokio::time::sleep(backoff).await;
+                            retries_since_reset += 1;
+                            let aborted = tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => true,
+                                _ = tokio::time::sleep(backoff) => false,
+                            };
+                            if aborted {
+                                yield Err(ReadSessionError::Aborted(AbortedError::new(
+                                    "client closed",
+                                    stream_context.clone(),
+                                )));
+                                break;
+                            }
                             continue;
                         }
                         yield Err(err.into_error(&stream_context.clone().with_attempts(attempts)));
@@ -431,12 +482,22 @@ pub async fn read_session(
                 }
             }
 
-            match batches
-                .as_mut()
-                .expect("batches should not be None")
-                .next()
-                .await
-            {
+            let next_item = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    yield Err(ReadSessionError::Aborted(AbortedError::new(
+                        "client closed",
+                        stream_context.clone(),
+                    )));
+                    break;
+                }
+                item = batches
+                    .as_mut()
+                    .expect("batches should not be None")
+                    .next() => item,
+            };
+
+            match next_item {
                 Some(Ok(ReadItem::ReconnectAdvised)) => {
                     batches = None;
                     // The advised connection was already poisoned when the
@@ -456,9 +517,11 @@ pub async fn read_session(
                     continue;
                 }
                 Some(Ok(ReadItem::Batch(batch))) => {
+                    made_progress_in_attempt = true;
                     if retry_backoff.used() > 0 {
                         retry_backoff.reset();
                     }
+                    retries_since_reset = 0;
                     attempts = 0;
 
                     if batch.tail.is_some() {
@@ -486,10 +549,9 @@ pub async fn read_session(
                     if err.is_server_draining() && read_limits_exhausted(&end) {
                         break;
                     }
-                    if take_server_draining_reconnect(&err, &mut advised_reconnects) {
+                    if err.is_server_draining() && made_progress_in_attempt {
                         debug!(
                             resume_seq_num = ?start.seq_num,
-                            advised_reconnects = advised_reconnects.count(),
                             "reconnecting read session while server drains"
                         );
                         yield Ok(ReadUpdate::behind());
@@ -504,8 +566,20 @@ pub async fn read_session(
                             access_token_mode,
                         )
                     {
+                        retries_since_reset += 1;
                         yield Ok(ReadUpdate::behind());
-                        tokio::time::sleep(backoff).await;
+                        let aborted = tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => true,
+                            _ = tokio::time::sleep(backoff) => false,
+                        };
+                        if aborted {
+                            yield Err(ReadSessionError::Aborted(AbortedError::new(
+                                "client closed",
+                                stream_context.clone(),
+                            )));
+                            break;
+                        }
                         continue;
                     }
                     yield Err(err.into_error(&stream_context.clone().with_attempts(attempts)));
@@ -555,6 +629,7 @@ async fn session_inner(
     reconnect: ReconnectAdvice,
     advised_reconnects: AdvisedReconnects,
     context: ErrorContext,
+    attempt: u32,
 ) -> Result<ReadItemStream, ReadSessionFailure> {
     let mut batches = client
         .read_session(
@@ -564,6 +639,7 @@ async fn session_inner(
             headers.encryption.as_ref(),
             headers.stream_config.as_ref(),
             reconnect.clone(),
+            attempt,
         )
         .await?;
 
@@ -648,18 +724,6 @@ fn retry_delay(
             "not retrying read session"
         );
         None
-    }
-}
-
-fn take_server_draining_reconnect(
-    err: &ReadSessionFailure,
-    advised_reconnects: &mut AdvisedReconnects,
-) -> bool {
-    if err.is_server_draining() {
-        advised_reconnects.record();
-        true
-    } else {
-        false
     }
 }
 

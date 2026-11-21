@@ -3747,6 +3747,7 @@ dependencies = [
  "tokio-muxt",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "urlencoding",
  "uuid",

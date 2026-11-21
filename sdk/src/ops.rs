@@ -2,7 +2,10 @@
 use crate::client::Connect;
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
-    error::{AppendError, ErrorContext, ProtocolError, ReadError, ReadSessionError, RequestError},
+    error::{
+        AppendError, ClientClosedError, ErrorContext, ProtocolError, ReadError, ReadSessionError,
+        RequestError,
+    },
     producer::{Producer, ProducerConfig},
     session::{self, AppendSession, AppendSessionConfig, ReadSession, StreamHeaders},
     types::{
@@ -73,6 +76,18 @@ impl S2 {
         Ok(Self {
             client: AccountClient::init(config, base_client),
         })
+    }
+
+    /// Close the client, aborting all active sessions and in-flight requests and terminating all
+    /// connections without waiting for the server.
+    ///
+    /// Repeated calls are idempotent. After `close()`, any new operation on this client or handles
+    /// derived from it fails immediately with [`ClientClosedError`].
+    ///
+    /// Dropping an [`S2`] without calling `close()` keeps it alive while any handle or session
+    /// opened from it remains open.
+    pub fn close(&self) {
+        self.client.close();
     }
 
     /// Get an [`S2Basin`].
@@ -634,23 +649,42 @@ impl S2Stream {
     }
 
     /// Create an append session for submitting [`AppendInput`]s.
-    pub fn append_session(&self, config: AppendSessionConfig) -> AppendSession {
-        AppendSession::new(
+    pub fn append_session(
+        &self,
+        config: AppendSessionConfig,
+    ) -> Result<AppendSession, ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "append_session",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                false,
+            )));
+        }
+        Ok(AppendSession::new(
             self.client.clone(),
             self.name.clone(),
             self.headers(config.stream_config()),
             config,
-        )
+        ))
     }
 
     /// Create a producer for submitting individual [`AppendRecord`](crate::types::AppendRecord)s.
-    pub fn producer(&self, config: ProducerConfig) -> Producer {
-        Producer::new(
+    pub fn producer(&self, config: ProducerConfig) -> Result<Producer, ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "producer",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                false,
+            )));
+        }
+        Ok(Producer::new(
             self.client.clone(),
             self.name.clone(),
             self.headers(config.stream_config()),
             config,
-        )
+        ))
     }
 
     /// Create a read session.
@@ -659,6 +693,16 @@ impl S2Stream {
         input: ReadInput,
         config: ReadSessionConfig,
     ) -> Result<ReadSession, ReadSessionError> {
+        if self.client.is_closed() {
+            return Err(ReadSessionError::ClientClosed(ClientClosedError::new(
+                ErrorContext::stream(
+                    "read_session",
+                    self.client.name.as_ref(),
+                    self.name.as_ref(),
+                    true,
+                ),
+            )));
+        }
         session::read_session(
             self.client.clone(),
             self.name.clone(),

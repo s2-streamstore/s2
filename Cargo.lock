@@ -5155,6 +5155,7 @@ dependencies = [
  "tokio-shared-rt",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "urlencoding",
  "uuid",

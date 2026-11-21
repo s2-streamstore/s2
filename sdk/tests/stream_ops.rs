@@ -529,7 +529,7 @@ async fn append_with_mismatched_seq_num_errors(
 async fn append_session_with_mismatched_seq_num_errors(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     let input1 = AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
         "lorem",
@@ -629,7 +629,7 @@ async fn append_with_mismatched_fencing_token_errors(
 async fn append_session_with_mismatched_fencing_token_errors(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     let fencing_token_1 = FencingToken::generate(30).expect("valid fencing token");
     let input1 = AppendInput::new(AppendRecordBatch::try_from_iter([CommandRecord::fence(
@@ -1636,7 +1636,7 @@ async fn read_nonexistent_stream_errors(
 async fn append_session_close_delivers_all_acks(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::default());
+    let session = stream.append_session(AppendSessionConfig::default())?;
 
     let ticket1 = session
         .submit(AppendInput::new(AppendRecordBatch::try_from_iter([
@@ -1676,7 +1676,7 @@ async fn append_session_close_delivers_all_acks(
 async fn batch_submit_ticket_drop_should_not_affect_others(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::default());
+    let session = stream.append_session(AppendSessionConfig::default())?;
 
     let _ticket1 = session
         .submit(AppendInput::new(AppendRecordBatch::try_from_iter([
@@ -1704,7 +1704,7 @@ async fn batch_submit_ticket_drop_should_not_affect_others(
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
 async fn producer_delivers_all_acks(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let ack1 = producer.submit(AppendRecord::new("lorem")?).await?.await?;
     let ack2 = producer.submit(AppendRecord::new("ipsum")?).await?.await?;
@@ -1725,7 +1725,7 @@ async fn producer_flushes_partial_batch_without_waiting_for_linger(
     let producer = stream.producer(
         ProducerConfig::new()
             .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    )?;
     let ticket = producer.submit(AppendRecord::new("lorem")?).await?;
 
     tokio::time::timeout(Duration::from_secs(10), producer.flush())
@@ -1749,7 +1749,7 @@ async fn producer_flush_delivers_all_indexed_acks(
     let producer = stream.producer(
         ProducerConfig::new()
             .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    )?;
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
     let ticket3 = producer.submit(AppendRecord::new("dolor")?).await?;
@@ -1785,7 +1785,7 @@ async fn producer_flush_is_reusable_and_excludes_later_submission(
         ProducerConfig::new()
             .with_match_seq_num(0)
             .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    )?;
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
 
     let record2 = AppendRecord::new("ipsum")?;
@@ -1827,7 +1827,7 @@ async fn producer_empty_flush_is_immediate_and_reusable(
     let producer = stream.producer(
         ProducerConfig::new()
             .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    )?;
 
     tokio::time::timeout(Duration::from_secs(10), producer.flush())
         .await
@@ -1860,7 +1860,7 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
         ProducerConfig::new()
             .with_match_seq_num(0)
             .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    )?;
     let ticket = producer.submit(AppendRecord::new("ipsum")?).await?;
 
     let flush_result = tokio::time::timeout(Duration::from_secs(10), producer.flush())
@@ -1900,7 +1900,7 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
 async fn producer_close_delivers_all_indexed_acks_from_same_ack(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1929,7 +1929,7 @@ async fn producer_close_delivers_all_indexed_acks_from_different_acks(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let producer = stream.producer(ProducerConfig::default().with_batching(
         BatchingConfig::default().with_limits(BatchLimits::default().with_max_batch_records(1)?),
-    ));
+    ))?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1959,7 +1959,7 @@ async fn producer_drop_errors_all_claimable_tickets(
     let producer = stream.producer(
         ProducerConfig::default()
             .with_batching(BatchingConfig::default().with_linger(Duration::from_secs(1))),
-    );
+    )?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1980,7 +1980,7 @@ async fn producer_drop_errors_all_claimable_tickets(
 async fn producer_drop_errors_no_claimable_tickets(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -2005,7 +2005,7 @@ async fn producer_drop_errors_no_claimable_tickets(
 async fn record_submit_ticket_drop_should_not_affect_others(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let _ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     drop(_ticket1);
@@ -2179,7 +2179,7 @@ async fn compression_roundtrip_session(
     let stream = basin.stream(stream_name.clone());
 
     // Payload must be >= 1KiB to trigger compression (COMPRESSION_THRESHOLD_BYTES)
-    let session = stream.append_session(AppendSessionConfig::default());
+    let session = stream.append_session(AppendSessionConfig::default())?;
     let ticket = session
         .submit(AppendInput::new(AppendRecordBatch::try_from_iter([
             AppendRecord::new("s2".repeat(10240))?,
@@ -2214,7 +2214,7 @@ async fn append_session_for_non_existent_stream_errors(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream = basin.stream(unique_stream_name());
 
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     let input = AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
         "lorem",
@@ -2252,7 +2252,7 @@ async fn producer_for_non_existent_stream_errors(
 
     let producer = stream.producer(ProducerConfig::new().with_batching(
         BatchingConfig::new().with_limits(BatchLimits::new().with_max_batch_records(10)?),
-    ));
+    ))?;
     let num_records = 2000;
 
     let mut tickets = Vec::with_capacity(num_records);
@@ -2344,7 +2344,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
     let session_stream = unique_stream_name();
     let producer = basin
         .stream(session_stream.clone())
-        .producer(ProducerConfig::new().with_stream_config(stream_config.clone()));
+        .producer(ProducerConfig::new().with_stream_config(stream_config.clone()))?;
     producer.submit(AppendRecord::new("hello")?).await?.await?;
     producer.close().await?;
     let config = basin.get_stream_config(session_stream).await?;

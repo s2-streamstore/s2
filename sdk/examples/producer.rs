@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = S2::new(S2Config::new(access_token))?;
     let stream = s2.basin(basin_name).stream(stream_name);
 
-    let producer = stream.producer(ProducerConfig::new());
+    let producer = stream.producer(ProducerConfig::new())?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;

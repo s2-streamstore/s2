@@ -430,6 +430,13 @@ pub fn bench_write(
     );
 
     async_stream::stream! {
+        let producer = match producer {
+            Ok(producer) => producer,
+            Err(e) => {
+                yield Err(CliError::op(OpKind::Bench, e));
+                return;
+            }
+        };
         let target_bps = target_mibps.get() as f64 * 1024.0 * 1024.0;
 
         let mut total_bytes: u64 = 0;

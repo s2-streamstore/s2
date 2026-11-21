@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR_END: simple-read
 
     // ANCHOR: append-session
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     // Submit a batch - this enqueues it and returns a ticket
     let records = AppendRecordBatch::try_from_iter([
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let producer = stream.producer(
         ProducerConfig::new()
             .with_batching(BatchingConfig::new().with_linger(Duration::from_millis(5))),
-    );
+    )?;
 
     // Submit individual records
     let ticket = producer.submit(AppendRecord::new("my event")?).await?;

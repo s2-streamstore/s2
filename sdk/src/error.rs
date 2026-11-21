@@ -250,6 +250,14 @@ impl ServerError {
         self.status == StatusCode::SERVICE_UNAVAILABLE
             && self.code.as_deref() == Some("server_draining")
     }
+
+    pub(crate) fn is_hot_server(&self) -> bool {
+        self.status == StatusCode::BAD_GATEWAY && self.code.as_deref() == Some("hot_server")
+    }
+
+    pub(crate) fn should_retire_connection(&self) -> bool {
+        self.is_server_draining() || self.is_hot_server()
+    }
 }
 
 impl fmt::Display for ServerError {
@@ -645,7 +653,6 @@ pub struct ClientClosedError {
 }
 
 impl ClientClosedError {
-    #[allow(dead_code)]
     pub(crate) fn new(context: ErrorContext) -> Self {
         Self { context }
     }
@@ -1745,6 +1752,10 @@ pub(crate) fn classify_http_error(err: client::HttpError, context: ErrorContext)
         }
         client::HttpError::Timeout => {
             ApiError::Timeout(TimeoutError::new("request timed out", context))
+        }
+        client::HttpError::ClientClosed => ApiError::ClientClosed(ClientClosedError::new(context)),
+        client::HttpError::Aborted => {
+            ApiError::Aborted(AbortedError::new("client closed", context))
         }
         client::HttpError::Send(_) | client::HttpError::Receive(_) => {
             if let Some(hyper_err) = source_err::<hyper::Error>(&err) {

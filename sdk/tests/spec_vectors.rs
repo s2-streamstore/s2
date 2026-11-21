@@ -11,15 +11,27 @@ use std::{
     error::Error as StdError,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 use bytes::{Bytes, BytesMut};
+use futures_util::StreamExt as _;
 use http::Response;
+use prost::Message as _;
 use s2_api::v1::{
     self as api,
     error::ErrorCode,
-    stream::s2s::{FrameDecoder, SessionMessage},
+    stream::{
+        proto::{
+            AppendAck as ProtoAppendAck, ReadBatch as ProtoReadBatch,
+            SequencedRecord as ProtoSequencedRecord, StreamPosition as ProtoStreamPosition,
+        },
+        s2s::{FrameDecoder, SessionMessage},
+    },
 };
 use s2_common::resources::ProvisionResult;
 use s2_sdk::{
@@ -29,13 +41,15 @@ use s2_sdk::{
     error::{AppendError, AppendSessionError, ReadError, ReadSessionError, RequestError, S2Error},
     producer::ProducerConfig,
     types::{
-        AccountEndpoint, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy,
-        BasinEndpoint, BasinName, BasinReconfiguration, CommandRecord, DeleteOnEmptyConfig,
-        DeleteOnEmptyReconfiguration, EncryptionKey, EnsureOutput, FencingToken, Header, Maybe,
-        MeteredBytes, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig, ReadSessionRetryPolicy,
-        ReadStart, ReadStop, RetentionPolicy, RetryConfig, S2Config, S2Endpoints, SequencedRecord,
-        StreamName, StreamReconfiguration, TimeRange, TimeRangeAndInterval, Timestamp,
-        TimestampingMode, TimestampingReconfiguration,
+        AccessTokenId, AccessTokenScopeInput, AccountEndpoint, AppendInput, AppendRecord,
+        AppendRecordBatch, AppendRetryPolicy, BasinEndpoint, BasinName, BasinReconfiguration,
+        CommandRecord, CreateNetworkPolicyInput, DeleteOnEmptyConfig, DeleteOnEmptyReconfiguration,
+        EncryptionKey, EnsureOutput, FencingToken, Header, IssueAccessTokenInput, ListBasinsInput,
+        Maybe, MeteredBytes, NetworkPolicy, OperationGroupPermissions, PublicNetPolicy, ReadFrom,
+        ReadInput, ReadLimits, ReadSessionConfig, ReadSessionRetryPolicy, ReadStart, ReadStop,
+        RetentionPolicy, RetryConfig, S2Config, S2Endpoints, SequencedRecord, StreamName,
+        StreamReconfiguration, TimeRange, TimeRangeAndInterval, Timestamp, TimestampingMode,
+        TimestampingReconfiguration,
     },
 };
 use serde::Deserialize;
@@ -1567,7 +1581,7 @@ async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
         .client(no_retry_config())
         .basin(basin_name.clone())
         .stream(stream_name.clone());
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new()).unwrap();
 
     let ticket = session
         .submit(sample_append_input())
@@ -1656,4 +1670,986 @@ async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
     assert_eq!(e.server.status.as_u16(), 416);
     assert!(!read_err.is_retryable());
     assert!(read_err.has_no_side_effects());
+}
+
+// ---------------------------------------------------------------------------
+// PR 3 conformance tests: C12, T2d, T4, T6, T6c, T7a, REFUSED_STREAM
+// ---------------------------------------------------------------------------
+
+fn encode_s2s_regular_frame(payload: &[u8], reconnect_advised: bool) -> Bytes {
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    let length = 1 + payload.len();
+    frame.push(((length >> 16) & 0xff) as u8);
+    frame.push(((length >> 8) & 0xff) as u8);
+    frame.push((length & 0xff) as u8);
+    frame.push(if reconnect_advised { 0x10 } else { 0x00 });
+    frame.extend_from_slice(payload);
+    Bytes::from(frame)
+}
+
+fn proto_append_ack(start: u64, end: u64) -> Vec<u8> {
+    ProtoAppendAck {
+        start: Some(ProtoStreamPosition {
+            seq_num: start,
+            timestamp: 1000,
+        }),
+        end: Some(ProtoStreamPosition {
+            seq_num: end,
+            timestamp: 1000,
+        }),
+        tail: Some(ProtoStreamPosition {
+            seq_num: end,
+            timestamp: 1000,
+        }),
+    }
+    .encode_to_vec()
+}
+
+fn proto_read_batch(seq_num: u64, tail_seq: u64) -> Vec<u8> {
+    ProtoReadBatch {
+        records: vec![ProtoSequencedRecord {
+            seq_num,
+            timestamp: 1000,
+            headers: vec![],
+            body: Bytes::from_static(b"rec"),
+        }],
+        tail: Some(ProtoStreamPosition {
+            seq_num: tail_seq,
+            timestamp: 1000,
+        }),
+    }
+    .encode_to_vec()
+}
+
+// spec: r1 C12
+#[tokio::test]
+async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_calls() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    // Server holds all requests open indefinitely (except GET /records s2s sends 200 headers
+    // immediately so ReadSession enters its active streaming state).
+    let server = MockH2Server::start(|_conn_id, req, mut respond| async move {
+        let is_s2s_read = req.method() == http::Method::GET
+            && req
+                .headers()
+                .get("content-type")
+                .is_some_and(|v| v == "s2s/proto");
+        let is_s2s_append = req.method() == http::Method::POST
+            && req
+                .headers()
+                .get("content-type")
+                .is_some_and(|v| v == "s2s/proto");
+        if is_s2s_read || is_s2s_append {
+            let resp = Response::builder()
+                .status(200)
+                .header("content-type", "s2s/proto")
+                .body(())
+                .unwrap();
+            let Ok(_send) = respond.send_response(resp, false) else {
+                return;
+            };
+            std::future::pending::<()>().await;
+        } else {
+            let _keep = respond;
+            std::future::pending::<()>().await;
+        }
+    })
+    .await;
+
+    let s2 = server.client(no_retry_config());
+    let basin = s2.basin(basin_name.clone());
+    let stream = basin.stream(stream_name.clone());
+
+    let append_session = stream
+        .append_session(AppendSessionConfig::new())
+        .expect("open append session");
+    let producer = stream
+        .producer(
+            ProducerConfig::new()
+                .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60))),
+        )
+        .expect("open producer");
+    let mut read_session = stream
+        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .await
+        .expect("open read session");
+    let caught_up = read_session.caught_up();
+
+    let append_ticket = append_session
+        .submit(sample_append_input())
+        .await
+        .expect("submit batch");
+    let producer_ticket = producer
+        .submit(AppendRecord::new("rec").unwrap())
+        .await
+        .expect("submit record");
+
+    let unary_append = tokio::spawn({
+        let stream = stream.clone();
+        async move { stream.append(sample_append_input()).await }
+    });
+    let unary_read = tokio::spawn({
+        let stream = stream.clone();
+        async move { stream.read(ReadInput::new()).await }
+    });
+    let read_next = tokio::spawn(async move { read_session.next().await });
+
+    // Give requests a brief moment to be in flight.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Close is synchronous, does not wait for the server, and is idempotent.
+    s2.close();
+    s2.close();
+
+    // All in-flight calls and sessions fail immediately with AbortedError (well before 5s timeout).
+    let append_err = tokio::time::timeout(Duration::from_secs(1), unary_append)
+        .await
+        .expect("unary append must abort promptly")
+        .unwrap()
+        .expect_err("unary append must fail");
+    assert!(
+        matches!(append_err, AppendError::Aborted(_)),
+        "{append_err:?}"
+    );
+    assert!(!append_err.has_no_side_effects());
+    assert!(!append_err.is_retryable());
+
+    let read_err = tokio::time::timeout(Duration::from_secs(1), unary_read)
+        .await
+        .expect("unary read must abort promptly")
+        .unwrap()
+        .expect_err("unary read must fail");
+    assert!(matches!(read_err, ReadError::Aborted(_)), "{read_err:?}");
+    assert!(read_err.has_no_side_effects());
+
+    let ticket_err = tokio::time::timeout(Duration::from_secs(1), append_ticket)
+        .await
+        .expect("append session ticket must abort promptly")
+        .expect_err("append session ticket must fail");
+    assert!(
+        matches!(
+            ticket_err,
+            AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
+        ),
+        "{ticket_err:?}"
+    );
+
+    let prod_err = tokio::time::timeout(Duration::from_secs(1), producer_ticket)
+        .await
+        .expect("producer ticket must abort promptly")
+        .expect_err("producer ticket must fail");
+    assert!(
+        matches!(
+            prod_err,
+            AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
+        ),
+        "{prod_err:?}"
+    );
+
+    let read_item = tokio::time::timeout(Duration::from_secs(1), read_next)
+        .await
+        .expect("read session must abort promptly")
+        .unwrap()
+        .expect("read session yields AbortedError");
+    assert!(
+        matches!(read_item, Err(ReadSessionError::Aborted(_))),
+        "{read_item:?}"
+    );
+    let cu_err = tokio::time::timeout(Duration::from_secs(1), caught_up)
+        .await
+        .expect("caught_up must fail promptly")
+        .expect_err("caught_up must fail");
+    assert!(matches!(cu_err, ReadSessionError::Aborted(_)), "{cu_err:?}");
+
+    // New calls on closed client or handles fail immediately with ClientClosedError.
+    assert!(matches!(
+        s2.list_basins(ListBasinsInput::new()).await,
+        Err(RequestError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.read(ReadInput::new()).await,
+        Err(ReadError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.append(sample_append_input()).await,
+        Err(AppendError::ClientClosed(_))
+    ));
+    assert!(stream.append_session(AppendSessionConfig::new()).is_err());
+    assert!(stream.producer(ProducerConfig::new()).is_err());
+    assert!(matches!(
+        stream
+            .read_session(ReadInput::new(), ReadSessionConfig::default())
+            .await,
+        Err(ReadSessionError::ClientClosed(_))
+    ));
+
+    // Dropping S2 without calling close() keeps sessions alive.
+    let ack_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
+        let resp = Response::builder()
+            .status(200)
+            .header("content-type", "s2s/proto")
+            .body(())
+            .unwrap();
+        let Ok(mut send) = respond.send_response(resp, false) else {
+            return;
+        };
+        let mut body = req.into_body();
+        if let Some(Ok(_)) = body.data().await {
+            let ack = encode_s2s_regular_frame(&proto_append_ack(0, 1), false);
+            let _ = send.send_data(ack, true);
+        }
+    })
+    .await;
+    let s2_drop = ack_server.client(no_retry_config());
+    let live_session = s2_drop
+        .basin(basin_name.clone())
+        .stream(stream_name.clone())
+        .append_session(AppendSessionConfig::new())
+        .expect("open session");
+    drop(s2_drop);
+    let ack = live_session
+        .submit(sample_append_input())
+        .await
+        .expect("submit after dropping S2")
+        .await
+        .expect("ack after dropping S2");
+    assert_eq!(ack.end.seq_num, 1);
+
+    // C12: closing client aborts a connection still being established (TLS handshake stall).
+    let stall_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stall_addr = stall_listener.local_addr().unwrap();
+    let stall_task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = stall_listener.accept().await {
+            held.push(sock);
+        }
+    });
+    let ep = format!("https://{stall_addr}");
+    let endpoints = S2Endpoints::new(
+        AccountEndpoint::new(&ep).unwrap(),
+        BasinEndpoint::new(&ep).unwrap(),
+    )
+    .unwrap();
+    let stall_s2 = S2::new(
+        S2Config::new("test-token")
+            .with_endpoints(endpoints)
+            .with_insecure_skip_cert_verification(true)
+            .with_connection_timeout(Duration::from_secs(10))
+            .unwrap()
+            .with_request_timeout(Duration::from_secs(10))
+            .unwrap()
+            .with_retry(no_retry_config()),
+    )
+    .unwrap();
+    let dial_task = tokio::spawn({
+        let s2 = stall_s2.clone();
+        async move { s2.list_basins(ListBasinsInput::new()).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    stall_s2.close();
+    let dial_err = tokio::time::timeout(Duration::from_secs(1), dial_task)
+        .await
+        .expect("in-progress connect must abort promptly on close()")
+        .unwrap()
+        .expect_err("must fail with Aborted");
+    assert!(matches!(dial_err, RequestError::Aborted(_)), "{dial_err:?}");
+    stall_task.abort();
+}
+
+// spec: r1 T7a
+#[tokio::test]
+async fn spec_t7a_connection_timeout_bounds_tls_handshake() {
+    // Raw TCP listener accepts immediately and never sends a TLS ServerHello.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accept_task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+
+    let ep = format!("https://{addr}");
+    let endpoints = S2Endpoints::new(
+        AccountEndpoint::new(&ep).unwrap(),
+        BasinEndpoint::new(&ep).unwrap(),
+    )
+    .unwrap();
+    let s2 = S2::new(
+        S2Config::new("test-token")
+            .with_endpoints(endpoints)
+            .with_insecure_skip_cert_verification(true)
+            .with_connection_timeout(Duration::from_millis(150))
+            .unwrap()
+            .with_request_timeout(Duration::from_secs(5))
+            .unwrap()
+            .with_retry(no_retry_config()),
+    )
+    .unwrap();
+
+    let start = tokio::time::Instant::now();
+    let err = s2
+        .list_basins(ListBasinsInput::new())
+        .await
+        .expect_err("stalled TLS handshake must time out");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "TLS handshake must be bounded by connection_timeout (150ms), took {elapsed:?}"
+    );
+    assert!(
+        matches!(err, RequestError::Connect(_)),
+        "T7a: connection_timeout must fail with ConnectError, got {err:?}"
+    );
+    assert!(err.is_retryable());
+    assert!(err.has_no_side_effects());
+    accept_task.abort();
+}
+
+// spec: r1 T4, T5a, T6
+#[tokio::test]
+async fn spec_t4_s2_attempt_header_unary_and_sessions() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+    let fast_retry_3 = RetryConfig::new()
+        .with_max_attempts(3)
+        .unwrap()
+        .with_min_base_delay(Duration::ZERO)
+        .with_max_base_delay(Duration::ZERO);
+
+    // 1. Unary s2-attempt header: 1, 2, 3
+    let unary_attempts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let unary_server = MockH2Server::start({
+        let attempts = unary_attempts.clone();
+        move |_conn_id, req, mut respond| {
+            let attempts = attempts.clone();
+            async move {
+                let hdr = req
+                    .headers()
+                    .get("s2-attempt")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned();
+                let idx = {
+                    let mut guard = attempts.lock().unwrap();
+                    guard.push(hdr);
+                    guard.len()
+                };
+                if idx < 3 {
+                    let resp = Response::builder().status(503).body(()).unwrap();
+                    if let Ok(mut send) = respond.send_response(resp, false) {
+                        let _ = send.send_data(
+                            Bytes::from_static(br#"{"code":"unavailable","message":"busy"}"#),
+                            true,
+                        );
+                    }
+                } else {
+                    let resp = Response::builder().status(200).body(()).unwrap();
+                    if let Ok(mut send) = respond.send_response(resp, false) {
+                        let _ = send.send_data(
+                            Bytes::from_static(br#"{"basins":[],"has_more":false}"#),
+                            true,
+                        );
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    unary_server
+        .client(fast_retry_3.clone())
+        .list_basins(ListBasinsInput::new())
+        .await
+        .expect("unary succeeds on attempt 3");
+    assert_eq!(
+        *unary_attempts.lock().unwrap(),
+        vec!["1", "2", "3"],
+        "T4: unary s2-attempt header"
+    );
+
+    // 2. AppendSession s2-attempt header across progress, retries, handover, and immediate drain
+    let append_attempts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let append_server = MockH2Server::start({
+        let attempts = append_attempts.clone();
+        move |_conn_id, req, mut respond| {
+            let attempts = attempts.clone();
+            async move {
+                let hdr = req
+                    .headers()
+                    .get("s2-attempt")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned();
+                let idx = {
+                    let mut guard = attempts.lock().unwrap();
+                    guard.push(hdr);
+                    guard.len()
+                };
+                match idx {
+                    1 => {
+                        // Ack batch 1, then drop connection when batch 2 arrives.
+                        let resp = Response::builder()
+                            .status(200)
+                            .header("content-type", "s2s/proto")
+                            .body(())
+                            .unwrap();
+                        let Ok(mut send) = respond.send_response(resp, false) else {
+                            return;
+                        };
+                        let mut body = req.into_body();
+                        let _ = body.data().await;
+                        let _ = send.send_data(
+                            encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
+                            false,
+                        );
+                        let _ = body.data().await;
+                        // Close cleanly while batch 2 is unacked -> ConnectionLost -> retry 0.
+                        let _ = send.send_data(Bytes::new(), true);
+                    }
+                    2 => {
+                        // Retry 0: fail immediately with 503 unavailable -> retry 1.
+                        let resp = Response::builder().status(503).body(()).unwrap();
+                        if let Ok(mut send) = respond.send_response(resp, false) {
+                            let _ = send.send_data(
+                                Bytes::from_static(br#"{"code":"unavailable","message":"busy"}"#),
+                                true,
+                            );
+                        }
+                    }
+                    3 => {
+                        // Retry 1: ack batch 2 with reconnect-advised bit -> handover (attempt 1).
+                        let resp = Response::builder()
+                            .status(200)
+                            .header("content-type", "s2s/proto")
+                            .body(())
+                            .unwrap();
+                        let Ok(mut send) = respond.send_response(resp, false) else {
+                            return;
+                        };
+                        let mut body = req.into_body();
+                        let _ = body.data().await;
+                        let _ = send.send_data(
+                            encode_s2s_regular_frame(&proto_append_ack(1, 2), true),
+                            true,
+                        );
+                    }
+                    4 => {
+                        // Handover request ends immediately with server_draining before any ack ->
+                        // counts as retry 0 (T6) -> next request sends s2-attempt: 2.
+                        let resp = Response::builder()
+                            .status(200)
+                            .header("content-type", "s2s/proto")
+                            .body(())
+                            .unwrap();
+                        if let Ok(mut send) = respond.send_response(resp, false) {
+                            let _ = send.send_data(
+                                encode_s2s_terminal_frame(
+                                    503,
+                                    br#"{"code":"server_draining","message":"draining"}"#,
+                                ),
+                                true,
+                            );
+                        }
+                    }
+                    _ => {
+                        // Attempt 2: ack batch 3 and close cleanly when client finishes.
+                        let resp = Response::builder()
+                            .status(200)
+                            .header("content-type", "s2s/proto")
+                            .body(())
+                            .unwrap();
+                        let Ok(mut send) = respond.send_response(resp, false) else {
+                            return;
+                        };
+                        let mut body = req.into_body();
+                        let _ = body.data().await;
+                        let _ = send.send_data(
+                            encode_s2s_regular_frame(&proto_append_ack(2, 3), false),
+                            false,
+                        );
+                        while let Some(Ok(_)) = body.data().await {}
+                        let _ = send.send_data(Bytes::new(), true);
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    let append_stream = append_server
+        .client(
+            fast_retry_3
+                .clone()
+                .with_append_retry_policy(AppendRetryPolicy::All),
+        )
+        .basin(basin_name.clone())
+        .stream(stream_name.clone());
+    let session = append_stream
+        .append_session(AppendSessionConfig::new())
+        .expect("open session");
+
+    let ack1 = tokio::time::timeout(Duration::from_secs(3), async {
+        session
+            .submit(sample_append_input())
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "ack1 timed out; attempts={:?}",
+            *append_attempts.lock().unwrap()
+        )
+    });
+    assert_eq!(ack1.end.seq_num, 1);
+    let ack2 = tokio::time::timeout(Duration::from_secs(3), async {
+        session
+            .submit(sample_append_input())
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "ack2 timed out; attempts={:?}",
+            *append_attempts.lock().unwrap()
+        )
+    });
+    assert_eq!(ack2.end.seq_num, 2);
+    let ack3 = tokio::time::timeout(Duration::from_secs(3), async {
+        session
+            .submit(sample_append_input())
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "ack3 timed out; attempts={:?}",
+            *append_attempts.lock().unwrap()
+        )
+    });
+    assert_eq!(ack3.end.seq_num, 3);
+    tokio::time::timeout(Duration::from_secs(3), session.close())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "close timed out; attempts={:?}",
+                *append_attempts.lock().unwrap()
+            )
+        })
+        .unwrap();
+
+    assert_eq!(
+        *append_attempts.lock().unwrap(),
+        vec!["1", "2", "3", "1", "2"],
+        "T4/T5a/T6: append session s2-attempt header sequence"
+    );
+
+    // 3. ReadSession s2-attempt header + T6 immediate server_draining exhaustion
+    let read_attempts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let read_server = MockH2Server::start({
+        let attempts = read_attempts.clone();
+        move |_conn_id, req, mut respond| {
+            let attempts = attempts.clone();
+            async move {
+                let hdr = req
+                    .headers()
+                    .get("s2-attempt")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned();
+                let idx = {
+                    let mut guard = attempts.lock().unwrap();
+                    guard.push(hdr);
+                    guard.len()
+                };
+                let resp = Response::builder()
+                    .status(200)
+                    .header("content-type", "s2s/proto")
+                    .body(())
+                    .unwrap();
+                let Ok(mut send) = respond.send_response(resp, false) else {
+                    return;
+                };
+                if idx == 1 {
+                    // Progress (batch 0), then server_draining -> handover (attempt 1, no budget
+                    // used).
+                    let _ = send.send_data(
+                        encode_s2s_regular_frame(&proto_read_batch(0, 1), false),
+                        false,
+                    );
+                }
+                let _ = send.send_data(
+                    encode_s2s_terminal_frame(
+                        503,
+                        br#"{"code":"server_draining","message":"draining"}"#,
+                    ),
+                    true,
+                );
+            }
+        }
+    })
+    .await;
+
+    let mut read_session = tokio::time::timeout(
+        Duration::from_secs(3),
+        read_server
+            .client(fast_retry_3)
+            .basin(basin_name)
+            .stream(stream_name)
+            .read_session(ReadInput::new(), ReadSessionConfig::default()),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "read open timed out; attempts={:?}",
+            *read_attempts.lock().unwrap()
+        )
+    })
+    .expect("open read session");
+    let first = tokio::time::timeout(Duration::from_secs(3), read_session.next())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "read first timed out; attempts={:?}",
+                *read_attempts.lock().unwrap()
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.records.len(), 1);
+    let err = tokio::time::timeout(Duration::from_secs(3), read_session.next())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "read err timed out; attempts={:?}",
+                *read_attempts.lock().unwrap()
+            )
+        })
+        .expect("should terminate with server_draining")
+        .expect_err("must exhaust budget on immediate server_draining");
+    assert!(
+        matches!(err, ReadSessionError::Server(ref se) if se.code.as_deref() == Some("server_draining")),
+        "{err:?}"
+    );
+    assert_eq!(
+        *read_attempts.lock().unwrap(),
+        vec!["1", "1", "2", "3"],
+        "T4/T6: read session handover then budgeted retries on immediate server_draining"
+    );
+}
+
+// spec: r1 T2d
+#[tokio::test]
+async fn spec_t2d_definite_only_retries_for_token_and_network_policy() {
+    let fast_retry_3 = RetryConfig::new()
+        .with_max_attempts(3)
+        .unwrap()
+        .with_min_base_delay(Duration::ZERO)
+        .with_max_base_delay(Duration::ZERO);
+
+    let token_input = || {
+        IssueAccessTokenInput::new(
+            "tok-1".parse::<AccessTokenId>().unwrap(),
+            AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all()),
+        )
+    };
+    let policy_input = || {
+        CreateNetworkPolicyInput::new(
+            "pol-1".parse().unwrap(),
+            NetworkPolicy::new().with_public_net(PublicNetPolicy::Cidrs(vec![
+                "192.0.2.0/24".parse().unwrap(),
+            ])),
+        )
+    };
+
+    // 1. issue_access_token does NOT retry indefinite 503 unavailable
+    let server = MockH2Server::from_responses([CannedResponse::new(
+        503,
+        r#"{"code":"unavailable","message":"busy"}"#,
+    )])
+    .await;
+    let err = server
+        .client(fast_retry_3.clone())
+        .issue_access_token(token_input())
+        .await
+        .expect_err("must not retry indefinite error");
+    assert!(matches!(err, RequestError::Server(_)));
+    assert_eq!(server.request_count(), 1);
+
+    // 2. issue_access_token DOES retry definite 503 server_draining
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(503, r#"{"code":"server_draining","message":"draining"}"#),
+        CannedResponse::new(201, r#"{"access_token":"secret-tok"}"#),
+    ])
+    .await;
+    let tok = server
+        .client(fast_retry_3.clone())
+        .issue_access_token(token_input())
+        .await
+        .expect("must retry definite server_draining");
+    assert_eq!(tok, "secret-tok");
+    assert_eq!(server.request_count(), 2);
+
+    // 3. create_network_policy does NOT retry indefinite 503 unavailable
+    let server = MockH2Server::from_responses([CannedResponse::new(
+        503,
+        r#"{"code":"unavailable","message":"busy"}"#,
+    )])
+    .await;
+    let err = server
+        .client(fast_retry_3.clone())
+        .create_network_policy(policy_input())
+        .await
+        .expect_err("must not retry indefinite error");
+    assert!(matches!(err, RequestError::Server(_)));
+    assert_eq!(server.request_count(), 1);
+
+    // 4. create_network_policy DOES retry definite 429 rate_limited
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(429, r#"{"code":"rate_limited","message":"slow down"}"#),
+        CannedResponse::new(
+            201,
+            r#"{"id":"pol-1.abcd1234","slug":"pol-1","created_at":"2026-01-01T00:00:00Z","policy":{"public_net":{"cidrs":["192.0.2.0/24"]}}}"#,
+        ),
+    ])
+    .await;
+    let info = server
+        .client(fast_retry_3)
+        .create_network_policy(policy_input())
+        .await
+        .expect("must retry definite rate_limited");
+    assert_eq!(info.id.slug().as_ref(), "pol-1");
+    assert_eq!(server.request_count(), 2);
+}
+
+// spec: r1 T6, T6c
+#[tokio::test]
+async fn spec_t6_connection_retirement_on_server_draining_and_hot_server() {
+    let fast_retry_2 = RetryConfig::new()
+        .with_max_attempts(2)
+        .unwrap()
+        .with_min_base_delay(Duration::ZERO)
+        .with_max_base_delay(Duration::ZERO);
+
+    // Helper: serve first status+body, then 200 empty basins list, recording conn_id per request.
+    async fn run_unary_retirement_case(
+        retry: RetryConfig,
+        first_status: u16,
+        first_body: &'static [u8],
+    ) -> Vec<usize> {
+        let seen_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let count = Arc::new(AtomicUsize::new(0));
+        let server = MockH2Server::start({
+            let seen_conns = seen_conns.clone();
+            let count = count.clone();
+            move |conn_id, _req, mut respond| {
+                let seen_conns = seen_conns.clone();
+                let count = count.clone();
+                async move {
+                    seen_conns.lock().unwrap().push(conn_id);
+                    let n = count.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        let resp = Response::builder().status(first_status).body(()).unwrap();
+                        if let Ok(mut send) = respond.send_response(resp, false) {
+                            let _ = send.send_data(Bytes::from_static(first_body), true);
+                        }
+                    } else {
+                        let resp = Response::builder().status(200).body(()).unwrap();
+                        if let Ok(mut send) = respond.send_response(resp, false) {
+                            let _ = send.send_data(
+                                Bytes::from_static(br#"{"basins":[],"has_more":false}"#),
+                                true,
+                            );
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+
+        server
+            .client(retry)
+            .list_basins(ListBasinsInput::new())
+            .await
+            .expect("retry must succeed");
+        seen_conns.lock().unwrap().clone()
+    }
+
+    // 1. Unary server_draining retires connection -> retry opens a new connection.
+    let conns = run_unary_retirement_case(
+        fast_retry_2.clone(),
+        503,
+        br#"{"code":"server_draining","message":"draining"}"#,
+    )
+    .await;
+    assert_eq!(conns.len(), 2);
+    assert_ne!(
+        conns[0], conns[1],
+        "T6/T6c: unary server_draining must retire connection"
+    );
+
+    // 2. Unary hot_server retires connection -> retry opens a new connection.
+    let conns = run_unary_retirement_case(
+        fast_retry_2.clone(),
+        502,
+        br#"{"code":"hot_server","message":"hot"}"#,
+    )
+    .await;
+    assert_eq!(conns.len(), 2);
+    assert_ne!(
+        conns[0], conns[1],
+        "T6/T6c: unary hot_server must retire connection"
+    );
+
+    // 3. Ordinary retryable 503 unavailable keeps using the same pooled connection.
+    let conns = run_unary_retirement_case(
+        fast_retry_2.clone(),
+        503,
+        br#"{"code":"unavailable","message":"busy"}"#,
+    )
+    .await;
+    assert_eq!(conns.len(), 2);
+    assert_eq!(
+        conns[0], conns[1],
+        "ordinary 503 unavailable should reuse pooled connection"
+    );
+
+    // 4. Session hot_server retires connection AND consumes retry budget even after progress (T6c).
+    let (basin_name, stream_name) = test_basin_and_stream();
+    let session_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let session_server = MockH2Server::start({
+        let session_conns = session_conns.clone();
+        move |conn_id, _req, mut respond| {
+            let session_conns = session_conns.clone();
+            async move {
+                let idx = {
+                    let mut guard = session_conns.lock().unwrap();
+                    guard.push(conn_id);
+                    guard.len()
+                };
+                let resp = Response::builder()
+                    .status(200)
+                    .header("content-type", "s2s/proto")
+                    .body(())
+                    .unwrap();
+                let Ok(mut send) = respond.send_response(resp, false) else {
+                    return;
+                };
+                if idx == 1 {
+                    let _ = send.send_data(
+                        encode_s2s_regular_frame(&proto_read_batch(0, 1), false),
+                        false,
+                    );
+                }
+                let _ = send.send_data(
+                    encode_s2s_terminal_frame(502, br#"{"code":"hot_server","message":"hot"}"#),
+                    true,
+                );
+            }
+        }
+    })
+    .await;
+
+    let mut read_session = session_server
+        .client(fast_retry_2)
+        .basin(basin_name)
+        .stream(stream_name)
+        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .await
+        .expect("open read session");
+    let _ = read_session.next().await.unwrap().unwrap();
+    let err = read_session
+        .next()
+        .await
+        .expect("must fail after hot_server consumes budget")
+        .expect_err("hot_server must exhaust budget");
+    assert!(
+        matches!(err, ReadSessionError::Server(ref se) if se.code.as_deref() == Some("hot_server")),
+        "{err:?}"
+    );
+    let conns = session_conns.lock().unwrap().clone();
+    assert_eq!(conns.len(), 2, "T6c: hot_server consumes retry budget");
+    assert_ne!(
+        conns[0], conns[1],
+        "T6c: session hot_server must retire connection"
+    );
+}
+
+// spec: r1 E3, E4d, T1, T2c
+#[tokio::test]
+async fn spec_refused_stream_classified_as_definite_and_retried_under_no_side_effects() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    // 1. With max_attempts = 1: REFUSED_STREAM is ConnectionLostError with has_no_side_effects =
+    //    true.
+    let server = MockH2Server::start(|_conn_id, _req, mut respond| async move {
+        respond.send_reset(h2::Reason::REFUSED_STREAM);
+    })
+    .await;
+    let stream = server
+        .client(no_retry_config().with_append_retry_policy(AppendRetryPolicy::NoSideEffects))
+        .basin(basin_name.clone())
+        .stream(stream_name.clone());
+    let err = stream
+        .append(sample_append_input())
+        .await
+        .expect_err("REFUSED_STREAM must fail with max_attempts = 1");
+    assert!(
+        matches!(err, AppendError::ConnectionLost(_)),
+        "expected ConnectionLost, got {err:?}"
+    );
+    assert!(err.is_retryable());
+    assert!(
+        err.has_no_side_effects(),
+        "REFUSED_STREAM must be definite (has_no_side_effects == true)"
+    );
+
+    // 2. With max_attempts = 2 + AppendRetryPolicy::NoSideEffects: REFUSED_STREAM is retried!
+    let count = Arc::new(AtomicUsize::new(0));
+    let server = MockH2Server::start({
+        let count = count.clone();
+        move |_conn_id, _req, mut respond| {
+            let count = count.clone();
+            async move {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    respond.send_reset(h2::Reason::REFUSED_STREAM);
+                } else {
+                    let resp = Response::builder()
+                        .status(200)
+                        .header("content-type", "application/protobuf")
+                        .body(())
+                        .unwrap();
+                    if let Ok(mut send) = respond.send_response(resp, false) {
+                        let _ = send.send_data(Bytes::from(proto_append_ack(0, 1)), true);
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    let retry = RetryConfig::new()
+        .with_max_attempts(2)
+        .unwrap()
+        .with_min_base_delay(Duration::ZERO)
+        .with_max_base_delay(Duration::ZERO)
+        .with_append_retry_policy(AppendRetryPolicy::NoSideEffects);
+    let ack = server
+        .client(retry)
+        .basin(basin_name)
+        .stream(stream_name)
+        .append(sample_append_input())
+        .await
+        .expect("NoSideEffects must retry definite REFUSED_STREAM");
+    assert_eq!(ack.end.seq_num, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 }
