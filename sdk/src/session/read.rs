@@ -388,7 +388,7 @@ pub async fn read_session(
     let mut retry_backoff = retry_builder(&client.config.retry).build();
     let access_token_mode = client.config.access_token.mode();
     let baseline_wait = end.wait;
-    let mut last_tail_at: Option<Instant> = None;
+    let mut wait_anchor: Option<Instant> = None;
     let mut advised_reconnects = AdvisedReconnects::default();
     let initial_resume_seq_num = if start.clamp == Some(true) {
         None
@@ -397,7 +397,7 @@ pub async fn read_session(
     };
 
     let batches = loop {
-        end.wait = remaining_wait(baseline_wait, last_tail_at);
+        end.wait = remaining_wait(baseline_wait, wait_anchor);
         match session_inner(
             client.clone(),
             name.clone(),
@@ -437,7 +437,7 @@ pub async fn read_session(
 
         loop {
             if batches.is_none() {
-                end.wait = remaining_wait(baseline_wait, last_tail_at);
+                end.wait = remaining_wait(baseline_wait, wait_anchor);
                 match session_inner(
                     client.clone(),
                     name.clone(),
@@ -503,9 +503,7 @@ pub async fn read_session(
                         retry_backoff.reset();
                     }
 
-                    if batch.tail.is_some() {
-                        last_tail_at = Some(Instant::now());
-                    }
+                    wait_anchor = next_wait_anchor(wait_anchor, &batch);
 
                     update_resume_start(&mut start, &batch);
                     if let Some(count) = end.count.as_mut() {
@@ -624,14 +622,27 @@ fn read_limits_exhausted(end: &ReadEnd) -> bool {
     end.count == Some(0) || end.bytes == Some(0)
 }
 
+/// Track the instant the server's finite wait counts from.
+///
+/// The server arms the wait on the first heartbeat (an empty batch with tail
+/// info). Later heartbeats do not reset it; only batches with records do.
+fn next_wait_anchor(anchor: Option<Instant>, batch: &ReadBatch) -> Option<Instant> {
+    if !batch.records.is_empty() {
+        anchor.map(|_| Instant::now())
+    } else if batch.tail.is_some() {
+        anchor.or_else(|| Some(Instant::now()))
+    } else {
+        anchor
+    }
+}
+
 /// Compute the remaining wait budget for a retry.
 ///
-/// During catchup (tail not yet observed), the full wait is sent.
-/// Once tailing, the wait budget is depleted based on time since
-/// the last batch with tail info, which approximates how long the
-/// server has been in its long polling state.
-fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> Option<u32> {
-    baseline_wait.map(|w| match last_tail_at {
+/// Until the server has armed the wait (no heartbeat seen yet), the full wait
+/// is sent. Once armed, the budget is depleted by the time since the anchor,
+/// which approximates how long the server has been in its long polling state.
+fn remaining_wait(baseline_wait: Option<u32>, wait_anchor: Option<Instant>) -> Option<u32> {
+    baseline_wait.map(|w| match wait_anchor {
         Some(since) => w.saturating_sub(since.elapsed().as_secs() as u32),
         None => w,
     })
@@ -723,6 +734,38 @@ mod tests {
 
     fn batch(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> ReadBatch {
         ReadBatch { records, tail }
+    }
+
+    fn aged_anchor() -> Instant {
+        Instant::now() - Duration::from_secs(50)
+    }
+
+    #[test]
+    fn catch_up_records_do_not_arm_the_wait() {
+        let caught_up = batch(vec![record(0, false)], Some(position(1)));
+        assert!(next_wait_anchor(None, &caught_up).is_none());
+        assert!(next_wait_anchor(None, &batch(vec![record(0, false)], None)).is_none());
+    }
+
+    #[test]
+    fn first_heartbeat_arms_the_wait() {
+        let heartbeat = batch(Vec::new(), Some(position(1)));
+        assert!(next_wait_anchor(None, &heartbeat).is_some());
+    }
+
+    #[test]
+    fn later_heartbeats_keep_the_anchor() {
+        let anchor = aged_anchor();
+        let heartbeat = batch(Vec::new(), Some(position(1)));
+        assert_eq!(next_wait_anchor(Some(anchor), &heartbeat), Some(anchor));
+        assert_eq!(remaining_wait(Some(60), Some(anchor)), Some(10));
+    }
+
+    #[test]
+    fn records_reset_an_armed_wait() {
+        let anchor = aged_anchor();
+        let next = next_wait_anchor(Some(anchor), &batch(vec![record(1, false)], None));
+        assert!(next.is_some_and(|at| at > anchor));
     }
 
     #[test]
