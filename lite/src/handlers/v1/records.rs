@@ -252,7 +252,8 @@ pub async fn read(
                             yield v1t::stream::sse::read_batch_event(format, &batch, id);
                         },
                         Err(err) => {
-                            yield v1t::stream::sse::error_event(&ServiceError::from(err).to_response());
+                            let error = ServiceError::from(err).to_response();
+                            yield v1t::stream::sse::error_event(&error);
                             errored = true;
                         }
                     }
