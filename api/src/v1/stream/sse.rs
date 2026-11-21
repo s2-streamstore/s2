@@ -4,6 +4,7 @@ use s2_common::http::ParseableHeader;
 use serde::Serialize;
 
 use super::{ReadBatch, StreamPosition};
+use crate::v1::error::{ErrorInfo, StandardError};
 
 static LAST_EVENT_ID_HEADER: http::HeaderName = http::HeaderName::from_static("last-event-id");
 
@@ -113,7 +114,7 @@ pub enum ReadEvent {
     Error {
         #[cfg_attr(feature = "utoipa", schema(inline))]
         event: Error,
-        data: String,
+        data: ErrorEventData,
     },
     #[cfg_attr(feature = "utoipa", schema(title = "ping"))]
     Ping {
@@ -149,10 +150,12 @@ pub fn read_batch_event(
 }
 
 #[cfg(feature = "axum")]
-pub fn error_event(data: String) -> Result<axum::response::sse::Event, axum::Error> {
-    Ok(axum::response::sse::Event::default()
+pub fn error_event(
+    data: impl Into<ErrorEventData>,
+) -> Result<axum::response::sse::Event, axum::Error> {
+    axum::response::sse::Event::default()
         .event(Error::Error)
-        .data(data))
+        .json_data(data.into())
 }
 
 #[cfg(feature = "axum")]
@@ -183,6 +186,27 @@ impl AsRef<str> for DoneEventData {
     }
 }
 
+/// Payload of an SSE `error` event emitted when a streaming read terminates with an error, carrying the HTTP status code alongside the error details.
+#[rustfmt::skip]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct ErrorEventData {
+    /// HTTP status code of the error.
+    pub status: u16,
+    #[serde(flatten)]
+    pub info: ErrorInfo,
+}
+
+impl From<StandardError> for ErrorEventData {
+    fn from(error: StandardError) -> Self {
+        Self {
+            status: error.status.as_u16(),
+            info: error.info,
+        }
+    }
+}
+
+/// Heartbeat emitted while waiting at the tail for new records, sent only once all records before `tail` have been delivered.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

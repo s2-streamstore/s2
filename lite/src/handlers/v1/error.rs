@@ -175,13 +175,9 @@ impl ServiceError {
                 DeleteStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                DeleteStreamError::StreamerMissingInActionError(e) => {
+                DeleteStreamError::StreamerMissingInActionError(_)
+                | DeleteStreamError::RequestDroppedError(_) => {
                     standard(ErrorCode::Unavailable, e.to_string())
-                }
-                DeleteStreamError::RequestDroppedError(e) => {
-                    // Unavailable error code promised to be side-effect free,
-                    // The terminal trim marker may have become durable prior to drop.
-                    standard(ErrorCode::Other, e.to_string())
                 }
                 DeleteStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
@@ -237,13 +233,9 @@ impl ServiceError {
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                AppendError::StreamerMissingInActionError(e) => {
+                AppendError::StreamerMissingInActionError(_)
+                | AppendError::RequestDroppedError(_) => {
                     standard(ErrorCode::Unavailable, e.to_string())
-                }
-                AppendError::RequestDroppedError(e) => {
-                    // Unavailable error code promised to be side-effect free,
-                    // The append may have become durable prior to drop.
-                    standard(ErrorCode::Other, e.to_string())
                 }
                 AppendError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),
                 AppendError::StreamNotFound(e) => {

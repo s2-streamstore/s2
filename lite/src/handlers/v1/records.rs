@@ -146,6 +146,8 @@ pub struct ReadArgs {
 }
 
 /// Read records.
+///
+/// Starts at the tail when `seq_num`, `timestamp`, and `tail_offset` are all omitted.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
     path = super::paths::streams::records::READ,
@@ -250,8 +252,15 @@ pub async fn read(
                             yield v1t::stream::sse::read_batch_event(format, &batch, id);
                         },
                         Err(err) => {
-                            let (_, body) = ServiceError::from(err).to_response().to_parts();
-                            yield v1t::stream::sse::error_event(body);
+                            let error = match ServiceError::from(err).to_response() {
+                                v1t::error::ErrorResponse::Standard(err) => err,
+                                other => {
+                                    unreachable!(
+                                        "unexpected non-standard mid-stream read error: {other:?}"
+                                    )
+                                }
+                            };
+                            yield v1t::stream::sse::error_event(error);
                             errored = true;
                         }
                     }
@@ -363,6 +372,12 @@ pub struct AppendArgs {
     responses(
         (status = StatusCode::OK, body = v1t::stream::AppendAck),
         (status = StatusCode::PRECONDITION_FAILED, body = v1t::stream::AppendConditionFailed),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Append rate limit exceeded (`rate_limited`). No records were appended.",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
@@ -1144,6 +1159,60 @@ mod tests {
         assert_eq!(info["code"], "decryption_failed");
         assert!(
             info["message"]
+                .as_str()
+                .expect("error message string")
+                .contains("record decryption failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_read_with_wrong_key_ends_with_error_event() {
+        let encryption_key = aegis_key(0x42);
+        let wrong_key = aegis_key(0x24);
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "read-sse-bad-key",
+            basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        append_encrypted_payload(&backend, &basin, &stream, b"secret", encryption_key).await;
+
+        let response = send(
+            &app,
+            request_builder("GET", read_uri(&stream), &basin)
+                .header(header::ACCEPT, "text/event-stream")
+                .header(
+                    S2_ENCRYPTION_KEY_HEADER.as_str(),
+                    wrong_key.to_header_value(),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_bytes(response, "sse body").await;
+        let body = std::str::from_utf8(&body).expect("utf8 sse body");
+        let events: Vec<_> = body
+            .split("\n\n")
+            .filter(|e| !e.trim().is_empty())
+            .collect();
+        let [event] = events.as_slice() else {
+            panic!("expected only an error event: {body}");
+        };
+        let field = |name: &str| {
+            event
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .map(str::trim)
+        };
+        assert_eq!(field("event:"), Some("error"));
+        let data: serde_json::Value =
+            serde_json::from_str(field("data:").expect("error event data")).expect("json data");
+        assert_eq!(data["status"], 400);
+        assert_eq!(data["code"], "decryption_failed");
+        assert!(
+            data["message"]
                 .as_str()
                 .expect("error message string")
                 .contains("record decryption failed")
