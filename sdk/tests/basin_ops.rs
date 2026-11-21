@@ -780,7 +780,7 @@ async fn create_stream_invalid_retention_age_zero(
     assert_matches!(
         result,
         Err(RequestError::Server(ServerError { code, .. })) => {
-            assert_eq!(code, "invalid");
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -795,7 +795,7 @@ async fn get_stream_config_nonexistent_errors(basin: &SharedS2Basin) -> Result<(
     assert_matches!(
         result,
         Err(RequestError::Server(ServerError { code, .. })) => {
-            assert_eq!(code, "stream_not_found");
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -1150,7 +1150,7 @@ async fn reconfigure_stream_invalid_retention_age_zero(
     assert_matches!(
         result,
         Err(RequestError::Server(ServerError { code, .. })) => {
-            assert_eq!(code, "invalid");
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1172,7 +1172,7 @@ async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<
     assert_matches!(
         result,
         Err(RequestError::Server(ServerError { code, .. })) => {
-            assert_eq!(code, "stream_not_found");
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -1195,7 +1195,7 @@ async fn create_stream_duplicate_name_errors(basin: &SharedS2Basin) -> Result<()
     assert_matches!(
         result,
         Err(RequestError::Server(ServerError { code, .. })) => {
-            assert_eq!(code, "resource_already_exists");
+            assert_eq!(code.as_deref(), Some("resource_already_exists"));
         }
     );
 
@@ -1240,7 +1240,10 @@ async fn get_stream_config_for_deleting_stream_errors(
     assert_matches!(
         result,
         Err(RequestError::Server(ServerError { code, .. })) => {
-            assert!(code == "stream_deletion_pending" || code == "stream_not_found");
+            assert!(matches!(
+                code.as_deref(),
+                Some("stream_deletion_pending" | "stream_not_found")
+            ));
         }
     );
 
@@ -1290,7 +1293,9 @@ async fn deleted_stream_has_deleted_at_when_listed(
 
 fn is_free_tier_limitation(err: &RequestError) -> bool {
     match err {
-        RequestError::Server(ServerError { code, message, .. }) if code == "invalid" => {
+        RequestError::Server(ServerError { code, message, .. })
+            if code.as_deref() == Some("invalid") =>
+        {
             message.to_lowercase().contains("free tier")
         }
         _ => false,

@@ -45,8 +45,8 @@ async fn tail_of_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "stream_not_found");
+        Err(ReadError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -515,9 +515,10 @@ async fn append_with_mismatched_seq_num_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::ConditionFailed(
-            AppendConditionFailed::SeqNumMismatch(1)
-        ))
+        Err(AppendError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     Ok(())
@@ -548,9 +549,10 @@ async fn append_session_with_mismatched_seq_num_errors(
 
     assert_matches!(
         result,
-        Err(AppendSessionError::Append(AppendError::ConditionFailed(
-            AppendConditionFailed::SeqNumMismatch(1)
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     Ok(())
@@ -611,8 +613,11 @@ async fn append_with_mismatched_fencing_token_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::ConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token))) => {
-            assert_eq!(fencing_token, fencing_token_1)
+        Err(AppendError::FencingTokenMismatch(FencingTokenMismatchError {
+            current_fencing_token,
+            ..
+        })) => {
+            assert_eq!(current_fencing_token, fencing_token_1)
         }
     );
 
@@ -647,8 +652,11 @@ async fn append_session_with_mismatched_fencing_token_errors(
 
     assert_matches!(
         result,
-        Err(AppendSessionError::Append(AppendError::ConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token)))) => {
-            assert_eq!(fencing_token, fencing_token_1)
+        Err(AppendSessionError::FencingTokenMismatch(FencingTokenMismatchError {
+            current_fencing_token,
+            ..
+        })) => {
+            assert_eq!(current_fencing_token, fencing_token_1)
         }
     );
 
@@ -662,9 +670,12 @@ async fn read_empty_stream_errors(stream: &S2Stream) -> Result<(), Box<dyn std::
 
     assert_matches!(
         result,
-        Err(ReadError::ReadUnwritten(StreamPosition {
-            seq_num: 0,
-            timestamp: 0,
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition {
+                seq_num: 0,
+                timestamp: 0,
+                ..
+            },
             ..
         }))
     );
@@ -690,7 +701,10 @@ async fn read_beyond_tail_errors(stream: &S2Stream) -> Result<(), Box<dyn std::e
 
     assert_matches!(
         result,
-        Err(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { seq_num: 1, .. },
+            ..
+        }))
     );
 
     Ok(())
@@ -722,7 +736,10 @@ async fn read_beyond_tail_with_clamp_to_tail_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { seq_num: 1, .. },
+            ..
+        }))
     );
 
     Ok(())
@@ -783,7 +800,10 @@ async fn read_session_beyond_tail_errors(
     assert!(result.is_err());
     assert_matches!(
         result.err().expect("should be err"),
-        ReadSessionError::Read(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        ReadSessionError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { seq_num: 1, .. },
+            ..
+        })
     );
 
     Ok(())
@@ -1108,7 +1128,7 @@ async fn read_from_timestamp_in_future_errors(
         )
         .await;
 
-    assert_matches!(result, Err(ReadError::ReadUnwritten(tail)) => {
+    assert_matches!(result, Err(ReadError::ReadUnwritten(ReadUnwrittenError { tail, .. })) => {
         assert_eq!(tail.seq_num, 2);
         assert_eq!(tail.timestamp, base_timestamp + 1);
     });
@@ -1206,8 +1226,8 @@ async fn append_without_timestamp_client_require_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1316,8 +1336,8 @@ async fn append_to_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "stream_not_found");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -1336,8 +1356,8 @@ async fn append_invalid_command_header_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1357,8 +1377,8 @@ async fn append_invalid_command_header_with_extra_headers_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1514,7 +1534,13 @@ async fn read_from_tail_offset_variants(
     let result = stream
         .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(0))))
         .await;
-    assert_matches!(result, Err(ReadError::ReadUnwritten(StreamPosition { .. })));
+    assert_matches!(
+        result,
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { .. },
+            ..
+        }))
+    );
 
     let batch = stream
         .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(3))))
@@ -1579,8 +1605,8 @@ async fn read_start_timestamp_ge_until_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(ReadError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1597,8 +1623,8 @@ async fn read_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "stream_not_found");
+        Err(ReadError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -1842,9 +1868,10 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
         .expect("failing producer flush timed out");
     assert_matches!(
         flush_result,
-        Err(ProducerError::Append(AppendSessionError::Append(
-            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     let ticket_result = ticket
@@ -1852,15 +1879,17 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
         .expect("covered ticket should be ready when flush fails");
     assert_matches!(
         ticket_result,
-        Err(ProducerError::Append(AppendSessionError::Append(
-            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
     assert_matches!(
         producer.flush().await,
-        Err(ProducerError::Append(AppendSessionError::Append(
-            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     Ok(())
@@ -1940,8 +1969,8 @@ async fn producer_drop_errors_all_claimable_tickets(
     let result1 = ticket1.await;
     let result2 = ticket2.await;
 
-    assert_matches!(result1, Err(ProducerError::ProducerDropped) => {});
-    assert_matches!(result2, Err(ProducerError::ProducerDropped) => {});
+    assert_matches!(result1, Err(AppendSessionError::Aborted(_)) => {});
+    assert_matches!(result2, Err(AppendSessionError::Aborted(_)) => {});
 
     Ok(())
 }
@@ -2191,11 +2220,25 @@ async fn append_session_for_non_existent_stream_errors(
         "lorem",
     )?])?);
 
-    let result = session.submit(input).await?.await;
+    let result = match session.submit(input).await {
+        Ok(ticket) => ticket.await,
+        Err(e) => Err(e),
+    };
 
-    assert_matches!(result, Err(AppendSessionError::Append(AppendError::Request(RequestError::Server(err)))) => {
-        assert_eq!(err.code, "stream_not_found");
-    });
+    match result {
+        Err(AppendSessionError::Server(err)) => {
+            assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+        }
+        Err(AppendSessionError::SessionClosed(closed)) => {
+            assert_matches!(
+                closed.failure(),
+                Some(AppendSessionError::Server(err)) => {
+                    assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+                }
+            );
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
 
     Ok(())
 }
@@ -2219,10 +2262,16 @@ async fn producer_for_non_existent_stream_errors(
             .await
         {
             Ok(ticket) => tickets.push(ticket),
-            Err(ProducerError::Append(AppendSessionError::Append(AppendError::Request(
-                RequestError::Server(err),
-            )))) => {
-                assert_eq!(err.code, "stream_not_found");
+            Err(AppendSessionError::Server(err)) => {
+                assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+            }
+            Err(AppendSessionError::SessionClosed(closed)) => {
+                assert_matches!(
+                    closed.failure(),
+                    Some(AppendSessionError::Server(err)) => {
+                        assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+                    }
+                );
             }
             Err(e) => return Err(e.into()),
         }
@@ -2230,9 +2279,20 @@ async fn producer_for_non_existent_stream_errors(
 
     for ticket in tickets {
         let result = ticket.await;
-        assert_matches!(result, Err(ProducerError::Append(AppendSessionError::Append(AppendError::Request(RequestError::Server(err))))) => {
-            assert_eq!(err.code, "stream_not_found");
-        });
+        match result {
+            Err(AppendSessionError::Server(err)) => {
+                assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+            }
+            Err(AppendSessionError::SessionClosed(closed)) => {
+                assert_matches!(
+                    closed.failure(),
+                    Some(AppendSessionError::Server(err)) => {
+                        assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+                    }
+                );
+            }
+            other => panic!("unexpected ticket result: {other:?}"),
+        }
     }
 
     Ok(())

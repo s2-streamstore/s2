@@ -19,7 +19,7 @@ use tracing::debug;
 
 use crate::{
     api::{ApiError, BasinClient, retry_builder},
-    error::{ReadError, RequestError},
+    error::{ErrorContext, ReadSessionError, SessionClosedError, TimeoutError},
     reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::RetryBackoff,
     session::StreamHeaders,
@@ -33,15 +33,15 @@ use crate::{
 enum ReadSessionFailure {
     #[error(transparent)]
     Api(#[from] ApiError),
-    #[error("heartbeat timeout")]
-    HeartbeatTimeout,
+    #[error(transparent)]
+    HeartbeatTimeout(#[from] TimeoutError),
 }
 
 impl ReadSessionFailure {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Api(err) => err.is_retryable(),
-            Self::HeartbeatTimeout => true,
+            Self::HeartbeatTimeout(_) => true,
         }
     }
 
@@ -52,43 +52,11 @@ impl ReadSessionFailure {
     fn is_server_draining(&self) -> bool {
         matches!(self, Self::Api(error) if error.is_server_draining())
     }
-}
 
-/// Errors returned by a read session.
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-pub enum ReadSessionError {
-    /// An error with the read request underlying the session.
-    #[error(transparent)]
-    Read(#[from] ReadError),
-    /// The session heartbeat timed out.
-    #[error("heartbeat timeout")]
-    HeartbeatTimeout,
-}
-
-impl ReadSessionError {
-    /// Whether retrying the operation is safe or sensible.
-    pub fn is_retryable(&self) -> bool {
+    fn into_error(self, context: &ErrorContext) -> ReadSessionError {
         match self {
-            Self::Read(error) => error.is_retryable(),
-            Self::HeartbeatTimeout => true,
-        }
-    }
-
-    /// Return the underlying request error, if present.
-    pub fn request_error(&self) -> Option<&RequestError> {
-        match self {
-            Self::Read(error) => error.request_error(),
-            Self::HeartbeatTimeout => None,
-        }
-    }
-}
-
-impl From<ReadSessionFailure> for ReadSessionError {
-    fn from(error: ReadSessionFailure) -> Self {
-        match error {
-            ReadSessionFailure::Api(error) => Self::Read(error.into()),
-            ReadSessionFailure::HeartbeatTimeout => Self::HeartbeatTimeout,
+            Self::Api(error) => ReadSessionError::from(error).with_context(context),
+            Self::HeartbeatTimeout(error) => ReadSessionError::Timeout(error).with_context(context),
         }
     }
 }
@@ -98,7 +66,7 @@ impl From<ReadSessionFailure> for ReadSessionError {
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type InternalStreaming<R> =
-    Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionFailure>>>>;
+    Pin<Box<dyn Send + futures_core::Stream<Item = Result<R, ReadSessionError>>>>;
 
 /// An item from a single read connection.
 enum ReadItem {
@@ -110,41 +78,14 @@ enum ReadItem {
     ReconnectAdvised,
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-/// Error returned while waiting for a read session to catch up.
-pub enum CaughtUpError {
-    #[error("read session ended before catching up")]
-    /// The session ended before reaching a reported tail.
-    SessionClosed,
-    #[error(transparent)]
-    /// The read failed.
-    Read(#[from] ReadSessionError),
-}
-
-impl CaughtUpError {
-    /// Whether retrying the operation is safe or sensible.
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::SessionClosed => false,
-            Self::Read(error) => error.is_retryable(),
-        }
-    }
-
-    /// Return the underlying request error, if present.
-    pub fn request_error(&self) -> Option<&RequestError> {
-        match self {
-            Self::SessionClosed => None,
-            Self::Read(error) => error.request_error(),
-        }
-    }
-}
-
-type CaughtUpResult = Result<StreamPosition, CaughtUpError>;
+type CaughtUpResult = Result<StreamPosition, ReadSessionError>;
 
 #[derive(Clone)]
 enum CaughtUpFuture {
-    Pending(Shared<oneshot::Receiver<CaughtUpResult>>),
+    Pending {
+        rx: Shared<oneshot::Receiver<CaughtUpResult>>,
+        context: ErrorContext,
+    },
     Ready(CaughtUpResult),
 }
 
@@ -153,9 +94,11 @@ impl Future for CaughtUpFuture {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
-            Self::Pending(future) => match Pin::new(future).poll(cx) {
+            Self::Pending { rx, context } => match Pin::new(rx).poll(cx) {
                 Poll::Ready(Ok(result)) => Poll::Ready(result),
-                Poll::Ready(Err(_)) => Poll::Ready(Err(CaughtUpError::SessionClosed)),
+                Poll::Ready(Err(_)) => Poll::Ready(Err(ReadSessionError::SessionClosed(
+                    SessionClosedError::new(None, context.clone()),
+                ))),
                 Poll::Pending => Poll::Pending,
             },
             Self::Ready(result) => Poll::Ready(result.clone()),
@@ -172,16 +115,18 @@ struct CaughtUpState {
     tx: Option<oneshot::Sender<CaughtUpResult>>,
     /// The future handed out by `caught_up()`.
     future: CaughtUpFuture,
+    context: ErrorContext,
 }
 
 impl CaughtUpState {
-    fn new() -> Self {
-        let (tx, future) = pending_catch_up();
+    fn new(context: ErrorContext) -> Self {
+        let (tx, future) = pending_catch_up(context.clone());
         Self {
             tail: None,
             terminal: false,
             tx: Some(tx),
             future,
+            context,
         }
     }
 
@@ -197,7 +142,7 @@ impl CaughtUpState {
         if self.terminal || self.tail.take().is_none() {
             return;
         }
-        let (tx, future) = pending_catch_up();
+        let (tx, future) = pending_catch_up(self.context.clone());
         self.tx = Some(tx);
         self.future = future;
     }
@@ -217,9 +162,11 @@ impl CaughtUpState {
         self.terminal = true;
         if let Some(error) = error {
             self.tail = None;
-            self.complete(Err(CaughtUpError::Read(error)));
+            self.complete(Err(error));
         } else if self.tail.is_none() {
-            self.complete(Err(CaughtUpError::SessionClosed));
+            self.complete(Err(ReadSessionError::SessionClosed(
+                SessionClosedError::new(None, self.context.clone()),
+            )));
         }
     }
 
@@ -232,9 +179,15 @@ impl CaughtUpState {
     }
 }
 
-fn pending_catch_up() -> (oneshot::Sender<CaughtUpResult>, CaughtUpFuture) {
+fn pending_catch_up(context: ErrorContext) -> (oneshot::Sender<CaughtUpResult>, CaughtUpFuture) {
     let (tx, rx) = oneshot::channel();
-    (tx, CaughtUpFuture::Pending(rx.shared()))
+    (
+        tx,
+        CaughtUpFuture::Pending {
+            rx: rx.shared(),
+            context,
+        },
+    )
 }
 
 struct ReadUpdate {
@@ -278,10 +231,14 @@ pub struct ReadSession {
 }
 
 impl ReadSession {
-    fn new(updates: InternalStreaming<ReadUpdate>, resume_seq_num: Option<u64>) -> Self {
+    fn new(
+        updates: InternalStreaming<ReadUpdate>,
+        resume_seq_num: Option<u64>,
+        context: ErrorContext,
+    ) -> Self {
         Self {
             updates,
-            state: CaughtUpState::new(),
+            state: CaughtUpState::new(context),
             resume_seq_num,
         }
     }
@@ -310,10 +267,10 @@ impl ReadSession {
     /// reads itself. It is ready immediately when the session is already caught up and remains
     /// pending across retries. Once it resolves, its returned tail never changes. If the session
     /// later falls behind, call `caught_up()` again to wait for the next catch-up. The future
-    /// returns [`CaughtUpError`] if the session fails or closes before catching up.
+    /// returns [`ReadSessionError`] if the session fails or closes before catching up.
     pub fn caught_up(
         &self,
-    ) -> impl Future<Output = Result<StreamPosition, CaughtUpError>>
+    ) -> impl Future<Output = Result<StreamPosition, ReadSessionError>>
     + Clone
     + Send
     + Sync
@@ -344,7 +301,6 @@ impl futures_core::Stream for ReadSession {
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
-                    let error = ReadSessionError::from(error);
                     self.state.end(Some(error.clone()));
                     return Poll::Ready(Some(Err(error)));
                 }
@@ -370,6 +326,7 @@ pub async fn read_session(
     input: ReadInput,
     config: ReadSessionConfig,
 ) -> Result<ReadSession, ReadSessionError> {
+    let context = ErrorContext::stream("read_session", client.name.as_ref(), name.as_ref(), true);
     let ReadInput {
         start,
         stop,
@@ -389,6 +346,7 @@ pub async fn read_session(
         start.seq_num
     };
 
+    let mut initial_attempts: u32 = 0;
     let batches = loop {
         end.wait = remaining_wait(baseline_wait, last_tail_at);
         match session_inner(
@@ -399,6 +357,7 @@ pub async fn read_session(
             end.clone(),
             ReconnectAdvice::default(),
             advised_reconnects,
+            context.clone(),
         )
         .await
         {
@@ -414,19 +373,22 @@ pub async fn read_session(
                     );
                     continue;
                 }
+                initial_attempts += 1;
                 if let Some(backoff) =
                     retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
                 {
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
-                return Err(err.into());
+                return Err(err.into_error(&context.clone().with_attempts(initial_attempts)));
             }
         }
     };
 
+    let stream_context = context.clone();
     let updates = Box::pin(stream! {
-        let mut batches: Option<InternalStreaming<ReadItem>> = Some(batches);
+        let mut batches: Option<ReadItemStream> = Some(batches);
+        let mut attempts: u32 = 0;
 
         loop {
             if batches.is_none() {
@@ -439,6 +401,7 @@ pub async fn read_session(
                     end.clone(),
                     ReconnectAdvice::default(),
                     advised_reconnects,
+                    stream_context.clone(),
                 ).await {
                     Ok(b) => batches = Some(b),
                     Err(err) => {
@@ -450,6 +413,7 @@ pub async fn read_session(
                             );
                             continue;
                         }
+                        attempts += 1;
                         if let Some(backoff) =
                             retry_delay(
                                 &err,
@@ -461,7 +425,7 @@ pub async fn read_session(
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
-                        yield Err(err);
+                        yield Err(err.into_error(&stream_context.clone().with_attempts(attempts)));
                         break;
                     }
                 }
@@ -495,6 +459,7 @@ pub async fn read_session(
                     if retry_backoff.used() > 0 {
                         retry_backoff.reset();
                     }
+                    attempts = 0;
 
                     if batch.tail.is_some() {
                         last_tail_at = Some(Instant::now());
@@ -530,6 +495,7 @@ pub async fn read_session(
                         yield Ok(ReadUpdate::behind());
                         continue;
                     }
+                    attempts += 1;
                     if let Some(backoff) =
                         retry_delay(
                             &err,
@@ -542,14 +508,14 @@ pub async fn read_session(
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
-                    yield Err(err);
+                    yield Err(err.into_error(&stream_context.clone().with_attempts(attempts)));
                     break;
                 }
                 None => break,
             }
         }
     });
-    Ok(ReadSession::new(updates, initial_resume_seq_num))
+    Ok(ReadSession::new(updates, initial_resume_seq_num, context))
 }
 
 fn resume_seq_num_after_batch(batch: &ReadBatch) -> Option<u64> {
@@ -575,6 +541,11 @@ fn update_resume_start(start: &mut ReadStart, batch: &ReadBatch) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+type ReadItemStream =
+    Pin<Box<dyn Send + futures_core::Stream<Item = Result<ReadItem, ReadSessionFailure>>>>;
+
+#[allow(clippy::too_many_arguments)]
 async fn session_inner(
     client: BasinClient,
     name: StreamName,
@@ -583,7 +554,8 @@ async fn session_inner(
     end: ReadEnd,
     reconnect: ReconnectAdvice,
     advised_reconnects: AdvisedReconnects,
-) -> Result<InternalStreaming<ReadItem>, ReadSessionFailure> {
+    context: ErrorContext,
+) -> Result<ReadItemStream, ReadSessionFailure> {
     let mut batches = client
         .read_session(
             &name,
@@ -610,7 +582,10 @@ async fn session_inner(
                     }
                 }
                 Ok(None) => break,
-                Err(_) => Err(ReadSessionFailure::HeartbeatTimeout)?,
+                Err(_) => Err(ReadSessionFailure::HeartbeatTimeout(TimeoutError::new(
+                    "heartbeat timeout",
+                    context.clone(),
+                )))?,
             }
         }
     }))
@@ -740,11 +715,13 @@ mod tests {
     }
 
     fn test_session(
-        updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionFailure>>
-        + Send
-        + 'static,
+        updates: impl futures_core::Stream<Item = Result<ReadUpdate, ReadSessionError>> + Send + 'static,
     ) -> ReadSession {
-        ReadSession::new(Box::pin(updates), None)
+        ReadSession::new(
+            Box::pin(updates),
+            None,
+            ErrorContext::default().into_read_only(),
+        )
     }
 
     #[tokio::test]
@@ -843,10 +820,10 @@ mod tests {
         assert!(poll!(next.as_mut()).is_pending());
         drop(next);
 
-        let CaughtUpFuture::Pending(caught_up) = caught_up else {
+        let CaughtUpFuture::Pending { rx: caught_up, .. } = caught_up else {
             panic!("initial caught-up future should use the pending epoch");
         };
-        let CaughtUpFuture::Pending(current) = session.state.future() else {
+        let CaughtUpFuture::Pending { rx: current, .. } = session.state.future() else {
             panic!("unchanged heartbeat should preserve the pending epoch");
         };
         assert!(caught_up.ptr_eq(&current));
@@ -890,20 +867,25 @@ mod tests {
         let caught_up = session.caught_up();
 
         assert!(session.next().await.is_none());
-        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
+        assert!(matches!(
+            caught_up.await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
     }
 
     #[tokio::test]
     async fn read_error_rejects_wait() {
-        let mut session = test_session(stream::iter([Err(ReadSessionFailure::HeartbeatTimeout)]));
+        let mut session = test_session(stream::iter([Err(ReadSessionError::Timeout(
+            TimeoutError::new(
+                "heartbeat timeout",
+                ErrorContext::default().into_read_only(),
+            ),
+        ))]));
         let caught_up = session.caught_up();
 
         let error = session.next().await.unwrap().unwrap_err();
-        assert_eq!(error.to_string(), "heartbeat timeout");
-        assert!(matches!(
-            caught_up.await,
-            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
-        ));
+        assert!(error.to_string().contains("heartbeat timeout"));
+        assert!(matches!(caught_up.await, Err(ReadSessionError::Timeout(_))));
     }
 
     #[tokio::test]
@@ -914,7 +896,10 @@ mod tests {
                 vec![record(0, false)],
                 Some(tail),
             ))),
-            Err(ReadSessionFailure::HeartbeatTimeout),
+            Err(ReadSessionError::Timeout(TimeoutError::new(
+                "heartbeat timeout",
+                ErrorContext::default().into_read_only(),
+            ))),
         ]));
 
         session.next().await.unwrap().unwrap();
@@ -926,7 +911,7 @@ mod tests {
         assert_eq!(caught_up.await.unwrap(), tail);
         assert!(matches!(
             session.caught_up().await,
-            Err(CaughtUpError::Read(ReadSessionError::HeartbeatTimeout))
+            Err(ReadSessionError::Timeout(_))
         ));
     }
 
@@ -937,6 +922,9 @@ mod tests {
             session.caught_up()
         };
 
-        assert!(matches!(caught_up.await, Err(CaughtUpError::SessionClosed)));
+        assert!(matches!(
+            caught_up.await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
     }
 }

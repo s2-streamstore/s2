@@ -2,11 +2,9 @@
 use crate::client::Connect;
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
-    error::{AppendError, ReadError, RequestError},
+    error::{AppendError, ErrorContext, ProtocolError, ReadError, ReadSessionError, RequestError},
     producer::{Producer, ProducerConfig},
-    session::{
-        self, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError, StreamHeaders,
-    },
+    session::{self, AppendSession, AppendSessionConfig, ReadSession, StreamHeaders},
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
         CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, EncryptionKey,
@@ -16,10 +14,24 @@ use crate::{
         ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
         LocationInfo, LocationName, Metric, NetworkPolicyInfo, NetworkPolicySelector, Page,
         ReadBatch, ReadInput, ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput,
-        S2Config, StreamConfig, StreamInfo, StreamName, StreamPosition, Streaming,
+        S2Config, StreamConfig, StreamInfo, StreamName, StreamPosition, Streaming, ValidationError,
         idempotency_token,
     },
 };
+
+fn response_protocol_error(err: ValidationError, ctx: ErrorContext) -> RequestError {
+    RequestError::Protocol(ProtocolError::new(err.0, ctx))
+}
+
+fn init_error(err: RequestError, op: &'static str) -> RequestError {
+    let ctx = ErrorContext::account(op, true);
+    match err {
+        RequestError::Validation(e) => {
+            RequestError::Validation(ValidationError(ctx.format_string(&e.0)))
+        }
+        other => other,
+    }
+}
 
 #[derive(Debug, Clone)]
 /// An S2 account.
@@ -30,10 +42,7 @@ pub struct S2 {
 impl S2 {
     /// Create a new [`S2`].
     pub fn new(config: S2Config) -> Result<Self, RequestError> {
-        let base_client = BaseClient::init(&config)?;
-        Ok(Self {
-            client: AccountClient::init(config, base_client),
-        })
+        Self::init_with_op(config, "S2::new")
     }
 
     /// Create a new [`S2`] from environment variables.
@@ -41,7 +50,16 @@ impl S2 {
     /// Reads `S2_ACCESS_TOKEN`, and optionally `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`
     /// (empty endpoint variables are treated as unset; if one is set, both must be set).
     pub fn from_env() -> Result<Self, RequestError> {
-        Self::new(S2Config::from_env()?)
+        let config = S2Config::from_env()
+            .map_err(|e| init_error(RequestError::Validation(e), "S2::from_env"))?;
+        Self::init_with_op(config, "S2::from_env")
+    }
+
+    fn init_with_op(config: S2Config, op: &'static str) -> Result<Self, RequestError> {
+        let base_client = BaseClient::init(&config).map_err(|e| init_error(e.into(), op))?;
+        Ok(Self {
+            client: AccountClient::init(config, base_client),
+        })
     }
 
     #[doc(hidden)]
@@ -50,7 +68,8 @@ impl S2 {
     where
         C: Connect + Clone + Send + Sync + 'static,
     {
-        let base_client = BaseClient::init_with_connector(&config, connector)?;
+        let base_client = BaseClient::init_with_connector(&config, connector)
+            .map_err(|e| init_error(e.into(), "S2::new"))?;
         Ok(Self {
             client: AccountClient::init(config, base_client),
         })
@@ -70,13 +89,15 @@ impl S2 {
         &self,
         input: ListBasinsInput,
     ) -> Result<Page<BasinInfo>, RequestError> {
+        let ctx = ErrorContext::account("list_basins", true);
         let response = self.client.list_basins(input.into()).await?;
         Ok(Page::new(
             response
                 .basins
                 .into_iter()
                 .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| response_protocol_error(e, ctx))?,
             response.has_more,
         ))
     }
@@ -113,11 +134,12 @@ impl S2 {
 
     /// Create a basin.
     pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, RequestError> {
+        let ctx = ErrorContext::basin("create_basin", input.name.as_ref(), false);
         let info = self
             .client
             .create_basin(input.into(), idempotency_token())
             .await?;
-        Ok(info.try_into()?)
+        info.try_into().map_err(|e| response_protocol_error(e, ctx))
     }
 
     /// Ensure a basin.
@@ -131,12 +153,14 @@ impl S2 {
         &self,
         input: EnsureBasinInput,
     ) -> Result<EnsureOutput<BasinInfo>, RequestError> {
+        let ctx = ErrorContext::basin("ensure_basin", input.name.as_ref(), false);
         let (name, request) = input.into();
         Ok(self
             .client
             .ensure_basin(name, request)
             .await?
-            .try_map(BasinInfo::try_from)?
+            .try_map(BasinInfo::try_from)
+            .map_err(|e| response_protocol_error(e, ctx))?
             .into())
     }
 
@@ -181,13 +205,15 @@ impl S2 {
         &self,
         input: ListAccessTokensInput,
     ) -> Result<Page<AccessTokenInfo>, RequestError> {
+        let ctx = ErrorContext::account("list_access_tokens", true);
         let response = self.client.list_access_tokens(input.into()).await?;
         Ok(Page::new(
             response
                 .access_tokens
                 .into_iter()
                 .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| response_protocol_error(e, ctx))?,
             response.has_more,
         ))
     }
@@ -255,13 +281,15 @@ impl S2 {
         &self,
         input: ListNetworkPoliciesInput,
     ) -> Result<Page<NetworkPolicyInfo>, RequestError> {
+        let ctx = ErrorContext::account("list_network_policies", true);
         let response = self.client.list_network_policies(input.into()).await?;
         Ok(Page::new(
             response
                 .network_policies
                 .into_iter()
                 .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| response_protocol_error(e, ctx))?,
             response.has_more,
         ))
     }
@@ -300,8 +328,11 @@ impl S2 {
         &self,
         input: CreateNetworkPolicyInput,
     ) -> Result<NetworkPolicyInfo, RequestError> {
+        let ctx = ErrorContext::account("create_network_policy", false);
         let response = self.client.create_network_policy(input.into()).await?;
-        Ok(response.try_into()?)
+        response
+            .try_into()
+            .map_err(|e| response_protocol_error(e, ctx))
     }
 
     /// Get a network policy by slug or full reference.
@@ -309,8 +340,11 @@ impl S2 {
         &self,
         selector: NetworkPolicySelector,
     ) -> Result<NetworkPolicyInfo, RequestError> {
+        let ctx = ErrorContext::account("get_network_policy", true);
         let response = self.client.get_network_policy(selector).await?;
-        Ok(response.try_into()?)
+        response
+            .try_into()
+            .map_err(|e| response_protocol_error(e, ctx))
     }
 
     /// Delete a network policy by slug or full reference. It must not be bound to any access
@@ -401,13 +435,15 @@ impl S2Basin {
         &self,
         input: ListStreamsInput,
     ) -> Result<Page<StreamInfo>, RequestError> {
+        let ctx = ErrorContext::basin("list_streams", self.client.name.as_ref(), true);
         let response = self.client.list_streams(input.into()).await?;
         Ok(Page::new(
             response
                 .streams
                 .into_iter()
                 .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| response_protocol_error(e, ctx))?,
             response.has_more,
         ))
     }
@@ -447,11 +483,17 @@ impl S2Basin {
         &self,
         input: CreateStreamInput,
     ) -> Result<StreamInfo, RequestError> {
+        let ctx = ErrorContext::stream(
+            "create_stream",
+            self.client.name.as_ref(),
+            input.name.as_ref(),
+            false,
+        );
         let info = self
             .client
             .create_stream(input.into(), idempotency_token())
             .await?;
-        Ok(info.try_into()?)
+        info.try_into().map_err(|e| response_protocol_error(e, ctx))
     }
 
     /// Ensure a stream.
@@ -465,12 +507,19 @@ impl S2Basin {
         &self,
         input: EnsureStreamInput,
     ) -> Result<EnsureOutput<StreamInfo>, RequestError> {
+        let ctx = ErrorContext::stream(
+            "ensure_stream",
+            self.client.name.as_ref(),
+            input.name.as_ref(),
+            false,
+        );
         let (name, config) = input.into();
         Ok(self
             .client
             .ensure_stream(name, config)
             .await?
-            .try_map(StreamInfo::try_from)?
+            .try_map(StreamInfo::try_from)
+            .map_err(|e| response_protocol_error(e, ctx))?
             .into())
     }
 
@@ -543,6 +592,12 @@ impl S2Stream {
 
     /// Append records.
     pub async fn append(&self, mut input: AppendInput) -> Result<AppendAck, AppendError> {
+        let ctx = ErrorContext::stream(
+            "append",
+            self.client.name.as_ref(),
+            self.name.as_ref(),
+            false,
+        );
         let stream_config = input
             .stream_config
             .take()
@@ -557,7 +612,7 @@ impl S2Stream {
                 self.client.config.retry.append_retry_policy,
             )
             .await?;
-        Ok(ack.into())
+        Ok(AppendAck::try_from_proto(ack, ctx)?)
     }
 
     /// Read records.

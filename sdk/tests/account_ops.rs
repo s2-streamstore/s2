@@ -424,7 +424,7 @@ async fn issue_access_token_with_auto_prefix_streams_but_without_prefix_errors()
         .await;
 
     assert_matches!(result, Err(RequestError::Server(ServerError { code, message, .. })) => {
-        assert_eq!(code, "invalid");
+        assert_eq!(code.as_deref(), Some("invalid"));
         assert_eq!(message, "Auto prefixing is only allowed for streams with prefix matching");
     });
     Ok(())
@@ -438,7 +438,7 @@ async fn issue_access_token_with_no_permitted_ops_errors() -> Result<(), Box<dyn
 
     let result_matches = |result: Result<String, RequestError>| {
         assert_matches!(result, Err(RequestError::Server(ServerError { code, message, .. })) => {
-            assert_eq!(code, "invalid");
+            assert_eq!(code.as_deref(), Some("invalid"));
             assert_eq!(message, "Access token permissions cannot be empty");
         });
     };

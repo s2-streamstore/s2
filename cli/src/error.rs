@@ -1,9 +1,6 @@
 use miette::Diagnostic;
 use s2_sdk::{
-    error::{
-        AppendError, AppendSessionError, ErrorCode, ProducerError, ReadError, ReadSessionError,
-        RequestError, ServerError,
-    },
+    error::{ErrorCode, S2Error, ServerError},
     types::ValidationError,
 };
 use thiserror::Error;
@@ -30,38 +27,7 @@ const BUG_HELP: &str = color_print::cstr!(
 "
 );
 
-#[derive(Error, Debug)]
-pub enum SdkError {
-    #[error(transparent)]
-    Request(#[from] RequestError),
-    #[error(transparent)]
-    Read(#[from] ReadError),
-    #[error(transparent)]
-    Append(#[from] AppendError),
-    #[error(transparent)]
-    AppendSession(#[from] AppendSessionError),
-    #[error(transparent)]
-    ReadSession(#[from] ReadSessionError),
-    #[error(transparent)]
-    Producer(#[from] ProducerError),
-}
-
-impl SdkError {
-    fn request_error(&self) -> Option<&RequestError> {
-        match self {
-            Self::Request(error) => Some(error),
-            Self::Read(error) => error.request_error(),
-            Self::Append(error) => error.request_error(),
-            Self::AppendSession(error) => error.request_error(),
-            Self::ReadSession(error) => error.request_error(),
-            Self::Producer(error) => error.request_error(),
-        }
-    }
-
-    fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
-    }
-}
+pub type SdkError = S2Error;
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum CliError {
@@ -310,9 +276,8 @@ fn is_not_implemented(err: &SdkError) -> bool {
 
 fn is_malformed_access_token(err: &SdkError) -> bool {
     matches!(
-        err.request_error(),
-        Some(RequestError::Validation(ValidationError(message)))
-            if message.contains("access token")
+        err,
+        S2Error::Validation(ValidationError(message)) if message.contains("access token")
     )
 }
 
@@ -444,11 +409,7 @@ mod tests {
         #[case] token_source: TokenSource,
         #[case] expected: &str,
     ) {
-        let sdk_error = || {
-            SdkError::Request(RequestError::Validation(ValidationError(
-                "invalid access token: bad".into(),
-            )))
-        };
+        let sdk_error = || S2Error::Validation(ValidationError("invalid access token: bad".into()));
         for error in [
             CliError::UnauthorizedAccessToken(OpKind::ListBasins, sdk_error(), token_source),
             CliError::MalformedAccessToken(sdk_error(), token_source),

@@ -4463,15 +4463,32 @@ impl AppendAck {
     pub fn new(start: StreamPosition, end: StreamPosition, tail: StreamPosition) -> Self {
         Self { start, end, tail }
     }
-}
-
-impl From<api::stream::proto::AppendAck> for AppendAck {
-    fn from(value: api::stream::proto::AppendAck) -> Self {
-        Self {
-            start: value.start.unwrap_or_default().into(),
-            end: value.end.unwrap_or_default().into(),
-            tail: value.tail.unwrap_or_default().into(),
-        }
+    pub(crate) fn try_from_proto(
+        value: api::stream::proto::AppendAck,
+        context: crate::error::ErrorContext,
+    ) -> Result<Self, crate::error::ProtocolError> {
+        let start = value
+            .start
+            .ok_or_else(|| {
+                crate::error::ProtocolError::new(
+                    "append ack missing start position",
+                    context.clone(),
+                )
+            })?
+            .into();
+        let end = value
+            .end
+            .ok_or_else(|| {
+                crate::error::ProtocolError::new("append ack missing end position", context.clone())
+            })?
+            .into();
+        let tail = value
+            .tail
+            .ok_or_else(|| {
+                crate::error::ProtocolError::new("append ack missing tail position", context)
+            })?
+            .into();
+        Ok(Self { start, end, tail })
     }
 }
 
@@ -5543,22 +5560,29 @@ mod tests {
 
     proptest! {
         #[test]
-        fn append_ack_from_proto_preserves_present_positions_and_defaults_missing(
+        fn append_ack_from_proto_requires_all_positions(
             start in proptest::option::of(proto_stream_position_strategy()),
             end in proptest::option::of(proto_stream_position_strategy()),
             tail in proptest::option::of(proto_stream_position_strategy()),
         ) {
-            let expected_start = start.unwrap_or_default();
-            let expected_end = end.unwrap_or_default();
-            let expected_tail = tail.unwrap_or_default();
-            let ack: AppendAck = api::stream::proto::AppendAck { start, end, tail }.into();
-
-            prop_assert_eq!(ack.start.seq_num, expected_start.seq_num);
-            prop_assert_eq!(ack.start.timestamp, expected_start.timestamp);
-            prop_assert_eq!(ack.end.seq_num, expected_end.seq_num);
-            prop_assert_eq!(ack.end.timestamp, expected_end.timestamp);
-            prop_assert_eq!(ack.tail.seq_num, expected_tail.seq_num);
-            prop_assert_eq!(ack.tail.timestamp, expected_tail.timestamp);
+            let res = AppendAck::try_from_proto(
+                api::stream::proto::AppendAck { start, end, tail },
+                crate::error::ErrorContext::default(),
+            );
+            match (start, end, tail) {
+                (Some(s), Some(e), Some(t)) => {
+                    let ack = res.expect("all positions present");
+                    prop_assert_eq!(ack.start.seq_num, s.seq_num);
+                    prop_assert_eq!(ack.start.timestamp, s.timestamp);
+                    prop_assert_eq!(ack.end.seq_num, e.seq_num);
+                    prop_assert_eq!(ack.end.timestamp, e.timestamp);
+                    prop_assert_eq!(ack.tail.seq_num, t.seq_num);
+                    prop_assert_eq!(ack.tail.timestamp, t.timestamp);
+                }
+                _ => {
+                    prop_assert!(res.is_err());
+                }
+            }
         }
     }
 

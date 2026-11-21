@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
     strum::VariantArray,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 #[non_exhaustive]
 // Keep this alphabetized.

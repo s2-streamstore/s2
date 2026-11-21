@@ -3,15 +3,19 @@
 //! Runs the shared JSON test vectors from `api/specs/sdk/vectors/` and
 //! `api/specs/s2/v1/error-codes.json` against `s2-sdk` and `s2-api`.
 
+mod support;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     env::VarError,
+    error::Error as StdError,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
 
 use bytes::{Bytes, BytesMut};
+use http::Response;
 use s2_api::v1::{
     self as api,
     error::ErrorCode,
@@ -22,19 +26,21 @@ use s2_sdk::{
     S2,
     append_session::AppendSessionConfig,
     batching::{BatchLimits, BatchingConfig},
-    error::RequestError,
+    error::{AppendError, AppendSessionError, ReadError, ReadSessionError, RequestError, S2Error},
     producer::ProducerConfig,
     types::{
-        AccountEndpoint, AppendInput, AppendRecord, AppendRecordBatch, BasinEndpoint, BasinName,
-        BasinReconfiguration, CommandRecord, DeleteOnEmptyConfig, DeleteOnEmptyReconfiguration,
-        EncryptionKey, EnsureOutput, FencingToken, Header, Maybe, MeteredBytes, ReadFrom,
-        ReadLimits, ReadSessionRetryPolicy, ReadStart, ReadStop, RetentionPolicy, RetryConfig,
-        S2Config, S2Endpoints, SequencedRecord, StreamReconfiguration, TimeRange,
-        TimeRangeAndInterval, Timestamp, TimestampingMode, TimestampingReconfiguration,
+        AccountEndpoint, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy,
+        BasinEndpoint, BasinName, BasinReconfiguration, CommandRecord, DeleteOnEmptyConfig,
+        DeleteOnEmptyReconfiguration, EncryptionKey, EnsureOutput, FencingToken, Header, Maybe,
+        MeteredBytes, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig, ReadSessionRetryPolicy,
+        ReadStart, ReadStop, RetentionPolicy, RetryConfig, S2Config, S2Endpoints, SequencedRecord,
+        StreamName, StreamReconfiguration, TimeRange, TimeRangeAndInterval, Timestamp,
+        TimestampingMode, TimestampingReconfiguration,
     },
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use support::{CannedResponse, MockH2Server, gzip_bytes, zstd_bytes};
 use tokio_util::codec::Decoder;
 
 fn specs_path(rel: &str) -> PathBuf {
@@ -121,6 +127,16 @@ fn spec_error_codes_parity() {
             "side_effects mismatch for {}",
             entry.code
         );
+        let serialized = serde_json::to_string(&code).expect("ErrorCode serializes");
+        assert_eq!(
+            serialized,
+            format!("\"{}\"", entry.code),
+            "serde snake_case mismatch for {}",
+            entry.code
+        );
+        let deserialized: ErrorCode =
+            serde_json::from_str(&serialized).expect("ErrorCode deserializes");
+        assert_eq!(deserialized, code);
     }
 
     let sdk_codes: BTreeSet<String> = ErrorCode::ALL.iter().map(ToString::to_string).collect();
@@ -1039,4 +1055,605 @@ fn spec_t5b_read_session_retry_policy_variants() {
         ReadSessionRetryPolicy::Budgeted,
         ReadSessionRetryPolicy::Unbounded
     );
+}
+
+// ---------------------------------------------------------------------------
+// PR 2 conformance tests: E1–E7, C6 error decompression, C8 redirects
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ErrorsFile {
+    cases: Vec<ErrorCase>,
+}
+
+#[derive(Deserialize)]
+struct ErrorCase {
+    rule: String,
+    name: String,
+    call: String,
+    status: u16,
+    body: String,
+    expect: serde_json::Value,
+}
+
+fn no_retry_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(1)
+        .expect("max_attempts = 1")
+}
+
+fn test_basin_and_stream() -> (BasinName, StreamName) {
+    (
+        "test-basin".parse().expect("valid basin"),
+        "test-stream".parse().expect("valid stream"),
+    )
+}
+
+fn sample_append_input() -> AppendInput {
+    AppendInput::new(
+        AppendRecordBatch::try_from_iter([AppendRecord::new("payload").expect("valid record")])
+            .expect("valid batch"),
+    )
+}
+
+// spec: r1 E1, E2, E2a, E2b, E4a, E4b, E4c, E4e, C8
+#[tokio::test]
+async fn spec_vectors_errors() {
+    let file: ErrorsFile = read_json("sdk/vectors/errors.json");
+    assert_eq!(file.cases.len(), 22);
+
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    for case in &file.cases {
+        let label = format!("[{}] {}", case.rule, case.name);
+        let expect = case.expect.get("if_representable").unwrap_or(&case.expect);
+        let expected_type = expect["type"].as_str().unwrap();
+        let expected_status = expect["status"].as_u64().unwrap() as u16;
+        let expected_code = expect["code"].as_str();
+        let expected_message = expect["message"].as_str().unwrap();
+        let expected_retryable = expect["is_retryable"].as_bool().unwrap();
+        let expected_no_side_effects = expect["has_no_side_effects"].as_bool().unwrap();
+
+        let server =
+            MockH2Server::from_responses([CannedResponse::new(case.status, case.body.clone())])
+                .await;
+        let s2 = server.client(no_retry_config());
+        let stream = s2.basin(basin_name.clone()).stream(stream_name.clone());
+
+        match case.call.as_str() {
+            "append" => {
+                let err = stream
+                    .append(sample_append_input())
+                    .await
+                    .expect_err(&format!("{label}: expected append error"));
+
+                assert_eq!(err.is_retryable(), expected_retryable, "{label}: retryable");
+                assert_eq!(
+                    err.has_no_side_effects(),
+                    expected_no_side_effects,
+                    "{label}: has_no_side_effects"
+                );
+
+                match expected_type {
+                    "ServerError" => {
+                        let AppendError::Server(se) = &err else {
+                            panic!("{label}: expected AppendError::Server, got {err:?}");
+                        };
+                        assert_eq!(se.status.as_u16(), expected_status, "{label}");
+                        assert_eq!(se.code.as_deref(), expected_code, "{label}");
+                        assert_eq!(se.message, expected_message, "{label}");
+                    }
+                    "SeqNumMismatchError" => {
+                        let AppendError::SeqNumMismatch(e) = &err else {
+                            panic!("{label}: expected AppendError::SeqNumMismatch, got {err:?}");
+                        };
+                        let expected_seq: u64 = expect["assignable_seq_num"]
+                            .as_str()
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        assert_eq!(e.assignable_seq_num, expected_seq, "{label}");
+                        assert_eq!(e.server.status.as_u16(), expected_status, "{label}");
+                        assert_eq!(e.server.code.as_deref(), expected_code, "{label}");
+                        assert_eq!(e.server.message, expected_message, "{label}");
+                    }
+                    "FencingTokenMismatchError" => {
+                        let AppendError::FencingTokenMismatch(e) = &err else {
+                            panic!(
+                                "{label}: expected AppendError::FencingTokenMismatch, got {err:?}"
+                            );
+                        };
+                        let expected_tok = expect["current_fencing_token"].as_str().unwrap();
+                        assert_eq!(&*e.current_fencing_token, expected_tok, "{label}");
+                        assert_eq!(e.server.status.as_u16(), expected_status, "{label}");
+                        assert_eq!(e.server.code.as_deref(), expected_code, "{label}");
+                        assert_eq!(e.server.message, expected_message, "{label}");
+                    }
+                    other => panic!("{label}: unexpected append error type {other:?}"),
+                }
+
+                // E1: converting into S2Error preserves classification and server_error().
+                let base: S2Error = err.into();
+                assert_eq!(base.is_retryable(), expected_retryable, "{label}: S2Error");
+                assert_eq!(
+                    base.has_no_side_effects(),
+                    expected_no_side_effects,
+                    "{label}: S2Error"
+                );
+                let se = base.server_error().expect("S2Error exposes ServerError");
+                assert_eq!(se.status.as_u16(), expected_status, "{label}: S2Error");
+                assert_eq!(se.code.as_deref(), expected_code, "{label}: S2Error");
+            }
+            "read" => {
+                let err = stream
+                    .read(ReadInput::new())
+                    .await
+                    .expect_err(&format!("{label}: expected read error"));
+
+                assert_eq!(err.is_retryable(), expected_retryable, "{label}: retryable");
+                assert_eq!(
+                    err.has_no_side_effects(),
+                    expected_no_side_effects,
+                    "{label}: has_no_side_effects"
+                );
+
+                match expected_type {
+                    "ReadUnwrittenError" => {
+                        let ReadError::ReadUnwritten(e) = &err else {
+                            panic!("{label}: expected ReadError::ReadUnwritten, got {err:?}");
+                        };
+                        let expected_seq: u64 =
+                            expect["tail"]["seq_num"].as_str().unwrap().parse().unwrap();
+                        let expected_ts: u64 = expect["tail"]["timestamp"]
+                            .as_str()
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        assert_eq!(e.tail.seq_num, expected_seq, "{label}");
+                        assert_eq!(e.tail.timestamp, expected_ts, "{label}");
+                        assert_eq!(e.server.status.as_u16(), expected_status, "{label}");
+                        assert_eq!(e.server.code.as_deref(), expected_code, "{label}");
+                        assert_eq!(e.server.message, expected_message, "{label}");
+                    }
+                    "ServerError" => {
+                        let ReadError::Server(se) = &err else {
+                            panic!("{label}: expected ReadError::Server, got {err:?}");
+                        };
+                        assert_eq!(se.status.as_u16(), expected_status, "{label}");
+                        assert_eq!(se.code.as_deref(), expected_code, "{label}");
+                        assert_eq!(se.message, expected_message, "{label}");
+                    }
+                    other => panic!("{label}: unexpected read error type {other:?}"),
+                }
+
+                let base: S2Error = err.into();
+                assert_eq!(base.is_retryable(), expected_retryable, "{label}: S2Error");
+                assert!(
+                    base.has_no_side_effects(),
+                    "{label}: read S2Error is definite"
+                );
+                let se = base.server_error().expect("S2Error exposes ServerError");
+                assert_eq!(se.status.as_u16(), expected_status, "{label}: S2Error");
+            }
+            other => panic!("{label}: unexpected call {other:?}"),
+        }
+    }
+}
+
+// spec: r1 C8
+#[tokio::test]
+async fn spec_c8_redirects_are_never_followed() {
+    let target = MockH2Server::from_responses([CannedResponse::new(200, "ok")]).await;
+    let location = format!("{}/v1/streams/test-stream/records", target.endpoint_url());
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    for status in [301u16, 302, 307, 308] {
+        let origin = MockH2Server::from_responses([
+            CannedResponse::new(status, "").with_header("location", location.as_str()),
+            CannedResponse::new(status, "").with_header("location", location.as_str()),
+        ])
+        .await;
+        let s2 = origin.client(no_retry_config());
+        let stream = s2.basin(basin_name.clone()).stream(stream_name.clone());
+
+        let append_err = stream
+            .append(sample_append_input())
+            .await
+            .expect_err("redirect must fail append");
+        let AppendError::Server(se) = &append_err else {
+            panic!("expected ServerError for {status}, got {append_err:?}");
+        };
+        assert_eq!(se.status.as_u16(), status);
+        assert_eq!(se.code, None);
+        assert_eq!(se.message, status.to_string());
+        assert!(!append_err.is_retryable());
+        assert!(!append_err.has_no_side_effects());
+
+        let read_err = stream
+            .read(ReadInput::new())
+            .await
+            .expect_err("redirect must fail read");
+        let ReadError::Server(se) = &read_err else {
+            panic!("expected ServerError for {status}, got {read_err:?}");
+        };
+        assert_eq!(se.status.as_u16(), status);
+        assert!(!read_err.is_retryable());
+        assert!(read_err.has_no_side_effects());
+    }
+
+    assert_eq!(
+        target.request_count(),
+        0,
+        "redirect target server must never be contacted"
+    );
+}
+
+// spec: r1 C6, E2
+#[tokio::test]
+async fn spec_c6_e2_compressed_and_corrupt_error_bodies() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    let gzip_body = gzip_bytes(br#"{"code":"server_draining","message":"draining"}"#).await;
+    let zstd_body = zstd_bytes(br#"{"code":"unavailable","message":"busy"}"#).await;
+
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(503, gzip_body).with_header("content-encoding", "gzip"),
+        CannedResponse::new(503, zstd_body).with_header("content-encoding", "zstd"),
+        CannedResponse::new(500, Bytes::from_static(b"not valid gzip bytes"))
+            .with_header("content-encoding", "gzip"),
+        CannedResponse::new(502, Bytes::from_static(b"brotli bytes"))
+            .with_header("content-encoding", "br"),
+    ])
+    .await;
+    let s2 = server.client(no_retry_config());
+    let stream = s2.basin(basin_name).stream(stream_name);
+
+    // 1. gzip error body decompressed
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let AppendError::Server(se) = &err else {
+        panic!("expected ServerError, got {err:?}");
+    };
+    assert_eq!(se.status.as_u16(), 503);
+    assert_eq!(se.code.as_deref(), Some("server_draining"));
+    assert_eq!(se.message, "draining");
+    assert!(err.is_retryable());
+    assert!(err.has_no_side_effects());
+
+    // 2. zstd error body decompressed
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let AppendError::Server(se) = &err else {
+        panic!("expected ServerError, got {err:?}");
+    };
+    assert_eq!(se.status.as_u16(), 503);
+    assert_eq!(se.code.as_deref(), Some("unavailable"));
+    assert_eq!(se.message, "busy");
+    assert!(err.is_retryable());
+    assert!(!err.has_no_side_effects());
+
+    // 3. corrupt gzip body on non-2xx still produces ServerError (not ProtocolError)
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let AppendError::Server(se) = &err else {
+        panic!("expected ServerError on corrupt gzip error body, got {err:?}");
+    };
+    assert_eq!(se.status.as_u16(), 500);
+    assert_eq!(se.code, None);
+    assert_eq!(se.message, "500");
+    assert!(err.is_retryable());
+    assert!(!err.has_no_side_effects());
+
+    // 4. unsupported content-encoding on non-2xx still produces ServerError
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let AppendError::Server(se) = &err else {
+        panic!("expected ServerError on unsupported encoding error body, got {err:?}");
+    };
+    assert_eq!(se.status.as_u16(), 502);
+    assert_eq!(se.code, None);
+    assert_eq!(se.message, "502");
+    assert!(err.is_retryable());
+    assert!(!err.has_no_side_effects());
+}
+
+// spec: r1 E2, E2a, E2b, E4e, F1
+#[tokio::test]
+async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(412, r#"{"seq_num_mismatch": 7, "future_field": true}"#),
+        CannedResponse::new(412, r#"{"fencing_token_mismatch": "tok", "extra": 123}"#),
+        CannedResponse::new(412, r#"{"seq_num_mismatch": 18446744073709551616}"#),
+        CannedResponse::new(
+            416,
+            r#"{"tail": {"seq_num": 9, "timestamp": 1000, "extra": "ok"}, "other": 1}"#,
+        ),
+        CannedResponse::new(416, r#"{"tail": "not-an-object"}"#),
+    ])
+    .await;
+    let s2 = server.client(no_retry_config());
+    let stream = s2.basin(basin_name).stream(stream_name);
+
+    // 1. 412 seq_num_mismatch with unknown field
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let AppendError::SeqNumMismatch(e) = &err else {
+        panic!("expected SeqNumMismatch, got {err:?}");
+    };
+    assert_eq!(e.assignable_seq_num, 7);
+    assert_eq!(e.server.status.as_u16(), 412);
+    assert!(!err.is_retryable());
+    assert!(err.has_no_side_effects());
+
+    // 2. 412 fencing_token_mismatch with unknown field
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let AppendError::FencingTokenMismatch(e) = &err else {
+        panic!("expected FencingTokenMismatch, got {err:?}");
+    };
+    assert_eq!(&*e.current_fencing_token, "tok");
+    assert_eq!(e.server.status.as_u16(), 412);
+
+    // 3. 412 out-of-range u64 falls back to plain ServerError, still definite & non-retryable (E4e)
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let AppendError::Server(se) = &err else {
+        panic!("expected plain ServerError on u64 overflow 412, got {err:?}");
+    };
+    assert_eq!(se.status.as_u16(), 412);
+    assert!(!err.is_retryable());
+    assert!(err.has_no_side_effects());
+
+    // 4. 416 with extra fields still produces ReadUnwrittenError
+    let err = stream.read(ReadInput::new()).await.unwrap_err();
+    let ReadError::ReadUnwritten(e) = &err else {
+        panic!("expected ReadUnwritten, got {err:?}");
+    };
+    assert_eq!(e.tail.seq_num, 9);
+    assert_eq!(e.tail.timestamp, 1000);
+    assert_eq!(e.server.status.as_u16(), 416);
+
+    // 5. 416 malformed body falls back to plain ServerError, still definite on read
+    let err = stream.read(ReadInput::new()).await.unwrap_err();
+    let ReadError::Server(se) = &err else {
+        panic!("expected plain ServerError on malformed 416, got {err:?}");
+    };
+    assert_eq!(se.status.as_u16(), 416);
+    assert!(!err.is_retryable());
+    assert!(err.has_no_side_effects());
+}
+
+// spec: r1 E1, E5, E5a, E5b, E7
+#[tokio::test]
+async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+    let fast_retry_all = RetryConfig::new()
+        .with_max_attempts(2)
+        .unwrap()
+        .with_min_base_delay(Duration::ZERO)
+        .with_max_base_delay(Duration::ZERO)
+        .with_append_retry_policy(AppendRetryPolicy::All);
+
+    // Case 1: indefinite attempt 1 + definite attempt 2 -> wrapped in IndefiniteAppendError
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(503, r#"{"code":"unavailable","message":"busy"}"#),
+        CannedResponse::new(412, r#"{"seq_num_mismatch":5}"#),
+    ])
+    .await;
+    let stream = server
+        .client(fast_retry_all.clone())
+        .basin(basin_name.clone())
+        .stream(stream_name.clone());
+
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    assert!(!err.is_retryable());
+    assert!(!err.has_no_side_effects());
+    assert!(
+        err.server_error().is_none(),
+        "E5a: wrapper hides ServerError"
+    );
+    let display = err.to_string();
+    assert!(display.contains("append"), "E7: {display}");
+    assert!(display.contains("test-basin"), "E7: {display}");
+    assert!(display.contains("test-stream"), "E7: {display}");
+    assert!(display.contains("after 2 attempts"), "E7: {display}");
+
+    let AppendError::IndefiniteAppend(wrapped) = &err else {
+        panic!("expected IndefiniteAppend, got {err:?}");
+    };
+    assert!(matches!(
+        wrapped.final_attempt_error(),
+        AppendError::SeqNumMismatch(e) if e.assignable_seq_num == 5
+    ));
+    let source = wrapped
+        .source()
+        .expect("E5b: IndefiniteAppendError sets source");
+    assert!(
+        source.downcast_ref::<AppendError>().is_some(),
+        "E5b: source must downcast directly to AppendError"
+    );
+
+    let base: S2Error = err.into();
+    assert!(base.server_error().is_none(), "E1/E5a: S2Error wrapper");
+    assert!(!base.has_no_side_effects());
+    assert!(!base.is_retryable());
+
+    // Case 2: indefinite attempt 1 + indefinite attempt 2 -> NOT wrapped
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(503, r#"{"code":"unavailable","message":"busy 1"}"#),
+        CannedResponse::new(503, r#"{"code":"unavailable","message":"busy 2"}"#),
+    ])
+    .await;
+    let stream = server
+        .client(fast_retry_all.clone())
+        .basin(basin_name.clone())
+        .stream(stream_name.clone());
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    assert!(
+        matches!(err, AppendError::Server(ref se) if se.message == "busy 2"),
+        "indefinite final error must not be wrapped: {err:?}"
+    );
+    assert!(err.to_string().contains("after 2 attempts"));
+
+    // Case 3: definite attempt 1 + definite attempt 2 -> NOT wrapped
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(503, r#"{"code":"server_draining","message":"draining"}"#),
+        CannedResponse::new(404, r#"{"code":"stream_not_found","message":"missing"}"#),
+    ])
+    .await;
+    let stream = server
+        .client(fast_retry_all)
+        .basin(basin_name.clone())
+        .stream(stream_name.clone());
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    assert!(
+        matches!(err, AppendError::Server(ref se) if se.code.as_deref() == Some("stream_not_found")),
+        "definite earlier attempt must not trigger IndefiniteAppend: {err:?}"
+    );
+    assert!(err.has_no_side_effects());
+    assert!(err.to_string().contains("after 2 attempts"));
+
+    // Case 4: single attempt omits attempt count from Display (E7)
+    let server = MockH2Server::from_responses([CannedResponse::new(
+        404,
+        r#"{"code":"stream_not_found","message":"missing"}"#,
+    )])
+    .await;
+    let stream = server
+        .client(no_retry_config())
+        .basin(basin_name)
+        .stream(stream_name);
+    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let display = err.to_string();
+    assert!(display.contains("append"), "E7: {display}");
+    assert!(display.contains("test-basin"), "E7: {display}");
+    assert!(display.contains("test-stream"), "E7: {display}");
+    assert!(!display.contains("attempts"), "E7: {display}");
+}
+
+fn encode_s2s_terminal_frame(status: u16, body: &[u8]) -> Bytes {
+    let mut frame = Vec::with_capacity(6 + body.len());
+    let length = 3 + body.len();
+    frame.push(((length >> 16) & 0xff) as u8);
+    frame.push(((length >> 8) & 0xff) as u8);
+    frame.push((length & 0xff) as u8);
+    frame.push(0x80); // terminal flag, uncompressed
+    frame.extend_from_slice(&status.to_be_bytes());
+    frame.extend_from_slice(body);
+    Bytes::from(frame)
+}
+
+// spec: r1 E2, E2a, E2b, E5a, E5b, E6, T9
+#[tokio::test]
+async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    // 1. Append session receiving 412 seq_num_mismatch terminal frame.
+    let append_terminal = encode_s2s_terminal_frame(412, br#"{"seq_num_mismatch":12}"#);
+    let server = MockH2Server::start(move |_conn_id, req, mut respond| {
+        let frame = append_terminal.clone();
+        async move {
+            let resp = Response::builder()
+                .status(200)
+                .header("content-type", "s2s/proto")
+                .body(())
+                .unwrap();
+            let Ok(mut send) = respond.send_response(resp, false) else {
+                return;
+            };
+            let mut body = req.into_body();
+            let _ = body.data().await;
+            let _ = send.send_data(frame, true);
+        }
+    })
+    .await;
+
+    let stream = server
+        .client(no_retry_config())
+        .basin(basin_name.clone())
+        .stream(stream_name.clone());
+    let session = stream.append_session(AppendSessionConfig::new());
+
+    let ticket = session
+        .submit(sample_append_input())
+        .await
+        .expect("initial submit accepted");
+    let err = ticket.await.expect_err("terminal frame must fail ticket");
+    let AppendSessionError::SeqNumMismatch(e) = &err else {
+        panic!("expected AppendSessionError::SeqNumMismatch, got {err:?}");
+    };
+    assert_eq!(e.assignable_seq_num, 12);
+    assert_eq!(e.server.status.as_u16(), 412);
+    assert!(!err.is_retryable());
+    assert!(err.has_no_side_effects());
+
+    // E6: subsequent submit after terminal failure fails with SessionClosedError carrying failure.
+    let closed_err = match session.submit(sample_append_input()).await {
+        Err(e) => e,
+        Ok(t) => t.await.expect_err("failed session must fail"),
+    };
+    let AppendSessionError::SessionClosed(closed) = &closed_err else {
+        panic!("expected SessionClosedError on closed session, got {closed_err:?}");
+    };
+    assert!(closed_err.has_no_side_effects());
+    assert!(!closed_err.is_retryable());
+    assert!(
+        closed_err.server_error().is_none(),
+        "E5a: SessionClosedError must not match as inner ServerError"
+    );
+    assert!(matches!(
+        closed.failure(),
+        Some(AppendSessionError::SeqNumMismatch(inner)) if inner.assignable_seq_num == 12
+    ));
+    let source = closed
+        .source()
+        .expect("E5b: SessionClosedError sets source");
+    assert!(
+        source.downcast_ref::<AppendSessionError>().is_some(),
+        "E5b: source must downcast directly to AppendSessionError"
+    );
+    assert!(
+        closed.to_string().contains("12"),
+        "E6: message includes failure message: {}",
+        closed
+    );
+
+    // 2. Read session receiving 416 tail terminal frame.
+    let read_terminal =
+        encode_s2s_terminal_frame(416, br#"{"tail":{"seq_num":5,"timestamp":1234}}"#);
+    let read_server = MockH2Server::start(move |_conn_id, _req, mut respond| {
+        let frame = read_terminal.clone();
+        async move {
+            let resp = Response::builder()
+                .status(200)
+                .header("content-type", "s2s/proto")
+                .body(())
+                .unwrap();
+            if let Ok(mut send) = respond.send_response(resp, false) {
+                let _ = send.send_data(frame, true);
+            }
+        }
+    })
+    .await;
+
+    let read_stream = read_server
+        .client(no_retry_config())
+        .basin(basin_name)
+        .stream(stream_name);
+    let read_res = read_stream
+        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .await;
+    let read_err = match read_res {
+        Err(e) => e,
+        Ok(mut sess) => {
+            use futures_util::StreamExt as _;
+            sess.next()
+                .await
+                .expect("expected terminal error item")
+                .expect_err("expected terminal error")
+        }
+    };
+    let ReadSessionError::ReadUnwritten(e) = &read_err else {
+        panic!("expected ReadSessionError::ReadUnwritten, got {read_err:?}");
+    };
+    assert_eq!(e.tail.seq_num, 5);
+    assert_eq!(e.tail.timestamp, 1234);
+    assert_eq!(e.server.status.as_u16(), 416);
+    assert!(!read_err.is_retryable());
+    assert!(read_err.has_no_side_effects());
 }

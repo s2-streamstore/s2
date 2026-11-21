@@ -18,8 +18,11 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
 use crate::{
-    api::{ApiError, BasinClient, Streaming, retry_builder},
-    error::{AppendError, RequestError},
+    api::{BasinClient, Streaming, retry_builder},
+    error::{
+        AbortedError, AppendSessionError, ConnectionLostError, ErrorContext, ProtocolError,
+        SessionClosedError, TimeoutError,
+    },
     frame_signal::FrameSignal,
     reconnect::{AdvisedReconnects, ReconnectAdvice},
     retry::{AppendRetryError, RetryBackoffBuilder},
@@ -30,131 +33,11 @@ use crate::{
     },
 };
 
-/// Errors returned by an append session.
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-pub enum AppendSessionError {
-    /// An error with the append request underlying the session.
-    #[error(transparent)]
-    Append(#[from] AppendError),
-    /// An append acknowledgement timed out.
-    #[error("append acknowledgement timed out")]
-    AckTimeout,
-    /// The server disconnected during the session.
-    #[error("server disconnected")]
-    ServerDisconnected,
-    /// The response stream closed while appends were in flight.
-    #[error("response stream closed early while appends in flight")]
-    StreamClosedEarly,
-    /// The session was already closed.
-    #[error("session already closed")]
-    SessionClosed,
-    /// The session is closing.
-    #[error("session is closing")]
-    SessionClosing,
-    /// The session was dropped without being closed.
-    #[error("session dropped without calling close")]
-    SessionDropped,
-    /// The server returned an invalid append acknowledgement.
-    #[error("invalid append acknowledgement: {0}")]
-    InvalidAck(String),
-    /// The final attempt failed definitively, but an earlier attempt may have taken effect,
-    /// so the entire append operation is indeterminate.
-    #[error(
-        "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
-    )]
-    IndefiniteFailure {
-        /// The definite error returned by the final attempt.
-        #[source]
-        final_attempt_error: Box<Self>,
-    },
-}
-
-impl AppendSessionError {
-    /// Whether retrying the operation is safe or sensible.
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Append(error) => error.is_retryable(),
-            Self::IndefiniteFailure {
-                final_attempt_error,
-            } => final_attempt_error.is_retryable(),
-            Self::AckTimeout | Self::ServerDisconnected => true,
-            Self::StreamClosedEarly
-            | Self::SessionClosed
-            | Self::SessionClosing
-            | Self::SessionDropped
-            | Self::InvalidAck(_) => false,
-        }
-    }
-
-    /// Whether retrying the operation cannot duplicate a mutation.
-    pub fn has_no_side_effects(&self) -> bool {
-        match self {
-            Self::Append(error) => error.has_no_side_effects(),
-            Self::IndefiniteFailure { .. } => false,
-            Self::SessionClosed | Self::SessionClosing => true,
-            Self::AckTimeout
-            | Self::ServerDisconnected
-            | Self::StreamClosedEarly
-            | Self::SessionDropped
-            | Self::InvalidAck(_) => false,
-        }
-    }
-
-    /// Return the underlying request error, if present.
-    pub fn request_error(&self) -> Option<&RequestError> {
-        match self {
-            Self::Append(error) => error.request_error(),
-            Self::IndefiniteFailure {
-                final_attempt_error,
-            } => final_attempt_error.request_error(),
-            Self::AckTimeout
-            | Self::ServerDisconnected
-            | Self::StreamClosedEarly
-            | Self::SessionClosed
-            | Self::SessionClosing
-            | Self::SessionDropped
-            | Self::InvalidAck(_) => None,
-        }
-    }
-
-    fn is_authentication_error(&self) -> bool {
-        matches!(
-            self,
-            Self::Append(AppendError::Request(error)) if error.is_authentication_error()
-        )
-    }
-
-    fn is_server_draining(&self) -> bool {
-        matches!(
-            self,
-            Self::Append(AppendError::Request(error)) if error.is_server_draining()
-        )
-    }
-}
-
-impl AppendRetryError for AppendSessionError {
-    fn has_no_side_effects(&self) -> bool {
-        Self::has_no_side_effects(self)
-    }
-
-    fn into_indefinite_failure(self) -> Self {
-        Self::IndefiniteFailure {
-            final_attempt_error: Box::new(self),
-        }
-    }
-}
-
-impl From<ApiError> for AppendSessionError {
-    fn from(error: ApiError) -> Self {
-        Self::Append(error.into())
-    }
-}
-
 /// A [`Future`] that resolves to an acknowledgement once the batch of records is appended.
 pub struct BatchSubmitTicket {
     rx: oneshot::Receiver<Result<AppendAck, AppendSessionError>>,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
 }
 
 impl Future for BatchSubmitTicket {
@@ -163,11 +46,14 @@ impl Future for BatchSubmitTicket {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(res)) => Poll::Ready(res),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(self
-                .terminal_err
-                .get()
-                .cloned()
-                .unwrap_or(AppendSessionError::SessionDropped))),
+            Poll::Ready(Err(_)) => {
+                Poll::Ready(Err(self.terminal_err.get().cloned().unwrap_or_else(|| {
+                    AppendSessionError::Aborted(AbortedError::new(
+                        "append session dropped without calling close",
+                        self.context.clone(),
+                    ))
+                })))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -275,6 +161,7 @@ pub struct AppendSession {
     cmd_tx: mpsc::Sender<Command>,
     permits: AppendPermits,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -293,6 +180,12 @@ impl AppendSession {
         let permits = AppendPermits::new(config.max_unacked_batches, config.max_unacked_bytes);
         let retry_builder = retry_builder(&client.config.retry);
         let terminal_err = Arc::new(OnceLock::new());
+        let context = ErrorContext::stream(
+            "append_session",
+            client.name.as_ref(),
+            stream.as_ref(),
+            false,
+        );
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
@@ -301,11 +194,13 @@ impl AppendSession {
             retry_builder,
             buffer_size,
             terminal_err.clone(),
+            context.clone(),
         )));
         Self {
             cmd_tx,
             permits,
             terminal_err,
+            context,
             _handle: handle,
         }
     }
@@ -350,11 +245,12 @@ impl AppendSession {
             .clone()
             .reserve_owned()
             .await
-            .map_err(|_| self.terminal_err())?;
+            .map_err(|_| self.session_closed_err())?;
         Ok(BatchSubmitPermit {
             append_permit,
             cmd_tx_permit,
             terminal_err: self.terminal_err.clone(),
+            context: self.context.clone(),
         })
     }
 
@@ -364,16 +260,22 @@ impl AppendSession {
         self.cmd_tx
             .send(Command::Close { done_tx })
             .await
-            .map_err(|_| self.terminal_err())?;
-        done_rx.await.map_err(|_| self.terminal_err())??;
+            .map_err(|_| self.close_err())?;
+        done_rx.await.map_err(|_| self.close_err())??;
         Ok(())
     }
 
-    fn terminal_err(&self) -> AppendSessionError {
-        self.terminal_err
-            .get()
-            .cloned()
-            .unwrap_or(AppendSessionError::SessionClosed)
+    fn session_closed_err(&self) -> AppendSessionError {
+        AppendSessionError::SessionClosed(SessionClosedError::new(
+            self.terminal_err.get().cloned(),
+            self.context.clone(),
+        ))
+    }
+
+    fn close_err(&self) -> AppendSessionError {
+        self.terminal_err.get().cloned().unwrap_or_else(|| {
+            AppendSessionError::SessionClosed(SessionClosedError::new(None, self.context.clone()))
+        })
     }
 }
 
@@ -382,6 +284,7 @@ pub struct BatchSubmitPermit {
     append_permit: AppendPermit,
     cmd_tx_permit: mpsc::OwnedPermit<Command>,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
 }
 
 impl BatchSubmitPermit {
@@ -396,6 +299,7 @@ impl BatchSubmitPermit {
         BatchSubmitTicket {
             rx: ack_rx,
             terminal_err: self.terminal_err,
+            context: self.context,
         }
     }
 }
@@ -403,6 +307,7 @@ impl BatchSubmitPermit {
 pub(crate) struct AppendSessionInternal {
     cmd_tx: mpsc::Sender<Command>,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -412,6 +317,8 @@ impl AppendSessionInternal {
         let (cmd_tx, cmd_rx) = mpsc::channel(buffer_size);
         let retry_builder = retry_builder(&client.config.retry);
         let terminal_err = Arc::new(OnceLock::new());
+        let context =
+            ErrorContext::stream("producer", client.name.as_ref(), stream.as_ref(), false);
         let handle = AbortOnDropHandle::new(tokio::spawn(run_session_with_retry(
             client,
             stream,
@@ -420,10 +327,12 @@ impl AppendSessionInternal {
             retry_builder,
             buffer_size,
             terminal_err.clone(),
+            context.clone(),
         )));
         Self {
             cmd_tx,
             terminal_err,
+            context,
             _handle: handle,
         }
     }
@@ -434,6 +343,7 @@ impl AppendSessionInternal {
     ) -> impl Future<Output = Result<BatchSubmitTicket, AppendSessionError>> + Send + 'static {
         let cmd_tx = self.cmd_tx.clone();
         let terminal_err = self.terminal_err.clone();
+        let context = self.context.clone();
         async move {
             let (ack_tx, ack_rx) = oneshot::channel();
             cmd_tx
@@ -444,14 +354,15 @@ impl AppendSessionInternal {
                 })
                 .await
                 .map_err(|_| {
-                    terminal_err
-                        .get()
-                        .cloned()
-                        .unwrap_or(AppendSessionError::SessionClosed)
+                    AppendSessionError::SessionClosed(SessionClosedError::new(
+                        terminal_err.get().cloned(),
+                        context.clone(),
+                    ))
                 })?;
             Ok(BatchSubmitTicket {
                 rx: ack_rx,
                 terminal_err,
+                context,
             })
         }
     }
@@ -461,16 +372,15 @@ impl AppendSessionInternal {
         self.cmd_tx
             .send(Command::Close { done_tx })
             .await
-            .map_err(|_| self.terminal_err())?;
-        done_rx.await.map_err(|_| self.terminal_err())??;
+            .map_err(|_| self.close_err())?;
+        done_rx.await.map_err(|_| self.close_err())??;
         Ok(())
     }
 
-    fn terminal_err(&self) -> AppendSessionError {
-        self.terminal_err
-            .get()
-            .cloned()
-            .unwrap_or(AppendSessionError::SessionClosed)
+    fn close_err(&self) -> AppendSessionError {
+        self.terminal_err.get().cloned().unwrap_or_else(|| {
+            AppendSessionError::SessionClosed(SessionClosedError::new(None, self.context.clone()))
+        })
     }
 }
 
@@ -517,6 +427,7 @@ impl AppendPermits {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session_with_retry(
     client: BasinClient,
     stream: StreamName,
@@ -525,6 +436,7 @@ async fn run_session_with_retry(
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
 ) {
     let access_token_mode = client.config.access_token.mode();
     let frame_signal = match client.config.retry.append_retry_policy {
@@ -545,6 +457,7 @@ async fn run_session_with_retry(
     let mut prev_total_acked_records = 0;
     let mut retry_backoff = retry_builder.build();
     let mut advised_reconnects = AdvisedReconnects::default();
+    let mut attempts: u32 = 0;
 
     loop {
         let result = run_session(
@@ -555,6 +468,7 @@ async fn run_session_with_retry(
             buffer_size,
             &frame_signal,
             advised_reconnects,
+            &context,
         )
         .await;
 
@@ -585,7 +499,11 @@ async fn run_session_with_retry(
                 if prev_total_acked_records < state.total_acked_records {
                     prev_total_acked_records = state.total_acked_records;
                     retry_backoff.reset();
+                    attempts = 0;
                 }
+                attempts += 1;
+                let attempt_ctx = context.clone().with_attempts(attempts);
+                let err = err.with_context(&attempt_ctx);
 
                 if is_safe_to_retry(
                     &err,
@@ -627,7 +545,9 @@ async fn run_session_with_retry(
                     }
 
                     if let Some(stashed) = state.stashed_submission.take() {
-                        let _ = stashed.ack_tx.send(Err(err.clone()));
+                        let _ = stashed.ack_tx.send(Err(AppendSessionError::SessionClosed(
+                            SessionClosedError::new(Some(session_err.clone()), context.clone()),
+                        )));
                     }
 
                     if let Some(done_tx) = state.close_tx.take() {
@@ -637,10 +557,12 @@ async fn run_session_with_retry(
                     state.cmd_rx.close();
                     while let Some(cmd) = state.cmd_rx.recv().await {
                         let error = match &cmd {
-                            Command::Submit { .. } => &err,
-                            Command::Close { .. } => &session_err,
+                            Command::Submit { .. } => AppendSessionError::SessionClosed(
+                                SessionClosedError::new(Some(session_err.clone()), context.clone()),
+                            ),
+                            Command::Close { .. } => session_err.clone(),
                         };
-                        cmd.reject(error.clone());
+                        cmd.reject(error);
                     }
                     break;
                 }
@@ -661,6 +583,7 @@ enum SessionOutcome {
     ReconnectAdvised,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     client: &BasinClient,
     stream: &StreamName,
@@ -669,6 +592,7 @@ async fn run_session(
     buffer_size: usize,
     frame_signal: &Option<FrameSignal>,
     advised_reconnects: AdvisedReconnects,
+    context: &ErrorContext,
 ) -> Result<SessionOutcome, AppendSessionError> {
     if let Some(s) = frame_signal {
         s.reset();
@@ -687,7 +611,7 @@ async fn run_session(
     let ack_timeout = client.config.request_timeout;
 
     if !state.inflight_appends.is_empty() {
-        resend(state, &input_tx, &mut acks, ack_timeout).await?;
+        resend(state, &input_tx, &mut acks, ack_timeout, context).await?;
 
         if let Some(s) = frame_signal {
             s.reset();
@@ -709,7 +633,8 @@ async fn run_session(
     loop {
         if reconnect.is_advised() && state.close_tx.is_none() && !declined_advice {
             if advised_reconnects.should_reconnect() {
-                drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout).await?;
+                drain_for_reconnect(input_tx, acks, state, timer.as_mut(), ack_timeout, context)
+                    .await?;
                 return Ok(SessionOutcome::ReconnectAdvised);
             }
             declined_advice = true;
@@ -719,14 +644,22 @@ async fn run_session(
             (event_ord, _deadline) = &mut timer, if timer.is_armed() => {
                 match TimerEvent::from(event_ord) {
                     TimerEvent::AckDeadline => {
-                        return Err(AppendSessionError::AckTimeout);
+                        return Err(AppendSessionError::Timeout(TimeoutError::new(
+                            "append acknowledgement timed out",
+                            context.clone(),
+                        )));
                     }
                 }
             }
 
             input_tx_permit = input_tx.reserve(), if state.stashed_submission.is_some() => {
-                let input_tx_permit = input_tx_permit
-                    .map_err(|_| AppendSessionError::ServerDisconnected)?;
+                let input_tx_permit = input_tx_permit.map_err(|_| {
+                    AppendSessionError::ConnectionLost(ConnectionLostError::new(
+                        "server disconnected",
+                        false,
+                        context.clone(),
+                    ))
+                })?;
                 let submission = state.stashed_submission
                     .take()
                     .expect("stashed_submission should not be None");
@@ -756,9 +689,9 @@ async fn run_session(
                 match cmd {
                     Some(Command::Submit { input, ack_tx, permit }) => {
                         if state.close_tx.is_some() {
-                            let _ = ack_tx.send(
-                                Err(AppendSessionError::SessionClosing)
-                            );
+                            let _ = ack_tx.send(Err(AppendSessionError::SessionClosed(
+                                SessionClosedError::new(None, context.clone()),
+                            )));
                         } else {
                             let input_metered_bytes = input.records.metered_bytes();
                             state.stashed_submission = Some(StashedSubmission {
@@ -773,7 +706,10 @@ async fn run_session(
                         state.close_tx = Some(done_tx);
                     }
                     None => {
-                        return Err(AppendSessionError::SessionDropped);
+                        return Err(AppendSessionError::Aborted(AbortedError::new(
+                            "append session dropped without calling close",
+                            context.clone(),
+                        )));
                     }
                 }
             }
@@ -785,6 +721,7 @@ async fn run_session(
                             ack,
                             state,
                             timer.as_mut(),
+                            context,
                         )?;
                     }
                     Some(Err(err)) => {
@@ -792,7 +729,13 @@ async fn run_session(
                     }
                     None => {
                         if !state.inflight_appends.is_empty() || state.stashed_submission.is_some() {
-                            return Err(AppendSessionError::StreamClosedEarly);
+                            return Err(AppendSessionError::ConnectionLost(
+                                ConnectionLostError::new(
+                                    "response stream closed early while appends in flight",
+                                    state.inflight_appends.is_empty(),
+                                    context.clone(),
+                                ),
+                            ));
                         }
                         break;
                     }
@@ -817,6 +760,7 @@ async fn resend(
     input_tx: &mpsc::Sender<AppendInput>,
     acks: &mut Streaming<AppendAck>,
     ack_timeout: Duration,
+    context: &ErrorContext,
 ) -> Result<(), AppendSessionError> {
     debug!(
         inflight_appends_len = state.inflight_appends.len(),
@@ -835,14 +779,22 @@ async fn resend(
             (event_ord, _deadline) = &mut timer, if timer.is_armed() => {
                 match TimerEvent::from(event_ord) {
                     TimerEvent::AckDeadline => {
-                        return Err(AppendSessionError::AckTimeout);
+                        return Err(AppendSessionError::Timeout(TimeoutError::new(
+                            "append acknowledgement timed out",
+                            context.clone(),
+                        )));
                     }
                 }
             }
 
             input_tx_permit = input_tx.reserve(), if !resend_finished => {
-                let input_tx_permit = input_tx_permit
-                    .map_err(|_| AppendSessionError::ServerDisconnected)?;
+                let input_tx_permit = input_tx_permit.map_err(|_| {
+                    AppendSessionError::ConnectionLost(ConnectionLostError::new(
+                        "server disconnected",
+                        false,
+                        context.clone(),
+                    ))
+                })?;
 
                 if let Some(inflight_append) = state.inflight_appends.get_mut(resend_index) {
                     inflight_append.ack_deadline = Instant::now() + ack_timeout;
@@ -865,18 +817,26 @@ async fn resend(
                             ack,
                             state,
                             timer.as_mut(),
+                            context,
                         )?;
                         resend_index = resend_index.checked_sub(1).ok_or_else(|| {
-                            AppendSessionError::InvalidAck(
-                                "received ack without a corresponding resent append in flight".to_string(),
-                            )
+                            AppendSessionError::Protocol(ProtocolError::new(
+                                "received ack without a corresponding resent append in flight",
+                                context.clone(),
+                            ))
                         })?;
                     }
                     Some(Err(err)) => {
                         return Err(err.into());
                     }
                     None => {
-                        return Err(AppendSessionError::StreamClosedEarly);
+                        return Err(AppendSessionError::ConnectionLost(
+                            ConnectionLostError::new(
+                                "response stream closed early while resending appends",
+                                false,
+                                context.clone(),
+                            ),
+                        ));
                     }
                 }
             }
@@ -901,6 +861,7 @@ async fn drain_for_reconnect(
     state: &mut SessionState,
     mut timer: Pin<&mut MuxTimer<N_TIMER_VARIANTS>>,
     ack_timeout: Duration,
+    context: &ErrorContext,
 ) -> Result<(), AppendSessionError> {
     drop(input_tx);
     loop {
@@ -918,7 +879,10 @@ async fn drain_for_reconnect(
             (event_ord, _deadline) = &mut timer, if timer.is_armed() => {
                 match TimerEvent::from(event_ord) {
                     TimerEvent::AckDeadline => {
-                        return Err(AppendSessionError::AckTimeout);
+                        return Err(AppendSessionError::Timeout(TimeoutError::new(
+                            "append acknowledgement timed out",
+                            context.clone(),
+                        )));
                     }
                 }
             }
@@ -926,7 +890,7 @@ async fn drain_for_reconnect(
             ack = acks.next() => {
                 match ack {
                     Some(Ok(ack)) => {
-                        process_ack(ack, state, timer.as_mut())?;
+                        process_ack(ack, state, timer.as_mut(), context)?;
                     }
                     Some(Err(err)) if err.is_server_draining() => {
                         return Ok(());
@@ -936,7 +900,13 @@ async fn drain_for_reconnect(
                     }
                     None => {
                         if !state.inflight_appends.is_empty() {
-                            return Err(AppendSessionError::StreamClosedEarly);
+                            return Err(AppendSessionError::ConnectionLost(
+                                ConnectionLostError::new(
+                                    "response stream closed early during reconnect drain",
+                                    false,
+                                    context.clone(),
+                                ),
+                            ));
                         }
                         return Ok(());
                     }
@@ -955,6 +925,12 @@ async fn connect(
     reconnect: ReconnectAdvice,
 ) -> Result<(mpsc::Sender<AppendInput>, Streaming<AppendAck>), AppendSessionError> {
     let (input_tx, input_rx) = mpsc::channel::<AppendInput>(buffer_size);
+    let ack_ctx = ErrorContext::stream(
+        "append_session",
+        client.name.as_ref(),
+        stream.as_ref(),
+        false,
+    );
     let ack_stream = Box::pin(
         client
             .append_session(
@@ -966,8 +942,9 @@ async fn connect(
                 reconnect,
             )
             .await?
-            .map(|ack| match ack {
-                Ok(ack) => Ok(ack.into()),
+            .map(move |ack| match ack {
+                Ok(ack) => AppendAck::try_from_proto(ack, ack_ctx.clone())
+                    .map_err(crate::api::ApiError::Protocol),
                 Err(err) => Err(err),
             }),
     );
@@ -978,33 +955,40 @@ fn process_ack(
     ack: AppendAck,
     state: &mut SessionState,
     timer: Pin<&mut MuxTimer<N_TIMER_VARIANTS>>,
+    context: &ErrorContext,
 ) -> Result<(), AppendSessionError> {
     let corresponding_append = state.inflight_appends.pop_front().ok_or_else(|| {
-        AppendSessionError::InvalidAck(
-            "received ack without a corresponding append in flight".to_string(),
-        )
+        AppendSessionError::Protocol(ProtocolError::new(
+            "received ack without a corresponding append in flight",
+            context.clone(),
+        ))
     })?;
 
     if ack.end.seq_num < ack.start.seq_num {
-        return Err(AppendSessionError::InvalidAck(
-            "ack end seq_num should be greater than or equal to start seq_num".to_string(),
-        ));
+        return Err(AppendSessionError::Protocol(ProtocolError::new(
+            "ack end seq_num should be greater than or equal to start seq_num",
+            context.clone(),
+        )));
     }
 
     if state
         .prev_ack_end
         .is_some_and(|end| ack.end.seq_num <= end.seq_num)
     {
-        return Err(AppendSessionError::InvalidAck(
-            "ack end seq_num should be greater than previous ack end".to_string(),
-        ));
+        return Err(AppendSessionError::Protocol(ProtocolError::new(
+            "ack end seq_num should be greater than previous ack end",
+            context.clone(),
+        )));
     }
 
     let num_acked_records = (ack.end.seq_num - ack.start.seq_num) as usize;
     let expected_records = corresponding_append.input.records.len();
     if num_acked_records != expected_records {
-        return Err(AppendSessionError::InvalidAck(format!(
-            "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
+        return Err(AppendSessionError::Protocol(ProtocolError::new(
+            format!(
+                "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
+            ),
+            context.clone(),
         )));
     }
 
@@ -1123,21 +1107,14 @@ mod tests {
 
     use super::{AppendSessionError, is_safe_to_retry};
     use crate::{
-        api::{ApiError, ServerErrorBody},
-        error::{AppendError, ProducerError, RequestError},
+        error::{ErrorContext, ServerError, TimeoutError},
         frame_signal::FrameSignal,
         retry::AppendRetryError,
         types::{AccessTokenMode, AppendRetryPolicy},
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
-        AppendSessionError::Append(AppendError::Request(RequestError::from(ApiError::Server(
-            status,
-            ServerErrorBody {
-                code: code.to_owned(),
-                message: "test".to_owned(),
-            },
-        ))))
+        AppendSessionError::Server(ServerError::new_for_test(status, Some(code), "test"))
     }
 
     #[rstest::rstest]
@@ -1156,7 +1133,7 @@ mod tests {
         let latest = server_error(status, code);
         let error = latest.clone().with_prior_uncertainty(prior_uncertainty);
         assert_eq!(
-            matches!(error, AppendSessionError::IndefiniteFailure { .. }),
+            matches!(error, AppendSessionError::IndefiniteAppend(_)),
             wrapped
         );
         assert_eq!(error.is_retryable(), latest.is_retryable());
@@ -1164,35 +1141,19 @@ mod tests {
             error.has_no_side_effects(),
             !wrapped && latest.has_no_side_effects()
         );
-        assert_eq!(
-            error.request_error().unwrap().server_error().unwrap().code,
-            code
-        );
         if wrapped {
+            assert!(error.server_error().is_none());
             let source = error
                 .source()
                 .unwrap()
-                .downcast_ref::<Box<AppendSessionError>>()
+                .downcast_ref::<AppendSessionError>()
                 .unwrap();
             assert_eq!(source.to_string(), latest.to_string());
             assert!(source.has_no_side_effects());
+            assert_eq!(source.server_error().unwrap().code.as_deref(), Some(code));
+        } else {
+            assert_eq!(error.server_error().unwrap().code.as_deref(), Some(code));
         }
-
-        let producer_error = ProducerError::from(error.clone());
-        assert_eq!(producer_error.is_retryable(), error.is_retryable());
-        assert_eq!(
-            producer_error.has_no_side_effects(),
-            error.has_no_side_effects()
-        );
-        assert_eq!(
-            producer_error
-                .request_error()
-                .unwrap()
-                .server_error()
-                .unwrap()
-                .code,
-            code
-        );
     }
 
     #[test]
@@ -1294,9 +1255,12 @@ mod tests {
             mode,
         ));
 
-        // AckTimeout — retryable but has possible side effects.
+        // Timeout — retryable but has possible side effects.
         assert!(!is_safe_to_retry(
-            &AppendSessionError::AckTimeout,
+            &AppendSessionError::Timeout(TimeoutError::new(
+                "append acknowledgement timed out",
+                ErrorContext::default(),
+            )),
             policy,
             true,
             Some(&signal),

@@ -445,8 +445,14 @@ impl StreamingResponse {
             poison_handle,
             ..
         } = self;
-        let bytes = body.collect().await?.to_bytes();
-        let bytes = decompress_body(&headers, bytes).await?;
+        let bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => Bytes::new(),
+        };
+        let bytes = match decompress_body(&headers, bytes).await {
+            Ok(bytes) => bytes,
+            Err(_) => Bytes::new(),
+        };
         drop(permit);
         Ok((bytes, poison_handle))
     }
@@ -609,7 +615,14 @@ where
     let operation = async {
         let response = client.request(http_request).await?;
         let (parts, body) = response.into_parts();
-        let bytes = body.collect().await?.to_bytes();
+        let bytes = if parts.status.is_success() {
+            body.collect().await?.to_bytes()
+        } else {
+            match body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            }
+        };
 
         Ok::<_, HttpError>((parts.status, parts.headers, bytes))
     };
@@ -622,7 +635,14 @@ where
         operation.await?
     };
 
-    let bytes = decompress_body(&headers, bytes).await?;
+    let bytes = if status.is_success() {
+        decompress_body(&headers, bytes).await?
+    } else {
+        match decompress_body(&headers, bytes).await {
+            Ok(bytes) => bytes,
+            Err(_) => Bytes::new(),
+        }
+    };
 
     Ok(UnaryResponse {
         status,
@@ -748,30 +768,66 @@ async fn compress_body(
     }
 }
 
-async fn decompress_body(headers: &HeaderMap, bytes: Bytes) -> Result<Bytes, HttpError> {
-    let content_encoding = headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok());
+const MAX_DECOMPRESSED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-    match content_encoding {
-        Some("gzip") => {
+async fn decompress_single(encoding: &str, bytes: Bytes) -> Result<Bytes, HttpError> {
+    let limit = (MAX_DECOMPRESSED_RESPONSE_BYTES as u64) + 1;
+    match encoding {
+        "" | "identity" => Ok(bytes),
+        "gzip" => {
             let mut decoder = GzipDecoder::new(bytes.as_ref());
+            decoder.multiple_members(true);
             let mut decompressed = Vec::new();
             decoder
+                .take(limit)
                 .read_to_end(&mut decompressed)
                 .await
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
+            if decompressed.len() > MAX_DECOMPRESSED_RESPONSE_BYTES {
+                return Err(HttpError::ResponseCompression(format!(
+                    "decompressed response exceeds {MAX_DECOMPRESSED_RESPONSE_BYTES} byte limit"
+                )));
+            }
             Ok(Bytes::from(decompressed))
         }
-        Some("zstd") => {
-            let mut decoder = ZstdDecoder::new(bytes.as_ref());
+        "zstd" => {
+            let decoder = ZstdDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
             decoder
+                .take(limit)
                 .read_to_end(&mut decompressed)
                 .await
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
+            if decompressed.len() > MAX_DECOMPRESSED_RESPONSE_BYTES {
+                return Err(HttpError::ResponseCompression(format!(
+                    "decompressed response exceeds {MAX_DECOMPRESSED_RESPONSE_BYTES} byte limit"
+                )));
+            }
             Ok(Bytes::from(decompressed))
         }
-        _ => Ok(bytes),
+        other => Err(HttpError::ResponseCompression(format!(
+            "unsupported content-encoding: {other}"
+        ))),
     }
+}
+
+async fn decompress_body(headers: &HeaderMap, mut bytes: Bytes) -> Result<Bytes, HttpError> {
+    let mut encodings = Vec::new();
+    for raw in headers.get_all(CONTENT_ENCODING) {
+        let s = raw.to_str().map_err(|e| {
+            HttpError::ResponseCompression(format!("invalid content-encoding: {e}"))
+        })?;
+        for part in s.split(',') {
+            let token = part.trim().to_ascii_lowercase();
+            if !token.is_empty() && token != "identity" {
+                encodings.push(token);
+            }
+        }
+    }
+    for encoding in encodings.into_iter().rev() {
+        bytes = decompress_single(&encoding, bytes).await?;
+    }
+    Ok(bytes)
 }
 
 struct RequestPermit {

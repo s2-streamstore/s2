@@ -5,7 +5,7 @@ use std::{future::Future, time::Duration};
 use assert_matches::assert_matches;
 use common::{S2Stream, s2};
 use s2_sdk::{
-    error::{ClientError, RequestError, ServerError},
+    error::{RequestError, ServerError},
     types::*,
 };
 use test_context::test_context;
@@ -97,7 +97,7 @@ async fn poll_metrics<Fetch, Fut, Ready>(
     interval: Duration,
     mut fetch: Fetch,
     mut ready: Ready,
-) -> Result<Vec<Metric>, RequestError>
+) -> Result<Vec<Metric>, Box<dyn std::error::Error>>
 where
     Fetch: FnMut() -> Fut,
     Fut: Future<Output = Result<Vec<Metric>, RequestError>>,
@@ -125,12 +125,10 @@ where
         tokio::time::sleep(interval).await;
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        RequestError::Client(ClientError::Other(format!(
-            "metrics not ready after {}s",
-            timeout.as_secs()
-        )))
-    }))
+    match last_err {
+        Some(err) => Err(Box::new(err)),
+        None => Err(format!("metrics not ready after {}s", timeout.as_secs()).into()),
+    }
 }
 
 #[test_context(S2Stream)]
@@ -656,7 +654,7 @@ async fn account_metrics_invalid_time_ranges(
         assert_matches!(
             result,
             Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code, "invalid");
+                assert_eq!(code.as_deref(), Some("invalid"));
             }
         );
     }
@@ -737,7 +735,7 @@ async fn basin_metrics_invalid_time_ranges(
         assert_matches!(
             result,
             Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code, "invalid");
+                assert_eq!(code.as_deref(), Some("invalid"));
             }
         );
     }
@@ -824,7 +822,7 @@ async fn stream_metrics_invalid_time_ranges(
         assert_matches!(
             result,
             Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code, "invalid");
+                assert_eq!(code.as_deref(), Some("invalid"));
             }
         );
     }

@@ -19,7 +19,7 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::{
     api::BasinClient,
     batching::{AppendInputs, AppendRecordBatches, BatchingConfig},
-    error::ProducerError,
+    error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError},
     session::{
         AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket, StreamHeaders,
     },
@@ -31,21 +31,25 @@ use crate::{
 
 /// A [`Future`] that resolves to an acknowledgement once the record is appended.
 pub struct RecordSubmitTicket {
-    rx: oneshot::Receiver<Result<IndexedAppendAck, ProducerError>>,
-    terminal_err: Arc<OnceLock<ProducerError>>,
+    rx: oneshot::Receiver<Result<IndexedAppendAck, AppendSessionError>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
 }
 
 impl Future for RecordSubmitTicket {
-    type Output = Result<IndexedAppendAck, ProducerError>;
+    type Output = Result<IndexedAppendAck, AppendSessionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(res)) => Poll::Ready(res),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(self
-                .terminal_err
-                .get()
-                .cloned()
-                .unwrap_or(ProducerError::ProducerDropped))),
+            Poll::Ready(Err(_)) => {
+                Poll::Ready(Err(self.terminal_err.get().cloned().unwrap_or_else(|| {
+                    AppendSessionError::Aborted(AbortedError::new(
+                        "producer dropped without calling close",
+                        self.context.clone(),
+                    ))
+                })))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -167,7 +171,8 @@ impl ProducerConfig {
 pub struct Producer {
     cmd_tx: mpsc::Sender<Command>,
     permits: AppendPermits,
-    terminal_err: Arc<OnceLock<ProducerError>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
     _handle: AbortOnDropHandle<()>,
 }
 
@@ -178,6 +183,8 @@ impl Producer {
         headers: StreamHeaders,
         config: ProducerConfig,
     ) -> Self {
+        let context =
+            ErrorContext::stream("producer", client.name.as_ref(), stream.as_ref(), false);
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(RECORD_BATCH_MAX.count);
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
         let session = AppendSessionInternal::new(client, stream, headers);
@@ -187,11 +194,13 @@ impl Producer {
             config,
             cmd_rx,
             terminal_err.clone(),
+            context.clone(),
         )));
         Self {
             cmd_tx,
             permits,
             terminal_err,
+            context,
             _handle,
         }
     }
@@ -205,7 +214,10 @@ impl Producer {
     ///
     /// Use [`flush`](Self::flush) to establish a non-terminal durability boundary, and call
     /// [`close`](Self::close) when finished to flush remaining records and release resources.
-    pub async fn submit(&self, record: AppendRecord) -> Result<RecordSubmitTicket, ProducerError> {
+    pub async fn submit(
+        &self,
+        record: AppendRecord,
+    ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let permit = self.reserve(record.metered_bytes() as u32).await?;
         Ok(permit.submit(record))
     }
@@ -226,18 +238,19 @@ impl Producer {
     /// [`Semaphore::acquire_many_owned`](tokio::sync::Semaphore::acquire_many_owned) and
     /// [`Sender::reserve_owned`](tokio::sync::mpsc::Sender::reserve_owned), both of which are
     /// cancel safe.
-    pub async fn reserve(&self, bytes: u32) -> Result<RecordSubmitPermit, ProducerError> {
+    pub async fn reserve(&self, bytes: u32) -> Result<RecordSubmitPermit, AppendSessionError> {
         let append_permit = self.permits.acquire(bytes).await;
         let cmd_tx_permit = self
             .cmd_tx
             .clone()
             .reserve_owned()
             .await
-            .map_err(|_| self.terminal_err())?;
+            .map_err(|_| self.session_closed_err())?;
         Ok(RecordSubmitPermit {
             append_permit,
             cmd_tx_permit,
             terminal_err: self.terminal_err.clone(),
+            context: self.context.clone(),
         })
     }
 
@@ -250,7 +263,7 @@ impl Producer {
     /// A record whose [`submit`](Self::submit) call completed before this method began is covered
     /// by the flush. Submissions concurrent with the flush may be ordered on either side of the
     /// boundary; records ordered after it are not included in the durability wait.
-    pub async fn flush(&self) -> Result<(), ProducerError> {
+    pub async fn flush(&self) -> Result<(), AppendSessionError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Flush { done_tx })
@@ -260,7 +273,7 @@ impl Producer {
     }
 
     /// Close the producer and wait for all submitted records to be appended.
-    pub async fn close(self) -> Result<(), ProducerError> {
+    pub async fn close(self) -> Result<(), AppendSessionError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Close { done_tx })
@@ -269,18 +282,26 @@ impl Producer {
         done_rx.await.map_err(|_| self.terminal_err())?
     }
 
-    fn terminal_err(&self) -> ProducerError {
+    fn session_closed_err(&self) -> AppendSessionError {
+        AppendSessionError::SessionClosed(SessionClosedError::new(
+            self.terminal_err.get().cloned(),
+            self.context.clone(),
+        ))
+    }
+
+    fn terminal_err(&self) -> AppendSessionError {
         self.terminal_err
             .get()
             .cloned()
-            .unwrap_or(ProducerError::ProducerClosed)
+            .unwrap_or_else(|| self.session_closed_err())
     }
 
     async fn run(
         session: AppendSessionInternal,
         config: ProducerConfig,
         mut cmd_rx: mpsc::Receiver<Command>,
-        terminal_err: Arc<OnceLock<ProducerError>>,
+        terminal_err: Arc<OnceLock<AppendSessionError>>,
+        context: ErrorContext,
     ) {
         let (record_tx, mut inputs) = Self::batcher(&config, config.match_seq_num);
         let mut record_tx = Some(record_tx);
@@ -318,9 +339,9 @@ impl Producer {
                     match cmd {
                         Some(Command::Submit { record, ack_tx, permit }) => {
                             if control.close_tx.is_some() {
-                                let _ = ack_tx.send(
-                                    Err(ProducerError::ProducerClosing)
-                                );
+                                let _ = ack_tx.send(Err(AppendSessionError::SessionClosed(
+                                    SessionClosedError::new(None, context.clone()),
+                                )));
                             } else {
                                 stashed_submission = Some(StashedSubmission { record, ack_tx, permit });
                             }
@@ -330,15 +351,21 @@ impl Producer {
                         }
                         Some(Command::Flush { done_tx }) => {
                             if control.close_tx.is_some() {
-                                let _ = done_tx.send(Err(ProducerError::ProducerClosing));
+                                let _ = done_tx.send(Err(AppendSessionError::SessionClosed(
+                                    SessionClosedError::new(None, context.clone()),
+                                )));
                             } else {
                                 control.flush_tx = Some(done_tx);
                             }
                         }
                         None => {
                             terminate_producer(
-                                ProducerError::ProducerDropped,
+                                AppendSessionError::Aborted(AbortedError::new(
+                                    "producer dropped without calling close",
+                                    context.clone(),
+                                )),
                                 &terminal_err,
+                                &context,
                                 &mut pending_batch_acks,
                                 &mut pending_record_acks,
                                 &mut stashed_submission,
@@ -361,6 +388,7 @@ impl Producer {
                             terminate_producer(
                                 err.into(),
                                 &terminal_err,
+                                &context,
                                 &mut pending_batch_acks,
                                 &mut pending_record_acks,
                                 &mut stashed_submission,
@@ -399,6 +427,7 @@ impl Producer {
                             terminate_producer(
                                 err,
                                 &terminal_err,
+                                &context,
                                 &mut pending_batch_acks,
                                 &mut pending_record_acks,
                                 &mut stashed_submission,
@@ -418,6 +447,7 @@ impl Producer {
                         terminate_producer(
                             err,
                             &terminal_err,
+                            &context,
                             &mut pending_batch_acks,
                             &mut pending_record_acks,
                             &mut stashed_submission,
@@ -466,7 +496,7 @@ impl Producer {
         let session_close_res = session.close().await;
 
         if let Some(done_tx) = control.close_tx.take() {
-            let _ = done_tx.send(session_close_res.map_err(Into::into));
+            let _ = done_tx.send(session_close_res);
         }
     }
 
@@ -493,7 +523,8 @@ impl Producer {
 pub struct RecordSubmitPermit {
     append_permit: AppendPermit,
     cmd_tx_permit: mpsc::OwnedPermit<Command>,
-    terminal_err: Arc<OnceLock<ProducerError>>,
+    terminal_err: Arc<OnceLock<AppendSessionError>>,
+    context: ErrorContext,
 }
 
 impl RecordSubmitPermit {
@@ -508,28 +539,30 @@ impl RecordSubmitPermit {
         RecordSubmitTicket {
             rx: ack_rx,
             terminal_err: self.terminal_err,
+            context: self.context,
         }
     }
 }
 
-type SubmitFuture = Pin<Box<dyn Future<Output = Result<BatchSubmitTicket, ProducerError>> + Send>>;
+type SubmitFuture =
+    Pin<Box<dyn Future<Output = Result<BatchSubmitTicket, AppendSessionError>> + Send>>;
 
 enum Command {
     Submit {
         record: AppendRecord,
-        ack_tx: oneshot::Sender<Result<IndexedAppendAck, ProducerError>>,
+        ack_tx: oneshot::Sender<Result<IndexedAppendAck, AppendSessionError>>,
         permit: AppendPermit,
     },
     Flush {
-        done_tx: oneshot::Sender<Result<(), ProducerError>>,
+        done_tx: oneshot::Sender<Result<(), AppendSessionError>>,
     },
     Close {
-        done_tx: oneshot::Sender<Result<(), ProducerError>>,
+        done_tx: oneshot::Sender<Result<(), AppendSessionError>>,
     },
 }
 
 impl Command {
-    fn reject(self, err: ProducerError) {
+    fn reject(self, err: AppendSessionError) {
         match self {
             Command::Submit { ack_tx, .. } => {
                 let _ = ack_tx.send(Err(err));
@@ -546,18 +579,18 @@ impl Command {
 
 struct StashedSubmission {
     record: AppendRecord,
-    ack_tx: oneshot::Sender<Result<IndexedAppendAck, ProducerError>>,
+    ack_tx: oneshot::Sender<Result<IndexedAppendAck, AppendSessionError>>,
     permit: AppendPermit,
 }
 
 #[derive(Default)]
 struct PendingControl {
-    flush_tx: Option<oneshot::Sender<Result<(), ProducerError>>>,
-    close_tx: Option<oneshot::Sender<Result<(), ProducerError>>>,
+    flush_tx: Option<oneshot::Sender<Result<(), AppendSessionError>>>,
+    close_tx: Option<oneshot::Sender<Result<(), AppendSessionError>>>,
 }
 
 struct PendingRecordAck {
-    ack_tx: oneshot::Sender<Result<IndexedAppendAck, ProducerError>>,
+    ack_tx: oneshot::Sender<Result<IndexedAppendAck, AppendSessionError>>,
     _permit: AppendPermit,
 }
 
@@ -567,12 +600,12 @@ struct PendingBatchAck {
 }
 
 impl Future for PendingBatchAck {
-    type Output = (Result<AppendAck, ProducerError>, Vec<PendingRecordAck>);
+    type Output = (Result<AppendAck, AppendSessionError>, Vec<PendingRecordAck>);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.ticket).poll(cx) {
             Poll::Ready(batch_ack) => Poll::Ready((
-                batch_ack.map_err(Into::into),
+                batch_ack,
                 self.pending_record_acks
                     .take()
                     .expect("pending_record_acks should not be None"),
@@ -583,7 +616,7 @@ impl Future for PendingBatchAck {
 }
 
 fn dispatch_acks(
-    batch_ack: Result<AppendAck, ProducerError>,
+    batch_ack: Result<AppendAck, AppendSessionError>,
     pending_record_acks: Vec<PendingRecordAck>,
 ) {
     match batch_ack {
@@ -604,9 +637,11 @@ fn dispatch_acks(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn terminate_producer(
-    err: ProducerError,
-    terminal_err: &OnceLock<ProducerError>,
+    err: AppendSessionError,
+    terminal_err: &OnceLock<AppendSessionError>,
+    context: &ErrorContext,
     pending_batch_acks: &mut FuturesUnordered<PendingBatchAck>,
     pending_record_acks: &mut VecDeque<PendingRecordAck>,
     stashed_submission: &mut Option<StashedSubmission>,
@@ -619,12 +654,25 @@ async fn terminate_producer(
         dispatch_acks(batch_ack, pending_record_acks);
     }
 
+    let err = match err {
+        AppendSessionError::SessionClosed(closed) => {
+            closed.failure.map(|f| *f).unwrap_or_else(|| {
+                AppendSessionError::SessionClosed(SessionClosedError::new(None, context.clone()))
+            })
+        }
+        other => other,
+    };
+
     let _ = terminal_err.set(err.clone());
+    let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new(
+        Some(err.clone()),
+        context.clone(),
+    ));
     for pending in pending_record_acks.drain(..) {
-        let _ = pending.ack_tx.send(Err(err.clone()));
+        let _ = pending.ack_tx.send(Err(unsent_err.clone()));
     }
     if let Some(submission) = stashed_submission.take() {
-        let _ = submission.ack_tx.send(Err(err.clone()));
+        let _ = submission.ack_tx.send(Err(unsent_err.clone()));
     }
     if let Some(done_tx) = control.flush_tx.take() {
         let _ = done_tx.send(Err(err.clone()));
@@ -634,6 +682,10 @@ async fn terminate_producer(
     }
     cmd_rx.close();
     while let Some(cmd) = cmd_rx.recv().await {
-        cmd.reject(err.clone());
+        let reject_err = match &cmd {
+            Command::Submit { .. } => unsent_err.clone(),
+            Command::Flush { .. } | Command::Close { .. } => err.clone(),
+        };
+        cmd.reject(reject_err);
     }
 }

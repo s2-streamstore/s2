@@ -22,7 +22,7 @@ use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
     batching::BatchingConfig,
-    error::ProducerError,
+    error::AppendSessionError,
     producer::{IndexedAppendAck, ProducerConfig},
     types::{
         AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput,
@@ -65,7 +65,7 @@ pub fn default_linger(target_mibps: NonZeroU64, record_size: u32) -> Duration {
 }
 
 type PendingAck =
-    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, ProducerError>)> + Send>>;
+    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, AppendSessionError>)> + Send>>;
 
 pub struct BenchWriteSample {
     pub bytes: u64,

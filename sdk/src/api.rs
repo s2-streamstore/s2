@@ -11,7 +11,6 @@ use http::{
 };
 use prost::{self, Message};
 use s2_api::v1::{
-    MaybeKnown,
     access::{
         IssueAccessTokenRequest, IssueAccessTokenResponse, ListAccessTokensRequest,
         ListAccessTokensResponse,
@@ -32,8 +31,8 @@ use s2_api::v1::{
         NetworkPolicyInfo,
     },
     stream::{
-        AppendConditionFailed, CreateStreamRequest, ListStreamsRequest, ListStreamsResponse,
-        ReadEnd, ReadStart, StreamInfo, TailResponse,
+        CreateStreamRequest, ListStreamsRequest, ListStreamsResponse, ReadEnd, ReadStart,
+        StreamInfo, TailResponse,
         proto::{AppendAck, AppendInput, ReadBatch},
         s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
     },
@@ -48,14 +47,18 @@ use tracing::debug;
 
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
-    error::{ClientError, server_error_has_no_side_effects, server_error_is_retryable},
+    error::{
+        AbortedError, ClientClosedError, ConnectError, ConnectionLostError, ErrorContext,
+        FencingTokenMismatchError, ProtocolError, ReadUnwrittenError, SeqNumMismatchError,
+        ServerError, TimeoutError, classify_http_error,
+    },
     frame_signal::FrameSignal,
     reconnect::ReconnectAdvice,
     retry::{AppendRetryError, RetryBackoff, RetryBackoffBuilder},
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
-        Compression, EncryptionKey, LocationName, NetworkPolicySelector, RetryConfig, S2Config,
-        S2Endpoints, StreamName, ValidationError,
+        Compression, EncryptionKey, FencingToken, LocationName, NetworkPolicySelector, RetryConfig,
+        S2Config, S2Endpoints, StreamName, ValidationError,
     },
 };
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
@@ -94,26 +97,44 @@ impl AccountClient {
         &self,
         request: ListAccessTokensRequest,
     ) -> Result<ListAccessTokensResponse, ApiError> {
+        let ctx = ErrorContext::account("list_access_tokens", true);
         let url = self.uri("v1/access-tokens");
-        let request = self.get(url).query(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<ListAccessTokensResponse>()?)
+        let request = self
+            .get(url)
+            .query(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<ListAccessTokensResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn issue_access_token(
         &self,
         request: IssueAccessTokenRequest,
     ) -> Result<IssueAccessTokenResponse, ApiError> {
+        let ctx = ErrorContext::account("issue_access_token", false);
         let url = self.uri("v1/access-tokens");
-        let request = self.post(url).json(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<IssueAccessTokenResponse>()?)
+        let request = self
+            .post(url)
+            .json(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<IssueAccessTokenResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), ApiError> {
+        let ctx = ErrorContext::account("revoke_access_token", false);
         let url = self.uri(format!("v1/access-tokens/{}", urlencoding::encode(&id)));
-        let request = self.delete(url).build()?;
-        self.request(request)
+        let request = self
+            .delete(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        self.request(request, ctx)
             .send()
             .await
             .ignore_not_found_code("access_token_not_found")?;
@@ -124,45 +145,69 @@ impl AccountClient {
         &self,
         request: ListNetworkPoliciesRequest,
     ) -> Result<ListNetworkPoliciesResponse, ApiError> {
+        let ctx = ErrorContext::account("list_network_policies", true);
         let url = self.uri("v1/network-policies");
-        let request = self.get(url).query(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<ListNetworkPoliciesResponse>()?)
+        let request = self
+            .get(url)
+            .query(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<ListNetworkPoliciesResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn create_network_policy(
         &self,
         request: CreateNetworkPolicyRequest,
     ) -> Result<NetworkPolicyInfo, ApiError> {
+        let ctx = ErrorContext::account("create_network_policy", false);
         let url = self.uri("v1/network-policies");
-        let request = self.post(url).json(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<NetworkPolicyInfo>()?)
+        let request = self
+            .post(url)
+            .json(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<NetworkPolicyInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn get_network_policy(
         &self,
         selector: NetworkPolicySelector,
     ) -> Result<NetworkPolicyInfo, ApiError> {
+        let ctx = ErrorContext::account("get_network_policy", true);
         let url = self.uri(format!(
             "v1/network-policies/{}",
             urlencoding::encode(&selector.to_string())
         ));
-        let request = self.get(url).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<NetworkPolicyInfo>()?)
+        let request = self
+            .get(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<NetworkPolicyInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn delete_network_policy(
         &self,
         selector: NetworkPolicySelector,
     ) -> Result<(), ApiError> {
+        let ctx = ErrorContext::account("delete_network_policy", false);
         let url = self.uri(format!(
             "v1/network-policies/{}",
             urlencoding::encode(&selector.to_string())
         ));
-        let request = self.delete(url).build()?;
-        self.request(request)
+        let request = self
+            .delete(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        self.request(request, ctx)
             .send()
             .await
             .ignore_not_found_code("network_policy_not_found")?;
@@ -170,37 +215,63 @@ impl AccountClient {
     }
 
     pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, ApiError> {
+        let ctx = ErrorContext::account("list_locations", true);
         let url = self.uri("v1/locations");
-        let request = self.get(url).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<Vec<LocationInfo>>()?)
+        let request = self
+            .get(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<Vec<LocationInfo>>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn get_default_location(&self) -> Result<LocationInfo, ApiError> {
+        let ctx = ErrorContext::account("get_default_location", true);
         let url = self.uri("v1/locations/default");
-        let request = self.get(url).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<LocationInfo>()?)
+        let request = self
+            .get(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<LocationInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn set_default_location(
         &self,
         location: LocationName,
     ) -> Result<LocationInfo, ApiError> {
+        let ctx = ErrorContext::account("set_default_location", false);
         let url = self.uri("v1/locations/default");
-        let request = self.put(url).json(&location).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<LocationInfo>()?)
+        let request = self
+            .put(url)
+            .json(&location)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<LocationInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn list_basins(
         &self,
         request: ListBasinsRequest,
     ) -> Result<ListBasinsResponse, ApiError> {
+        let ctx = ErrorContext::account("list_basins", true);
         let url = self.uri("v1/basins");
-        let request = self.get(url).query(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<ListBasinsResponse>()?)
+        let request = self
+            .get(url)
+            .query(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<ListBasinsResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn create_basin(
@@ -208,21 +279,31 @@ impl AccountClient {
         request: CreateBasinRequest,
         idempotency_token: String,
     ) -> Result<BasinInfo, ApiError> {
+        let ctx = ErrorContext::basin("create_basin", request.basin.as_ref(), false);
         let url = self.uri("v1/basins");
         let request = self
             .post(url)
             .header(S2_REQUEST_TOKEN, idempotency_token)
             .json(&request)
-            .build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<BasinInfo>()?)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<BasinInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, ApiError> {
+        let ctx = ErrorContext::basin("get_basin_config", name.as_ref(), true);
         let url = self.uri(format!("v1/basins/{name}"));
-        let request = self.get(url).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<BasinConfig>()?)
+        let request = self
+            .get(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<BasinConfig>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn reconfigure_basin(
@@ -230,10 +311,17 @@ impl AccountClient {
         name: BasinName,
         config: BasinReconfiguration,
     ) -> Result<BasinConfig, ApiError> {
+        let ctx = ErrorContext::basin("reconfigure_basin", name.as_ref(), false);
         let url = self.uri(format!("v1/basins/{name}"));
-        let request = self.patch(url).json(&config).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<BasinConfig>()?)
+        let request = self
+            .patch(url)
+            .json(&config)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<BasinConfig>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn ensure_basin(
@@ -241,15 +329,19 @@ impl AccountClient {
         name: BasinName,
         request: Option<EnsureBasinRequest>,
     ) -> Result<ProvisionResult<BasinInfo>, ApiError> {
+        let ctx = ErrorContext::basin("ensure_basin", name.as_ref(), false);
         let url = self.uri(format!("v1/basins/{name}"));
         let request = match request {
-            Some(body) => self.put(url).json(&body).build()?,
-            None => self.put(url).build()?,
-        };
-        let response = self.request(request).send().await?;
+            Some(body) => self.put(url).json(&body).build(),
+            None => self.put(url).build(),
+        }
+        .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
         let status = response.status();
         let provision_result_header_value = provision_result_header_value(&response);
-        let info = response.json::<BasinInfo>()?;
+        let info = response
+            .json::<BasinInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))?;
         Ok(provision_result_from_parts(
             status,
             provision_result_header_value.as_deref(),
@@ -258,9 +350,13 @@ impl AccountClient {
     }
 
     pub async fn delete_basin(&self, name: BasinName) -> Result<(), ApiError> {
+        let ctx = ErrorContext::basin("delete_basin", name.as_ref(), false);
         let url = self.uri(format!("v1/basins/{name}"));
-        let request = self.delete(url).build()?;
-        self.request(request)
+        let request = self
+            .delete(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        self.request(request, ctx)
             .send()
             .await
             .ignore_not_found_code("basin_not_found")?;
@@ -271,10 +367,17 @@ impl AccountClient {
         &self,
         request: AccountMetricSetRequest,
     ) -> Result<MetricSetResponse, ApiError> {
+        let ctx = ErrorContext::account("get_account_metrics", true);
         let url = self.uri("v1/metrics");
-        let request = self.get(url).query(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<MetricSetResponse>()?)
+        let request = self
+            .get(url)
+            .query(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<MetricSetResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn get_basin_metrics(
@@ -282,10 +385,17 @@ impl AccountClient {
         name: BasinName,
         request: BasinMetricSetRequest,
     ) -> Result<MetricSetResponse, ApiError> {
+        let ctx = ErrorContext::basin("get_basin_metrics", name.as_ref(), true);
         let url = self.uri(format!("v1/metrics/{name}"));
-        let request = self.get(url).query(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<MetricSetResponse>()?)
+        let request = self
+            .get(url)
+            .query(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<MetricSetResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn get_stream_metrics(
@@ -294,13 +404,25 @@ impl AccountClient {
         stream_name: StreamName,
         request: StreamMetricSetRequest,
     ) -> Result<MetricSetResponse, ApiError> {
+        let ctx = ErrorContext::stream(
+            "get_stream_metrics",
+            basin_name.as_ref(),
+            stream_name.as_ref(),
+            true,
+        );
         let url = self.uri(format!(
             "v1/metrics/{basin_name}/{}",
             urlencoding::encode(&stream_name)
         ));
-        let request = self.get(url).query(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<MetricSetResponse>()?)
+        let request = self
+            .get(url)
+            .query(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<MetricSetResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 }
 
@@ -335,7 +457,7 @@ impl BasinClient {
         client::uri_with_path(&self.base_url, path)
     }
 
-    fn request(&self, mut request: client::Request) -> RequestBuilder<'_> {
+    fn request(&self, mut request: client::Request, context: ErrorContext) -> RequestBuilder<'_> {
         if matches!(
             self.config.endpoints.basin_authority,
             BasinAuthority::Direct(_)
@@ -345,17 +467,24 @@ impl BasinClient {
                 HeaderValue::from_str(&self.name).expect("valid header value"),
             );
         }
-        self.client.request(request)
+        self.client.request(request, context)
     }
 
     pub async fn list_streams(
         &self,
         request: ListStreamsRequest,
     ) -> Result<ListStreamsResponse, ApiError> {
+        let ctx = ErrorContext::basin("list_streams", self.name.as_ref(), true);
         let url = self.uri("v1/streams");
-        let request = self.get(url).query(&request).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<ListStreamsResponse>()?)
+        let request = self
+            .get(url)
+            .query(&request)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<ListStreamsResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn create_stream(
@@ -363,21 +492,36 @@ impl BasinClient {
         request: CreateStreamRequest,
         idempotency_token: String,
     ) -> Result<StreamInfo, ApiError> {
+        let ctx = ErrorContext::stream(
+            "create_stream",
+            self.name.as_ref(),
+            request.stream.as_ref(),
+            false,
+        );
         let url = self.uri("v1/streams");
         let request = self
             .post(url)
             .header(S2_REQUEST_TOKEN, idempotency_token)
             .json(&request)
-            .build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<StreamInfo>()?)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<StreamInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, ApiError> {
+        let ctx = ErrorContext::stream("get_stream_config", self.name.as_ref(), name.as_ref(), true);
         let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
-        let request = self.get(url).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<StreamConfig>()?)
+        let request = self
+            .get(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<StreamConfig>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn reconfigure_stream(
@@ -385,10 +529,22 @@ impl BasinClient {
         name: StreamName,
         config: StreamReconfiguration,
     ) -> Result<StreamConfig, ApiError> {
+        let ctx = ErrorContext::stream(
+            "reconfigure_stream",
+            self.name.as_ref(),
+            name.as_ref(),
+            false,
+        );
         let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
-        let request = self.patch(url).json(&config).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<StreamConfig>()?)
+        let request = self
+            .patch(url)
+            .json(&config)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<StreamConfig>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn ensure_stream(
@@ -396,15 +552,19 @@ impl BasinClient {
         name: StreamName,
         config: Option<StreamConfig>,
     ) -> Result<ProvisionResult<StreamInfo>, ApiError> {
+        let ctx = ErrorContext::stream("ensure_stream", self.name.as_ref(), name.as_ref(), false);
         let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         let request = match config {
-            Some(body) => self.put(url).json(&body).build()?,
-            None => self.put(url).build()?,
-        };
-        let response = self.request(request).send().await?;
+            Some(body) => self.put(url).json(&body).build(),
+            None => self.put(url).build(),
+        }
+        .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
         let status = response.status();
         let provision_result_header_value = provision_result_header_value(&response);
-        let info = response.json::<StreamInfo>()?;
+        let info = response
+            .json::<StreamInfo>()
+            .map_err(|e| ApiError::from_http(e, ctx))?;
         Ok(provision_result_from_parts(
             status,
             provision_result_header_value.as_deref(),
@@ -413,9 +573,13 @@ impl BasinClient {
     }
 
     pub async fn delete_stream(&self, name: StreamName) -> Result<(), ApiError> {
+        let ctx = ErrorContext::stream("delete_stream", self.name.as_ref(), name.as_ref(), false);
         let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
-        let request = self.delete(url).build()?;
-        self.request(request)
+        let request = self
+            .delete(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        self.request(request, ctx)
             .send()
             .await
             .ignore_not_found_code("stream_not_found")?;
@@ -423,13 +587,19 @@ impl BasinClient {
     }
 
     pub async fn check_tail(&self, name: &StreamName) -> Result<TailResponse, ApiError> {
+        let ctx = ErrorContext::stream("check_tail", self.name.as_ref(), name.as_ref(), true);
         let url = self.uri(format!(
             "v1/streams/{}/records/tail",
             urlencoding::encode(name)
         ));
-        let request = self.get(url).build()?;
-        let response = self.request(request).send().await?;
-        Ok(response.json::<TailResponse>()?)
+        let request = self
+            .get(url)
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
+        let response = self.request(request, ctx.clone()).send().await?;
+        response
+            .json::<TailResponse>()
+            .map_err(|e| ApiError::from_http(e, ctx))
     }
 
     pub async fn append(
@@ -440,33 +610,31 @@ impl BasinClient {
         stream_config: Option<&StreamConfig>,
         append_retry_policy: AppendRetryPolicy,
     ) -> Result<AppendAck, ApiError> {
+        let ctx = ErrorContext::stream("append", self.name.as_ref(), name.as_ref(), false);
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
         let mut request = self
             .post(url)
             .header(CONTENT_TYPE, CONTENT_TYPE_PROTO)
             .header(ACCEPT, ACCEPT_PROTO)
             .body(input.encode_to_vec())
-            .build()?;
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
         set_encryption_header(&mut request, encryption);
         set_stream_config_header(&mut request, stream_config);
         let response = self
-            .request(request)
+            .request(request, ctx.clone())
             .with_append_retry_policy(append_retry_policy)
-            .error_handler(|status, response| {
-                if status == StatusCode::PRECONDITION_FAILED {
-                    Err(ApiError::AppendConditionFailed(
-                        response.json::<MaybeKnown<AppendConditionFailed>>()?,
-                    ))
-                } else {
-                    Err(ApiError::Server(
-                        status,
-                        response.json::<ServerErrorBody>()?,
-                    ))
-                }
+            .error_handler(|status, response, ctx| {
+                Err(parse_append_error_response(
+                    status,
+                    &response.into_bytes(),
+                    ctx,
+                ))
             })
             .send()
             .await?;
-        Ok(AppendAck::decode(response.into_bytes())?)
+        AppendAck::decode(response.into_bytes())
+            .map_err(|e| ApiError::Protocol(ProtocolError::new(format!("protobuf decode: {e}"), ctx)))
     }
 
     pub async fn read(
@@ -477,6 +645,7 @@ impl BasinClient {
         encryption: Option<&EncryptionKey>,
         stream_config: Option<&StreamConfig>,
     ) -> Result<ReadBatch, ApiError> {
+        let ctx = ErrorContext::stream("read", self.name.as_ref(), name.as_ref(), true);
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
         let mut builder = self
             .get(url)
@@ -484,18 +653,30 @@ impl BasinClient {
             .query(&start)
             .query(&end);
         if let Some(wait) = end.wait {
-            builder =
-                builder.timeout(self.client.request_timeout + Duration::from_secs(wait.into()));
+            builder = builder.timeout(
+                self.client
+                    .request_timeout
+                    .saturating_add(Duration::from_secs(wait.into())),
+            );
         }
-        let mut request = builder.build()?;
+        let mut request = builder
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
         set_encryption_header(&mut request, encryption);
         set_stream_config_header(&mut request, stream_config);
         let response = self
-            .request(request)
-            .error_handler(read_response_error_handler)
+            .request(request, ctx.clone())
+            .error_handler(|status, response, ctx| {
+                Err(parse_read_error_response(
+                    status,
+                    &response.into_bytes(),
+                    ctx,
+                ))
+            })
             .send()
             .await?;
-        Ok(ReadBatch::decode(response.into_bytes())?)
+        ReadBatch::decode(response.into_bytes())
+            .map_err(|e| ApiError::Protocol(ProtocolError::new(format!("protobuf decode: {e}"), ctx)))
     }
 
     pub async fn append_session<I>(
@@ -510,6 +691,7 @@ impl BasinClient {
     where
         I: Stream<Item = AppendInput> + Send + 'static,
     {
+        let ctx = ErrorContext::stream("append_session", self.name.as_ref(), name.as_ref(), false);
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
         let compression = self.config.compression.into();
@@ -532,11 +714,19 @@ impl BasinClient {
             .timeout(self.client.request_timeout);
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
-        let mut request = request_builder.build()?;
+        let mut request = request_builder
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
         set_encryption_header(&mut request, encryption);
         set_stream_config_header(&mut request, stream_config);
-        let (response, access_token) = self.client.init_streaming_authorized(request).await?;
-        let response = match response.into_result().await {
+        let (response, access_token) = self
+            .client
+            .init_streaming_authorized(request, ctx.clone())
+            .await?;
+        let response = match response
+            .into_result(TerminalKind::Append, ctx.clone())
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 self.client
@@ -554,7 +744,7 @@ impl BasinClient {
             let mut advice_seen = false;
 
             while let Some(chunk) = bytes_stream.next().await {
-                let chunk = chunk?;
+                let chunk = chunk.map_err(|e| ApiError::from_http(e, ctx.clone()))?;
                 buffer.extend_from_slice(&chunk);
 
                 loop {
@@ -565,10 +755,19 @@ impl BasinClient {
                                 poison_handle.poison();
                                 reconnect.advise();
                             }
-                            yield msg.try_into_proto()?;
+                            yield msg.try_into_proto().map_err(|e| {
+                                ApiError::Protocol(ProtocolError::new(
+                                    format!("protobuf decode: {e}"),
+                                    ctx.clone(),
+                                ))
+                            })?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
-                            let error: ApiError = msg.into();
+                            let error = ApiError::from_terminal_message(
+                                msg,
+                                TerminalKind::Append,
+                                ctx.clone(),
+                            );
                             if error.is_server_draining() {
                                 poison_handle.poison();
                             }
@@ -579,14 +778,19 @@ impl BasinClient {
                             Err::<(), ApiError>(error)?;
                         }
                         Ok(None) => break,
-                        Err(err) => Err(err)?,
+                        Err(err) => Err(ApiError::Protocol(ProtocolError::new(
+                            format!("s2s frame decode: {err}"),
+                            ctx.clone(),
+                        )))?,
                     }
                 }
             }
             if !buffer.is_empty() {
-                Err(ClientError::UnexpectedEof(
-                    format!("not all bytes were consumed from the buffer, {} remaining", buffer.len()),
-                ))?;
+                Err(ApiError::ConnectionLost(ConnectionLostError::new(
+                    format!("truncated s2s frame at end of stream ({} bytes remaining)", buffer.len()),
+                    false,
+                    ctx.clone(),
+                )))?;
             }
         }))
     }
@@ -600,6 +804,7 @@ impl BasinClient {
         stream_config: Option<&StreamConfig>,
         reconnect: ReconnectAdvice,
     ) -> Result<Streaming<ReadBatch>, ApiError> {
+        let ctx = ErrorContext::stream("read_session", self.name.as_ref(), name.as_ref(), true);
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
         let mut request_builder = self
@@ -611,11 +816,19 @@ impl BasinClient {
             .timeout(self.client.request_timeout);
         request_builder =
             add_basin_header_if_required(request_builder, &self.config.endpoints, &self.name);
-        let mut request = request_builder.build()?;
+        let mut request = request_builder
+            .build()
+            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
         set_encryption_header(&mut request, encryption);
         set_stream_config_header(&mut request, stream_config);
-        let (response, access_token) = self.client.init_streaming_authorized(request).await?;
-        let response = match response.into_result().await {
+        let (response, access_token) = self
+            .client
+            .init_streaming_authorized(request, ctx.clone())
+            .await?;
+        let response = match response
+            .into_result(TerminalKind::Read, ctx.clone())
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 self.client
@@ -633,7 +846,7 @@ impl BasinClient {
             let mut advice_seen = false;
 
             while let Some(chunk) = bytes_stream.next().await {
-                let chunk = chunk?;
+                let chunk = chunk.map_err(|e| ApiError::from_http(e, ctx.clone()))?;
                 buffer.extend_from_slice(&chunk);
 
                 loop {
@@ -644,10 +857,19 @@ impl BasinClient {
                                 poison_handle.poison();
                                 reconnect.advise();
                             }
-                            yield msg.try_into_proto()?;
+                            yield msg.try_into_proto().map_err(|e| {
+                                ApiError::Protocol(ProtocolError::new(
+                                    format!("protobuf decode: {e}"),
+                                    ctx.clone(),
+                                ))
+                            })?;
                         }
                         Ok(Some(SessionMessage::Terminal(msg))) => {
-                            let error: ApiError = msg.into();
+                            let error = ApiError::from_terminal_message(
+                                msg,
+                                TerminalKind::Read,
+                                ctx.clone(),
+                            );
                             if error.is_server_draining() {
                                 poison_handle.poison();
                             }
@@ -658,31 +880,78 @@ impl BasinClient {
                             Err::<(), ApiError>(error)?;
                         }
                         Ok(None) => break,
-                        Err(err) => Err(err)?,
+                        Err(err) => Err(ApiError::Protocol(ProtocolError::new(
+                            format!("s2s frame decode: {err}"),
+                            ctx.clone(),
+                        )))?,
                     }
                 }
             }
             if !buffer.is_empty() {
-                Err(ClientError::UnexpectedEof(
-                    format!("not all bytes were consumed from the buffer, {} remaining", buffer.len()),
-                ))?;
+                Err(ApiError::ConnectionLost(ConnectionLostError::new(
+                    format!("truncated s2s frame at end of stream ({} bytes remaining)", buffer.len()),
+                    false,
+                    ctx.clone(),
+                )))?;
             }
         }))
     }
 }
 
-fn read_response_error_handler(
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TerminalKind {
+    Append,
+    Read,
+}
+
+#[derive(serde::Deserialize)]
+struct AppendConditionFailedBody {
+    seq_num_mismatch: Option<u64>,
+    fencing_token_mismatch: Option<String>,
+}
+
+pub(crate) fn parse_append_error_response(
     status: StatusCode,
-    response: UnaryResponse,
-) -> Result<UnaryResponse, ApiError> {
-    if status == StatusCode::RANGE_NOT_SATISFIABLE {
-        Err(ApiError::ReadUnwritten(response.json::<TailResponse>()?))
-    } else {
-        Err(ApiError::Server(
-            status,
-            response.json::<ServerErrorBody>()?,
-        ))
+    body: &[u8],
+    context: ErrorContext,
+) -> ApiError {
+    if status == StatusCode::PRECONDITION_FAILED
+        && let Ok(parsed) = serde_json::from_slice::<AppendConditionFailedBody>(body)
+    {
+        match (parsed.seq_num_mismatch, parsed.fencing_token_mismatch) {
+            (Some(assignable_seq_num), None) => {
+                let server = ServerError::from_response(status, body, context);
+                return ApiError::SeqNumMismatch(SeqNumMismatchError::new(
+                    assignable_seq_num,
+                    server,
+                ));
+            }
+            (None, Some(token)) => {
+                let server = ServerError::from_response(status, body, context);
+                return ApiError::FencingTokenMismatch(FencingTokenMismatchError::new(
+                    FencingToken::from_server(token),
+                    server,
+                ));
+            }
+            _ => {}
+        }
     }
+    ApiError::Server(ServerError::from_response(status, body, context))
+}
+
+pub(crate) fn parse_read_error_response(
+    status: StatusCode,
+    body: &[u8],
+    context: ErrorContext,
+) -> ApiError {
+    let context = context.into_read_only();
+    if status == StatusCode::RANGE_NOT_SATISFIABLE
+        && let Ok(tail) = serde_json::from_slice::<TailResponse>(body)
+    {
+        let server = ServerError::from_response(status, body, context);
+        return ApiError::ReadUnwritten(ReadUnwrittenError::new(tail.tail.into(), server));
+    }
+    ApiError::Server(ServerError::from_response(status, body, context))
 }
 
 impl Deref for BasinClient {
@@ -703,129 +972,179 @@ pub(crate) struct ServerErrorBody {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ApiError {
     #[error(transparent)]
-    Client(#[from] ClientError),
+    Server(#[from] ServerError),
     #[error(transparent)]
-    ProtoDecode(#[from] prost::DecodeError),
+    SeqNumMismatch(#[from] SeqNumMismatchError),
     #[error(transparent)]
-    TerminalDecode(#[from] TerminalDecodeError),
+    FencingTokenMismatch(#[from] FencingTokenMismatchError),
+    #[error(transparent)]
+    ReadUnwritten(#[from] ReadUnwrittenError),
     #[error(transparent)]
     Validation(#[from] ValidationError),
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
+    #[error(transparent)]
+    ConnectionLost(#[from] ConnectionLostError),
+    #[error(transparent)]
+    Timeout(#[from] TimeoutError),
+    #[error(transparent)]
+    Protocol(#[from] ProtocolError),
+    #[error(transparent)]
+    ClientClosed(#[from] ClientClosedError),
+    #[error(transparent)]
+    Aborted(#[from] AbortedError),
     #[cfg(feature = "_hidden")]
     #[error("access token provider failed: {0}")]
     AccessTokenProvider(crate::types::AccessTokenProviderError),
-    #[error(transparent)]
-    Compression(#[from] std::io::Error),
-    #[error("append condition check failed")]
-    AppendConditionFailed(MaybeKnown<AppendConditionFailed>),
     #[error(
         "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
     )]
-    IndefiniteFailure {
+    IndefiniteAppend {
         #[source]
         final_attempt_error: Box<Self>,
     },
-    #[error("read from an unwritten position")]
-    ReadUnwritten(TailResponse),
-    #[error("{1}")]
-    Server(StatusCode, ServerErrorBody),
 }
 
 impl ApiError {
+    pub(crate) fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
+        classify_http_error(err, context)
+    }
+
+    pub(crate) fn from_terminal_message(
+        msg: TerminalMessage,
+        kind: TerminalKind,
+        context: ErrorContext,
+    ) -> Self {
+        let status = match StatusCode::from_u16(msg.status) {
+            Ok(status) if status.as_u16() >= 300 => status,
+            Ok(status) => {
+                return Self::Protocol(ProtocolError::new(
+                    format!("unexpected non-error status code in terminal frame: {status}"),
+                    context,
+                ));
+            }
+            Err(err) => {
+                return Self::Protocol(ProtocolError::new(
+                    format!("invalid status code in terminal frame: {err}"),
+                    context,
+                ));
+            }
+        };
+        match kind {
+            TerminalKind::Append => parse_append_error_response(status, &msg.body, context),
+            TerminalKind::Read => parse_read_error_response(status, &msg.body, context),
+        }
+    }
+
+    pub(crate) fn with_context(self, context: &ErrorContext) -> Self {
+        match self {
+            Self::Server(e) => Self::Server(e.with_context(context)),
+            Self::SeqNumMismatch(e) => Self::SeqNumMismatch(e.with_context(context)),
+            Self::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e.with_context(context)),
+            Self::ReadUnwritten(e) => Self::ReadUnwritten(e.with_context(context)),
+            Self::Validation(e) => Self::Validation(e),
+            Self::Connect(e) => Self::Connect(e.with_context(context)),
+            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_context(context)),
+            Self::Timeout(e) => Self::Timeout(e.with_context(context)),
+            Self::Protocol(e) => Self::Protocol(e.with_context(context)),
+            Self::ClientClosed(e) => Self::ClientClosed(e.with_context(context)),
+            Self::Aborted(e) => Self::Aborted(e.with_context(context)),
+            #[cfg(feature = "_hidden")]
+            Self::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
+            Self::IndefiniteAppend {
+                final_attempt_error,
+            } => Self::IndefiniteAppend {
+                final_attempt_error: Box::new(final_attempt_error.with_context(context)),
+            },
+        }
+    }
+
+    pub(crate) fn into_read_only(self) -> Self {
+        match self {
+            Self::Server(e) => Self::Server(e.into_read_only()),
+            Self::SeqNumMismatch(e) => Self::SeqNumMismatch(e),
+            Self::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e),
+            Self::ReadUnwritten(e) => Self::ReadUnwritten(e),
+            Self::Validation(e) => Self::Validation(e),
+            Self::Connect(e) => Self::Connect(e.into_read_only()),
+            Self::ConnectionLost(e) => Self::ConnectionLost(e.into_read_only()),
+            Self::Timeout(e) => Self::Timeout(e.into_read_only()),
+            Self::Protocol(e) => Self::Protocol(e.into_read_only()),
+            Self::ClientClosed(e) => Self::ClientClosed(e),
+            Self::Aborted(e) => Self::Aborted(e.into_read_only()),
+            #[cfg(feature = "_hidden")]
+            Self::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
+            Self::IndefiniteAppend {
+                final_attempt_error,
+            } => Self::IndefiniteAppend {
+                final_attempt_error: Box::new(final_attempt_error.into_read_only()),
+            },
+        }
+    }
+
+    pub(crate) fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
+        if !unsent {
+            return self;
+        }
+        match self {
+            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
+            other => other,
+        }
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Server(status, err_resp) => server_error_is_retryable(*status, &err_resp.code),
-            Self::Client(err) => err.is_retryable(),
-            Self::IndefiniteFailure {
+            Self::Server(e) => e.is_retryable(),
+            Self::SeqNumMismatch(e) => e.is_retryable(),
+            Self::FencingTokenMismatch(e) => e.is_retryable(),
+            Self::ReadUnwritten(e) => e.is_retryable(),
+            Self::Validation(_) => false,
+            Self::Connect(e) => e.is_retryable(),
+            Self::ConnectionLost(e) => e.is_retryable(),
+            Self::Timeout(e) => e.is_retryable(),
+            Self::Protocol(e) => e.is_retryable(),
+            Self::ClientClosed(e) => e.is_retryable(),
+            Self::Aborted(e) => e.is_retryable(),
+            Self::IndefiniteAppend {
                 final_attempt_error,
             } => final_attempt_error.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
-            _ => false,
         }
     }
 
     pub(crate) fn is_server_draining(&self) -> bool {
-        matches!(
-            self,
-            Self::Server(StatusCode::SERVICE_UNAVAILABLE, response)
-                if response.code == "server_draining"
-        )
+        matches!(self, Self::Server(e) if e.is_server_draining())
     }
 
     pub(crate) fn is_authentication_error(&self) -> bool {
-        matches!(
-            self,
-            Self::Server(StatusCode::UNAUTHORIZED, response) if response.code == "authn"
-        )
+        matches!(self, Self::Server(e) if e.is_authentication_error())
     }
 }
 
 impl AppendRetryError for ApiError {
     fn has_no_side_effects(&self) -> bool {
         match self {
-            Self::Server(status, err_resp) => {
-                server_error_has_no_side_effects(*status, &err_resp.code)
-            }
-            Self::Client(err) => err.has_no_side_effects(),
-            Self::AppendConditionFailed(_) | Self::Validation(_) => true,
+            Self::Server(e) => e.has_no_side_effects(),
+            Self::SeqNumMismatch(e) => e.has_no_side_effects(),
+            Self::FencingTokenMismatch(e) => e.has_no_side_effects(),
+            Self::ReadUnwritten(e) => e.has_no_side_effects(),
+            Self::Validation(_) => true,
+            Self::Connect(e) => e.has_no_side_effects(),
+            Self::ConnectionLost(e) => e.has_no_side_effects(),
+            Self::Timeout(e) => e.has_no_side_effects(),
+            Self::Protocol(e) => e.has_no_side_effects(),
+            Self::ClientClosed(e) => e.has_no_side_effects(),
+            Self::Aborted(e) => e.has_no_side_effects(),
+            Self::IndefiniteAppend { .. } => false,
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
-            _ => false,
         }
     }
 
     fn into_indefinite_failure(self) -> Self {
-        Self::IndefiniteFailure {
+        Self::IndefiniteAppend {
             final_attempt_error: Box::new(self),
-        }
-    }
-}
-
-impl From<client::HttpError> for ApiError {
-    fn from(err: client::HttpError) -> Self {
-        ClientError::from(err).into()
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum TerminalDecodeError {
-    #[error("invalid status code: {0}")]
-    InvalidStatusCode(#[from] http::status::InvalidStatusCode),
-    #[error("failed to parse error response: {0}")]
-    JsonDecode(#[from] serde_json::Error),
-}
-
-impl From<TerminalMessage> for ApiError {
-    fn from(msg: TerminalMessage) -> Self {
-        let status = match StatusCode::from_u16(msg.status) {
-            Ok(status) => status,
-            Err(err) => return ApiError::TerminalDecode(err.into()),
-        };
-        if status == StatusCode::PRECONDITION_FAILED {
-            let condition_failed =
-                match serde_json::from_slice::<MaybeKnown<AppendConditionFailed>>(&msg.body) {
-                    Ok(condition_failed) => condition_failed,
-                    Err(err) => {
-                        return ApiError::TerminalDecode(err.into());
-                    }
-                };
-            ApiError::AppendConditionFailed(condition_failed)
-        } else if status == StatusCode::RANGE_NOT_SATISFIABLE {
-            let tail = match serde_json::from_slice::<TailResponse>(&msg.body) {
-                Ok(tail) => tail,
-                Err(err) => {
-                    return ApiError::TerminalDecode(err.into());
-                }
-            };
-            ApiError::ReadUnwritten(tail)
-        } else {
-            let response = match serde_json::from_slice::<ServerErrorBody>(&msg.body) {
-                Ok(response) => response,
-                Err(err) => {
-                    return ApiError::TerminalDecode(err.into());
-                }
-            };
-            ApiError::Server(status, response)
         }
     }
 }
@@ -868,7 +1187,9 @@ impl BaseClient {
             config.rustls_crypto_provider.clone(),
         )
         .map_err(|e| {
-            ClientError::Configuration(format!("failed to initialize TLS connector: {e}"))
+            ApiError::Validation(ValidationError(format!(
+                "failed to initialize TLS connector: {e}"
+            )))
         })?;
         Self::init_with_connector(config, connector)
     }
@@ -972,33 +1293,39 @@ impl BaseClient {
     async fn init_streaming_authorized(
         &self,
         request: client::Request,
+        context: ErrorContext,
     ) -> Result<(StreamingResponse, Option<String>), ApiError> {
         self.init_streaming(request)
             .await
             .map(|response| (response, None))
-            .map_err(ApiError::from)
+            .map_err(|e| ApiError::from_http(e, context))
     }
 
     #[cfg(feature = "_hidden")]
     async fn init_streaming_authorized(
         &self,
         mut request: client::Request,
+        context: ErrorContext,
     ) -> Result<(StreamingResponse, Option<String>), ApiError> {
         let access_token = self.authorize(&mut request).await?;
-        let response = self.init_streaming(request).await.map_err(ApiError::from)?;
+        let response = self
+            .init_streaming(request)
+            .await
+            .map_err(|e| ApiError::from_http(e, context))?;
         Ok((response, access_token))
     }
 
     async fn execute_unary(
         &self,
         mut request: client::Request,
+        context: ErrorContext,
     ) -> Result<(UnaryResponse, Option<String>), ApiError> {
         let access_token = self.authorize(&mut request).await?;
         let response = self
             .client
             .execute_unary(request)
             .await
-            .map_err(ApiError::from)?;
+            .map_err(|e| ApiError::from_http(e, context))?;
         Ok((response, access_token))
     }
 
@@ -1032,10 +1359,11 @@ impl BaseClient {
         }
     }
 
-    fn request(&self, request: client::Request) -> RequestBuilder<'_> {
+    fn request(&self, request: client::Request, context: ErrorContext) -> RequestBuilder<'_> {
         RequestBuilder {
             client: self,
             request,
+            context,
             retry_enabled: true,
             append_retry_policy: None,
             frame_signal: None,
@@ -1068,12 +1396,16 @@ pub fn retry_builder(config: &RetryConfig) -> RetryBackoffBuilder {
         .with_max_retries(config.max_retries())
 }
 
-type ErrorHandlerFn =
-    Box<dyn Fn(StatusCode, UnaryResponse) -> Result<UnaryResponse, ApiError> + Send + Sync>;
+type ErrorHandlerFn = Box<
+    dyn Fn(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>
+        + Send
+        + Sync,
+>;
 
 struct RequestBuilder<'a> {
     client: &'a BaseClient,
     request: client::Request,
+    context: ErrorContext,
     retry_enabled: bool,
     append_retry_policy: Option<AppendRetryPolicy>,
     frame_signal: Option<FrameSignal>,
@@ -1082,20 +1414,19 @@ struct RequestBuilder<'a> {
 
 impl<'a> RequestBuilder<'a> {
     fn with_append_retry_policy(self, policy: AppendRetryPolicy) -> Self {
-        let frame_signal = match policy {
-            AppendRetryPolicy::NoSideEffects => Some(FrameSignal::new()),
-            AppendRetryPolicy::All => None,
-        };
         Self {
             append_retry_policy: Some(policy),
-            frame_signal,
+            frame_signal: Some(FrameSignal::new()),
             ..self
         }
     }
 
     fn error_handler<F>(self, handler: F) -> Self
     where
-        F: Fn(StatusCode, UnaryResponse) -> Result<UnaryResponse, ApiError> + Send + Sync + 'static,
+        F: Fn(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>
+            + Send
+            + Sync
+            + 'static,
     {
         Self {
             error_handler: Some(Box::new(handler)),
@@ -1110,8 +1441,12 @@ impl<'a> RequestBuilder<'a> {
             .retry_enabled
             .then(|| self.client.retry_builder.build());
         let mut prior_uncertainty = false;
+        let mut attempts: u32 = 0;
 
         loop {
+            attempts += 1;
+            let attempt_ctx = self.context.clone().with_attempts(attempts);
+
             if let Some(ref signal) = self.frame_signal {
                 signal.reset();
             }
@@ -1119,22 +1454,28 @@ impl<'a> RequestBuilder<'a> {
             let attempt_request = {
                 let mut r = request.try_clone().expect("body should not be a stream");
                 if let Some(ref signal) = self.frame_signal {
-                    r = r.compress().await.map_err(ApiError::from)?;
+                    r = r
+                        .compress()
+                        .await
+                        .map_err(|e| ApiError::from_http(e, attempt_ctx.clone()))?;
                     r = r.with_monitored_body(signal.clone());
                 }
                 r
             };
 
-            let response = self.client.execute_unary(attempt_request).await;
+            let response = self
+                .client
+                .execute_unary(attempt_request, attempt_ctx.clone())
+                .await;
 
             let (err, retry_after, access_token) = match response {
                 Ok((resp, access_token)) => {
                     let retry_after = parse_retry_after_ms(resp.headers());
 
                     let result = if let Some(ref handler) = self.error_handler {
-                        resp.into_result_with_handler(handler)
+                        resp.into_result_with_handler(attempt_ctx.clone(), handler)
                     } else {
-                        resp.into_result()
+                        resp.into_result(attempt_ctx.clone())
                     };
 
                     match result {
@@ -1181,6 +1522,10 @@ impl<'a> RequestBuilder<'a> {
                     retries_exhausted = retry_backoff.as_ref().is_none_or(|b| b.is_exhausted()),
                     "not retrying request"
                 );
+                let unsent = self.frame_signal.as_ref().is_some_and(|s| !s.is_signalled());
+                let err = err
+                    .mark_unsent_connection_lost(unsent)
+                    .with_context(&attempt_ctx);
                 return Err(err.with_prior_uncertainty(prior_uncertainty));
             }
         }
@@ -1239,67 +1584,80 @@ fn base_url(endpoints: &S2Endpoints, kind: ClientKind) -> Uri {
 }
 
 trait UnaryResult {
-    fn into_result(self) -> Result<UnaryResponse, ApiError>;
-    fn into_result_with_handler<F>(self, handler: F) -> Result<UnaryResponse, ApiError>
+    fn into_result(self, context: ErrorContext) -> Result<UnaryResponse, ApiError>;
+    fn into_result_with_handler<F>(
+        self,
+        context: ErrorContext,
+        handler: F,
+    ) -> Result<UnaryResponse, ApiError>
     where
-        F: FnOnce(StatusCode, UnaryResponse) -> Result<UnaryResponse, ApiError>;
+        F: FnOnce(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>;
 }
 
 impl UnaryResult for UnaryResponse {
-    fn into_result(self) -> Result<UnaryResponse, ApiError> {
+    fn into_result(self, context: ErrorContext) -> Result<UnaryResponse, ApiError> {
         let status = self.status();
         if status.is_success() {
             Ok(self)
         } else {
-            Err(ApiError::Server(status, self.json::<ServerErrorBody>()?))
+            Err(ApiError::Server(ServerError::from_response(
+                status,
+                &self.into_bytes(),
+                context,
+            )))
         }
     }
 
-    fn into_result_with_handler<F>(self, handler: F) -> Result<UnaryResponse, ApiError>
+    fn into_result_with_handler<F>(
+        self,
+        context: ErrorContext,
+        handler: F,
+    ) -> Result<UnaryResponse, ApiError>
     where
-        F: FnOnce(StatusCode, UnaryResponse) -> Result<UnaryResponse, ApiError>,
+        F: FnOnce(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>,
     {
         let status = self.status();
         if status.is_success() {
             Ok(self)
         } else {
-            handler(status, self)
+            handler(status, self, context)
         }
     }
 }
 
 #[async_trait]
 trait StreamingResult {
-    async fn into_result(self) -> Result<StreamingResponse, ApiError>;
+    async fn into_result(
+        self,
+        kind: TerminalKind,
+        context: ErrorContext,
+    ) -> Result<StreamingResponse, ApiError>;
 }
 
 #[async_trait]
 impl StreamingResult for StreamingResponse {
-    async fn into_result(self) -> Result<StreamingResponse, ApiError> {
+    async fn into_result(
+        self,
+        kind: TerminalKind,
+        context: ErrorContext,
+    ) -> Result<StreamingResponse, ApiError> {
         if self.status().is_success() {
             return Ok(self);
         }
 
         let status = self.status();
-        let (bytes, poison_handle) = self.into_bytes_with_poison_handle().await?;
-        if status == StatusCode::RANGE_NOT_SATISFIABLE
-            && let Ok(tail) = serde_json::from_slice::<TailResponse>(&bytes)
-        {
-            return Err(ApiError::ReadUnwritten(tail));
+        let (bytes, poison_handle) = self
+            .into_bytes_with_poison_handle()
+            .await
+            .map_err(|e| ApiError::from_http(e, context.clone()))?;
+        let error = match kind {
+            TerminalKind::Append => parse_append_error_response(status, &bytes, context),
+            TerminalKind::Read => parse_read_error_response(status, &bytes, context),
+        };
+        if error.is_server_draining() {
+            poison_handle.poison();
         }
-        match serde_json::from_slice::<ServerErrorBody>(&bytes) {
-            Ok(response) => {
-                let error = ApiError::Server(status, response);
-                if error.is_server_draining() {
-                    poison_handle.poison();
-                }
-                Err(error)
-            }
-            Err(error) => Err(ApiError::Client(ClientError::ResponseDecode(format!(
-                "could not decode server error {status}: {error}; body: {}",
-                String::from_utf8_lossy(&bytes),
-            )))),
-        }
+        Err(error)
     }
 }
 
@@ -1333,8 +1691,9 @@ impl IgnoreNotFoundCode for Result<UnaryResponse, ApiError> {
     fn ignore_not_found_code(self, expected_code: &str) -> Result<(), ApiError> {
         match self {
             Ok(_) => Ok(()),
-            Err(ApiError::Server(StatusCode::NOT_FOUND, ref body))
-                if body.code == expected_code =>
+            Err(ApiError::Server(ref server))
+                if server.status == StatusCode::NOT_FOUND
+                    && server.code.as_deref() == Some(expected_code) =>
             {
                 Ok(())
             }
@@ -1718,77 +2077,86 @@ mod tests {
         let error =
             AppendError::from(server_error(status, code).with_prior_uncertainty(prior_uncertainty));
         assert_eq!(
-            matches!(error, AppendError::IndefiniteFailure { .. }),
+            matches!(error, AppendError::IndefiniteAppend(_)),
             wrapped
         );
-        let server = error.request_error().unwrap().server_error().unwrap();
-        assert_eq!((server.status, server.code.as_str()), (status, code));
-        assert_eq!(server.message, "test");
-        assert_eq!(error.is_retryable(), server.is_retryable());
-        assert_eq!(
-            error.has_no_side_effects(),
-            !wrapped && server.has_no_side_effects()
-        );
         if wrapped {
+            assert!(error.server_error().is_none());
+            assert!(!error.has_no_side_effects());
             let latest = error
                 .source()
                 .unwrap()
-                .downcast_ref::<Box<AppendError>>()
+                .downcast_ref::<AppendError>()
                 .unwrap();
             assert!(latest.has_no_side_effects());
-            assert_eq!(
-                latest.request_error().unwrap().server_error().unwrap().code,
-                code
-            );
+            let server = latest.server_error().unwrap();
+            assert_eq!((server.status, server.code.as_deref()), (status, Some(code)));
+            assert_eq!(server.message, "test");
+            assert_eq!(error.is_retryable(), server.is_retryable());
             assert_eq!(
                 error.to_string(),
                 format!(
                     "append may have taken effect in an earlier attempt; final attempt failed: {latest}"
                 )
             );
+        } else {
+            let server = error.server_error().unwrap();
+            assert_eq!((server.status, server.code.as_deref()), (status, Some(code)));
+            assert_eq!(server.message, "test");
+            assert_eq!(error.is_retryable(), server.is_retryable());
+            assert_eq!(error.has_no_side_effects(), server.has_no_side_effects());
         }
     }
 
     #[rstest::rstest]
     #[case::condition_failed(
-        ApiError::AppendConditionFailed(AppendConditionFailed::SeqNumMismatch(42).into()),
-        "sequence number mismatch, expected: 42"
+        parse_append_error_response(
+            StatusCode::PRECONDITION_FAILED,
+            br#"{"seq_num_mismatch":42}"#,
+            ErrorContext::default(),
+        ),
+        "assignable_seq_num=42"
     )]
     #[case::unrecognized_condition(
-        ApiError::from(TerminalMessage {
-            status: 412,
-            body: bytes::Bytes::from_static(br#"{"some_future_mismatch":7}"#),
-        }),
-        "unrecognized condition: some_future_mismatch"
+        ApiError::from_terminal_message(
+            TerminalMessage {
+                status: 412,
+                body: bytes::Bytes::from_static(br#"{"some_future_mismatch":7}"#),
+            },
+            TerminalKind::Append,
+            ErrorContext::default(),
+        ),
+        r#"{"some_future_mismatch":7}"#
     )]
     #[case::invalid_access_token(
         ApiError::Validation(ValidationError("invalid access token: invalid header".to_owned())),
         "invalid access token: invalid header"
     )]
     #[test]
-    fn unary_append_wraps_definite_terminal_errors(#[case] error: ApiError, #[case] message: &str) {
+    fn unary_append_wraps_definite_terminal_errors(
+        #[case] error: ApiError,
+        #[case] expected_substr: &str,
+    ) {
         assert!(error.has_no_side_effects());
         let error = AppendError::from(error.with_prior_uncertainty(true));
-        assert!(matches!(error, AppendError::IndefiniteFailure { .. }));
+        assert!(matches!(error, AppendError::IndefiniteAppend(_)));
         assert!(!error.has_no_side_effects());
         assert!(!error.is_retryable());
+        assert!(error.server_error().is_none());
         let latest = error
             .source()
             .unwrap()
-            .downcast_ref::<Box<AppendError>>()
+            .downcast_ref::<AppendError>()
             .unwrap();
         assert!(latest.has_no_side_effects());
-        assert_eq!(latest.to_string(), message);
+        assert!(
+            latest.to_string().contains(expected_substr),
+            "got: {latest}"
+        );
     }
 
     fn server_error(status: StatusCode, code: &str) -> ApiError {
-        ApiError::Server(
-            status,
-            ServerErrorBody {
-                code: code.to_owned(),
-                message: "test".to_owned(),
-            },
-        )
+        ApiError::Server(ServerError::new_for_test(status, Some(code), "test"))
     }
 
     #[test]
@@ -1908,7 +2276,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let response = client.request(request).send().await.unwrap();
+        let response = client
+            .request(request, ErrorContext::default())
+            .send()
+            .await
+            .unwrap();
 
         assert_eq!(response.into_bytes(), bytes::Bytes::from_static(b"ok"));
         assert_eq!(
@@ -1964,12 +2336,16 @@ mod tests {
             .parse::<Uri>()
             .unwrap();
         let request = client.get(url).build().unwrap();
-        let err: ApiError = match client.request(request).send().await {
+        let err: ApiError = match client
+            .request(request, ErrorContext::default())
+            .send()
+            .await
+        {
             Err(e) => e,
             Ok(_) => panic!("should fail with DNS error"),
         };
         assert!(
-            matches!(&err, ApiError::Client(ClientError::Connect(_))),
+            matches!(&err, ApiError::Connect(_)),
             "expected a connect error, got: {err}"
         );
     }
@@ -2043,21 +2419,23 @@ mod tests {
             Err(server_error(StatusCode::NOT_FOUND, "basin_not_found"));
         assert!(matches!(
             wrong_code.ignore_not_found_code("stream_not_found"),
-            Err(ApiError::Server(StatusCode::NOT_FOUND, body)) if body.code == "basin_not_found"
+            Err(ApiError::Server(server))
+                if server.status == StatusCode::NOT_FOUND
+                    && server.code.as_deref() == Some("basin_not_found")
         ));
 
         let wrong_status: Result<UnaryResponse, ApiError> =
             Err(server_error(StatusCode::CONFLICT, "stream_not_found"));
         assert!(matches!(
             wrong_status.ignore_not_found_code("stream_not_found"),
-            Err(ApiError::Server(StatusCode::CONFLICT, _))
+            Err(ApiError::Server(server)) if server.status == StatusCode::CONFLICT
         ));
 
         let server_err: Result<UnaryResponse, ApiError> =
             Err(server_error(StatusCode::INTERNAL_SERVER_ERROR, "unavailable"));
         assert!(matches!(
             server_err.ignore_not_found_code("stream_not_found"),
-            Err(ApiError::Server(StatusCode::INTERNAL_SERVER_ERROR, _))
+            Err(ApiError::Server(server)) if server.status == StatusCode::INTERNAL_SERVER_ERROR
         ));
     }
 
